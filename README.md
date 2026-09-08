@@ -25,6 +25,8 @@ npm run build
 
 接口、浏览器下载会话、任务控制和日志检索示例见 [docs/api.md](docs/api.md)。运行时以 JSONL 写入 API/worker 的模块日志、操作记录及异常追踪；日志字段会脱敏密码、令牌和授权头。
 
+初始化、定时或手动命令中的独立 `debug` 支持 PSH 到 ASH 自动握手，已经确认 ASH 时跳过。完整 Base64 密文作为解密接口 `source` 原样提交，本地可使用离线 Mock 口令；配置、串口连续打印处理和失败语义见 [docs/psh-debug.md](docs/psh-debug.md)。
+
 开发时使用 CodeGraph 先同步索引，再评估会话运行时的变更影响：
 
 ```sh

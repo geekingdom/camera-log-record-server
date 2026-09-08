@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 from pymongo import ReturnDocument
 
 from camera_logs.collection.collector import Collector
+from camera_logs.collection.psh_dialogue import PshSwitchError
+from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 
@@ -37,7 +39,17 @@ class SessionRuntime:
         self.input_bytes = 0
         self.error = None
         self.started_at = now()
+        self.debug_passwords = PshPasswordProvider(repo.settings)
         self.background = asyncio.create_task(self.run())
+
+    async def on_debug(self, event, details):
+        """记录调试模式切换阶段，只保存任务身份与模式，不保存密文或解密口令。"""
+        await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"],
+            "sessionId": self.collector.session_id, "type": "DEBUG_MODE", "phase": event,
+            "mode": details["mode"], "createdAt": now()})
+        await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
+            {"$set": {"shellMode": details["mode"], "debugPhase": event, "updatedAt": now()}})
+        logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
 
     def file_id(self, path):
         """原始文件与压缩文件共享逻辑 ID，路径包含运行及会话以避免跨任务碰撞。"""
@@ -174,15 +186,22 @@ class SessionRuntime:
                 config = dict(self.task)
                 config["password"] = self.repo.decrypt(config["passwordEncrypted"])
                 config["knownHosts"] = self.repo.settings.known_hosts
+                config["pshSerialCharacterInterval"] = self.repo.settings.psh_serial_character_interval
                 self.started_at = now()
+                await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
+                    {"$set": {"shellMode": "UNKNOWN", "debugPhase": None}})
                 self.collector = Collector(config, self.repo.settings.log_root, connection_factory=self.factory,
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
-                    reserve_execution=self.reserve, update_execution=self.update_execution)
+                    reserve_execution=self.reserve, update_execution=self.update_execution,
+                    resolve_debug_password=self.debug_passwords, on_debug=self.on_debug)
                 await self.collector.start()
                 delay = 1
                 await self.collector.wait_closed()
             except asyncio.CancelledError:
                 raise
+            except PshSwitchError as exc:
+                self.error = str(exc)
+                break
             except Exception as exc:
                 logger.exception("采集会话异常 task=%s", self.task["id"])
                 import asyncssh
@@ -191,11 +210,13 @@ class SessionRuntime:
                     break
             finally:
                 if self.collector:
-                    await self.collector.stop()
+                    await self._stop_collector()
                 await self.repo.db.commands.update_many({"taskId": self.task["id"], "status": "QUEUED"},
                     {"$set": {"status": "CANCELLED", "completedAt": now()}})
                 await self.repo.db.commands.update_many({"taskId": self.task["id"], "status": "SENDING"},
                     {"$set": {"status": "UNKNOWN", "completedAt": now()}})
+            if self.error:
+                break
             if not self.stopping:
                 await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"],
                     "type": "CONNECTION_GAP", "detectedAt": now(), "message": "连接中断，设备端未提供补传"})
@@ -208,10 +229,17 @@ class SessionRuntime:
         """禁用重试并等待采集器收尾，连接释放完成后才能取消运行等待。"""
         self.stopping = True
         if self.collector:
-            await self.collector.stop()
+            await self._stop_collector()
         if not self.background.done():
             self.background.cancel()
         await asyncio.gather(self.background, return_exceptions=True)
+
+    async def _stop_collector(self):
+        """握手失败在连接和文件已关闭后作为运行错误返回，不误标为隔离失败。"""
+        try:
+            await self.collector.stop()
+        except PshSwitchError as exc:
+            self.error = str(exc)
 
     def background_failure(self):
         """读取终结异常用于停止结果，不把正常取消重新抛给监督器。"""

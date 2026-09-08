@@ -3,6 +3,7 @@
 import socket
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,3 +23,12 @@ class Settings(BaseSettings):
     cluster_capacity: int = 500
     retention_days: int = 7
     start_background: bool = True
+    psh_mode: str = "disabled"
+    psh_serial_character_interval: float = Field(default=.1, ge=0, le=1)
+    psh_mock_password_file: Path | None = None
+    psh_token_url: str = ""
+    psh_api_url: str = ""
+    psh_client_id: str = ""
+    psh_client_secret: str = ""
+    psh_api_key: str = ""
+    psh_user_name: str = ""
