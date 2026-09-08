@@ -56,6 +56,7 @@ async def test_runtime_cleanup_does_not_touch_other_runs_or_sessions(monkeypatch
     runtime.collector, runtime.error = None, None
     runtime.factory = runtime.debug_passwords = None
     runtime.stopping = False
+    runtime.pending_executions = {}
     running = asyncio.create_task(runtime.run())
     if not construction_fails:
         await asyncio.wait_for(started.wait(), 1)

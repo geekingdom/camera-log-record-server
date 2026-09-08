@@ -130,16 +130,17 @@ class Collector:
                 await self._debug.observe_initial_mode()
             for item in self.task.get("initialCommands", []):
                 await self._send_initial(item)
+            self._initializing = False
+            # 定时预算要求当前状态已持久化；发布完成后再开始首次间隔计时。
+            await _call(
+                self._on_state, "COLLECTING", {"taskId": self.task_id, "sessionId": self.session_id}
+            )
             for position, item in enumerate(self.task.get("scheduledCommands", [])):
                 self._scheduled.append(asyncio.create_task(self._scheduled_loop(position, item)))
         except BaseException:
             # 初始化失败时本实例已经拥有连接和后台协程，必须立即进入同一关闭路径。
             await self.stop()
             raise
-        self._initializing = False
-        await _call(
-            self._on_state, "COLLECTING", {"taskId": self.task_id, "sessionId": self.session_id}
-        )
 
     async def _send_initial(self, item: Mapping[str, Any]) -> None:
         command = str(item["command"])
@@ -284,7 +285,8 @@ class Collector:
             await asyncio.sleep(interval)
             if self._closed.is_set():
                 return
-            detail = {"taskId": self.task_id, "runId": self.run_id, "execution": execution + 1}
+            detail = {"taskId": self.task_id, "runId": self.run_id, "sessionId": self.session_id,
+                      "execution": execution + 1}
             try:
                 before_send = (
                     (lambda command_id=command_id, detail=detail: _call(self._reserve, command_id, detail))
@@ -298,7 +300,7 @@ class Collector:
                     timeout_seconds=float(item.get("timeoutSeconds", 30)),
                     before_send=before_send,
                 )
-                await _call(self._update, command_id, "SENT", {"execution": execution + 1})
+                await _call(self._update, command_id, "SENT", detail)
             except BudgetExhausted:
                 return
             except CommandChannelBlocked:
@@ -309,7 +311,7 @@ class Collector:
                     self._update,
                     command_id,
                     "FAILED",
-                    {"execution": execution + 1, "error": str(error)},
+                    detail | {"error": str(error)},
                 )
                 # debug 失败只影响当前执行；下一次定时 debug 可先安全恢复后重新握手。
                 continue
@@ -318,7 +320,7 @@ class Collector:
                     self._update,
                     command_id,
                     "UNKNOWN",
-                    {"execution": execution + 1, "error": str(error)},
+                    detail | {"error": str(error)},
                 )
                 return
 

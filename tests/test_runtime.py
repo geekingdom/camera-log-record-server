@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from camera_logs.collection.collector import LogChunk
 from camera_logs.collection.runtime import SessionRuntime
@@ -111,10 +112,12 @@ def test_scheduled_budget_is_cumulative_across_reconnected_sessions(tmp_path):
         runtime.pending_executions = {}
         runtime.repo.db.budgets = BudgetCollection()
         runtime.repo.db.commands = InsertCollection()
-        first = await runtime.reserve("repeat", {"execution": 1})
+        runtime.repo.db.tasks.find_one = AsyncMock(return_value=runtime.task)
+        detail = {"taskId": "task-a", "runId": "run-a"}
+        first = await runtime.reserve("repeat", detail | {"sessionId": "session-one", "execution": 1})
         runtime.collector = SimpleNamespace(session_id="session-two")
-        second = await runtime.reserve("repeat", {"execution": 2})
-        third = await runtime.reserve("repeat", {"execution": 3})
+        second = await runtime.reserve("repeat", detail | {"sessionId": "session-two", "execution": 2})
+        third = await runtime.reserve("repeat", detail | {"sessionId": "session-two", "execution": 3})
         return first, second, third, runtime.repo.db.commands.values
 
     first, second, third, executions = asyncio.run(scenario())

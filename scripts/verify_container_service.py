@@ -35,6 +35,7 @@ from camera_logs.common.config import Settings
 logger = logging.getLogger(__name__)
 INITIAL = ["verify-init-first", "verify-init-second"]
 MANUAL = "verify-manual-status"
+SCHEDULED = "verify-scheduled-status"
 LINES = [f"verify-serial seq={number:03d}\n".encode() for number in range(16)]
 
 
@@ -263,7 +264,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             body = {"name": f"容器验收串口-{suffix}", "description": "脚本自动清理的合成任务",
                     "protocol": "TELNET_SERIAL", "ip": args.device_host, "port": simulator.port,
                     "resourceId": resource.json()["id"], "initialCommands": [{"command": command} for command in INITIAL],
-                    "scheduledCommands": [], "autoStart": True}
+                    "scheduledCommands": [{"command": SCHEDULED, "totalExecutions": 2, "intervalSeconds": 1}],
+                    "autoStart": True}
             response = await client.post("/api/v1/tasks", json=body, headers={"Idempotency-Key": f"container-verify-{suffix}"})
             response.raise_for_status()
             task_id = response.json()["id"]
@@ -309,6 +311,16 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 await asyncio.sleep(.1)
             if MANUAL not in simulator.commands:
                 raise AssertionError("手动命令没有到达串口服务")
+            executions = await wait_for(client, f"/api/v1/tasks/{task_id}/command-executions",
+                lambda item: len([record for record in item["items"]
+                                  if record["kind"] == "SCHEDULED" and record["status"] == "SENT"]) == 2,
+                "两次定时命令发送")
+            scheduled = [record for record in executions["items"] if record["kind"] == "SCHEDULED"]
+            if sorted(record["attempt"] for record in scheduled) != [1, 2]:
+                raise AssertionError("定时执行次数或预算序号错误")
+            await asyncio.sleep(1.1)
+            if simulator.commands.count(SCHEDULED) != 2:
+                raise AssertionError("定时命令实际到达次数不等于预算次数")
             await stop_task(client, task_id)
             await asyncio.wait_for(simulator.peer_closed.wait(), timeout=30)
             if simulator.failure:
@@ -330,7 +342,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 raise AssertionError("下载 Range 响应不符合 206 或内容不连续")
             digest = verify_archive(download.content, simulator.sent)
             return {"passed": True, "taskId": task_id, "taskStopped": True, "initialCommands": len(INITIAL),
-                    "manualCommand": "SENT", "realtimeLines": len(LINES), "archiveSha256": digest,
+                    "manualCommand": "SENT", "scheduledCommands": 2,
+                    "realtimeLines": len(LINES), "archiveSha256": digest,
                     "downloadBytes": len(download.content), "range206": True}
     finally:
         if socket:

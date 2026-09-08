@@ -158,7 +158,17 @@ class SessionRuntime:
         logger.info("采集状态变化", extra={"context": {"taskId": self.task["id"], "state": state}})
 
     async def reserve(self, command_id, details):
-        """发送前原子占用一次预算；不确定结果不退回次数，防止重连后重复发送。"""
+        """复核发送会话及运行归属后占用预算；不确定结果不退回次数。"""
+        collector = self.collector
+        session_id = details.get("sessionId")
+        if (self.stopping or getattr(self, "retired", False) or collector is None
+                or session_id != collector.session_id or details.get("taskId") != self.task["id"]
+                or details.get("runId") != self.task["runId"]):
+            return False
+        current = await self.repo.db.tasks.find_one({**owner_filter(self.task), "sessionId": session_id,
+                                                    "status": "COLLECTING", "desiredState": "RUNNING"})
+        if current is None or self.collector is not collector or self.stopping or getattr(self, "retired", False):
+            return False
         command = next(c for c in self.task["scheduledCommands"] if c["id"] == command_id)
         budget_id = f'{self.task["runId"]}:{command_id}'
         await self.repo.db.budgets.update_one({"_id": budget_id}, {"$setOnInsert": {"attempts": 0}}, upsert=True)
@@ -167,17 +177,23 @@ class SessionRuntime:
         if not budget:
             return False
         execution = {"id": new_id(), "taskId": self.task["id"], "runId": self.task["runId"],
-            "sessionId": self.collector.session_id, "commandId": command_id, "kind": "SCHEDULED",
+            "sessionId": session_id, "commandId": command_id, "kind": "SCHEDULED",
             "attempt": budget["attempts"], "status": "SENDING", "createdAt": now()}
         await self.repo.db.commands.insert_one(execution)
-        self.pending_executions[command_id] = execution["id"]
+        self.pending_executions[(session_id, command_id)] = execution["id"]
         return True
 
     async def update_execution(self, command_id, status, details):
-        """按本会话的执行 ID 更新结果，模板与其他任务不共享进度。"""
-        identifier = self.pending_executions.pop(command_id, None)
+        """只更新原会话仍在发送的记录，迟到回调不覆盖 UNKNOWN 或后继执行。"""
+        if details.get("taskId") != self.task["id"] or details.get("runId") != self.task["runId"]:
+            return
+        session_id = details.get("sessionId")
+        identifier = self.pending_executions.pop((session_id, command_id), None)
         if identifier:
-            await self.repo.db.commands.update_one({"id": identifier}, {"$set": {"status": status, "completedAt": now()}})
+            await self.repo.db.commands.update_one({"id": identifier, "taskId": self.task["id"],
+                "runId": self.task["runId"], "sessionId": session_id, "commandId": command_id,
+                "kind": "SCHEDULED", "status": "SENDING"},
+                {"$set": {"status": status, "completedAt": now()}})
 
     async def manual(self, document):
         """只在命令绑定的会话发送；已过期会话取消，进入发送后异常记为未知。"""
@@ -286,6 +302,9 @@ class SessionRuntime:
                         {"$set": {"status": "CANCELLED", "completedAt": now()}})
                     await self.repo.db.commands.update_many({**session_commands, "status": "SENDING"},
                         {"$set": {"status": "UNKNOWN", "completedAt": now()}})
+                    for key in list(self.pending_executions):
+                        if key[0] == session_commands["sessionId"]:
+                            self.pending_executions.pop(key, None)
             if self.error:
                 break
             if not self.stopping:
