@@ -25,6 +25,12 @@ docker compose -f deploy/worker-node.yml up -d --build
 
 构建上下文使用 `.dockerignore` 排除 `.env`、本地凭据、虚拟环境、依赖目录、设备日志及下载产物。镜像仍需访问 Python、Node、Nginx 基础镜像仓库及相应包仓库；上下文排除不能替代运行时密钥管理。
 
+## CI 容器链路验证
+
+GitHub Actions 的 `container-smoke` 在独立 Linux runner 上生成一次性密钥，构建并启动三成员 MongoDB、API、worker 和 Nginx 前端。验证程序在 runner 上建立合成 Telnet 源，worker 经 Docker 网桥网关连接，所有控制和下载请求经过前端 `/api/` 代理。该流程不访问真实设备、不使用仓库密钥，结束后清理独立项目的容器与卷，失败时保留控制台诊断日志。
+
+`scripts/prepare_container_env.py` 只用于隔离验收目录，默认独占创建 `.env`，权限为 0600；已有文件时立即失败，不能覆盖开发配置。容器链路结果以当前提交的 `container-smoke` 作业为准；少量合成日志的冒烟验证不能替代实体设备兼容性、500 路持续吞吐或长期容量验收。
+
 ## 生产 TLS
 
 `deploy/nginx/tls-site.conf.example` 是外层 Nginx 的配置示例。将 `logs.example.com`、证书路径和上游网络改为实际值，并使用受信任 CA 签发与续期的证书。示例不提供自签名证书，也不应把测试证书作为生产 TLS 配置。
@@ -45,6 +51,8 @@ docker compose -f deploy/docker-compose.yml exec mongo1 mongosh --quiet --eval '
 ## 会话与下载
 
 SSH 任务支持 `pause` 与 `resume`；暂停时 worker 停止当前会话，恢复会重新进入调度。Telnet 设备和串口任务不支持暂停。collector 默认在 10 秒没有收到日志时关闭连接，运行时按重连策略建立新会话。初始化命令按数组顺序逐条发送，不能依赖以分号拼接多条命令。
+
+`register_local_devices.py` 可读取本地 SSH 或 Telnet 串口任务清单；注册幂等键包含协议、IP 和端口，同一串口服务器的不同端口不会冲突。`verify_live_service.py --name-prefix 联调串口-` 可限定验证串口联调任务，默认仍只验证 SSH 联调任务；加 `--stop-after` 会经正式 API 停止所选任务，使用前应确认前缀范围。
 
 下载作业成功后，浏览器可请求 `POST /api/v1/downloads/{jobId}/browser-session`。服务为该作业写入 5 分钟的 HttpOnly、SameSite=Strict cookie，并返回同源下载 URL。API、worker、归档、作业及维护失败均进入结构化模块日志；访问记录包含 request ID，日志输出会对密码、令牌和授权信息脱敏。
 

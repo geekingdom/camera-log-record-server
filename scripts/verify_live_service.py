@@ -11,14 +11,16 @@ import websockets
 from camera_logs.common.config import Settings
 
 
-async def verify(url, stop_after):
+async def verify(url, stop_after, name_prefix="联调设备-"):
     """对本地标记的联调设备执行端到端只读和受控停止校验。"""
     settings = Settings()
     headers = {"Authorization": "Bearer "+settings.bootstrap_token}
     report = {"checkedAt": time.time(), "tasks": []}
     async with httpx.AsyncClient(base_url=url, headers=headers, timeout=120) as client:
         tasks = (await client.get("/api/v1/tasks")).json()["items"]
-        tasks = [t for t in tasks if t["name"].startswith("联调设备-")]
+        tasks = [t for t in tasks if t["name"].startswith(name_prefix)]
+        if not tasks:
+            raise RuntimeError("未找到指定前缀的联调任务，不能视为验收通过")
         for task in tasks:
             task_id = task["id"]
             summary = {"taskId": task_id, "name": task["name"], "status": task["status"]}
@@ -78,5 +80,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--stop-after", action="store_true")
+    parser.add_argument("--name-prefix", default="联调设备-")
     args = parser.parse_args()
-    asyncio.run(verify(args.url, args.stop_after))
+    asyncio.run(verify(args.url, args.stop_after, args.name_prefix))

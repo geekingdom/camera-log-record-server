@@ -33,7 +33,7 @@ def main():
                 print(json.dumps({"id": existing["id"], "name": existing["name"], "status": existing["status"], "reused": True}, ensure_ascii=False))
                 continue
             response = client.post("/api/v1/tasks", json=device,
-                headers={"Idempotency-Key": "local-device-v2-"+device["ip"]})
+                headers={"Idempotency-Key": f"local-device-v3-{device['protocol']}-{device['ip']}-{device['port']}"})
             response.raise_for_status()
             task = response.json()
             print(json.dumps({"id": task["id"], "name": task["name"], "status": task["status"]}, ensure_ascii=False))
