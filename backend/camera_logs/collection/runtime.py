@@ -207,6 +207,7 @@ class SessionRuntime:
         """连接失败指数退避，先释放旧连接再重试；每次登录后重新发送初始化命令。"""
         delay = 1
         while not self.stopping:
+            session_commands = None
             try:
                 config = dict(self.task)
                 config["password"] = self.repo.decrypt(config["passwordEncrypted"])
@@ -221,6 +222,9 @@ class SessionRuntime:
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
                     reserve_execution=self.reserve, update_execution=self.update_execution,
                     resolve_debug_password=self.debug_passwords, on_debug=self.on_debug)
+                # 收尾条件绑定本次实际创建的会话，旧运行不能取消后继会话的命令。
+                session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
+                                    "sessionId": self.collector.session_id}
                 await self.collector.start()
                 delay = 1
                 await self.collector.wait_closed()
@@ -243,10 +247,11 @@ class SessionRuntime:
             finally:
                 if self.collector:
                     await self._stop_collector()
-                await self.repo.db.commands.update_many({"taskId": self.task["id"], "status": "QUEUED"},
-                    {"$set": {"status": "CANCELLED", "completedAt": now()}})
-                await self.repo.db.commands.update_many({"taskId": self.task["id"], "status": "SENDING"},
-                    {"$set": {"status": "UNKNOWN", "completedAt": now()}})
+                if session_commands is not None:
+                    await self.repo.db.commands.update_many({**session_commands, "status": "QUEUED"},
+                        {"$set": {"status": "CANCELLED", "completedAt": now()}})
+                    await self.repo.db.commands.update_many({**session_commands, "status": "SENDING"},
+                        {"$set": {"status": "UNKNOWN", "completedAt": now()}})
             if self.error:
                 break
             if not self.stopping:
