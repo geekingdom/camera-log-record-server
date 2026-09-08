@@ -180,11 +180,19 @@ async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connect
         raise
 
 
+def _log_telnet_client(**kwargs):
+    """通过库提供的工厂接入日志接收优化，保留连接生命周期和协商机制。"""
+    from camera_logs.collection.telnet_client import LogTelnetClient
+
+    return LogTelnetClient(**kwargs)
+
+
 async def _connect_telnet(task: Mapping[str, Any], host: str, port: int) -> Connection:
     import telnetlib3
 
     reader, writer = await asyncio.wait_for(
-        telnetlib3.open_connection(host=host, port=port, encoding=False), timeout=30)
+        telnetlib3.open_connection(host=host, port=port, encoding=False,
+                                 client_factory=_log_telnet_client), timeout=30)
     username, password = task.get("username"), task.get("password")
     try:
         prefix = b""
