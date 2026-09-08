@@ -182,6 +182,34 @@ def test_ssh_shell_setup_failure_closes_owned_client(monkeypatch, tmp_path):
     assert client.closed
 
 
+def test_ssh_shell_setup_failure_aborts_when_client_close_fails(monkeypatch, tmp_path):
+    """SSH shell 创建失败时，关闭异常也不能阻止强制中止或替换原错误。"""
+    class Client:
+        def __init__(self):
+            self.aborted = False
+
+        async def create_process(self, **_kwargs):
+            raise RuntimeError("shell unavailable")
+
+        def close(self):
+            raise ConnectionResetError("close failed")
+
+        def abort(self):
+            self.aborted = True
+
+    client = Client()
+
+    async def connect(*_args, **_kwargs):
+        return client
+
+    monkeypatch.setitem(sys.modules, "asyncssh", SimpleNamespace(connect=connect))
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("host ssh-ed25519 AAAA")
+    with pytest.raises(RuntimeError, match="shell unavailable"):
+        asyncio.run(_connect_ssh({"username": "u", "password": "p", "knownHosts": known_hosts}, "host", 22))
+    assert client.aborted
+
+
 def test_ssh_shell_setup_cancellation_closes_owned_client(monkeypatch, tmp_path):
     class Client:
         def __init__(self): self.closed = self.aborted = False

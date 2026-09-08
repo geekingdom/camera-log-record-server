@@ -82,6 +82,7 @@ class Collector:
         self._reserve, self._update = reserve_execution, update_execution
         self._connection: AsyncConnection | None = None
         self._connection_closed = False
+        self._connection_close_lock = asyncio.Lock()
         self._writer = HourlyWriter(
             self.task_id,
             self.run_id,
@@ -494,11 +495,14 @@ class Collector:
             self._queue.task_done()
 
     async def _close_connection(self) -> None:
-        if self._connection is None or self._connection_closed:
-            return
-        self._connection_closed = True
-        self._debug.close()
-        await self._connection.close()
+        """序列化所有关闭调用；失败或取消不确认释放，后续收尾仍可重试。"""
+        self._accepting_commands = False
+        async with self._connection_close_lock:
+            if self._connection is None or self._connection_closed:
+                return
+            self._debug.close()
+            await self._connection.close()
+            self._connection_closed = True
 
     async def wait_closed(self) -> None:
         await self._closed.wait()

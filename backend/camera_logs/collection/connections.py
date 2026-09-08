@@ -170,13 +170,13 @@ async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connect
     except BaseException:
         # create_process 失败或取消时，连接已经由本函数取得，必须主动回收。
         if client:
-            client.close()
             try:
-                await asyncio.wait_for(client.wait_closed(), timeout=10)
-            except BaseException:  # noqa: BLE001 - cancellation must still abort the owned transport.
-                abort = getattr(client, "abort", None)
-                if abort:
-                    abort()
+                client.close()
+                await asyncio.wait_for(client.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS)
+            except BaseException:
+                # close 本身也可能失败；无论哪个清理阶段报错，都中止且保留建连根因。
+                logger.exception("SSH shell 创建失败后的连接收尾异常")
+                _abort_transport(client)
         raise
 
 
