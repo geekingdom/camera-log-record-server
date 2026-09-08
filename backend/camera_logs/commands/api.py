@@ -11,6 +11,11 @@ from camera_logs.common.database import now, public
 from camera_logs.common.models import InitialCommand, TokenCreate, new_id
 from camera_logs.common.security import actor, authorize
 
+SERVICE_TOKEN_SCOPES = frozenset({
+    "admin", "commands:send", "logs:download", "logs:read", "tasks:control",
+    "tasks:read", "tasks:write", "templates:read", "templates:write",
+})
+
 
 def install_command_routes(app, repo, listing):
     """安装命令相关路由；所有写入均在鉴权后记录审计事件。"""
@@ -57,6 +62,9 @@ def install_command_routes(app, repo, listing):
     async def create_token(body: TokenCreate, user: User):
         """创建一次性返回明文的新服务令牌，数据库仅保存散列。"""
         authorize(user, "admin")
+        unknown_scopes = set(body.scopes) - SERVICE_TOKEN_SCOPES
+        if unknown_scopes:
+            raise HTTPException(422, f"存在不支持的权限：{', '.join(sorted(unknown_scopes))}")
         token = secrets.token_urlsafe(32)
         doc = {"id": new_id(), "name": body.name, "scopes": body.scopes, "taskIds": body.taskIds,
                "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "revoked": False,
@@ -64,6 +72,12 @@ def install_command_routes(app, repo, listing):
         await repo().db.tokens.insert_one(doc)
         await repo().audit(user["id"], "create_token", doc["id"])
         return public(doc) | {"token": token}
+
+    @app.get("/api/v1/service-tokens")
+    async def service_tokens(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+        """分页返回服务账号元数据；统一公开化处理确保散列永不离开服务端。"""
+        authorize(user, "admin")
+        return await listing("tokens", {}, page, pageSize)
 
     @app.delete("/api/v1/service-tokens/{identifier}", status_code=204)
     async def revoke_token(identifier: str, user: User):

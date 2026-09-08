@@ -171,6 +171,40 @@ def _expired(job: dict[str, Any]) -> bool:
     return stamp.astimezone(UTC) <= datetime.now(UTC)
 
 
+class JobProgress:
+    """按冻结片段推进作业进度，避免高频扫描或复制逐块写入数据库。
+
+    冻结字节数可用时以字节为权重；全部为零时按文件数平均推进。运行中最大
+    只报告 99，最终的 100 与 SUCCEEDED 在同一次条件更新中提交，失败和取消
+    因而不会被错误地显示为完成。
+    """
+
+    def __init__(self, repo: Any, job: dict[str, Any]) -> None:
+        self.repo, self.job = repo, job
+        files = job.get("files", [])
+        weights = [max(0, int(file.get("bytes", 0))) for file in files]
+        self.weights = weights if sum(weights) else [1] * len(files)
+        self.total = sum(self.weights)
+        self.completed = self.position = 0
+        self.persisted = int(job.get("progress", 0))
+
+    async def advance(self) -> None:
+        """在一个冻结片段已处理后更新，百分点未变化时不额外落库。"""
+        if self.position >= len(self.weights) or self.total <= 0:
+            return
+        self.completed += self.weights[self.position]
+        self.position += 1
+        candidate = min(99, self.completed * 100 // self.total)
+        if candidate <= self.persisted:
+            return
+        changed = await self.repo.db.jobs.update_one(
+            {"id": self.job["id"], "status": "RUNNING"},
+            {"$set": {"progress": candidate}},
+        )
+        if changed.modified_count:
+            self.persisted = candidate
+
+
 async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     """组装选中片段；缺失必须显式报告，多片段使用 ZIP STORE 避免再次压缩。"""
     exports = _root(repo) / "exports"
@@ -178,6 +212,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     output = exports / job["id"]
     sources: list[tuple[dict[str, Any], Path, bool]] = []
     missing: list[str] = []
+    progress: JobProgress | None = job.get("_progress")
     await _reserve_temp(repo, job["id"], _estimated_temp_bytes(job["files"]))
     try:
         await asyncio.to_thread(scratch.mkdir, parents=True, exist_ok=True)
@@ -196,6 +231,9 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             except Exception:  # noqa: BLE001 - partial exports deliberately record each unavailable source
                 _log.exception("export source unavailable fileId=%s", frozen.get("id"))
                 missing.append(frozen.get("id", "unknown"))
+            finally:
+                if progress is not None:
+                    await progress.advance()
         if not sources:
             raise FileNotFoundError("no selected archives are available")
         if missing and not job.get("allowPartial", False):
@@ -293,6 +331,7 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     start = datetime.fromisoformat(job["start"])
     end = datetime.fromisoformat(job["end"])
     results, truncated = [], False
+    progress: JobProgress | None = job.get("_progress")
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()
     await asyncio.to_thread(scratch.mkdir, parents=True, exist_ok=True)
     try:
@@ -302,6 +341,8 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 raise asyncio.CancelledError()
             path, _temporary = await _archive(repo, frozen, scratch)
             matches = await asyncio.to_thread(_search_limited, path, needle, start, end, 1000 - len(results), stopped.is_set)
+            if progress is not None:
+                await progress.advance()
             for offset, text in matches:
                 results.append({"fileId": frozen["id"], "offset": offset, "text": text})
                 if len(results) >= 1000:
@@ -316,6 +357,7 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
 async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     """在节点并发上限内执行冻结作业，条件更新避免覆盖已经取消的状态。"""
     async with _jobs:
+        job["_progress"] = JobProgress(repo, job)
         try:
             if await _cancelled(repo, job["id"]):
                 return {"status": "CANCELLED"}
@@ -323,7 +365,7 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": {"status": "EXPIRED"}})
                 return {"status": "EXPIRED"}
             result = await (_download(repo, job) if job["kind"] == "DOWNLOAD" else _search(repo, job))
-            update = result | {"status": "SUCCEEDED", "completedAt": datetime.now(UTC)}
+            update = result | {"status": "SUCCEEDED", "progress": 100, "completedAt": datetime.now(UTC)}
             changed = await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": update})
             if not changed.modified_count:
                 await asyncio.to_thread(shutil.rmtree, _root(repo) / "exports" / job["id"], True)
@@ -342,3 +384,5 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             except Exception:  # noqa: BLE001 - audit failure must not hide the original job failure
                 _log.exception("failed to audit job failure id=%s", job.get("id"))
             return update
+        finally:
+            job.pop("_progress", None)

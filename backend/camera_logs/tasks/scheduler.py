@@ -48,25 +48,91 @@ async def schedule_once(repo):
         resuming = task["status"] == "PAUSED" and bool(task.get("runId"))
         run_id = task["runId"] if resuming else new_id()
         endpoint = f'{task["ip"]}:{task["port"]}'
+        claim_token = new_id() if resuming else None
+        claim_expires = now() + timedelta(seconds=10) if resuming else None
+        if resuming:
+            # 同一暂停运行只允许一个短期恢复租约，崩溃遗留的 token 到期后可被新周期接管。
+            reservation = await db.tasks.find_one_and_update(
+                {"id": task["id"], "runId": run_id, "nodeId": None, "status": "PAUSED",
+                 "desiredState": "RUNNING", "$or": [
+                     {"resumeClaimToken": {"$exists": False}},
+                     {"resumeClaimExpires": {"$exists": False}},
+                     {"resumeClaimExpires": {"$lt": now()}},
+                 ]},
+                {"$set": {"resumeClaimToken": claim_token, "resumeClaimExpires": claim_expires}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if not reservation:
+                continue
         try:
             if resuming:
-                await db.endpoint_locks.update_one({"endpoint": endpoint, "taskId": task["id"], "runId": run_id},
-                    {"$setOnInsert": {"endpoint": endpoint, "taskId": task["id"], "runId": run_id}}, upsert=True)
+                await db.endpoint_locks.find_one_and_update(
+                    {"endpoint": endpoint, "taskId": task["id"], "runId": run_id},
+                    {"$set": {"claimToken": claim_token},
+                     "$setOnInsert": {"endpoint": endpoint, "taskId": task["id"], "runId": run_id}},
+                    upsert=True, return_document=ReturnDocument.AFTER,
+                )
             else:
                 await db.endpoint_locks.insert_one({"endpoint": endpoint, "taskId": task["id"], "runId": run_id})
         except DuplicateKeyError:
+            if resuming:
+                await db.tasks.update_one(
+                    {"id": task["id"], "runId": run_id, "nodeId": None, "resumeClaimToken": claim_token},
+                    {"$unset": {"resumeClaimToken": "", "resumeClaimExpires": ""}},
+                )
             await db.tasks.update_one({"id": task["id"], "nodeId": None},
                 {"$set": {"status": "BLOCKED", "error": "采集端点已被活动任务占用"}})
             continue
-        claimed = await db.tasks.find_one_and_update({"id": task["id"], "nodeId": None, "desiredState": "RUNNING"},
-            {"$set": {"nodeId": node_id, "runId": run_id, "status": "PENDING", "error": None},
-             "$inc": {"generation": 1}}, return_document=ReturnDocument.AFTER)
+        if resuming:
+            owned_lock = await db.endpoint_locks.find_one(
+                {"endpoint": endpoint, "taskId": task["id"], "runId": run_id, "claimToken": claim_token}
+            )
+            if not owned_lock:
+                await db.tasks.update_one(
+                    {"id": task["id"], "runId": run_id, "nodeId": None, "resumeClaimToken": claim_token},
+                    {"$unset": {"resumeClaimToken": "", "resumeClaimExpires": ""}},
+                )
+                continue
+        claim_query = {"id": task["id"], "nodeId": None, "desiredState": "RUNNING"}
+        if resuming:
+            claim_query.update({
+                "runId": run_id, "status": "PAUSED", "resumeClaimToken": claim_token,
+                "resumeClaimExpires": {"$gte": now()},
+            })
+        claim_update = {
+            "$set": {"nodeId": node_id, "runId": run_id, "status": "PENDING", "error": None},
+            "$inc": {"generation": 1},
+        }
+        if resuming:
+            claim_update["$unset"] = {"resumeClaimToken": "", "resumeClaimExpires": ""}
+        claimed = await db.tasks.find_one_and_update(
+            claim_query, claim_update, return_document=ReturnDocument.AFTER
+        )
         if claimed:
+            if resuming:
+                await db.endpoint_locks.update_one(
+                    {"endpoint": endpoint, "taskId": task["id"], "runId": run_id, "claimToken": claim_token},
+                    {"$unset": {"claimToken": ""}},
+                )
             await db.runs.update_one({"id": run_id}, {"$set": {"nodeId": node_id, "generation": claimed["generation"]},
                 "$setOnInsert": {"id": run_id, "taskId": task["id"], "startedAt": now()}}, upsert=True)
             active += 1
         elif not resuming:
             await db.endpoint_locks.delete_one({"runId": run_id})
+        else:
+            # 仅本次 token 能回收恢复锁；后继领取写入的新 token 不受旧补偿影响。
+            stopped = await db.tasks.find_one({
+                "id": task["id"], "runId": run_id, "nodeId": None, "desiredState": "STOPPED",
+                "resumeClaimToken": claim_token,
+            })
+            if stopped:
+                await db.endpoint_locks.delete_one(
+                    {"endpoint": endpoint, "taskId": task["id"], "runId": run_id, "claimToken": claim_token}
+                )
+            await db.tasks.update_one(
+                {"id": task["id"], "runId": run_id, "nodeId": None, "resumeClaimToken": claim_token},
+                {"$unset": {"resumeClaimToken": "", "resumeClaimExpires": ""}},
+            )
         if active >= repo.settings.cluster_capacity:
             break
 

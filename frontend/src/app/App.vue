@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 根协调层只保存会话、页签和列表数据；具体编辑器与业务动作下沉到 feature 目录。
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { KeyRound, RefreshCw, Terminal, Plus } from "lucide-vue-next";
+import { KeyRound, RefreshCw, Terminal, Plus, Radio, FileCode2, Server, LogOut, Search, ChevronRight, BookOpen, ShieldCheck, ScrollText, Settings2 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api, clearToken, getToken, setToken } from "../shared/api";
 import type { Node, Task, Template } from "../shared/types";
@@ -10,6 +10,25 @@ import TemplateEditor from "../features/templates/TemplateEditor.vue";
 import TaskList from "../features/tasks/TaskList.vue";
 import TemplateList from "../features/templates/TemplateList.vue";
 import NodeList from "../features/nodes/NodeList.vue";
+import { taskStatusLabels } from "../features/tasks/taskStatus";
+import TaskOverview from "../features/tasks/TaskOverview.vue";
+import LogsWorkspace from "../features/logs/LogsWorkspace.vue";
+import AccessManager from "../features/access/AccessManager.vue";
+import AuditWorkspace from "../features/audit/AuditWorkspace.vue";
+import SettingsManager from "../features/settings/SettingsManager.vue";
+const navigation = [
+  { key: "tasks", label: "采集任务", icon: Radio },
+  { key: "logs", label: "日志工作台", icon: Terminal },
+  { key: "templates", label: "命令模板", icon: FileCode2 },
+  { key: "nodes", label: "服务节点", icon: Server },
+  { key: "access", label: "服务账号", icon: ShieldCheck },
+  { key: "audit", label: "审计与事件", icon: ScrollText },
+  { key: "settings", label: "后台配置", icon: Settings2 },
+];
+const lastUpdated = ref("");
+const templatePage = ref(1);
+const selectedWorkspace = ref("config");
+const selectedLogTask = ref("");
 const activeTab = ref("tasks"),
   token = ref(getToken()),
   authenticated = ref(Boolean(getToken())),
@@ -35,9 +54,12 @@ async function loadTasks() {
   });
   tasks.value = data.items;
   totals.value.tasks = data.total;
+  lastUpdated.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
 }
 async function loadTemplates() {
-  const data = await api.templates(1, 100);
+  const requestedPage = templatePage.value;
+  const data = await api.templates(requestedPage, 100);
+  if (requestedPage !== templatePage.value) return;
   templates.value = data.items;
   totals.value.templates = data.total;
 }
@@ -53,7 +75,7 @@ async function refresh(quiet = false) {
   try {
     if (activeTab.value === "tasks") await loadTasks();
     else if (activeTab.value === "templates") await loadTemplates();
-    else await loadNodes();
+    else if (activeTab.value === "nodes") await loadNodes();
   } catch (value) {
     if (!quiet) error(value);
   } finally {
@@ -86,14 +108,20 @@ function logout() {
   templateEditorOpen.value = false;
 }
 function createTask() {
+  selectedWorkspace.value = "config";
   selectedTask.value = undefined;
   taskEditorOpen.value = true;
   void loadTemplates().catch(error);
 }
 function editTask(task: Task) {
+  selectedWorkspace.value = "config";
   selectedTask.value = task;
   taskEditorOpen.value = true;
   void loadTemplates().catch(error);
+}
+function viewTask(task: Task) {
+  selectedLogTask.value = task.id;
+  activeTab.value = "logs";
 }
 function createTemplate() {
   selectedTemplate.value = undefined;
@@ -112,6 +140,7 @@ watch(activeTab, () => {
   void refresh();
 });
 watch([page, pageSize], () => void refresh());
+watch(templatePage, () => void loadTemplates().catch(error));
 let timer: ReturnType<typeof setInterval>;
 onMounted(() => {
   if (authenticated.value) void login();
@@ -120,13 +149,27 @@ onMounted(() => {
 onBeforeUnmount(() => clearInterval(timer));
 </script>
 <template>
-  <main class="shell">
+  <main class="shell" :class="{ 'is-authenticated': authenticated }">
+    <aside v-if="authenticated" class="sidebar">
+      <div class="sidebar-brand"><span class="brand-mark"><Terminal :size="23" /></span><div><strong>设备日志服务</strong><small>LOG RECORD</small></div></div>
+      <div class="nav-caption">工作空间</div>
+      <nav role="tablist" aria-label="工作空间导航" class="side-nav">
+        <button v-for="item in navigation" :key="item.key" role="tab" :aria-selected="activeTab === item.key" :class="{ active: activeTab === item.key }" @click="activeTab = item.key">
+          <component :is="item.icon" :size="18" /><span>{{ item.label }}</span><ChevronRight v-if="activeTab === item.key" :size="14" />
+        </button>
+      </nav>
+      <div class="sidebar-footer"><a href="https://github.com/geekingdom/camera-log-record-server/blob/main/docs/api.md" target="_blank" rel="noopener"><BookOpen :size="16" /> API 文档</a><span><i /> 已连接控制台</span></div>
+    </aside>
+    <div class="main-column">
     <header class="topbar">
-      <div class="brand">
-        <Terminal :size="21" /><span>设备日志服务</span
-        ><small>运行控制台</small>
-      </div>
-      <form v-if="!authenticated" class="auth" @submit.prevent="login">
+      <div v-if="authenticated" class="breadcrumb"><span>工作空间</span><ChevronRight :size="14" /><strong>{{ navigation.find(item => item.key === activeTab)?.label }}</strong></div>
+      <div v-else class="brand"><Terminal :size="22" /><span>设备日志服务</span></div>
+      <div v-if="authenticated" class="topbar-actions"><span class="refresh-time" v-if="lastUpdated">任务更新 {{ lastUpdated }}</span><el-tooltip content="退出控制台"><el-button text :icon="LogOut" aria-label="退出" @click="logout" /></el-tooltip></div>
+    </header>
+    <section v-if="!authenticated" class="login-state">
+      <div class="login-symbol"><Terminal :size="30" /></div>
+      <h1>设备日志服务</h1>
+      <form class="auth" @submit.prevent="login">
         <el-input
           v-model="token"
           type="password"
@@ -140,36 +183,20 @@ onBeforeUnmount(() => clearInterval(timer));
           >连接</el-button
         >
       </form>
-      <el-button v-else @click="logout">退出</el-button>
-    </header>
-    <section v-if="!authenticated" class="login-state">
-      <KeyRound :size="36" />
-      <h1>设备日志服务</h1>
     </section>
     <section v-else class="workspace">
-      <el-tabs v-model="activeTab" class="work-tabs"
-        ><el-tab-pane name="tasks" label="采集任务" /><el-tab-pane
-          name="templates"
-          label="命令模板" /><el-tab-pane name="nodes" label="服务节点"
-      /></el-tabs>
       <div class="page-head">
         <h1>
-          {{
-            activeTab === "tasks"
-              ? "采集任务"
-              : activeTab === "templates"
-                ? "命令模板"
-                : "服务节点"
-          }}
+          {{ navigation.find(item => item.key === activeTab)?.label }}
         </h1>
         <div>
-          <el-tooltip content="刷新列表"
+          <el-tooltip v-if="['tasks', 'templates', 'nodes'].includes(activeTab)" content="刷新列表"
             ><el-button
               :icon="RefreshCw"
               aria-label="刷新列表"
               @click="refresh()" /></el-tooltip
           ><el-button
-            v-if="activeTab !== 'nodes'"
+            v-if="['tasks', 'templates'].includes(activeTab)"
             type="primary"
             :icon="Plus"
             @click="activeTab === 'tasks' ? createTask() : createTemplate()"
@@ -177,32 +204,16 @@ onBeforeUnmount(() => clearInterval(timer));
           >
         </div>
       </div>
-      <template v-if="activeTab === 'tasks'"
-        ><div class="task-overview">
-          <span
-            ><b>{{ totals.tasks }}</b> 任务总数</span
-          ><span
-            ><b>{{
-              tasks.filter((task) => task.status === "COLLECTING").length
-            }}</b>
-            当前页采集</span
-          ><span
-            ><b>{{
-              tasks.filter((task) =>
-                ["FAILED", "ERROR", "RECONNECTING"].includes(task.status ?? ""),
-              ).length
-            }}</b>
-            当前页异常</span
-          ><span
-            ><b>{{ totals.nodes }}</b> 已登记节点</span
-          >
-        </div>
+      <template v-if="activeTab === 'tasks'">
+        <TaskOverview :tasks="tasks" :total="totals.tasks" :nodes="totals.nodes" />
+        <div class="list-heading"><h2>全部采集任务</h2><span>{{ totals.tasks }} 条记录</span></div>
         <div class="task-filters">
           <el-input
             v-model="taskSearch"
             clearable
             placeholder="搜索任务名称或 IP"
             aria-label="搜索任务名称或 IP"
+            :prefix-icon="Search"
             @keyup.enter="applyTaskFilters"
           /><el-select
             v-model="taskStatus"
@@ -210,21 +221,14 @@ onBeforeUnmount(() => clearInterval(timer));
             placeholder="全部状态"
             aria-label="按状态筛选"
             @change="applyTaskFilters"
-            ><el-option label="采集中" value="COLLECTING" /><el-option
-              label="连接中"
-              value="CONNECTING" /><el-option
-              label="重连中"
-              value="RECONNECTING" /><el-option
-              label="已暂停"
-              value="PAUSED" /><el-option
-              label="已停止"
-              value="STOPPED" /></el-select
+            ><el-option v-for="(label, value) in taskStatusLabels" :key="value" :label="label" :value="value" /></el-select
           ><el-button @click="applyTaskFilters">筛选</el-button>
         </div>
         <TaskList
           :items="tasks"
           :loading="busy"
           @edit="editTask"
+          @view="viewTask"
           @changed="refresh()"
       /></template>
       <TemplateList
@@ -233,7 +237,18 @@ onBeforeUnmount(() => clearInterval(timer));
         @edit="editTemplate"
         @changed="refresh()"
       />
-      <NodeList v-else :items="nodes" :loading="busy" />
+      <NodeList v-else-if="activeTab === 'nodes'" :items="nodes" :loading="busy" />
+      <LogsWorkspace v-else-if="activeTab === 'logs'" v-model="selectedLogTask" />
+      <AccessManager v-else-if="activeTab === 'access'" />
+      <AuditWorkspace v-else-if="activeTab === 'audit'" />
+      <SettingsManager v-else-if="activeTab === 'settings'" />
+      <el-pagination
+        v-if="activeTab === 'templates'"
+        v-model:current-page="templatePage"
+        :page-size="100"
+        :total="totals.templates"
+        layout="total, prev, pager, next"
+      />
       <el-pagination
         v-if="activeTab === 'tasks'"
         v-model:current-page="page"
@@ -243,10 +258,13 @@ onBeforeUnmount(() => clearInterval(timer));
         layout="total, prev, pager, next"
       />
     </section>
+    <footer v-if="authenticated" class="workspace-footer"><span>设备日志记录平台</span><span>SSH / Telnet</span></footer>
+    </div>
   </main>
   <TaskEditor
     v-model="taskEditorOpen"
     :task="selectedTask"
+    :initial-workspace="selectedWorkspace"
     :templates="templates"
     @saved="refresh()"
   />

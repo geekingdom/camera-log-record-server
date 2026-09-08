@@ -9,7 +9,7 @@ import LiveLogs from "../logs/LiveLogs.vue";
 import LogArchives from "../logs/LogArchives.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ task?: Task; templates: Template[] }>();
+const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string }>();
 const emit = defineEmits<{ saved: [] }>();
 const blank = (): Task => ({
   id: "",
@@ -29,12 +29,35 @@ const formRef = ref<FormInstance>(),
 const autoStart = ref(false),
   clearPassword = ref(false),
   templateId = ref(""),
+  templateItems = ref<Template[]>([]),
+  templatePage = ref(1),
+  templateTotal = ref(0),
+  templateLoading = ref(false),
   saving = ref(false),
   loading = ref(false);
+const templatePageSize = 20;
 const portTouched = ref(false),
   workspace = ref("config"),
   serial = computed(() => form.value.protocol === "TELNET_SERIAL");
 let generation = 0;
+let templateGeneration = 0;
+// 模板选择器独立分页；序号保证抽屉关闭、重开或翻页时旧响应不会覆盖当前页。
+async function loadTemplatePage(page: number) {
+  const current = ++templateGeneration;
+  templateLoading.value = true;
+  try {
+    const response = await api.templates(page, templatePageSize);
+    if (current !== templateGeneration || !open.value) return;
+    templateItems.value = response.items;
+    templatePage.value = response.page;
+    templateTotal.value = response.total;
+  } catch (error) {
+    if (current === templateGeneration && open.value)
+      ElMessage.error(error instanceof Error ? error.message : "读取命令模板失败");
+  } finally {
+    if (current === templateGeneration) templateLoading.value = false;
+  }
+}
 const rules = computed(() => ({
   name: [
     {
@@ -71,11 +94,19 @@ watch(
   () => [open.value, props.task] as const,
   async ([visible, task]) => {
     const current = ++generation;
-    if (!visible) return;
+    ++templateGeneration;
+    if (!visible) {
+      templateLoading.value = false;
+      return;
+    }
     loading.value = true;
-    workspace.value = "config";
+    workspace.value = props.initialWorkspace ?? "config";
     clearPassword.value = false;
     templateId.value = "";
+    templateItems.value = [];
+    templatePage.value = 1;
+    templateTotal.value = 0;
+    void loadTemplatePage(1);
     autoStart.value = false;
     portTouched.value = Boolean(task);
     try {
@@ -102,7 +133,7 @@ watch(
   },
 );
 async function replaceTemplate() {
-  const template = props.templates.find((item) => item.id === templateId.value);
+  const template = templateItems.value.find((item) => item.id === templateId.value);
   if (!template) return;
   if (
     (form.value.initialCommands.length ||
@@ -253,14 +284,26 @@ async function save() {
               <el-select
                 v-model="templateId"
                 clearable
+                :loading="templateLoading"
                 placeholder="选择命令模板"
                 @change="replaceTemplate"
                 ><el-option
-                  v-for="item in props.templates"
+                  v-for="item in templateItems"
                   :key="item.id"
                   :label="item.name"
                   :value="item.id"
-              /></el-select>
+              /><template #footer>
+                <el-pagination
+                  v-if="templateTotal > templatePageSize"
+                  v-model:current-page="templatePage"
+                  :disabled="templateLoading"
+                  :page-size="templatePageSize"
+                  :total="templateTotal"
+                  layout="prev, pager, next"
+                  small
+                  @current-change="loadTemplatePage"
+                />
+              </template></el-select>
             </div>
             <CommandEditor
               ref="editorRef"
@@ -271,7 +314,7 @@ async function save() {
         </el-form>
       </el-tab-pane>
       <el-tab-pane v-if="props.task" label="实时打印" name="live"
-        ><LiveLogs v-if="open && workspace === 'live'" :task-id="props.task.id"
+        ><LiveLogs v-if="open && workspace === 'live'" :task-id="props.task.id" @history="workspace = 'archives'"
       /></el-tab-pane>
       <el-tab-pane v-if="props.task" label="小时归档" name="archives"
         ><LogArchives

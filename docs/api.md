@@ -61,6 +61,53 @@ Content-Type: application/json
 {"command":"show status","newline":"\n","timeoutSeconds":30}
 ```
 
+## 后台配置与节点
+
+以下接口要求 `admin` 作用域。平台设置的保留期是数据库中的版本化配置；修改必须携带当前版本，避免两个管理员互相覆盖。节点登记与 worker 心跳分离：登记不会启动 worker，也不会把节点标记为在线。
+
+```http
+GET /api/v1/platform-settings
+PATCH /api/v1/platform-settings
+Content-Type: application/json
+
+{"retentionDays":14,"version":1}
+```
+
+`retentionDays` 范围为 1 到 3650 天。节点配置使用以下接口：
+
+```http
+GET  /api/v1/admin/nodes
+POST /api/v1/admin/nodes
+PATCH /api/v1/admin/nodes/{nodeId}
+```
+
+登记请求包含 `id`、`url`、`capacity` 和可选的 `accepting`。`url` 仅允许 HTTPS，开发环境允许 `localhost` 或环回地址的 HTTP；不得包含用户信息、查询参数、片段或路径。更新节点仅接受 `version`、`capacity` 和 `accepting`，当前版本不提供已登记节点地址修改接口。节点列表会同时给出人工配置与 worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回，沿用原部署配置；登记后才由平台容量和准入设置约束。实际容量取平台配置、本机 `NODE_CAPACITY` 和 100 的最小值。
+
+## 服务账号与审计
+
+服务账号接口也要求 `admin`。创建响应中的 `token` 只返回这一次；后续列表只返回名称、作用域、任务范围、撤销状态和过期时间，不会返回明文或散列。撤销会立即使账号失效，但保留审计记录。
+
+```http
+POST /api/v1/service-tokens
+Content-Type: application/json
+
+{"name":"reporting","scopes":["logs:read"],"taskIds":["task-example"],"expiresInDays":30}
+
+GET    /api/v1/service-tokens?page=1&pageSize=20
+DELETE /api/v1/service-tokens/{tokenId}
+```
+
+可用作用域为 `admin`、`tasks:read`、`tasks:write`、`tasks:control`、`commands:send`、`templates:read`、`templates:write`、`logs:read` 与 `logs:download`。`taskIds` 省略时不按任务白名单限制；提供后，任务级接口只允许访问列出的任务。
+
+管理员可查询操作审计和运行事件，两者均支持 `page`（从 1 开始）和 `pageSize`（最多 100）：
+
+```http
+GET /api/v1/audit-events?action=control%3ARUNNING&actor=admin&taskId=task-example&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
+GET /api/v1/runtime-events?taskId=task-example&nodeId=node-a&type=CONNECTION_GAP&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
+```
+
+`audit-events` 可按 `action`、`actor` 和 `taskId`（审计目标）筛选；`runtime-events` 可按 `taskId`、`nodeId` 和 `type` 筛选。时间范围必须成对提供、带 UTC 时区或偏移、长度大于零且不超过 31 天。旧的连接缺口事件使用 `detectedAt`，接口会按其发生时间筛选和排序，并返回统一的 `createdAt` 供显示。上述事件接口不读取设备日志正文或口令。
+
 ## 日志与导出
 
 按小时查看目录：
@@ -68,6 +115,10 @@ Content-Type: application/json
 ```http
 GET /api/v1/tasks/{taskId}/log-hours?page=1&pageSize=100
 ```
+
+可选 `date=YYYY-MM-DD` 按 `Asia/Shanghai` 自然日筛选。一个小时可包含重连或回拨形成的多个片段；响应的 `fragmentCount`、`readyCount`、`openCount` 与 `unavailableCount` 给出覆盖状态，`files` 按运行、会话和首块序号排序。每个片段含逻辑文件 `id`、状态、字节数、归档名、可用的 `sha256` 与序号范围；内部路径、密码和令牌不会返回。
+
+小时 `status` 为 `READY`、`OPEN` 或 `UNAVAILABLE`。`integrity` 为 `VERIFIED`（所有 READY 片段有摘要）、`UNVERIFIED`（已封存但缺少摘要）、`OPEN`（仍在写入）或 `UNAVAILABLE`（存在删除中或不可用片段）。它描述目录中的片段状态，不替代下载作业的最终清单校验。
 
 读取开放原始文件的一段内容：
 
@@ -88,6 +139,8 @@ Content-Type: application/json
 ```
 
 使用 `GET /api/v1/downloads/{jobId}` 查询状态；成功后从 `GET /api/v1/downloads/{jobId}/content` 下载，客户端可发送标准 `Range` 头继续未完成下载。`DELETE /api/v1/downloads/{jobId}` 取消队列或运行中的下载。
+
+下载和搜索作业从 `progress=0` 开始，按冻结片段的字节权重推进；运行中最大为 99，只有 `status=SUCCEEDED` 时才写入 100。失败、过期或取消的作业不会被显示为完成。下载最多选择 168 个小时，预计归档大小超过 20 GB 会被拒绝；节点临时导出空间上限为 100 GB，成功产物和下载保护最长保留 24 小时。多片段导出使用 ZIP STORE；`allowPartial=false` 时任一不可用片段会拒绝或失败，设为 `true` 时结果清单会明确列出 `missing`。
 
 浏览器原生下载可先创建短期会话：
 
@@ -112,8 +165,6 @@ Content-Type: application/json
 ## 错误格式
 
 实时接口为 `WS /api/v1/tasks/{taskId}/logs`。连接后十秒内发送首帧 `{"token":"<access-token>","cursor":null}`，后续消息包含 `fileId`、`sessionId`、`offset`、`endOffset`、Base64 `data` 及 `cursor`。重连传回最后游标；收到 `gap` 表示实时缓冲过期，需要从文件接口补读，原始文件并未因此丢失。服务端会持续检查令牌有效性。
-
-使用 `POST /api/v1/service-tokens` 创建服务账号令牌，使用 `DELETE /api/v1/service-tokens/{id}` 撤销。支持 `tasks:read`、`tasks:write`、`tasks:control`、`commands:send`、`logs:read`、`logs:download`、`templates:read`、`templates:write` 等权限，并可通过 `taskIds` 限定任务范围。创建或撤销令牌需要 `admin` 权限。
 
 错误响应使用统一结构：
 

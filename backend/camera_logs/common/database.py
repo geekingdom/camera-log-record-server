@@ -33,7 +33,7 @@ class Repository:
 
     async def initialize(self):
         """创建唯一、查询和 TTL 索引；重复调用不会改变已有业务数据。"""
-        for name in ("tasks", "templates", "operations", "commands", "nodes", "files", "jobs", "tokens", "runs"):
+        for name in ("tasks", "templates", "operations", "commands", "nodes", "node_configs", "platform_settings", "files", "jobs", "tokens", "runs"):
             await self.db[name].create_index("id", unique=True)
         await self.db.templates.create_index("name", unique=True)
         await self.db.idempotency.create_index([("actor", 1), ("key", 1)], unique=True)

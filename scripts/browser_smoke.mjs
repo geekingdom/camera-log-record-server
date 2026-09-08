@@ -45,6 +45,8 @@ async function exportableTaskId() {
       headers,
     }).then((response) => response.json());
     for (const task of tasks.items) {
+      // 实时验收必须选正在采集的任务，停止任务的历史归档不能证明实时订阅正常。
+      if (task.status !== "COLLECTING") continue;
       const hours = await fetch(
         `/api/v1/tasks/${encodeURIComponent(task.id)}/log-hours`,
         { headers },
@@ -175,6 +177,32 @@ try {
     path: `${screenshots}/task-form-mobile.png`,
     fullPage: true,
   });
+
+  // 独立工作台必须能从任务名称进入，不依赖编辑抽屉中的隐藏页签。
+  await page.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await existing.locator(".task-name").click();
+  await page.locator(".log-line").first().waitFor({ timeout: 15000 });
+  await page.screenshot({ path: `${screenshots}/logs-workspace-desktop.png`, fullPage: true });
+  await page.getByRole("tab", { name: "小时归档与检索", exact: true }).click();
+  await page.locator(".archive-table .el-table__expand-icon").first().click();
+  await page.getByRole("button", { name: "查看内容", exact: true }).first().click();
+  const content = page.getByRole("dialog", { name: "日志片段内容" });
+  await page.waitForFunction(() => {
+    const text = document.querySelector(".file-viewer-content")?.textContent?.trim();
+    return Boolean(text && text !== "此范围没有内容");
+  });
+  await content.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByPlaceholder("关键词", { exact: true }).fill(`acceptance-no-match-${Date.now()}`);
+  const completedSearch = page.waitForResponse(async response => {
+    if (!/\/log-searches\/[^/]+$/.test(new URL(response.url()).pathname) || response.request().method() !== "GET") return false;
+    return (await response.json()).status === "SUCCEEDED";
+  }, { timeout: 60000 });
+  await page.getByRole("button", { name: "检索", exact: true }).click();
+  await completedSearch;
+  await page.screenshot({ path: `${screenshots}/archives-workspace-desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: `${screenshots}/archives-workspace-mobile.png`, fullPage: true });
 
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth > window.innerWidth,

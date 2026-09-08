@@ -104,7 +104,7 @@ async def recover_orphan_archives(repo: Any) -> int:
 
 async def apply_retention(repo: Any) -> dict[str, int]:
     """Delete only expired, ready archives with no queued/running job reference."""
-    cutoff = now() - timedelta(days=repo.settings.retention_days) - timedelta(hours=1)
+    cutoff = now() - timedelta(days=await get_retention_days(repo)) - timedelta(hours=1)
     removed = skipped = failures = 0
     cursor = repo.db.files.find({
         "nodeId": repo.settings.node_id, "$or": [
@@ -144,6 +144,20 @@ async def apply_retention(repo: Any) -> dict[str, int]:
                 {"$set": {"retentionErrorAt": now()}},
             )
     return {"removed": removed, "skipped": skipped, "failures": failures}
+
+
+async def get_retention_days(repo: Any) -> int:
+    """每轮维护读取数据库保留期；缺省或损坏记录安全回退到进程默认值。"""
+    fallback = int(getattr(repo.settings, "retention_days", 7))
+    collection = getattr(repo.db, "platform_settings", None)
+    if collection is None:
+        return fallback
+    document = await collection.find_one({"id": "platform"})
+    value = document.get("retentionDays") if document else fallback
+    if isinstance(value, int) and 1 <= value <= 3650:
+        return value
+    logger.warning("平台保留期配置无效，使用默认值 retentionDays=%s", fallback)
+    return fallback
 
 
 async def cleanup_exports(repo: Any) -> int:

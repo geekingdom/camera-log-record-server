@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 服务节点只读列表，节点详情字段由服务端扩展时通过 JSON 兜底展示。
+// 节点监控只展示真实心跳与资源数据，登记和准入修改由后台配置模块负责。
 import type { Node } from "../../shared/types";
 defineProps<{ items: Node[]; loading: boolean }>();
 </script>
@@ -31,6 +31,7 @@ defineProps<{ items: Node[]; loading: boolean }>();
           :percentage="Number(Number(row.diskPercent).toFixed(1))"
           :status="row.diskPercent >= 90 ? 'exception' : undefined" /></template
     ></el-table-column>
+    <el-table-column label="新任务准入" min-width="130"><template #default="{ row }"><el-tag :type="row.accepting ? 'success' : 'warning'">{{ row.configurationMismatch ? '地址配置不一致' : row.accepting ? '允许接入' : '暂停接入' }}</el-tag></template></el-table-column>
     <el-table-column label="接收速率" width="150"
       ><template #default="{ row }"
         >{{

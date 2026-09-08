@@ -4,8 +4,10 @@
 查询执行期间的小时轮转改变结果。实时推送允许显式缺口，但不能影响归档保存。
 """
 import asyncio
+from datetime import date as CalendarDate
 from datetime import datetime, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -15,6 +17,7 @@ from camera_logs.common.database import now, public
 from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.security import actor, authenticate, authorize
 from camera_logs.logs.download_sessions import download_actor
+from camera_logs.logs.hour_catalog import summarize_hours
 
 
 async def node_request(repo, node_id, path, params=None):
@@ -67,20 +70,16 @@ def install_log_routes(app):
         return app.state.repo
 
     @app.get("/api/v1/tasks/{task_id}/log-hours")
-    async def hours(task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(100, ge=1, le=168)):
+    async def hours(task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(100, ge=1, le=168),
+                    date: Annotated[CalendarDate | None, Query()] = None):
         authorize(user, "logs:read", task_id)
         await repo().get("tasks", task_id)
-        groups = {}
-        async for file in repo().db.files.find({"taskId": task_id, "status": {"$ne": "DELETED"}}).sort("hour", -1):
-            key = file["hour"]
-            entry = groups.setdefault(key, {"hourId": key, "hour": key, "status": "READY", "bytes": 0,
-                                           "archiveBytes": 0, "files": []})
-            entry["bytes"] += file.get("bytes", 0)
-            entry["archiveBytes"] += file.get("archiveBytes", 0)
-            entry["files"].append(public(file))
-            if file["status"] != "READY":
-                entry["status"] = file["status"]
-        values = list(groups.values())
+        query = {"taskId": task_id, "status": {"$ne": "DELETED"}}
+        if date is not None:
+            start = datetime.combine(date, datetime.min.time(), ZoneInfo("Asia/Shanghai"))
+            query["hour"] = {"$gte": start.astimezone(now().tzinfo).isoformat(),
+                             "$lt": (start+timedelta(days=1)).astimezone(now().tzinfo).isoformat()}
+        values = summarize_hours([file async for file in repo().db.files.find(query)])
         return {"items": values[(page-1)*pageSize:page*pageSize], "total": len(values), "page": page, "pageSize": pageSize}
 
     @app.get("/api/v1/log-files/{identifier}/content")

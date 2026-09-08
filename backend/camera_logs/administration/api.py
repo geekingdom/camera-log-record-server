@@ -1,4 +1,5 @@
-"""提供运行指标、审计查询和经人工确认的旧节点隔离接口。"""
+"""提供运行指标、受限审计查询和经人工确认的旧节点隔离接口。"""
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
@@ -16,17 +17,109 @@ class FenceConfirmation(BaseModel):
     evidence: str = Field(min_length=10, max_length=2000)
 
 
+def _utc_range(start: str | None, end: str | None) -> dict[str, datetime]:
+    """解析管理查询时间范围，拒绝无时区、反向和过宽条件以控制扫描范围。"""
+    if start is None and end is None:
+        return {}
+    if start is None or end is None:
+        raise HTTPException(422, "开始和结束时间必须同时提供")
+    try:
+        lower, upper = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    except ValueError as exc:
+        raise HTTPException(422, "时间必须使用带时区的 ISO 8601 格式") from exc
+    if lower.tzinfo is None or upper.tzinfo is None:
+        raise HTTPException(422, "时间必须显式包含 UTC 时区或偏移")
+    lower, upper = lower.astimezone(UTC), upper.astimezone(UTC)
+    if upper <= lower or upper - lower > timedelta(days=31):
+        raise HTTPException(422, "时间范围必须大于零且不超过31天")
+    return {"$gte": lower, "$lt": upper}
+
+
+async def _event_page(db, collection: str, query: dict, page: int, page_size: int) -> dict:
+    """按确定的创建时间倒序返回公开事件字段，计数与页面使用完全相同的条件。"""
+    cursor = db[collection].find(query).sort("createdAt", -1).skip((page - 1) * page_size).limit(page_size)
+    return {
+        "items": [public(item) async for item in cursor],
+        "total": await db[collection].count_documents(query),
+        "page": page,
+        "pageSize": page_size,
+    }
+
+
+async def _runtime_event_page(db, query: dict, page: int, page_size: int) -> dict:
+    """兼容历史 detectedAt 事件，统一按实际发生时间排序并补出展示时间。"""
+    cursor = db.events.aggregate([
+        {"$match": query},
+        {"$addFields": {"_eventTime": {"$ifNull": ["$createdAt", "$detectedAt"]}}},
+        {"$sort": {"_eventTime": -1}},
+        {"$skip": (page - 1) * page_size},
+        {"$limit": page_size},
+        {"$project": {"_eventTime": 0}},
+    ])
+    items = []
+    async for item in cursor:
+        item = public(item)
+        if item.get("createdAt") is None and item.get("detectedAt") is not None:
+            item["createdAt"] = item["detectedAt"]
+        items.append(item)
+    return {
+        "items": items,
+        "total": await db.events.count_documents(query),
+        "page": page,
+        "pageSize": page_size,
+    }
+
+
 def install_admin_routes(app):
     """安装仅管理员可访问的审计、指标和外部 fencing 路由。"""
     User = Annotated[dict, Depends(actor)]
 
     @app.get("/api/v1/audit-events")
-    async def audit_events(request: Request, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100)):
-        """按时间倒序分页读取审计事件，不暴露数据库内部字段。"""
+    async def audit_events(
+        request: Request,
+        user: User,
+        page: int = Query(1, ge=1),
+        pageSize: int = Query(50, ge=1, le=100),
+        action: str | None = Query(default=None, max_length=128),
+        actor_id: str | None = Query(default=None, alias="actor", max_length=128),
+        task_id: str | None = Query(default=None, alias="taskId", max_length=128),
+        start: str | None = Query(default=None, max_length=64),
+        end: str | None = Query(default=None, max_length=64),
+    ):
+        """按操作、主体、目标任务和受限 UTC 范围查询审计事件。"""
         authorize(user, "admin")
         db = request.app.state.repo.db
-        return {"items": [public(x) async for x in db.audit.find({}).sort("createdAt", -1).skip((page-1)*pageSize).limit(pageSize)],
-                "total": await db.audit.count_documents({}), "page": page, "pageSize": pageSize}
+        query = {key: value for key, value in {
+            "action": action, "actor": actor_id, "targetId": task_id,
+        }.items() if value}
+        if stamp := _utc_range(start, end):
+            query["createdAt"] = stamp
+        return await _event_page(db, "audit", query, page, pageSize)
+
+    @app.get("/api/v1/runtime-events")
+    async def runtime_events(
+        request: Request,
+        user: User,
+        page: int = Query(1, ge=1),
+        pageSize: int = Query(50, ge=1, le=100),
+        task_id: str | None = Query(default=None, alias="taskId", max_length=128),
+        node_id: str | None = Query(default=None, alias="nodeId", max_length=128),
+        event_type: str | None = Query(default=None, alias="type", max_length=128),
+        start: str | None = Query(default=None, max_length=64),
+        end: str | None = Query(default=None, max_length=64),
+    ):
+        """按任务、节点、类别和受限 UTC 范围查询不含日志正文的运行事件。"""
+        authorize(user, "admin")
+        db = request.app.state.repo.db
+        query = {key: value for key, value in {
+            "taskId": task_id, "nodeId": node_id, "type": event_type,
+        }.items() if value}
+        if stamp := _utc_range(start, end):
+            query["$or"] = [
+                {"createdAt": stamp},
+                {"createdAt": {"$exists": False}, "detectedAt": stamp},
+            ]
+        return await _runtime_event_page(db, query, page, pageSize)
 
     @app.get("/metrics")
     async def metrics(request: Request, user: User):

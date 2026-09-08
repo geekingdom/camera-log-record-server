@@ -95,6 +95,8 @@ def create_app(settings=None, db=None):
     install_log_routes(app)
     from camera_logs.administration.api import install_admin_routes
     install_admin_routes(app)
+    from camera_logs.administration.settings import install_settings_routes
+    install_settings_routes(app)
     from camera_logs.logs.download_sessions import install_download_sessions
     install_download_sessions(app)
     return app

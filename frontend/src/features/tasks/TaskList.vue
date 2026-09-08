@@ -1,22 +1,25 @@
 <script setup lang="ts">
 // 任务列表负责生命周期按钮的可用性与同任务防重复提交，不持有任务详情状态。
 import { computed, ref } from "vue";
-import { CirclePause, CirclePlay, CircleStop, Edit3 } from "lucide-vue-next";
+import { CirclePause, CirclePlay, CircleStop, Edit3, Info } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import type { Task } from "../../shared/types";
+import TaskDiagnostics from "./TaskDiagnostics.vue";
+import { taskStatusLabel, taskStatusTone } from "./taskStatus";
 
 const props = defineProps<{ items: Task[]; loading: boolean }>();
-const emit = defineEmits<{ edit: [Task]; changed: [] }>();
+const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: [] }>();
 const pendingIds = ref(new Set<string>());
 const activeStatuses = new Set(["COLLECTING", "CONNECTING", "RECONNECTING"]);
-const actualLabels: Record<string, string> = {
-  STOPPED: "已停止",
-  CONNECTING: "连接中",
-  COLLECTING: "采集中",
-  RECONNECTING: "重连中",
-  PAUSED: "已暂停",
-};
+const diagnosticId = ref<string>();
+const diagnosticsOpen = ref(false);
+// 轮询替换任务对象后仍按 ID 选择新快照，不保留打开弹窗时的过期错误。
+const diagnosticTask = computed(() => props.items.find(task => task.id === diagnosticId.value));
+function showDiagnostics(task: Task) {
+  diagnosticId.value = task.id;
+  diagnosticsOpen.value = true;
+}
 const desiredLabels: Record<string, string> = {
   STOPPED: "停止",
   RUNNING: "运行",
@@ -82,7 +85,7 @@ const rows = computed(() => props.items);
   >
     <el-table-column label="任务" min-width="220"
       ><template #default="{ row }"
-        ><div>{{ row.name }}</div>
+        ><button class="task-name" @click="emit('view', row)" :aria-label="`查看实时打印 · ${row.name}`">{{ row.name }}</button>
         <small class="task-id">ID: {{ row.id }}</small></template
       ></el-table-column
     >
@@ -100,8 +103,8 @@ const rows = computed(() => props.items);
       ><template #default="{ row }"
         ><el-tag
           size="small"
-          :type="row.status === 'COLLECTING' ? 'success' : 'info'"
-          >{{ label(row.status, actualLabels) }}</el-tag
+          :type="taskStatusTone(row.status)"
+          >{{ taskStatusLabel(row.status) }}</el-tag
         ></template
       ></el-table-column
     >
@@ -110,8 +113,11 @@ const rows = computed(() => props.items);
         label(row.desiredState, desiredLabels)
       }}</template></el-table-column
     >
-    <el-table-column label="操作" width="210" fixed="right"
+    <el-table-column label="操作" width="250" fixed="right"
       ><template #default="{ row }">
+        <el-tooltip :content="`查看任务状态 · ID: ${row.id}`">
+          <el-button text :icon="Info" aria-label="查看任务状态" @click="showDiagnostics(row)" />
+        </el-tooltip>
         <el-tooltip :content="`编辑任务 · ID: ${row.id}`"
           ><el-button
             text
@@ -150,4 +156,5 @@ const rows = computed(() => props.items);
         /></el-tooltip> </template
     ></el-table-column>
   </el-table>
+  <TaskDiagnostics v-model="diagnosticsOpen" :task="diagnosticTask" />
 </template>

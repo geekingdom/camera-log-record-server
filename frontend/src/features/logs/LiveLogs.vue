@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 实时日志只暂停本地视图；连接、去重和有界接收始终继续运行。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { LocateFixed, Pause, Play, Send, Trash2 } from "lucide-vue-next";
+import { LocateFixed, Pause, Play, Send, Trash2, FileSearch } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api, getToken } from "../../shared/api";
 import {
@@ -10,6 +10,7 @@ import {
 } from "../../shared/composables/liveLogBuffer";
 
 const props = defineProps<{ taskId: string }>();
+const emit = defineEmits<{ history: [] }>();
 const buffer = new LiveLogBuffer();
 const lines = ref<string[]>([]);
 const connected = ref(false);
@@ -21,7 +22,7 @@ const pausedView = ref(false);
 const follow = ref(true);
 const consoleRef = ref<HTMLElement>();
 const rowHeight = 24;
-const viewportHeight = 264;
+const viewportHeight = ref(264);
 const overscan = 8;
 const first = computed(() =>
   Math.max(0, Math.floor(scrollTop.value / rowHeight) - overscan),
@@ -29,7 +30,7 @@ const first = computed(() =>
 const last = computed(() =>
   Math.min(
     lines.value.length,
-    first.value + Math.ceil(viewportHeight / rowHeight) + overscan * 2,
+    first.value + Math.ceil(viewportHeight.value / rowHeight) + overscan * 2,
   ),
 );
 const visible = computed(() => lines.value.slice(first.value, last.value));
@@ -158,7 +159,15 @@ async function send() {
   }
 }
 watch(() => props.taskId, connect, { immediate: true });
-onBeforeUnmount(close);
+// 日志窗高度随抽屉/工作台变化，虚拟列表按实际高度计算，避免放大后底部空白。
+const resize = new ResizeObserver(entries => {
+  viewportHeight.value = entries[0]?.contentRect.height ?? 264;
+});
+watch(consoleRef, (current, previous) => {
+  if (previous) resize.unobserve(previous);
+  if (current) resize.observe(current);
+});
+onBeforeUnmount(() => { resize.disconnect(); close(); });
 </script>
 <template>
   <section class="form-section runtime">
@@ -195,6 +204,7 @@ onBeforeUnmount(close);
     <p v-if="gaps || omitted" class="log-gap">
       <span v-if="gaps">服务端报告 {{ gaps }} 个日志缺口。</span>
       <span v-if="omitted">本地已省略 {{ omitted }} 行高频日志。</span>
+      <el-button :icon="FileSearch" @click="emit('history')">查看原始日志</el-button>
     </p>
     <div ref="consoleRef" class="log-console virtual-log" @scroll="onScroll">
       <div :style="topSpacer" />

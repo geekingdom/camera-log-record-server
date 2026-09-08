@@ -27,7 +27,7 @@ export class ApiError extends Error {
   }
 }
 // 所有 REST 请求经过此处，避免各功能模块遗漏 Bearer Token 或请求 ID 错误提示。
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body) headers.set("Content-Type", "application/json");
@@ -130,15 +130,16 @@ export const api = {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey() },
     }),
-  logHours: (id: string) => request<Page<LogHour>>(`/tasks/${id}/log-hours`),
+  logHours: (id: string, date?: string, page = 1) => request<Page<LogHour>>(`/tasks/${id}/log-hours${query(page, 24, { date })}`),
+  fileContent: (id: string, offset = 0, limit = 65536) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`),
   command: (id: string, command: InitialCommand) =>
     request<CommandExecution>(`/tasks/${id}/commands`, {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(command),
     }),
-  executions: (id: string) =>
-    request<Page<CommandExecution>>(`/tasks/${id}/command-executions`),
+  executions: (id: string, page = 1) =>
+    request<Page<CommandExecution>>(`/tasks/${id}/command-executions${query(page, 50)}`),
   templates: (page?: number, pageSize?: number) =>
     request<Page<Template>>(`/command-templates${query(page, pageSize)}`),
   template: (id: string) => request<Template>(`/command-templates/${id}`),
@@ -183,8 +184,8 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify({ taskId, keyword, start, end }),
     }),
-  searchResults: (id: string) =>
-    request<Page<Record<string, unknown>>>(`/log-searches/${id}/results`),
+  searchResults: (id: string, page = 1) =>
+    request<Page<Record<string, unknown>>>(`/log-searches/${id}/results${query(page, 100)}`),
   searchStatus: (id: string) =>
     request<{
       id: string;

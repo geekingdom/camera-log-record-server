@@ -140,15 +140,22 @@ class Worker:
         disk = shutil.disk_usage(root)
         disk_percent = disk.used / disk.total * 100
         await self.report_disk_pressure(disk_percent)
+        # 人工配置独立于心跳保存；变更只控制新建连接，不强制中断已有采集。
+        config = await self.repo.db.node_configs.find_one({"id": self.repo.settings.node_id}) or {}
+        capacity = min(100, self.repo.settings.node_capacity, config.get("capacity", self.repo.settings.node_capacity))
+        mismatch = bool(config.get("url") and config["url"].rstrip("/") != self.repo.settings.node_url.rstrip("/"))
+        reported = await self.repo.db.nodes.find_one({"id": self.repo.settings.node_id}) or {}
+        accepting = disk_percent < 90 and config.get("accepting", True) and not mismatch and not reported.get("isolated", False)
         current_bytes = sum(r.input_bytes for r in self.active.values())
         tick = time.monotonic()
         rate = max(0, current_bytes-self.last_bytes)/max(.01, tick-self.last_tick)
         self.last_bytes, self.last_tick = current_bytes, tick
         await self.repo.db.nodes.update_one({"id": self.repo.settings.node_id}, {"$set": {
             "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "heartbeat": now(),
-            "capacity": self.repo.settings.node_capacity, "activeTasks": len(self.active),
+            "capacity": capacity, "activeTasks": len(self.active),
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
-            "accepting": disk_percent < 90}}, upsert=True)
+            "accepting": accepting, "configurationMismatch": mismatch,
+            "configuredUrl": config.get("url")}}, upsert=True)
         for task_id, future in list(self.releases.items()):
             if future.done():
                 try:
@@ -185,7 +192,7 @@ class Worker:
                 continue
             elif runtime is None and task["status"] == "PENDING" and task["desiredState"] == "RUNNING":
                 # 调度心跳可能已经过期，建连前以本周期磁盘值复核；保留排队任务直到空间恢复。
-                if disk_percent >= 90:
+                if not accepting or len(self.active) >= capacity:
                     continue
                 self.active[task["id"]] = SessionRuntime(self.repo, task, connect)
             elif runtime is None and task["status"] not in ("STOPPED", "BLOCKED"):

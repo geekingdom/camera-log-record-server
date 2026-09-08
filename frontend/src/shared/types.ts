@@ -10,7 +10,7 @@ export type TaskActualStatus =
 export type TaskDesiredState = "STOPPED" | "RUNNING" | "PAUSED" | string;
 export interface InitialCommand {
   command: string;
-  newline: "\n";
+  newline: "\n" | "\r" | "\r\n";
   delaySeconds: number;
   prompt: string | null;
   timeoutSeconds: number;
@@ -31,6 +31,12 @@ export interface Task {
   password?: string;
   status?: TaskActualStatus;
   desiredState?: TaskDesiredState;
+  error?: string | null;
+  shellMode?: string;
+  debugPhase?: string | null;
+  runId?: string;
+  sessionId?: string;
+  updatedAt?: string;
   version?: number;
   description?: string;
   deviceId?: string;
@@ -69,6 +75,26 @@ export interface LogHour {
   status: string;
   bytes: number;
   archiveBytes: number;
+  fragmentCount?: number;
+  readyCount?: number;
+  openCount?: number;
+  unavailableCount?: number;
+  integrity?: string;
+  files: LogFile[];
+}
+export interface LogFile {
+  id: string;
+  runId?: string;
+  sessionId?: string;
+  nodeId?: string;
+  status: string;
+  bytes: number;
+  archiveBytes?: number;
+  archiveName?: string;
+  rawFileName?: string;
+  sha256?: string;
+  firstSequence?: number;
+  lastSequence?: number;
 }
 export interface CommandExecution {
   id?: string;
