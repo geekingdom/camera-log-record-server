@@ -155,7 +155,9 @@ async def test_debug_events_persist_task_recovery_state_without_run_latch(tmp_pa
 async def test_blocked_manual_command_persists_failed_reason(tmp_path):
     """命令通道未确认恢复时，手动命令写为 FAILED 并保存不含密码的原因。"""
     repo, task = await repository(tmp_path)
-    command = {"id": "blocked-manual", "taskId": task["id"], "sessionId": "debug-session", "command": "show status", "status": "QUEUED"}
+    command = {"id": "blocked-manual", "taskId": task["id"], "runId": task["runId"], "kind": "MANUAL",
+               "sessionId": "debug-session", "command": "show status", "status": "QUEUED"}
+    await repo.db.tasks.update_one({"id": task["id"]}, {"$set": {"sessionId": "debug-session"}})
     await repo.db.commands.insert_one(command)
     runtime = object.__new__(SessionRuntime)
     runtime.repo, runtime.task, runtime.stopping = repo, task, False

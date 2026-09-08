@@ -169,7 +169,9 @@ class Collector:
         """将人工命令加入唯一发送队列；提示符和发送后延时都在本会话内串行完成。"""
         if not command or not command.strip() or self._initializing or not self._accepting_commands or self._connection is None:
             raise RuntimeError("collector is not accepting manual commands")
-        if self._command_blocked:
+        # 通道阻断时只允许精确的后续 debug 进入同一发送队列，由 sender 先无密码
+        # 恢复并确认 shell，再执行这一次新握手；普通命令仍不得绕过阻断。
+        if self._command_blocked and command.strip() != "debug":
             raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
         command_id = str(uuid.uuid4())
         self._command_status[command_id] = "QUEUED"

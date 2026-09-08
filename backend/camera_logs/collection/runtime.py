@@ -181,23 +181,41 @@ class SessionRuntime:
 
     async def manual(self, document):
         """只在命令绑定的会话发送；已过期会话取消，进入发送后异常记为未知。"""
-        claimed = await self.repo.db.commands.find_one_and_update({"id": document["id"], "status": "QUEUED"},
+        collector = self.collector
+        if self.stopping or getattr(self, "retired", False) or collector is None:
+            return
+        # 先读取命令再核对当前归属，防止旧快照取消已属于后继实例的记录。
+        record = await self.repo.db.commands.find_one({"id": document["id"], "taskId": self.task["id"],
+                                                     "kind": "MANUAL", "status": "QUEUED"})
+        if record is None:
+            return
+        current = await self.repo.db.tasks.find_one({**owner_filter(self.task), "sessionId": collector.session_id,
+                                                   "status": "COLLECTING", "desiredState": "RUNNING"})
+        if current is None:
+            return
+        scope = {"id": record["id"], "taskId": self.task["id"], "kind": "MANUAL",
+                 "runId": record.get("runId"), "sessionId": record.get("sessionId")}
+        if record.get("runId") != self.task["runId"] or record.get("sessionId") != collector.session_id:
+            await self.repo.db.commands.update_one({**scope, "status": "QUEUED"},
+                {"$set": {"status": "CANCELLED", "completedAt": now()}})
+            return
+        claimed = await self.repo.db.commands.find_one_and_update({**scope, "status": "QUEUED"},
             {"$set": {"status": "SENDING", "startedAt": now()}}, return_document=ReturnDocument.AFTER)
         if not claimed:
             return
         status = "UNKNOWN"
         error = None
         try:
-            if self.stopping or not self.collector or document.get("sessionId") != self.collector.session_id:
+            if self.stopping or getattr(self, "retired", False) or self.collector is not collector:
                 status = "CANCELLED"
             else:
                 # collector 内部负责提示符等待及发送后延时，外层不能提前取消其串行收尾。
-                await self.collector.enqueue_manual(
-                    document["command"],
-                    newline=document.get("newline", "\n"),
-                    prompt=document.get("prompt"),
-                    timeout_seconds=float(document.get("timeoutSeconds", 30)),
-                    delay_seconds=float(document.get("delaySeconds", 0)),
+                await collector.enqueue_manual(
+                    claimed["command"],
+                    newline=claimed.get("newline", "\n"),
+                    prompt=claimed.get("prompt"),
+                    timeout_seconds=float(claimed.get("timeoutSeconds", 30)),
+                    delay_seconds=float(claimed.get("delaySeconds", 0)),
                 )
                 status = "SENT"
         except CommandChannelBlocked as exc:
@@ -209,7 +227,7 @@ class SessionRuntime:
         except Exception:
             logger.exception("手动命令结果未知 task=%s command=%s", self.task["id"], document["id"])
         finally:
-            await self.repo.db.commands.update_one({"id": document["id"]},
+            await self.repo.db.commands.update_one({**scope, "status": "SENDING"},
                 {"$set": {"status": status, "error": error, "completedAt": now()}})
 
     async def run(self):
