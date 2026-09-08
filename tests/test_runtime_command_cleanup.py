@@ -9,8 +9,9 @@ from mongomock_motor import AsyncMongoMockClient
 
 
 @pytest.mark.parametrize("construction_fails", [False, True])
-async def test_runtime_cleanup_does_not_touch_other_runs_or_sessions(monkeypatch, tmp_path, construction_fails):
-    """覆盖正常取消及采集器构造失败；未创建会话时不能按任务范围清理命令。"""
+@pytest.mark.parametrize("stop_fails", [False, True])
+async def test_runtime_cleanup_does_not_touch_other_runs_or_sessions(monkeypatch, tmp_path, construction_fails, stop_fails):
+    """构造或停止失败时，收尾仍只处理已创建旧会话的命令记录。"""
     database = AsyncMongoMockClient().db
     documents = []
     for task, run, session in [
@@ -42,7 +43,8 @@ async def test_runtime_cleanup_does_not_touch_other_runs_or_sessions(monkeypatch
             await asyncio.Future()
 
         async def stop(self):
-            pass
+            if stop_fails:
+                raise RuntimeError("collector stop failed")
 
     monkeypatch.setattr("camera_logs.collection.runtime.Collector", Collector)
     runtime = object.__new__(SessionRuntime)

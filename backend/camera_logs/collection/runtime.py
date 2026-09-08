@@ -15,6 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pymongo import ReturnDocument
+from pymongo.errors import ConnectionFailure, ExecutionTimeout
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.psh_dialogue import PshSwitchError
@@ -248,10 +249,28 @@ class SessionRuntime:
         key = (session_id, command_id)
         identifier = self.pending_executions.get(key)
         if identifier:
-            await self.repo.db.commands.update_one({"id": identifier, "taskId": self.task["id"],
-                "runId": self.task["runId"], "sessionId": session_id, "commandId": command_id,
-                "kind": "SCHEDULED", "status": "SENDING"},
-                {"$set": {"status": status, "completedAt": now()}})
+            completed_at = now()
+            for attempt in range(3):
+                try:
+                    # 只重试幂等的结果更新，绝不重新入队发送；记录实际处理结束时间。
+                    await self.repo.db.commands.update_one({"id": identifier, "taskId": self.task["id"],
+                        "runId": self.task["runId"], "sessionId": session_id, "commandId": command_id,
+                        "kind": "SCHEDULED", "status": "SENDING"},
+                        {"$set": {"status": status, "completedAt": completed_at}})
+                    break
+                except (ConnectionFailure, ExecutionTimeout):
+                    logger.exception("定时命令结果回写失败，等待重试 task=%s session=%s command=%s",
+                                     self.task["id"], session_id, command_id)
+                    if (self.stopping or getattr(self, "retired", False) or self.collector is None
+                            or self.collector.session_id != session_id):
+                        return
+                    if attempt == 2:
+                        raise
+                    # 三次失败交给会话监督收尾；只在前两次失败后等待 1 秒、2 秒。
+                    await asyncio.sleep(2 ** attempt)
+                    if (self.stopping or getattr(self, "retired", False) or self.collector is None
+                            or self.collector.session_id != session_id):
+                        return
             if self.pending_executions.get(key) == identifier:
                 self.pending_executions.pop(key, None)
 
@@ -355,16 +374,19 @@ class SessionRuntime:
                     self.error = "SSH主机指纹未登记或不匹配"
                     break
             finally:
-                if self.collector:
-                    await self._stop_collector()
-                if session_commands is not None:
-                    await self.repo.db.commands.update_many({**session_commands, "status": "QUEUED"},
-                        {"$set": {"status": "CANCELLED", "completedAt": now()}})
-                    await self.repo.db.commands.update_many({**session_commands, "status": "SENDING"},
-                        {"$set": {"status": "UNKNOWN", "completedAt": now()}})
-                    for key in list(self.pending_executions):
-                        if key[0] == session_commands["sessionId"]:
-                            self.pending_executions.pop(key, None)
+                try:
+                    if self.collector:
+                        await self._stop_collector()
+                finally:
+                    # 连接或归档收尾报错仍需结束本会话命令；不能跳过并遗留 SENDING。
+                    if session_commands is not None:
+                        await self.repo.db.commands.update_many({**session_commands, "status": "QUEUED"},
+                            {"$set": {"status": "CANCELLED", "completedAt": now()}})
+                        await self.repo.db.commands.update_many({**session_commands, "status": "SENDING"},
+                            {"$set": {"status": "UNKNOWN", "completedAt": now()}})
+                        for key in list(self.pending_executions):
+                            if key[0] == session_commands["sessionId"]:
+                                self.pending_executions.pop(key, None)
             if self.error:
                 break
             if not self.stopping:

@@ -20,6 +20,7 @@ from camera_logs.logs.storage import HourlyWriter
 
 from .line_prefix import LinePrefixer
 from .psh_dialogue import PshDialogue, PshSwitchError
+from .scheduled_supervision import supervise_scheduled
 
 
 class AsyncConnection(Protocol):
@@ -136,7 +137,7 @@ class Collector:
                 self._on_state, "COLLECTING", {"taskId": self.task_id, "sessionId": self.session_id}
             )
             for position, item in enumerate(self.task.get("scheduledCommands", [])):
-                self._scheduled.append(asyncio.create_task(self._scheduled_loop(position, item)))
+                self._scheduled.append(asyncio.create_task(supervise_scheduled(self, position, item)))
         except BaseException:
             # 初始化失败时本实例已经拥有连接和后台协程，必须立即进入同一关闭路径。
             await self.stop()

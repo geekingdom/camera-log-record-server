@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from camera_logs.collection.collector import Collector
+from pymongo.errors import ConnectionFailure
 from test_collector import FakeConnection
 from test_manual_command_ownership import runtime_and_command
 
@@ -75,6 +76,132 @@ async def test_scheduled_budget_stops_at_configured_execution_limit(tmp_path):
     assert results == [True, True, False]
     assert budget["attempts"] == 2
     assert await runtime.repo.db.commands.count_documents({"kind": "SCHEDULED"}) == 2
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+async def test_execution_result_retries_connection_failure_without_consuming_budget(tmp_path, monkeypatch, failures):
+    """结果写入短暂断连后重试同一执行记录，不再扣减预算或新建执行。"""
+    runtime = await scheduled_runtime(tmp_path)
+    assert await runtime.reserve("periodic", DETAIL)
+    key = ("session", "periodic")
+    execution_id = runtime.pending_executions[key]
+    collection_type = type(runtime.repo.db.commands)
+    original_update = collection_type.update_one
+    attempts = 0
+
+    async def fail_before_sent(self, query, update, **kwargs):
+        nonlocal attempts
+        if self.name == "commands" and query.get("id") == execution_id and attempts < failures:
+            attempts += 1
+            raise ConnectionFailure("temporary result write failure")
+        return await original_update(self, query, update, **kwargs)
+
+    async def fast_sleep(_delay):
+        """只替换运行时模块的退避等待，不调用被替换的全局 sleep。"""
+        return
+
+    monkeypatch.setattr(collection_type, "update_one", fail_before_sent)
+    monkeypatch.setattr("camera_logs.collection.runtime.asyncio.sleep", fast_sleep)
+    await runtime.update_execution("periodic", "SENT", DETAIL)
+
+    execution = await runtime.repo.db.commands.find_one({"id": execution_id})
+    budget = await runtime.repo.db.budgets.find_one({"_id": "run:periodic"})
+    assert attempts == failures
+    assert execution["status"] == "SENT"
+    assert budget["attempts"] == 1
+    assert key not in runtime.pending_executions
+
+
+async def test_stopping_runtime_keeps_pending_execution_after_result_write_retry_failure(tmp_path, monkeypatch):
+    """任务停止时退出结果写入重试，pending 映射留给会话收尾标记 UNKNOWN。"""
+    runtime = await scheduled_runtime(tmp_path)
+    assert await runtime.reserve("periodic", DETAIL)
+    key = ("session", "periodic")
+    execution_id = runtime.pending_executions[key]
+    collection_type = type(runtime.repo.db.commands)
+    original_update = collection_type.update_one
+
+    async def fail_result_write(self, query, update, **kwargs):
+        if self.name == "commands" and query.get("id") == execution_id:
+            raise ConnectionFailure("temporary result write failure")
+        return await original_update(self, query, update, **kwargs)
+
+    async def stop_during_backoff(_delay):
+        """退避前模拟任务停止，不递归调用已替换的 sleep。"""
+        runtime.stopping = True
+
+    monkeypatch.setattr(collection_type, "update_one", fail_result_write)
+    monkeypatch.setattr("camera_logs.collection.runtime.asyncio.sleep", stop_during_backoff)
+    await runtime.update_execution("periodic", "SENT", DETAIL)
+
+    execution = await runtime.repo.db.commands.find_one({"id": execution_id})
+    assert execution["status"] == "SENDING"
+    assert runtime.pending_executions[key] == execution_id
+
+
+async def test_cancelling_result_write_retry_keeps_pending_execution(tmp_path, monkeypatch):
+    """协程在结果写入退避中取消时传播取消，并保留 pending 映射供收尾处理。"""
+    runtime = await scheduled_runtime(tmp_path)
+    assert await runtime.reserve("periodic", DETAIL)
+    key = ("session", "periodic")
+    execution_id = runtime.pending_executions[key]
+    collection_type = type(runtime.repo.db.commands)
+    original_update = collection_type.update_one
+
+    async def fail_result_write(self, query, update, **kwargs):
+        if self.name == "commands" and query.get("id") == execution_id:
+            raise ConnectionFailure("temporary result write failure")
+        return await original_update(self, query, update, **kwargs)
+
+    async def cancel_during_backoff(_delay):
+        """模拟调度任务在退避点被取消，不经由全局 sleep 递归。"""
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(collection_type, "update_one", fail_result_write)
+    monkeypatch.setattr("camera_logs.collection.runtime.asyncio.sleep", cancel_during_backoff)
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.update_execution("periodic", "SENT", DETAIL)
+
+    execution = await runtime.repo.db.commands.find_one({"id": execution_id})
+    assert execution["status"] == "SENDING"
+    assert runtime.pending_executions[key] == execution_id
+
+
+async def test_execution_result_raises_after_three_connection_failures(tmp_path, monkeypatch):
+    """连续三次结果回写失败后向上传播，预算和 pending 交由会话收尾处理。"""
+    runtime = await scheduled_runtime(tmp_path)
+    assert await runtime.reserve("periodic", DETAIL)
+    key = ("session", "periodic")
+    execution_id = runtime.pending_executions[key]
+    collection_type = type(runtime.repo.db.commands)
+    original_update = collection_type.update_one
+    attempts = backoffs = 0
+
+    async def always_fail_result_write(self, query, update, **kwargs):
+        nonlocal attempts
+        if self.name == "commands" and query.get("id") == execution_id:
+            attempts += 1
+            raise ConnectionFailure("persistent result write failure")
+        return await original_update(self, query, update, **kwargs)
+
+    async def allow_two_backoffs(_delay):
+        """旧无限循环到第三次退避时中断，防止红测忙等。"""
+        nonlocal backoffs
+        backoffs += 1
+        if backoffs == 3:
+            raise AssertionError("第三次失败后不应继续退避")
+
+    monkeypatch.setattr(collection_type, "update_one", always_fail_result_write)
+    monkeypatch.setattr("camera_logs.collection.runtime.asyncio.sleep", allow_two_backoffs)
+    with pytest.raises(ConnectionFailure):
+        await runtime.update_execution("periodic", "SENT", DETAIL)
+
+    budget = await runtime.repo.db.budgets.find_one({"_id": "run:periodic"})
+    execution = await runtime.repo.db.commands.find_one({"id": execution_id})
+    assert attempts == 3
+    assert budget["attempts"] == 1
+    assert execution["status"] == "SENDING"
+    assert runtime.pending_executions[key] == execution_id
 
 
 @pytest.mark.parametrize("change", [{"taskId": "other"}, {"runId": "other"}])

@@ -179,6 +179,56 @@ async def verify_stop_conflict(db):
         raise AssertionError("停止冲突后仍创建执行记录")
 
 
+async def verify_result_retry(db):
+    """结果回写瞬态失败时只重试数据库，实际发送一次且保持会话可用。"""
+    runtime = await runtime_for(db, uuid4().hex)
+
+    class ResultProxy:
+        """前两次结果更新模拟连接失联，其他命令集合操作仍由真实数据库完成。"""
+        failures = 0
+
+        async def update_one(self, *args, **kwargs):
+            if self.failures < 2:
+                self.failures += 1
+                raise ConnectionFailure("injected transient result update failure")
+            return await db.commands.update_one(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(db.commands, name)
+
+    proxy = ResultProxy()
+    runtime.repo.db = SimpleNamespace(client=db.client, tasks=db.tasks, budgets=db.budgets, commands=proxy)
+    writes = []
+
+    async def write(data):
+        writes.append(data)
+
+    with TemporaryDirectory() as root:
+        collector = Collector(runtime.task | {"storageIdentity": "synthetic"}, root,
+                              connection_factory=lambda _: None,
+                              reserve_execution=runtime.reserve, update_execution=runtime.update_execution)
+        collector.session_id = "session"
+        collector._connection = SimpleNamespace(write=write)
+        collector._accepting_commands = True
+        runtime.collector = collector
+        sender = asyncio.create_task(collector._sender_loop())
+        try:
+            await asyncio.wait_for(collector._scheduled_loop(0, {
+                "id": "periodic", "command": "probe", "intervalSeconds": .001, "totalExecutions": 1,
+            }), 10)
+        finally:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+    budget = await db.budgets.find_one({"_id": runtime.task["runId"] + ":periodic"})
+    records = await db.commands.find({"taskId": runtime.task["id"]}).to_list()
+    if writes != [b"probe\n"] or budget["attempts"] != 1 or len(records) != 1:
+        raise AssertionError("结果回写重试重复发送或重复扣减预算")
+    if records[0]["status"] != "SENT" or runtime.pending_executions or proxy.failures != 2:
+        raise AssertionError("数据库恢复后未补齐结果")
+    if collector._closed.is_set() or not collector._accepting_commands:
+        raise AssertionError("短暂回写错误不应关闭采集会话")
+
+
 async def main():
     """临时库运行完毕总是删除；仅打印验收结果，不输出凭据和设备正文。"""
     settings = Settings()
@@ -193,9 +243,10 @@ async def main():
         await verify_budget(db)
         await verify_unknown_commit(db)
         await verify_stop_conflict(db)
+        await verify_result_retry(db)
         print(json.dumps({"passed": True, "budgetCancellation": True,
                           "executionCancellation": True, "reconnectBudget": True,
-                          "unknownCommit": True, "stopConflict": True}))
+                          "unknownCommit": True, "stopConflict": True, "resultRetry": True}))
     finally:
         try:
             await client.drop_database(name)
