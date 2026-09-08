@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import logging.handlers
@@ -16,7 +17,8 @@ from copy import copy
 from pathlib import Path
 from typing import Any
 
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
+from starlette.requests import Request
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 14
@@ -131,6 +133,8 @@ def log_request(
     actor: str | None = None,
     error: BaseException | None = None,
     logger: logging.Logger | None = None,
+    response_complete: bool = True,
+    response_bytes: int = 0,
 ) -> None:
     """写入不含 query、header、body 的访问日志；异常附带已脱敏追踪。"""
     logger = logger or logging.getLogger("camera_logs.access")
@@ -143,29 +147,59 @@ def log_request(
         "route": path,
         "targets": dict(request.path_params) if hasattr(request, "path_params") else {},
         "status": status,
+        "responseComplete": response_complete,
+        "responseBytes": response_bytes,
         "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
     }
     if error is not None:
         context["error"] = {"type": type(error).__name__, "message": redact_text(str(error))}
         logger.error("request failed", extra={"context": context}, exc_info=error)
-    else:
+    elif response_complete:
         logger.info("request completed", extra={"context": context})
+    else:
+        logger.warning("request ended before response completed", extra={"context": context})
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """为每个 HTTP 请求分配或沿用关联 ID，并在结束或异常时写访问日志。"""
+class RequestLoggingMiddleware:
+    """直接观察 ASGI 发送完成，避免流式下载仅返回响应头就被记录为成功。"""
 
-    async def dispatch(self, request: Any, call_next: Any) -> Any:
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
         request.state.request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         started_at = time.perf_counter()
+        status = None
+        complete = False
+        sent_bytes = 0
+        failure = None
+
+        async def tracked_send(message: Any) -> None:
+            nonlocal status, complete, sent_bytes
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["X-Request-ID"] = request.state.request_id
+            await send(message)
+            # 仅统计发送调用已完成的数据；失败的块不能声称已传输完成。
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            elif message["type"] == "http.response.body":
+                sent_bytes += len(message.get("body", b""))
+                complete = not message.get("more_body", False)
+
         try:
-            response = await call_next(request)
-        except Exception as error:
-            log_request(request, status=500, started_at=started_at, error=error)
+            await self.app(scope, receive, tracked_send)
+        except (Exception, asyncio.CancelledError) as error:
+            failure = error
             raise
-        response.headers["X-Request-ID"] = request.state.request_id
-        log_request(request, status=response.status_code, started_at=started_at)
-        return response
+        finally:
+            fallback = 499 if isinstance(failure, asyncio.CancelledError) else 500
+            log_request(request, status=status if status is not None else fallback,
+                started_at=started_at, error=failure, response_complete=complete,
+                response_bytes=sent_bytes)
 
 
 def add_request_logging(app: Any) -> None:
