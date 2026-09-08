@@ -33,6 +33,39 @@ class Worker:
         self.last_maintenance = 0.0
         self.maintenance_task = None
         self.releases = {}
+        self.disk_level = "NORMAL"
+
+    async def report_disk_pressure(self, percent):
+        """仅在磁盘阈值级别变化时记录告警及恢复，避免每秒重复事件。"""
+        level = "CRITICAL" if percent >= 95 else "NO_ADMISSION" if percent >= 90 else "WARNING" if percent >= 80 else "NORMAL"
+        if level == self.disk_level:
+            return
+        await self.repo.db.events.insert_one({"type": "DISK_PRESSURE_CHANGED", "nodeId": self.repo.settings.node_id,
+            "level": level, "previousLevel": self.disk_level, "diskPercent": percent, "createdAt": now()})
+        log = logger.info if level == "NORMAL" else logger.warning
+        log("节点磁盘状态变化 node=%s level=%s used=%.2f%%", self.repo.settings.node_id, level, percent)
+        self.disk_level = level
+
+    async def stop_pending(self, task):
+        """取消尚未建连的本机任务；无会话需要关闭，可直接结束运行并释放端点锁。"""
+        changed = await self.repo.db.tasks.update_one(
+            {"id": task["id"], "runId": task["runId"], "nodeId": self.repo.settings.node_id,
+             "status": "PENDING", "desiredState": "STOPPED"},
+            {"$set": {"status": "STOPPED", "nodeId": None, "updatedAt": now()}})
+        if not changed.matched_count:
+            return
+        await self.repo.db.endpoint_locks.delete_one({"taskId": task["id"], "runId": task["runId"]})
+        await self.repo.db.runs.update_one({"id": task["runId"]}, {"$set": {"endedAt": now()}})
+        await self.repo.db.operations.update_many(
+            {"taskId": task["id"], "desiredState": "STOPPED", "status": "PENDING"},
+            {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
+        await self.repo.db.operations.update_many(
+            {"taskId": task["id"], "desiredState": "RUNNING", "status": "PENDING"},
+            {"$set": {"status": "FAILED", "error": "启动前已停止", "completedAt": now()}})
+        # 编辑排队任务也沿用受控重启语义；显式停止已由 API 清除 restartRequested。
+        await self.repo.db.tasks.update_one(
+            {"id": task["id"], "runId": task["runId"], "status": "STOPPED", "restartRequested": True},
+            {"$set": {"desiredState": "RUNNING", "restartRequested": False}})
 
     async def pause(self, runtime):
         """等待连接关闭和日志排空，保留运行预算与端点锁；并发停止优先完成释放。"""
@@ -106,6 +139,7 @@ class Worker:
         root.mkdir(parents=True, exist_ok=True)
         disk = shutil.disk_usage(root)
         disk_percent = disk.used / disk.total * 100
+        await self.report_disk_pressure(disk_percent)
         current_bytes = sum(r.input_bytes for r in self.active.values())
         tick = time.monotonic()
         rate = max(0, current_bytes-self.last_bytes)/max(.01, tick-self.last_tick)
@@ -141,12 +175,18 @@ class Worker:
             if runtime is None and task["desiredState"] == "PAUSED" and task["status"] == "PENDING":
                 await self.pause_pending(task)
                 continue
+            if runtime is None and task["desiredState"] == "STOPPED" and task["status"] == "PENDING":
+                await self.stop_pending(task)
+                continue
             if runtime and (task["desiredState"] == "STOPPED" or disk_percent >= 95 or runtime.background.done()):
                 if disk_percent >= 95:
                     runtime.error = "磁盘空间不足，已停止采集"
                 self.releases[task["id"]] = asyncio.create_task(self.release(runtime))
                 continue
             elif runtime is None and task["status"] == "PENDING" and task["desiredState"] == "RUNNING":
+                # 调度心跳可能已经过期，建连前以本周期磁盘值复核；保留排队任务直到空间恢复。
+                if disk_percent >= 90:
+                    continue
                 self.active[task["id"]] = SessionRuntime(self.repo, task, connect)
             elif runtime is None and task["status"] not in ("STOPPED", "BLOCKED"):
                 await self.repo.db.tasks.update_one({"id": task["id"]},
