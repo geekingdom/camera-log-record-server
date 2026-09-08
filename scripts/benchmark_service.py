@@ -18,6 +18,7 @@ import httpx
 from camera_logs.common.config import Settings
 from service_benchmark_io import LoadSource, verify_download
 from service_benchmark_realtime import observe_realtime
+from service_benchmark_search import observe_searches
 
 
 async def wait_observer_ready(observer, ready, timeout):
@@ -128,6 +129,7 @@ async def execute(args):
     creating = asyncio.Semaphore(16)
     workers = []
     observers = []
+    search_jobs = set()
     started = time.monotonic()
     async with httpx.AsyncClient(base_url=args.url.rstrip("/"),
         headers={"Authorization": "Bearer " + token}, timeout=120,
@@ -171,9 +173,19 @@ async def execute(args):
                     route_observers.append(observer)
                     await wait_observer_ready(observer, ready, args.timeout)
                 begin = time.monotonic()
+                route_searches = []
+                if args.search_interval:
+                    search = asyncio.create_task(observe_searches(client, task_id, source,
+                        args.search_interval, args.seconds * 2 + args.timeout, search_jobs))
+                    observers.append(search)
+                    route_searches.append(search)
                 source.release.set()
-                end, realtime = await emit_observed(source, args.seconds, args.seconds * 2 + args.timeout,
-                                                     route_observers)
+                end, observations = await emit_observed(source, args.seconds, args.seconds * 2 + args.timeout,
+                                                        route_observers + route_searches)
+                realtime = observations[:len(route_observers)]
+                searches = observations[len(route_observers):]
+                if args.search_interval and (not searches or searches[0]["count"] < 1):
+                    raise AssertionError(f"路由 {number} 未完成任何并发搜索")
                 intervals.append((begin, end))
                 if source.failure:
                     raise RuntimeError(f"模拟源 {number} 发送失败") from source.failure
@@ -202,7 +214,7 @@ async def execute(args):
                     "sourceBytes": source.source_bytes, "sourceSha256": source.source_sha256,
                     "elapsedSeconds": source.elapsed_seconds, "maxTickLagSeconds": source.max_tick_lag_seconds,
                     "connectionCount": source.connection_count, "downloadBytes": size,
-                    "realtime": realtime, "verification": verified}
+                    "realtime": realtime, "searches": searches, "verification": verified}
                 results.append(result)
                 print(json.dumps({"route": number, "verified": True, "completedRoutes": len(results)}), flush=True)
 
@@ -217,6 +229,14 @@ async def execute(args):
                 if not observer.done():
                     observer.cancel()
             await asyncio.gather(*observers, return_exceptions=True)
+            for identifier in sorted(search_jobs):
+                try:
+                    response = await client.delete(f"/api/v1/log-searches/{identifier}")
+                    response.raise_for_status()
+                    await wait_until(client, f"/api/v1/log-searches/{identifier}",
+                        lambda item: item.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}, args.timeout)
+                except Exception as error:  # noqa: BLE001 - 搜索清理失败不能阻止采集连接回收。
+                    cleanup_errors.append({"searchId": identifier, "errorType": type(error).__name__})
             # 先向服务请求停止，再关闭模拟端，避免关闭监听触发不必要的重连。
             async def cleanup(task_id):
                 try:
@@ -261,8 +281,15 @@ async def execute(args):
     report["realtimeLogBytes"] = sum(observer["logBytes"] for item in results for observer in item["realtime"])
     report["realtimeVerified"] = all(len(item["realtime"]) == args.realtime_clients_per_route
                                      for item in results) and len(results) == args.routes
+    report["searchIntervalSeconds"] = args.search_interval
+    report["searchCount"] = sum(search["count"] for item in results for search in item["searches"])
+    report["searchMaxElapsedSeconds"] = max((search["maxElapsedSeconds"] for item in results
+        for search in item["searches"]), default=0)
+    report["searchVerified"] = not args.search_interval or (len(results) == args.routes and all(
+        len(item["searches"]) == 1 and item["searches"][0]["count"] > 0 for item in results))
     report["passed"] = all(report[key] for key in (
-        "integrityVerified", "targetRateAchieved", "concurrentWindowVerified", "cleanupVerified", "realtimeVerified"))
+        "integrityVerified", "targetRateAchieved", "concurrentWindowVerified", "cleanupVerified",
+        "realtimeVerified", "searchVerified"))
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
@@ -280,6 +307,7 @@ def parse_args():
     parser.add_argument("--line-bytes", type=int, default=256)
     parser.add_argument("--download-concurrency", type=int, default=2)
     parser.add_argument("--realtime-clients-per-route", type=int, default=0)
+    parser.add_argument("--search-interval", type=int, default=0)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -291,6 +319,8 @@ def parse_args():
         parser.error("下载并发须在 1..8，超时须为正整数")
     if not 0 <= args.realtime_clients_per_route <= 4:
         parser.error("每路实时订阅数须在 0..4，0 表示不订阅")
+    if args.search_interval < 0:
+        parser.error("搜索间隔须为非负整数秒，0 表示关闭")
     return args
 
 

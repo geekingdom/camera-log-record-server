@@ -86,7 +86,7 @@ async def test_benchmark_failure_still_waits_for_resource_deletion(tmp_path, mon
     options = SimpleNamespace(output=tmp_path / "result", env_file=tmp_path / "unused",
         download_concurrency=1, routes=1, seconds=1, url="http://synthetic.invalid",
         bind_host="127.0.0.1", device_host="127.0.0.1", lines_per_second=1200, line_bytes=256, timeout=1,
-        realtime_clients_per_route=0)
+        realtime_clients_per_route=0, search_interval=0)
     with pytest.raises(RuntimeError, match="模拟"):
         await module["execute"](options)
     assert ("DELETE", "/api/v1/resources/resource?version=1") in calls
@@ -158,7 +158,7 @@ async def test_benchmark_zero_realtime_clients_keeps_integrity_report_compatible
     options = SimpleNamespace(output=tmp_path / "result", env_file=tmp_path / "unused",
         download_concurrency=1, routes=1, seconds=1, url="http://synthetic.invalid",
         bind_host="127.0.0.1", device_host="127.0.0.1", lines_per_second=2, line_bytes=64, timeout=1,
-        realtime_clients_per_route=0)
+        realtime_clients_per_route=0, search_interval=0)
 
     report = await module["execute"](options)
 
@@ -167,6 +167,8 @@ async def test_benchmark_zero_realtime_clients_keeps_integrity_report_compatible
     assert report["realtimeVerified"] is True
     assert report["realtimeFrames"] == 0
     assert report["realtimeLogBytes"] == 0
+    assert report["searchIntervalSeconds"] == 0
+    assert report["searchCount"] == 0
 
 
 def test_benchmark_realtime_client_option_defaults_to_zero_and_limits_to_four(tmp_path, monkeypatch):
@@ -187,13 +189,15 @@ def test_benchmark_realtime_client_option_defaults_to_zero_and_limits_to_four(tm
         module["parse_args"]()
 
 
-async def test_benchmark_cancels_and_awaits_realtime_observer_after_route_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize("search_interval", [0, 1])
+async def test_benchmark_cancels_and_awaits_realtime_observer_after_route_failure(tmp_path, monkeypatch, search_interval):
     """路由发送失败后，最终清理必须取消并等待已建立的实时观察器。"""
     scripts = Path(__file__).resolve().parents[1] / "scripts"
     monkeypatch.syspath_prepend(str(scripts))
     module = runpy.run_path(str(scripts / "benchmark_service.py"))
     globals_ = module["execute"].__globals__
     cancelled = asyncio.Event()
+    search_cancelled, search_deleted = asyncio.Event(), asyncio.Event()
 
     class Source:
         def __init__(self, *_args):
@@ -220,7 +224,23 @@ async def test_benchmark_cancels_and_awaits_realtime_observer_after_route_failur
             cancelled.set()
             raise
 
+    async def observe_searches(*args):
+        args[-1].add("active-search")
+        try:
+            await asyncio.Future()
+        finally:
+            search_cancelled.set()
+
+    async def delete_search(_client, path):
+        assert path == "/api/v1/log-searches/active-search"
+        assert search_cancelled.is_set()
+        search_deleted.set()
+        return SimpleNamespace(raise_for_status=lambda: None)
+
     async def request(_client, method, path, **_kwargs):
+        if path == "/api/v1/log-searches/active-search":
+            assert search_deleted.is_set()
+            return {"status": "CANCELLED"}
         if path == "/api/v1/nodes":
             return {"items": [{"capacity": 1, "activeTasks": 0, "accepting": True}]}
         if path == "/api/v1/resources" and method == "POST":
@@ -239,13 +259,16 @@ async def test_benchmark_cancels_and_awaits_realtime_observer_after_route_failur
 
     monkeypatch.setitem(globals_, "LoadSource", Source)
     monkeypatch.setitem(globals_, "observe_realtime", observe_realtime)
+    monkeypatch.setitem(globals_, "observe_searches", observe_searches)
+    monkeypatch.setattr(globals_["httpx"].AsyncClient, "delete", delete_search)
     monkeypatch.setitem(globals_, "request", request)
     monkeypatch.setitem(globals_, "Settings", lambda **_kwargs: SimpleNamespace(bootstrap_token="synthetic"))
     options = SimpleNamespace(output=tmp_path / "result", env_file=tmp_path / "unused",
         download_concurrency=1, routes=1, seconds=1, url="http://synthetic.invalid",
         bind_host="127.0.0.1", device_host="127.0.0.1", lines_per_second=2, line_bytes=64, timeout=1,
-        realtime_clients_per_route=1)
+        realtime_clients_per_route=1, search_interval=search_interval)
 
     with pytest.raises(RuntimeError, match="模拟发送失败"):
         await module["execute"](options)
     assert cancelled.is_set()
+    assert search_deleted.is_set() is bool(search_interval)
