@@ -41,6 +41,38 @@ def line(route: int, sequence: int, width: int) -> bytes:
     return prefix + b"x" * max(0, width - len(prefix) - 1) + b"\n"
 
 
+def verify_route_archives(archives: list) -> tuple[str, int, int]:
+    """按块序号流式校验整路归档，跨文件保留半行及半个时间前缀。
+
+    每个归档独立验证原始正文摘要；只有完整逻辑行才剥离一次时间前缀。
+    合成源总是以换行结束，因此最终残留半行必须判为截断，不能忽略。
+    """
+    digest = hashlib.sha256()
+    stored_bytes = compressed_bytes = 0
+    pending = b""
+    prefix = re.compile(rb"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+    for archive in sorted(archives, key=lambda item: item.first_sequence or 0):
+        archived_digest = hashlib.sha256()
+        compressed_bytes += archive.path.stat().st_size
+        with tarfile.open(archive.path, "r:gz") as bundle:
+            members = [item for item in bundle.getmembers() if item.name.endswith(".log")]
+            assert len(members) == 1, "归档必须包含唯一正文文件"
+            stream = bundle.extractfile(members[0])
+            assert stream is not None, "归档正文不是普通文件"
+            while chunk := stream.read(256 * 1024):
+                archived_digest.update(chunk)
+                stored_bytes += len(chunk)
+                complete = (pending + chunk).split(b"\n")
+                pending = complete.pop()
+                for stored_line in complete:
+                    match = prefix.match(stored_line)
+                    assert match, "归档行缺少服务器时间前缀"
+                    digest.update(stored_line[match.end():] + b"\n")
+        assert archived_digest.hexdigest() == archive.sha256, "归档清单摘要与正文不一致"
+    assert not pending, "归档末尾存在截断的日志行"
+    return digest.hexdigest(), stored_bytes, compressed_bytes
+
+
 async def execute(args: argparse.Namespace) -> dict[str, object]:
     """生成多路输入、读取归档并比对每路 SHA-256 摘要。"""
     output = Path(args.output).resolve()
@@ -77,23 +109,11 @@ async def execute(args: argparse.Namespace) -> dict[str, object]:
     total_elapsed = time.monotonic() - source_started
     actual = []
     stored_bytes = compressed_bytes = 0
-    prefix = re.compile(rb"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
     for route in range(args.routes):
-        digest = hashlib.sha256()
-        # 后台归档回调完成顺序不代表接收顺序，跨小时校验按不可变块序号排列。
-        for archive in sorted(archives[route], key=lambda item: item.first_sequence or 0):
-            archived_digest = hashlib.sha256()
-            compressed_bytes += archive.path.stat().st_size
-            with tarfile.open(archive.path, "r:gz") as bundle:
-                member = next(item for item in bundle.getmembers() if item.name.endswith(".log"))
-                stream = bundle.extractfile(member)
-                for stored_line in stream:
-                    assert prefix.match(stored_line), "归档行缺少服务器时间前缀"
-                    archived_digest.update(stored_line)
-                    digest.update(stored_line[22:])
-                    stored_bytes += len(stored_line)
-            assert archived_digest.hexdigest() == archive.sha256, "归档清单摘要与正文不一致"
-        actual.append(digest.hexdigest())
+        digest, raw_size, packed_size = verify_route_archives(archives[route])
+        stored_bytes += raw_size
+        compressed_bytes += packed_size
+        actual.append(digest)
     passed = all(expected.hexdigest() == found for expected, found in zip(digests, actual, strict=True))
     maximum_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform != "darwin":
