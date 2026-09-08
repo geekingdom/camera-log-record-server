@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from camera_logs.common import observability
+from fastapi import HTTPException
 from starlette.websockets import WebSocketDisconnect
 from test_api import client  # noqa: F401
 
@@ -71,3 +72,14 @@ def test_real_endpoint_rejection_is_attributed_without_token(client, monkeypatch
     assert context["requestId"] and context["targets"] == {"task_id": "task"}
     assert context["actor"] is None
     assert "never-log-invalid-token" not in str(recorded.mock_calls)
+
+
+def test_node_unavailable_is_not_reported_as_authentication_failure(client, monkeypatch):  # noqa: F811
+    """首帧已认证后节点暂不可用使用 1013，不能误报为需要更换凭据的 4401。"""
+    client.portal.call(client.app.state.repo.db.tasks.insert_one, {"id": "task", "nodeId": "node"})
+    monkeypatch.setattr("camera_logs.logs.api.node_request", AsyncMock(side_effect=HTTPException(503, "节点暂不可用")))
+    with client.websocket_connect("/api/v1/tasks/task/logs") as socket:
+        socket.send_json({"token": "test-admin-token"})
+        with pytest.raises(WebSocketDisconnect) as failure:
+            socket.receive_json()
+    assert failure.value.code == 1013

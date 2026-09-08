@@ -5,10 +5,8 @@
 """
 from __future__ import annotations
 
-import asyncio
 import base64
 import hmac
-import tarfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,13 +17,16 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from camera_logs.logs.archive_access import LimitedReader, read_limiter, snapshot
+from camera_logs.logs.job_threads import job_thread
+from camera_logs.logs.read_threads import ReadThreads
+from camera_logs.logs.source import open_log_source
 
 
 def _root(runtime: Any, repo: Any) -> Path:
     return Path(getattr(runtime, "log_root", repo.settings.log_root)).resolve()
 
 
-def _path(runtime: Any, repo: Any, file: dict[str, Any]) -> Path:
+def _path(runtime: Any, repo: Any, file: dict[str, Any], *, require_exists: bool = True) -> Path:
     """校验目录中登记的本地路径，拒绝目录穿越和已被删除的文件。"""
     raw = file.get("path") or file.get("rawPath")
     if not raw:
@@ -34,7 +35,7 @@ def _path(runtime: Any, repo: Any, file: dict[str, Any]) -> Path:
     path = path.resolve() if path.is_absolute() else (_root(runtime, repo) / path).resolve()
     if path != _root(runtime, repo) and _root(runtime, repo) not in path.parents:
         raise HTTPException(403, "日志文件路径非法")
-    if not path.is_file():
+    if require_exists and not path.is_file():
         raise HTTPException(404, "日志文件不存在")
     return path
 
@@ -55,8 +56,11 @@ def _read_watermark(runtime: Any, file: dict[str, Any]) -> int | None:
     return max(registered or 0, confirmed) if confirmed is not None else registered
 
 
-def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
+def install_node_routes(app: Any, repo: Any, runtime: Any) -> ReadThreads:
     """注册仅供节点和 API 使用的内部路由，每次调用都校验内部令牌。"""
+    reads = ReadThreads()
+    # 独立测试应用使用默认 ASGI 生命周期；正式 Worker 在自己的 lifespan 中显式关闭。
+    app.router.add_event_handler("shutdown", reads.close)
     async def internal(authorization: str | None = Header(default=None)) -> None:
         expected = "Bearer " + repo.settings.internal_token
         if not repo.settings.internal_token or not authorization or not hmac.compare_digest(authorization, expected):
@@ -71,26 +75,21 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
     @app.get("/internal/read/{identifier}")
     async def read(identifier: str, _: None = Depends(internal), offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
         file = await get_file(identifier)
-        path = _path(runtime, repo, file)
+        path = _path(runtime, repo, file, require_exists=False)
         # 在事件循环中固定本次读取边界，工作线程不再访问可变化的会话映射。
         watermark = _read_watermark(runtime, file) if path.suffix == ".log" else file.get("bytes")
         def load() -> bytes:
-            cap = int(watermark if watermark is not None else path.stat().st_size)
-            if path.suffix == ".log":
-                with path.open("rb") as handle:
-                    handle.seek(offset)
-                    data = handle.read(min(limit, max(0, cap - offset)))
-                    read_limiter.consume(len(data)); return data
-            with tarfile.open(path, "r:gz") as archive:
-                member_name = file.get("archiveMember")
-                try:
-                    member = archive.getmember(member_name) if member_name else next((item for item in archive if item.name.endswith(".log")), None)
-                except KeyError:
-                    member = None
-                if member and (not member.isfile() or not member.name.endswith(".log")):
-                    member = None
-                if member is None: raise FileNotFoundError(path)
-                stream = LimitedReader(archive.extractfile(member), min(cap or member.size, member.size))
+            with open_log_source(path, file.get("archiveMember")) as source:
+                cap = min(int(watermark) if watermark is not None else source.size, source.size)
+                # 已验证源身份且请求位于冻结水位之外，无须扫描已读正文或占用带宽。
+                if offset >= cap:
+                    return b""
+                if source.archive is None:
+                    source.stream.seek(offset)
+                    data = source.stream.read(min(limit, max(0, cap - offset)))
+                    read_limiter.consume(len(data))
+                    return data
+                stream = LimitedReader(source.stream, cap)
                 remaining = offset
                 while remaining:
                     skipped = stream.read(min(262144, remaining))
@@ -98,7 +97,7 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
                     remaining -= len(skipped)
                 return stream.read(limit)
         try:
-            data = await asyncio.to_thread(load)
+            data = await reads.run(load)
         except FileNotFoundError as error:
             raise HTTPException(404, "归档成员不存在") from error
         return {"fileId": identifier, "sessionId": file.get("sessionId"), "data": base64.b64encode(data).decode(), "nextOffset": offset + len(data)}
@@ -106,12 +105,23 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
     @app.get("/internal/archive/{identifier}")
     async def archive(identifier: str, _: None = Depends(internal), bytes: int | None = Query(default=None, ge=0), includeIndex: bool = Query(default=False)):
         file = await get_file(identifier)
-        path = _path(runtime, repo, file)
+        path = _path(runtime, repo, file, require_exists=False)
         if bytes is None and not includeIndex and file.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"]:
+            path = _path(runtime, repo, file)
             return FileResponse(path, media_type="application/gzip", filename=path.name)
         snapshot_path = _root(runtime, repo) / "exports" / ".snapshots" / f"{identifier}-{uuid.uuid4().hex}.tar.gz"
         index = _path(runtime, repo, {"path": file["indexPath"]}) if includeIndex and file.get("indexPath") else None
-        await asyncio.to_thread(snapshot, path, snapshot_path, bytes if bytes is not None else file.get("bytes", path.stat().st_size), index, identifier, file.get("archiveMember"), includeIndex)
+        frozen_bytes = bytes if bytes is not None else file.get("bytes")
+        if frozen_bytes is None:
+            raise HTTPException(409, "日志文件缺少已确认字节水位")
+        try:
+            await reads.run(snapshot, path, snapshot_path, frozen_bytes, index, identifier, file.get("archiveMember"), includeIndex)
+        except BaseException as error:
+            # reads.run 已等待文件线程退出，取消或失败后可以安全回收未发布快照。
+            await job_thread(snapshot_path.unlink, missing_ok=True)
+            if isinstance(error, FileNotFoundError):
+                raise HTTPException(404, "归档成员不存在") from error
+            raise
         return FileResponse(snapshot_path, media_type="application/gzip", filename=f"{identifier}.tar.gz", background=BackgroundTask(snapshot_path.unlink, missing_ok=True))
 
     @app.get("/internal/downloads/{identifier}")
@@ -122,3 +132,5 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
             raise HTTPException(404, "导出文件不存在")
         path = _path(runtime, repo, {"path": job["resultPath"]})
         return FileResponse(path, filename=job.get("filename") or path.name)
+
+    return reads

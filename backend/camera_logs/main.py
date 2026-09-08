@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -30,19 +31,28 @@ def create_app(settings=None, db=None):
         repo = Repository(database, settings)
         from camera_logs.common.observability import setup_logging
         listener = setup_logging(settings.log_root.parent / "service-logs" / "api")
-        await repo.initialize()
-        app.state.repo = repo
         background = None
-        if settings.start_background:
-            from camera_logs.tasks.scheduler import scheduler_loop
-            background = asyncio.create_task(scheduler_loop(repo))
-        yield
-        if background:
-            background.cancel()
-            await asyncio.gather(background, return_exceptions=True)
-        if client:
-            await client.close()
-        listener.stop()
+        try:
+            await repo.initialize()
+            app.state.repo = repo
+            # 高频文件读取及实时轮询共用连接池，TLS 上下文只在 API 启动时加载。
+            async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(
+                max_connections=500, max_keepalive_connections=100,
+            )) as node_http:
+                app.state.node_http = node_http
+                if settings.start_background:
+                    from camera_logs.tasks.scheduler import scheduler_loop
+                    background = asyncio.create_task(scheduler_loop(repo))
+                try:
+                    yield
+                finally:
+                    if background:
+                        background.cancel()
+                        await asyncio.gather(background, return_exceptions=True)
+        finally:
+            if client:
+                await client.close()
+            listener.stop()
 
     app = FastAPI(title="设备日志记录服务", version="0.1.0", lifespan=lifespan)
     from camera_logs.common.observability import add_request_logging

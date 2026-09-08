@@ -4,6 +4,7 @@
 查询执行期间的小时轮转改变结果。实时推送允许显式缺口，但不能影响归档保存。
 """
 import asyncio
+import logging
 from datetime import date as CalendarDate
 from datetime import datetime, timedelta
 from typing import Annotated
@@ -20,18 +21,30 @@ from camera_logs.logs.download_sessions import download_actor
 from camera_logs.logs.hour_catalog import summarize_hours
 from camera_logs.logs.order import ordered_files
 
+logger = logging.getLogger(__name__)
 
-async def node_request(repo, node_id, path, params=None):
+
+async def node_request(repo, node_id, path, params=None, *, client):
     """通过内部令牌请求节点 JSON 数据，将网络故障转换为可重试服务错误。"""
     node = await repo.get("nodes", node_id)
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(node["url"]+path, params=params,
-                headers={"Authorization": "Bearer "+repo.settings.internal_token})
-            if response.status_code != 200:
-                raise HTTPException(503, "采集节点文件暂不可用")
-            return response.json()
+        # 这两个内部 GET 均无发送命令等副作用。响应尚未完整返回时，按同一
+        # 文件偏移或实时游标重试一次，不推进游标；超时与连接池排队不重试。
+        for attempt in range(2):
+            try:
+                response = await client.get(node["url"]+path, params=params,
+                    headers={"Authorization": "Bearer "+repo.settings.internal_token})
+                break
+            except (httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                if attempt:
+                    raise
+                logger.warning("节点只读连接中断，按原游标重试一次 node=%s path=%s error=%s",
+                               node_id, path, type(exc).__name__)
+        if response.status_code != 200:
+            raise HTTPException(503, "采集节点文件暂不可用")
+        return response.json()
     except httpx.HTTPError as exc:
+        logger.warning("节点 JSON 转发失败 node=%s path=%s error=%s", node_id, path, type(exc).__name__)
         raise HTTPException(503, "采集节点暂不可用") from exc
 
 
@@ -84,10 +97,11 @@ def install_log_routes(app):
         return {"items": values[(page-1)*pageSize:page*pageSize], "total": len(values), "page": page, "pageSize": pageSize}
 
     @app.get("/api/v1/log-files/{identifier}/content")
-    async def content(identifier: str, user: User, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
+    async def content(identifier: str, request: Request, user: User, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
         file = await repo().get("files", identifier)
         authorize(user, "logs:read", file["taskId"])
-        return await node_request(repo(), file["nodeId"], f"/internal/read/{identifier}", {"offset": offset, "limit": limit})
+        return await node_request(repo(), file["nodeId"], f"/internal/read/{identifier}",
+                                  {"offset": offset, "limit": limit}, client=request.app.state.node_http)
 
     async def create_job(body, request, user, kind):
         """冻结任务文件目录，申请保留期保护，并通过幂等键提交后台作业。"""
@@ -206,7 +220,8 @@ def install_log_routes(app):
                 if not task.get("nodeId"):
                     await ws.send_json({"type": "status", "status": task["status"]})
                 else:
-                    data = await node_request(repo(), task["nodeId"], f"/internal/tail/{task_id}", {"cursor": cursor or ""})
+                    data = await node_request(repo(), task["nodeId"], f"/internal/tail/{task_id}",
+                                              {"cursor": cursor or ""}, client=ws.app.state.node_http)
                     if data.get("gap"):
                         await ws.send_json({"type": "gap", "message": "实时缓冲已过期，请通过小时归档补读"})
                     for frame in data["frames"]:
@@ -221,7 +236,8 @@ def install_log_routes(app):
             pass
         except HTTPException as exc:
             ws.state.failure_type = "HTTPException"
-            await ws.close(code=4403 if exc.status_code == 403 else 4401, reason=str(exc.detail)[:120])
+            code = {401: 4401, 403: 4403}.get(exc.status_code, 1013)
+            await ws.close(code=code, reason=str(exc.detail)[:120])
         except Exception as exc:
             ws.state.failure_type = type(exc).__name__
             import logging

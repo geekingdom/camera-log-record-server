@@ -346,12 +346,13 @@ def create_worker_app(settings=None):
         await recover_orphan_archives(repo)
         app.state.repo, app.state.worker = repo, worker
         from camera_logs.node.files import install_node_routes
-        install_node_routes(app, repo, worker)
+        reads = install_node_routes(app, repo, worker)
         task = asyncio.create_task(worker.run())
         yield
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await worker.close()
+        await reads.close()
         from camera_logs.logs.compression import shutdown_compression
         await shutdown_compression()
         await client.close()
