@@ -67,9 +67,9 @@ class Repository:
             raise HTTPException(404, "记录不存在")
         return doc
 
-    async def audit(self, actor, action, target):
+    async def audit(self, actor, action, target, *, session=None):
         """追加用户操作审计事件，不在事件中保存敏感请求内容。"""
-        await self.db.audit.insert_one({"actor": actor, "action": action, "targetId": target, "createdAt": now()})
+        await self.db.audit.insert_one({"actor": actor, "action": action, "targetId": target, "createdAt": now()}, session=session)
 
     async def idem(self, actor, key, route, payload, collection, build):
         """以 actor 和幂等键串行化创建，并识别同键不同载荷冲突。"""

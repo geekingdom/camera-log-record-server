@@ -40,9 +40,13 @@ def test_missing_service_token_does_not_create_revoke_audit(client):  # noqa: F8
     }) == 0
 
 
-def test_isolation_evidence_is_recursively_redacted_before_runtime_event_output(client):  # noqa: F811
+def test_isolation_evidence_is_recursively_redacted_before_runtime_event_output(client, monkeypatch):  # noqa: F811
     """JSON 隔离依据中的嵌套凭据不能进入存储或管理员运行事件响应。"""
     repo = client.app.state.repo
+    async def mock_transaction(_repo, callback):
+        """该用例只验证脱敏，真实事务回滚由副本集验收脚本验证。"""
+        return await callback(None)
+    monkeypatch.setattr("camera_logs.administration.isolation.isolation_transaction", mock_transaction)
     client.portal.call(repo.db.nodes.insert_one, {
         "id": "stale-node", "heartbeat": now() - timedelta(seconds=31), "accepting": True,
     })

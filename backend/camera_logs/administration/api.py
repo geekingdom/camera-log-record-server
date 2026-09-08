@@ -8,7 +8,8 @@ from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, generate_latest
 from pydantic import BaseModel, Field
 
-from camera_logs.common.database import now, public
+from camera_logs.administration.isolation import confirm_node_isolation
+from camera_logs.common.database import public
 from camera_logs.common.observability import redact
 from camera_logs.common.security import actor, authorize
 
@@ -154,16 +155,5 @@ def install_admin_routes(app):
         authorize(user, "admin")
         if body.confirmation != "CONFIRM_NODE_ISOLATED":
             raise HTTPException(422, "必须先在基础设施层停止或隔离旧节点，并提供确认及操作依据")
-        repo = request.app.state.repo
-        node = await repo.get("nodes", node_id)
-        if (now()-node["heartbeat"].replace(tzinfo=now().tzinfo)).total_seconds() < 30:
-            raise HTTPException(409, "节点仍在发送心跳，不能确认隔离")
-        await repo.audit(user["id"], "confirm_node_isolation", node_id)
-        await repo.db.events.insert_one({"nodeId": node_id, "type": "EXTERNAL_FENCING_CONFIRMED",
-            "actor": user["id"], "evidence": _redacted_evidence(body.evidence), "createdAt": now()})
-        await repo.db.nodes.update_one({"id": node_id}, {"$set": {"accepting": False, "isolated": True}})
-        async for task in repo.db.tasks.find({"nodeId": node_id, "status": "BLOCKED"}):
-            await repo.db.endpoint_locks.delete_one({"taskId": task["id"], "runId": task.get("runId")})
-            await repo.db.tasks.update_one({"id": task["id"], "nodeId": node_id, "status": "BLOCKED"},
-                {"$set": {"nodeId": None, "status": "PENDING" if task["desiredState"] == "RUNNING" else "STOPPED"}})
-        return {"nodeId": node_id, "status": "ISOLATED"}
+        return await confirm_node_isolation(request.app.state.repo, node_id, user["id"],
+                                            _redacted_evidence(body.evidence))
