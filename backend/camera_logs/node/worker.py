@@ -85,6 +85,20 @@ class Worker:
             {"$set": {"desiredState": "RUNNING", "restartRequested": False}}, return_document=ReturnDocument.AFTER)
         self.active.pop(task["id"], None)
 
+    async def isolate_active_sessions(self):
+        """数据库长期失联时逐一关闭本机连接，不凭异常假定端点已经释放。
+
+        成功停止的实例才从 active 移除；停止失败的实例保留，后续人工或恢复后的
+        周期可继续隔离，端点锁也不会被本节点错误删除。
+        """
+        for task_id, runtime in list(self.active.items()):
+            try:
+                await runtime.stop()
+            except Exception:
+                logger.exception("数据库失联时关闭采集实例失败 task=%s", task_id)
+            else:
+                self.active.pop(task_id, None)
+
     async def tick(self):
         """更新资源心跳、处理期望状态并分发作业，不在本周期等待耗时归档。"""
         from camera_logs.collection.connections import connect
@@ -108,6 +122,10 @@ class Worker:
                 except Exception:
                     logger.exception("运行实例释放失败 task=%s", task_id)
                     await self.repo.db.tasks.update_one({"id": task_id}, {"$set": {"status": "BLOCKED", "error": "连接或日志关闭未完成，禁止重新连接"}})
+                    await self.repo.db.operations.update_many(
+                        {"taskId": task_id, "status": "PENDING"},
+                        {"$set": {"status": "FAILED", "completedAt": now()}},
+                    )
                 self.releases.pop(task_id, None)
         tasks = [t async for t in self.repo.db.tasks.find({"nodeId": self.repo.settings.node_id})]
         for task in tasks:
@@ -164,9 +182,7 @@ class Worker:
             except Exception:
                 logger.exception("节点周期失败")
                 if time.monotonic()-self.last_database_ok > 15:
-                    for runtime in list(self.active.values()):
-                        await runtime.stop()
-                    self.active.clear()
+                    await self.isolate_active_sessions()
             await asyncio.sleep(1)
 
     async def close(self):

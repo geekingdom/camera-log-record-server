@@ -19,6 +19,7 @@ from typing import Any
 from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
+from camera_logs.logs.compression import _hash_stream
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,26 @@ def _archive_id(root: Path, path: Path) -> str:
 
 
 def _manifest(path: Path) -> dict[str, Any]:
+    """恢复前重新校验正文和索引；只读取归档成员，不解包到文件系统。"""
     with tarfile.open(path, "r:gz") as archive:
         member = archive.getmember("manifest.json")
+        if not member.isfile() or member.size > 1024 * 1024:
+            raise ValueError("invalid archive manifest")
         stream = archive.extractfile(member)
         if stream is None:
             raise ValueError("archive manifest is unreadable")
-        return json.loads(stream.read())
+        manifest = json.loads(stream.read())
+        checks = [(".log", manifest["sha256"], manifest["rawSize"])]
+        if "indexSha256" in manifest or "indexBytes" in manifest:
+            checks.append((".index.jsonl", manifest["indexSha256"], manifest["indexBytes"]))
+        for suffix, digest, size in checks:
+            members = [item for item in archive.getmembers() if item.name.endswith(suffix)]
+            if len(members) != 1 or not members[0].isfile():
+                raise ValueError("invalid archive data members")
+            source = archive.extractfile(members[0])
+            if source is None or _hash_stream(source) != (digest, size):
+                raise ValueError("archive checksum or size mismatch")
+        return manifest
 
 
 async def recover_orphan_archives(repo: Any) -> int:
@@ -57,22 +72,31 @@ async def recover_orphan_archives(repo: Any) -> int:
         if "exports" in path.parts:
             continue
         identifier = _archive_id(root, path)
-        if await repo.db.files.find_one({"id": identifier}):
+        existing = await repo.db.files.find_one({"id": identifier})
+        if existing and existing.get("status") != "OPEN":
             continue
         try:
             manifest = await asyncio.to_thread(_manifest, path)
+            identity = {key: manifest[key] for key in ("taskId", "runId", "sessionId")}
+            identity["nodeId"] = repo.settings.node_id
+            if existing and any(existing.get(key) != value for key, value in identity.items()):
+                raise ValueError("archive identity differs from open catalog record")
             hour = datetime.fromisoformat(manifest["hourStart"]).astimezone(UTC).isoformat()
-            await repo.db.files.update_one(
-                {"id": identifier},
-                {"$set": {
-                    "id": identifier, "taskId": manifest["taskId"], "runId": manifest["runId"],
-                    "sessionId": manifest["sessionId"], "nodeId": repo.settings.node_id,
-                    "hour": hour, "path": str(path), "archiveName": path.name, "bytes": manifest["rawSize"],
-                    "sha256": manifest["sha256"], "firstSequence": manifest.get("firstSequence"),
-                    "lastSequence": manifest.get("lastSequence"), "status": "READY", "updatedAt": now(),
-                }, "$setOnInsert": {"createdAt": now()}}, upsert=True,
-            )
-            registered += 1
+            document = {
+                "id": identifier, **identity,
+                "hour": hour, "path": str(path), "archiveName": path.name, "bytes": manifest["rawSize"],
+                "archiveBytes": path.stat().st_size,
+                "sha256": manifest["sha256"], "firstSequence": manifest.get("firstSequence"),
+                "lastSequence": manifest.get("lastSequence"), "status": "READY", "updatedAt": now(),
+            }
+            if existing:
+                result = await repo.db.files.update_one(
+                    {"id": identifier, "status": "OPEN", **identity}, {"$set": document})
+                registered += result.modified_count
+            else:
+                result = await repo.db.files.update_one(
+                    {"id": identifier}, {"$setOnInsert": {**document, "createdAt": now()}}, upsert=True)
+                registered += int(result.upserted_id is not None)
         except Exception:
             logger.exception("归档恢复失败 path=%s", path)
     return registered
@@ -83,18 +107,26 @@ async def apply_retention(repo: Any) -> dict[str, int]:
     cutoff = now() - timedelta(days=repo.settings.retention_days) - timedelta(hours=1)
     removed = skipped = failures = 0
     cursor = repo.db.files.find({
-        "status": "READY", "nodeId": repo.settings.node_id, "hour": {"$lt": cutoff.isoformat()}
+        "nodeId": repo.settings.node_id, "$or": [
+            {"status": "READY", "hour": {"$lt": cutoff.isoformat()}},
+            {"status": "DELETING"},
+        ],
     })
     async for document in cursor:
-        active = await repo.db.jobs.find_one({"status": {"$in": ["QUEUED", "RUNNING"]}, "files.id": document["id"]})
-        if active:
-            skipped += 1
-            continue
-        claimed = await repo.db.files.find_one_and_update(
-            {"id": document["id"], "status": "READY", "retainUntil": {"$lte": now()}},
-            {"$set": {"status": "DELETING", "retentionClaimedAt": now()}},
-            return_document=ReturnDocument.AFTER,
-        )
+        # DELETING 已拒绝新的下载保护，可幂等续做崩溃前尚未完成的物理删除。
+        claimed = document if document["status"] == "DELETING" else None
+        if claimed is None:
+            active = await repo.db.jobs.find_one({"status": {"$in": ["QUEUED", "RUNNING"]}, "files.id": document["id"]})
+            if active:
+                skipped += 1
+                continue
+            claimed = await repo.db.files.find_one_and_update(
+                {"id": document["id"], "status": "READY", "$or": [
+                    {"retainUntil": None}, {"retainUntil": {"$lte": now()}},
+                ]},
+                {"$set": {"status": "DELETING", "retentionClaimedAt": now()}},
+                return_document=ReturnDocument.AFTER,
+            )
         if not claimed:
             continue
         try:
@@ -109,7 +141,7 @@ async def apply_retention(repo: Any) -> dict[str, int]:
             logger.exception("归档保留清理失败 fileId=%s", claimed.get("id"))
             await repo.db.files.update_one(
                 {"id": claimed["id"], "status": "DELETING"},
-                {"$set": {"status": "READY", "retentionErrorAt": now()}},
+                {"$set": {"retentionErrorAt": now()}},
             )
     return {"removed": removed, "skipped": skipped, "failures": failures}
 
