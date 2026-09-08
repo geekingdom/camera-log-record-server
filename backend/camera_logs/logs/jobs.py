@@ -6,8 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import bisect
-import json
 import logging
 import os
 import shutil
@@ -29,6 +27,7 @@ from camera_logs.logs.hour_download import (
     write_hour_archive,
 )
 from camera_logs.logs.naming import safe_filename_component
+from camera_logs.logs.search_stream import StreamSearch, index_entries
 
 OUTPUT_LIMIT = 20_000_000_000
 TEMP_LIMIT = 100_000_000_000
@@ -307,36 +306,14 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
         await _release_temp(job["id"])
 
 
-def _blocks(stream: Any, needle: bytes, index: list[dict[str, Any]], start: datetime, end: datetime, cancelled):
-    """分块匹配关键词，用少量尾部重叠处理跨块匹配并避免重复返回。"""
-    carry, offset = b"", 0
-    offsets = [item["offset"] for item in index]
-    while chunk := stream.read(256 * 1024):
-        if cancelled():
-            raise InterruptedError("job cancelled")
-        data = carry + chunk
-        begin = 0
-        while (found := data.find(needle, begin)) >= 0:
-            absolute = offset - len(carry) + found
-            # 重叠前缀已在前一块处理，只有跨越边界的匹配才能再次进入结果。
-            if absolute >= offset or found + len(needle) > len(carry):
-                slot = bisect.bisect_right(offsets, absolute) - 1
-                entry = index[slot] if slot >= 0 and absolute < index[slot]["offset"] + index[slot]["length"] else None
-                stamp = datetime.fromisoformat(entry["receivedAt"]) if entry else None
-                if stamp is None or start <= stamp <= end:
-                    yield absolute, data[max(0, found - 120):found + len(needle) + 120].decode("utf-8", "replace")
-            begin = found + max(1, len(needle))
-        carry = data[-max(1, len(needle) - 1):]
-        offset += len(chunk)
-
-
-def _search_archive(path: Path, needle: bytes, start: datetime, end: datetime, cancelled, archive_member: str | None = None):
+def _scan_archive(path: Path, scanner: StreamSearch, file: dict, cancelled, archive_member: str | None = None):
     """按旁路索引关联接收时间，流式扫描解压后的日志正文。"""
     if path.suffix == ".log":
         with path.open("rb") as raw:
-            yield from _blocks(LimitedReader(raw, path.stat().st_size), needle, [], start, end, cancelled)
+            yield from scanner.scan(LimitedReader(raw, path.stat().st_size), [], file, cancelled)
         return
-    with tarfile.open(path, "r:gz") as archive:
+    # 正文和索引交替读取不能共享 gzip 游标，否则补读索引会反复回扫整个正文。
+    with tarfile.open(path, "r:gz") as archive, tarfile.open(path, "r:gz") as index_archive:
         try:
             raw = archive.getmember(archive_member) if archive_member else next((item for item in archive.getmembers() if item.name.endswith(".log")), None)
         except KeyError:
@@ -344,16 +321,23 @@ def _search_archive(path: Path, needle: bytes, start: datetime, end: datetime, c
         index = next((item for item in archive.getmembers() if item.name.endswith(".index.jsonl")), None)
         if raw is None or not raw.name.endswith(".log"):
             raise FileNotFoundError(archive_member or path.name)
-        entries = [json.loads(line) for line in LimitedReader(archive.extractfile(index), index.size).read().splitlines()] if index else []
+        entries = index_entries(LimitedReader(index_archive.extractfile(index), index.size), cancelled) if index else []
         stream = archive.extractfile(raw)
         if stream:
-            yield from _blocks(LimitedReader(stream, raw.size), needle, entries, start, end, cancelled)
+            yield from scanner.scan(LimitedReader(stream, raw.size), entries, file, cancelled)
 
 
-def _search_limited(path: Path, needle: bytes, start: datetime, end: datetime, limit: int, cancelled, archive_member: str | None = None):
+def _search_archive(path: Path, needle: bytes, start: datetime, end: datetime, cancelled, archive_member: str | None = None):
+    """单归档扫描入口，保留偏移与文本的调用合同。"""
+    for result in _scan_archive(path, StreamSearch(needle, start, end), {}, cancelled, archive_member):
+        yield result["offset"], result["text"]
+
+
+def _search_limited(path: Path, scanner: StreamSearch, file: dict, limit: int, cancelled, archive_member: str | None = None):
+    """累计有界结果，匹配器继续保留本作业下一连续文件所需的尾部。"""
     results = []
-    for offset, text in _search_archive(path, needle, start, end, cancelled, archive_member):
-        results.append((offset, text))
+    for result in _scan_archive(path, scanner, file, cancelled, archive_member):
+        results.append(result)
         if len(results) >= limit:
             break
     return results
@@ -366,6 +350,7 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("search keyword is required")
     start = datetime.fromisoformat(job["start"])
     end = datetime.fromisoformat(job["end"])
+    scanner = StreamSearch(needle, start, end)
     results, truncated = [], False
     progress: JobProgress | None = job.get("_progress")
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()
@@ -377,11 +362,11 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 raise asyncio.CancelledError()
             file = await _file_doc(repo, frozen)
             path, _temporary = await _archive(repo, frozen, scratch, include_index=True)
-            matches = await asyncio.to_thread(_search_limited, path, needle, start, end, 1000 - len(results), stopped.is_set, file.get("archiveMember"))
+            matches = await asyncio.to_thread(_search_limited, path, scanner, frozen, 1000 - len(results), stopped.is_set, file.get("archiveMember"))
             if progress is not None:
                 await progress.advance()
-            for offset, text in matches:
-                results.append({"fileId": frozen["id"], "offset": offset, "text": text})
+            for match in matches:
+                results.append(match)
                 if len(results) >= 1000:
                     truncated = True
                     return {"results": results, "truncated": truncated}
