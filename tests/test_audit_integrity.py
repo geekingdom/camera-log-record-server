@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 from camera_logs.common.database import now
-from test_api import client  # noqa: F401
+from test_api import awaitable_mongomock_event_aggregate, client  # noqa: F401
 
 
 @pytest.mark.parametrize(("identifier", "kind", "path"), [
@@ -40,6 +40,7 @@ def test_missing_service_token_does_not_create_revoke_audit(client):  # noqa: F8
     }) == 0
 
 
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_isolation_evidence_is_recursively_redacted_before_runtime_event_output(client, monkeypatch):  # noqa: F811
     """JSON 隔离依据中的嵌套凭据不能进入存储或管理员运行事件响应。"""
     repo = client.app.state.repo

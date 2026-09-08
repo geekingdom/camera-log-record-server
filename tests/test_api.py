@@ -20,6 +20,19 @@ def client(tmp_path):
         yield client
 
 
+@pytest.fixture
+def awaitable_mongomock_event_aggregate(client, monkeypatch):
+    """将模拟器聚合游标包装为生产 PyMongo 异步接口所需的可等待返回值。"""
+    collection_type = type(client.app.state.repo.db.events)
+    aggregate = collection_type.aggregate
+
+    async def awaitable_aggregate(self, *args, **kwargs):
+        """测试替身只修复调用接口，聚合管道继续由 mongomock 执行。"""
+        return aggregate(self, *args, **kwargs)
+
+    monkeypatch.setattr(collection_type, "aggregate", awaitable_aggregate)
+
+
 def test_task_idempotency_and_password_secrecy(client):
     body = {"name": "camera", "protocol": "SSH", "ip": "127.0.0.1", "port": 22, "username": "root",
             "password": " secret ", "resourceId": "fixture-device"}

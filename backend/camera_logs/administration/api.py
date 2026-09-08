@@ -60,7 +60,8 @@ async def _event_page(db, collection: str, query: dict, page: int, page_size: in
 
 async def _runtime_event_page(db, query: dict, page: int, page_size: int) -> dict:
     """兼容历史 detectedAt 事件，统一按实际发生时间排序并补出展示时间。"""
-    cursor = db.events.aggregate([
+    # PyMongo 异步聚合先发起命令并返回协程，获得游标后才可按响应顺序读取结果。
+    cursor = await db.events.aggregate([
         {"$match": query},
         {"$addFields": {"_eventTime": {"$ifNull": ["$createdAt", "$detectedAt"]}}},
         {"$sort": {"_eventTime": -1}},

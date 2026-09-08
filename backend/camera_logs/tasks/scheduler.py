@@ -30,7 +30,14 @@ async def schedule_once(repo):
             await db.tasks.update_one({"id": task["id"], "nodeId": None}, {"$set": {"status": "STOPPED"}})
             await db.operations.update_many({"taskId": task["id"], "desiredState": "STOPPED", "status": "PENDING"},
                                             {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
-    active = await db.tasks.count_documents({"nodeId": {"$ne": None}})
+    # 调度租约内只有本调度者新增归属，节点收尾只会释放归属。一次投影扫描统计
+    # 全部占用（包括失联节点），本周期成功领取后递增；并发释放的容量下周期再用。
+    # 只读取 nodeId，避免为每个任务的每个候选节点重复 count_documents。
+    occupancy = {}
+    async for assigned in db.tasks.find({"nodeId": {"$ne": None}}, {"nodeId": 1, "_id": 0}):
+        owner = assigned["nodeId"]
+        occupancy[owner] = occupancy.get(owner, 0) + 1
+    active = sum(occupancy.values())
     if active >= repo.settings.cluster_capacity:
         return
     async for task in db.tasks.find({"desiredState": "RUNNING", "nodeId": None,
@@ -40,7 +47,7 @@ async def schedule_once(repo):
                                                 "diskPercent": {"$lt": 90}, "accepting": True})]
         candidates = []
         for node in nodes:
-            count = await db.tasks.count_documents({"nodeId": node["id"]})
+            count = occupancy.get(node["id"], 0)
             if count < node.get("capacity", 100) and node.get("writeLatencyMs", 0) <= 200:
                 candidates.append((count, node.get("inputBytesPerSecond", 0), node["id"]))
         if not candidates:
@@ -113,6 +120,7 @@ async def schedule_once(repo):
             claim_query, claim_update, return_document=ReturnDocument.AFTER
         )
         if claimed:
+            occupancy[node_id] = occupancy.get(node_id, 0) + 1
             if resuming:
                 await db.endpoint_locks.update_one(
                     {"endpoint": endpoint, "taskId": task["id"], "runId": run_id, "claimToken": claim_token},

@@ -2,10 +2,31 @@
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import pytest
+from camera_logs.administration.api import _runtime_event_page
 from camera_logs.common.database import now
 
 pytest_plugins = ("test_api",)
+
+
+async def test_runtime_event_page_awaits_production_aggregate_cursor():
+    """生产驱动的 aggregate 是协程，分页必须等待它返回异步游标。"""
+    async def cursor():
+        yield {"type": "CONNECTION_GAP", "detectedAt": datetime(2026, 9, 8, 8, tzinfo=UTC)}
+
+    aggregate = AsyncMock(return_value=cursor())
+    count_documents = AsyncMock(return_value=1)
+    db = SimpleNamespace(events=SimpleNamespace(aggregate=aggregate, count_documents=count_documents))
+
+    result = await _runtime_event_page(db, {"taskId": "task-gap"}, 1, 20)
+
+    aggregate.assert_awaited_once()
+    count_documents.assert_awaited_once_with({"taskId": "task-gap"})
+    assert result["items"] == [{"type": "CONNECTION_GAP", "detectedAt": datetime(2026, 9, 8, 8, tzinfo=UTC),
+                                "createdAt": datetime(2026, 9, 8, 8, tzinfo=UTC)}]
 
 
 def test_audit_events_filter_action_actor_task_and_utc_range(client):
@@ -28,6 +49,7 @@ def test_audit_events_filter_action_actor_task_and_utc_range(client):
     assert response.json()["items"][0]["targetId"] == "task-a"
 
 
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_runtime_events_filter_task_node_type_and_utc_range(client):
     """运行事件按任务、节点、类别和 UTC 区间独立筛选，不读取日志正文。"""
     repo = client.app.state.repo
@@ -48,6 +70,7 @@ def test_runtime_events_filter_task_node_type_and_utc_range(client):
     assert response.json()["items"][0]["type"] == "CONNECTION_GAP"
 
 
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_runtime_events_filter_and_sort_legacy_detected_time(client):
     """连接缺口的历史 detectedAt 字段与新事件同样可筛选并返回统一展示时间。"""
     repo = client.app.state.repo

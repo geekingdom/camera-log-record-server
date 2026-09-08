@@ -252,6 +252,11 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 if not asset.content:
                     raise AssertionError("前端模块入口为空")
             await wait_for(client, "/api/v1/nodes", lambda item: bool(item.get("items")), "采集节点注册")
+            # 使用真实 MongoDB 验证异步聚合接口，不能只依赖模拟器的同步游标行为。
+            events = await client.get("/api/v1/runtime-events", params={"pageSize": 1})
+            events.raise_for_status()
+            if not isinstance(events.json().get("items"), list):
+                raise TypeError("运行事件接口未返回分页列表")
             resource = await client.post("/api/v1/resources", json={
                 "name": f"容器验收串口资源-{suffix}", "kind": "SERIAL_SERVER", "ip": args.device_host,
             }, headers={"Idempotency-Key": f"container-resource-{suffix}"})
