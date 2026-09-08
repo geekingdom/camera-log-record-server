@@ -116,6 +116,20 @@ class SessionRuntime:
 
     async def on_state(self, state, details):
         """将会话状态映射到运行状态；压缩失败单独告警，不伪装成连接中断。"""
+        if state == "CLOCK_ROLLBACK":
+            # 时钟异常属于可追踪事件，不覆盖采集中状态；文件身份沿用该块的不可变路径。
+            await self.repo.db.events.insert_one({
+                "type": state, "taskId": self.task["id"], "runId": self.task["runId"],
+                "sessionId": details["sessionId"], "nodeId": self.repo.settings.node_id,
+                "previousReceivedAt": details["previousReceivedAt"], "receivedAt": details["receivedAt"],
+                "sequence": details["sequence"], "fileId": self.file_id(details["path"]),
+                "message": "服务器接收时间回拨，日志已另起片段，按块序号保持接收顺序", "createdAt": now(),
+            })
+            logger.warning("采集接收时间回拨", extra={"context": {
+                "taskId": self.task["id"], "sessionId": details["sessionId"],
+                "previousReceivedAt": details["previousReceivedAt"], "receivedAt": details["receivedAt"],
+            }})
+            return
         if state == "CLOSED":
             state = "STOPPING" if self.stopping else "RECONNECTING"
         elif state in {"READ_ERROR", "IDLE_TIMEOUT"}:

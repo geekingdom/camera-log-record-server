@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 from camera_logs.logs.compression import compress
 from camera_logs.logs.naming import safe_device_address, safe_filename_component
 
+MAX_PENDING_ARCHIVES = 2
+
 
 @dataclass(frozen=True, slots=True)
 class HourArchive:
@@ -47,6 +49,7 @@ class ChunkPosition:
     offset: int
     length: int
     path: Path
+    rollback_from: datetime | None = None
 
 
 class HourlyWriter:
@@ -82,10 +85,12 @@ class HourlyWriter:
         self._last_sequence: int | None = None
         self._sealed: list[HourArchive] = []
         self._archive_tasks: set[asyncio.Task[HourArchive]] = set()
+        self._archive_slots = asyncio.Semaphore(MAX_PENDING_ARCHIVES)
         self._archive_errors: list[Exception] = []
         self._last_sync = time.monotonic()
         self._durable_size = 0
         self._close_error: Exception | None = None
+        self._last_received_at: datetime | None = None
 
     @property
     def active_path(self) -> Path | None:
@@ -173,11 +178,13 @@ class HourlyWriter:
             grouped: list[tuple[bytes, int, int, datetime]] = []
             for data, received_at in chunks:
                 instant = received_at or self._now()
+                instant = instant.replace(tzinfo=UTC) if instant.tzinfo is None else instant.astimezone(UTC)
+                rollback_from = self._last_received_at if self._last_received_at and instant < self._last_received_at else None
                 hour = self._hour_of(instant, self.zone)
                 if self._hour is None:
                     await asyncio.to_thread(self._open_sync, hour)
-                elif hour != self._hour:
-                    # Bytes belonging to the old hour must reach disk before it is sealed.
+                elif hour != self._hour or rollback_from is not None:
+                    # 回拨也必须先排空并封存旧片段；新片段序号延续接收顺序，不按墙上时间重排。
                     if grouped:
                         await asyncio.to_thread(self._append_many_sync, grouped)
                         grouped = []
@@ -187,7 +194,8 @@ class HourlyWriter:
                 sequence, offset = self._sequence, self._size
                 assert self._log is not None
                 grouped.append((data, sequence, offset, instant))
-                positions.append(ChunkPosition(sequence, offset, len(data), self._log))
+                positions.append(ChunkPosition(sequence, offset, len(data), self._log, rollback_from))
+                self._last_received_at = instant
                 self._size += len(data)
                 self._digest.update(data)
                 self._first_sequence = self._first_sequence or sequence
@@ -267,30 +275,48 @@ class HourlyWriter:
         size, digest = self._size, self._digest.hexdigest()
         first, last = self._first_sequence, self._last_sequence
         assert log is not None and index is not None and hour is not None
+        archive_slot = False
+        if background:
+            # 在关闭文件前取得槽位；等待背压时取消不会遗留未登记的已关闭原始分片。
+            await self._archive_slots.acquire()
+            archive_slot = True
         try:
             await asyncio.to_thread(self._close_files_sync)
         except Exception as error:
             # 保留原文件和失败状态，重复停止不能把未确认同步误报为成功并释放归属。
+            if archive_slot:
+                self._archive_slots.release()
             self._close_error = error
+            raise
+        except BaseException:
+            if archive_slot:
+                self._archive_slots.release()
             raise
         self._handle = None
         if size == 0:
             await asyncio.to_thread(log.unlink, missing_ok=True)
             await asyncio.to_thread(index.unlink, missing_ok=True)
             self._log = self._index = self._hour = None
+            if archive_slot:
+                self._archive_slots.release()
             return None
         self._log = self._index = self._hour = None
-        task = asyncio.create_task(
-            self._archive(log, index, hour, size, digest, first, last)
-        )
         if background:
+            # 时钟反复回拨会快速产生分片；限制待压缩任务，避免压缩队列反压耗尽节点资源。
+            task = asyncio.create_task(
+                self._archive(log, index, hour, size, digest, first, last)
+            )
             self._archive_tasks.add(task)
             task.add_done_callback(self._archive_done)
             return None
+        task = asyncio.create_task(
+            self._archive(log, index, hour, size, digest, first, last)
+        )
         return await task
 
     def _archive_done(self, task: asyncio.Task[HourArchive]) -> None:
         self._archive_tasks.discard(task)
+        self._archive_slots.release()
         try:
             self._sealed.append(task.result())
         except Exception as error:  # noqa: BLE001 - 文件系统和压缩错误交由所有者告警。

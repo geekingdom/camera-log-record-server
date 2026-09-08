@@ -1,4 +1,5 @@
 """提供运行指标、受限审计查询和经人工确认的旧节点隔离接口。"""
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
@@ -8,6 +9,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, gen
 from pydantic import BaseModel, Field
 
 from camera_logs.common.database import now, public
+from camera_logs.common.observability import redact
 from camera_logs.common.security import actor, authorize
 
 
@@ -33,6 +35,15 @@ def _utc_range(start: str | None, end: str | None) -> dict[str, datetime]:
     if upper <= lower or upper - lower > timedelta(days=31):
         raise HTTPException(422, "时间范围必须大于零且不超过31天")
     return {"$gte": lower, "$lt": upper}
+
+
+def _redacted_evidence(value: str) -> str:
+    """递归净化 JSON 格式隔离依据；普通文本仍按统一日志规则脱敏。"""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return str(redact(value))
+    return json.dumps(redact(parsed), ensure_ascii=False, separators=(",", ":"))
 
 
 async def _event_page(db, collection: str, query: dict, page: int, page_size: int) -> dict:
@@ -149,7 +160,7 @@ def install_admin_routes(app):
             raise HTTPException(409, "节点仍在发送心跳，不能确认隔离")
         await repo.audit(user["id"], "confirm_node_isolation", node_id)
         await repo.db.events.insert_one({"nodeId": node_id, "type": "EXTERNAL_FENCING_CONFIRMED",
-            "actor": user["id"], "evidence": body.evidence, "createdAt": now()})
+            "actor": user["id"], "evidence": _redacted_evidence(body.evidence), "createdAt": now()})
         await repo.db.nodes.update_one({"id": node_id}, {"$set": {"accepting": False, "isolated": True}})
         async for task in repo.db.tasks.find({"nodeId": node_id, "status": "BLOCKED"}):
             await repo.db.endpoint_locks.delete_one({"taskId": task["id"], "runId": task.get("runId")})

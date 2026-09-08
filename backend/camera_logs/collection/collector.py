@@ -407,7 +407,7 @@ class Collector:
 
     async def _flush(self, pending: list[tuple[bytes, object]]) -> None:
         positions = await self._writer.write_many(pending)
-        for (data, _), position in zip(pending, positions, strict=True):
+        for (data, received_at), position in zip(pending, positions, strict=True):
             await _call(
                 self._on_log,
                 LogChunk(
@@ -420,6 +420,13 @@ class Collector:
                     str(position.path),
                 ),
             )
+            if position.rollback_from is not None:
+                await _call(self._on_state, "CLOCK_ROLLBACK", {
+                    "taskId": self.task_id, "sessionId": self.session_id,
+                    "previousReceivedAt": position.rollback_from.isoformat(),
+                    "receivedAt": received_at.astimezone(UTC).isoformat(),
+                    "sequence": position.sequence, "path": str(position.path),
+                })
         await self._publish_archives()
 
     async def _publish_archives(self) -> None:

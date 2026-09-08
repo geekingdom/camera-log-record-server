@@ -83,5 +83,8 @@ def install_command_routes(app, repo, listing):
     async def revoke_token(identifier: str, user: User):
         """撤销服务令牌并追加审计，不删除历史令牌记录。"""
         authorize(user, "admin")
+        token = await repo().db.tokens.find_one({"id": identifier})
+        if token is None:
+            raise HTTPException(404, "服务令牌不存在")
         await repo().db.tokens.update_one({"id": identifier}, {"$set": {"revoked": True}})
         await repo().audit(user["id"], "revoke_token", identifier)

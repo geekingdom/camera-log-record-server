@@ -174,8 +174,13 @@ def install_log_routes(app):
         authorize(user, "logs:read", doc["taskId"])
         if doc["actor"] != user["id"]:
             authorize(user, "admin")
-        await repo().db.jobs.update_one({"id": identifier, "status": {"$in": ["QUEUED", "RUNNING"]}},
-                                        {"$set": {"status": "CANCELLED"}})
+        changed = await repo().db.jobs.update_one(
+            {"id": identifier, "status": {"$in": ["QUEUED", "RUNNING"]}},
+            {"$set": {"status": "CANCELLED"}},
+        )
+        # 只有确实改变作业状态才记录取消，避免已结束作业产生错误审计事实。
+        if changed.modified_count:
+            await repo().audit(user["id"], f"cancel_{doc['kind'].lower()}", identifier)
 
     @app.websocket("/api/v1/tasks/{task_id}/logs")
     async def live(ws: WebSocket, task_id: str):
@@ -184,6 +189,8 @@ def install_log_routes(app):
         try:
             hello = await asyncio.wait_for(ws.receive_json(), timeout=10)
             user = await authenticate(repo(), hello.get("token", ""))
+            # 中间件只读取已鉴权的主体标识，绝不保留客户端首帧中的原始令牌。
+            ws.state.actor = user
             authorize(user, "logs:read", task_id)
             await repo().audit(user["id"], "live_subscribe", task_id)
             cursor = hello.get("cursor")
@@ -200,11 +207,17 @@ def install_log_routes(app):
                         await asyncio.wait_for(ws.send_json(frame), timeout=5)
                         cursor = frame["cursor"]
                 await asyncio.sleep(.1)
-        except (TimeoutError, WebSocketDisconnect):
+        except TimeoutError:
+            ws.state.failure_type = "TimeoutError"
+            await ws.close(code=4408, reason="订阅交互超时")
+        except WebSocketDisconnect:
+            # 正常断开由 WebSocket 中间件依据 closeCode 记录，不重复写错误事件。
             pass
         except HTTPException as exc:
+            ws.state.failure_type = "HTTPException"
             await ws.close(code=4403 if exc.status_code == 403 else 4401, reason=str(exc.detail)[:120])
-        except Exception:
+        except Exception as exc:
+            ws.state.failure_type = type(exc).__name__
             import logging
             logging.getLogger(__name__).exception("实时订阅异常 task=%s", task_id)
             try:

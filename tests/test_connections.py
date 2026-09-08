@@ -8,7 +8,13 @@ from types import SimpleNamespace
 
 import asyncssh
 import pytest
-from camera_logs.collection.connections import _connect_ssh, _TelnetConnection
+from camera_logs.collection import connections
+from camera_logs.collection.connections import (
+    _connect_ssh,
+    _connect_telnet,
+    _SshConnection,
+    _TelnetConnection,
+)
 
 
 class Writer:
@@ -31,6 +37,131 @@ def test_telnet_heartbeat_uses_iac_nop_and_stops_on_close():
     before, after = asyncio.run(run())
     assert before > 0
     assert before == after
+
+
+def test_ssh_close_aborts_and_preserves_wait_closed_error():
+    """SSH 收尾确认失败时强制中止传输，并将原始失败交给上层处理。"""
+    class Process:
+        def close(self):
+            pass
+
+    class Client:
+        def __init__(self):
+            self.closed = False
+            self.aborted = False
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            raise ConnectionResetError("peer reset")
+
+        def abort(self):
+            self.aborted = True
+
+    client = Client()
+    with pytest.raises(ConnectionResetError, match="peer reset"):
+        asyncio.run(_SshConnection(client, Process()).close())
+    assert client.closed and client.aborted
+
+
+def test_telnet_close_timeout_aborts_unresponsive_transport(monkeypatch):
+    """Telnet 关闭确认超时后强制中止，避免暂停和停止无限等待。"""
+    class UnresponsiveWriter:
+        def __init__(self):
+            self.closed = False
+            self.aborted = False
+
+        def get_extra_info(self, _key):
+            return None
+
+        def close(self):
+            self.closed = True
+
+        def abort(self):
+            self.aborted = True
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(connections, "CLOSE_TIMEOUT_SECONDS", .01)
+
+    async def scenario():
+        writer = UnresponsiveWriter()
+        connection = _TelnetConnection(None, writer, interval=60)
+        with pytest.raises(TimeoutError):
+            await connection.close()
+        return writer, connection
+
+    writer, connection = asyncio.run(scenario())
+    assert writer.closed and writer.aborted and connection._heartbeat.done()
+
+
+def test_telnet_close_cancellation_aborts_unresponsive_transport():
+    """取消关闭协程仍会中止 Telnet 传输并停止保活任务。"""
+    class UnresponsiveWriter:
+        def __init__(self):
+            self.waiting = asyncio.Event()
+            self.closed = False
+            self.aborted = False
+
+        def get_extra_info(self, _key):
+            return None
+
+        def close(self):
+            self.closed = True
+
+        def abort(self):
+            self.aborted = True
+
+        async def wait_closed(self):
+            self.waiting.set()
+            await asyncio.Event().wait()
+
+    async def scenario():
+        writer = UnresponsiveWriter()
+        connection = _TelnetConnection(None, writer, interval=60)
+        closing = asyncio.create_task(connection.close())
+        await writer.waiting.wait()
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        return writer, connection
+
+    writer, connection = asyncio.run(scenario())
+    assert writer.closed and writer.aborted and connection._heartbeat.done()
+
+
+def test_telnet_login_failure_preserves_original_error_after_forced_cleanup(monkeypatch):
+    """登录失败后即使关闭确认超时，也不能把原始登录错误替换为清理错误。"""
+    class Writer:
+        def __init__(self):
+            self.closed = False
+            self.aborted = False
+
+        def close(self):
+            self.closed = True
+
+        def abort(self):
+            self.aborted = True
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()
+
+    writer = Writer()
+
+    async def open_connection(**_kwargs):
+        return object(), writer
+
+    async def fail_login(*_args):
+        raise RuntimeError("login rejected")
+
+    monkeypatch.setattr(connections, "CLOSE_TIMEOUT_SECONDS", .01)
+    monkeypatch.setattr(connections, "_telnet_login", fail_login)
+    monkeypatch.setitem(sys.modules, "telnetlib3", SimpleNamespace(open_connection=open_connection))
+    with pytest.raises(RuntimeError, match="login rejected"):
+        asyncio.run(_connect_telnet({"username": "u", "password": "p"}, "host", 23))
+    assert writer.closed and writer.aborted
 
 
 def test_ssh_shell_setup_failure_closes_owned_client(monkeypatch, tmp_path):

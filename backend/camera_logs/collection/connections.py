@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
+CLOSE_TIMEOUT_SECONDS = 10
 
 
 class Connection(Protocol):
@@ -38,19 +39,17 @@ class _SshConnection:
             await drain()
 
     async def close(self) -> None:
-        # shell 通道收尾失败也必须关闭底层 SSH 连接，否则会占用设备有限的连接槽。
+        """关闭 shell 与 SSH 传输；确认失败时强制中止且保留原始异常。"""
         try:
-            self._process.close()
-        finally:
-            self._client.close()
-        try:
-            await asyncio.wait_for(self._client.wait_closed(), timeout=10)
-        except (TimeoutError, asyncio.CancelledError):
-            abort = getattr(self._client, "abort", None)
-            if abort:
-                abort()
-            if asyncio.current_task() and asyncio.current_task().cancelling():
-                raise
+            # shell 收尾异常也不能跳过底层连接的关闭和确认。
+            try:
+                self._process.close()
+            finally:
+                self._client.close()
+            await asyncio.wait_for(self._client.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS)
+        except BaseException:
+            _abort_transport(self._client)
+            raise
 
 
 class _TelnetConnection:
@@ -85,13 +84,15 @@ class _TelnetConnection:
 
     async def close(self) -> None:
         self._heartbeat.cancel()
-        await asyncio.gather(self._heartbeat, return_exceptions=True)
-        self._writer.close()
-        await self._writer.wait_closed()
+        try:
+            await asyncio.gather(self._heartbeat, return_exceptions=True)
+        finally:
+            # 取消等待保活协程时仍必须关闭底层传输，不能让停止流程悬挂。
+            await _close_telnet_writer(self._writer)
 
 
 async def connect(task: Mapping[str, Any]) -> Connection:
-    """按任务固定端点创建连接，SSH 必须使用已确认的主机密钥。"""
+    """按任务固定端点创建连接；SSH 默认免登记，可选严格主机密钥校验。"""
     protocol = task.get("protocol") or task.get("protocolType")
     host, port = str(task["ip"]), int(task["port"])
     if protocol == "SSH":
@@ -120,6 +121,29 @@ def _tcp_keepalive(owner: Any) -> None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
     except OSError:
         return
+
+
+def _abort_transport(owner: Any) -> None:
+    """尽力中止未能确认关闭的传输；中止失败不能覆盖原始关闭异常。"""
+    for candidate in (owner, getattr(owner, "transport", None)):
+        abort = getattr(candidate, "abort", None) if candidate is not None else None
+        if abort is None:
+            continue
+        try:
+            abort()
+        except Exception:
+            logger.exception("强制中止连接失败")
+        return
+
+
+async def _close_telnet_writer(writer: Any) -> None:
+    """有界等待 Telnet 关闭确认，超时、取消或异常时强制中止传输。"""
+    try:
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS)
+    except BaseException:
+        _abort_transport(writer)
+        raise
 
 
 async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connection:
@@ -168,8 +192,11 @@ async def _connect_telnet(task: Mapping[str, Any], host: str, port: int) -> Conn
             prefix = await _telnet_login(reader, writer, str(username), str(password), task)
         return _TelnetConnection(reader, writer, prefix=prefix, interval=float(task.get("telnetKeepaliveInterval", 30)))
     except BaseException:
-        writer.close()
-        await writer.wait_closed()
+        # 登录失败的根因必须返回给调用方；清理失败只记录并强制中止传输。
+        try:
+            await _close_telnet_writer(writer)
+        except BaseException:
+            logger.exception("Telnet 登录失败后的连接收尾异常")
         raise
 
 

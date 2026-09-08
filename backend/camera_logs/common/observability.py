@@ -20,6 +20,8 @@ from typing import Any
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 
+from camera_logs.common.websocket_logging import track_websocket
+
 MAX_LOG_BYTES = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 14
 _SECRET_KEYS = {"password", "token", "authorization", "passwordencrypted"}
@@ -28,7 +30,7 @@ _SECRET_TEXT = re.compile(
     r"(?i)\b(passwordencrypted|password|token|authorization)\b(\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
 )
-_BEARER_TEXT = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)\S+")
+_BEARER_TEXT = re.compile(r"(?i)(\bbearer\s+)[^\s,}\]\"']+")
 
 
 def _secret_key(key: object) -> bool:
@@ -167,6 +169,9 @@ class RequestLoggingMiddleware:
         self.app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "websocket":
+            await track_websocket(self.app, scope, receive, send, logging.getLogger("camera_logs.access"))
+            return
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
