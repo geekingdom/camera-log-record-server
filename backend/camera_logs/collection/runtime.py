@@ -37,12 +37,17 @@ class SessionRuntime:
         self.frame_bytes = 0
         self.frame_number = 0
         self.paths = {}
+        self.catalog_dirty = {}
+        self.catalog_ready = set()
+        self.catalog_lock = asyncio.Lock()
         self.last_catalog = 0.
         self.pending_executions = {}
         self.input_bytes = 0
         self.error = None
         self.started_at = now()
         self.debug_passwords = PshPasswordProvider(repo.settings)
+        # 目录水位不能只依赖下一块日志触发；设备停止输出后的尾块同样需要发布。
+        self.catalog_task = asyncio.create_task(self._catalog_loop())
         self.background = asyncio.create_task(self.run())
 
     async def on_debug(self, event, details):
@@ -72,6 +77,13 @@ class SessionRuntime:
         previous = self.paths.get(file_id, chunk.offset)
         end_offset = chunk.offset + len(chunk.data)
         self.paths[file_id] = max(previous, end_offset)
+        if file_id not in self.catalog_ready:
+            self.catalog_dirty[file_id] = {"id": file_id, "taskId": chunk.task_id, "runId": chunk.run_id,
+                "sessionId": chunk.session_id, "nodeId": self.repo.settings.node_id,
+                "hour": self._hour_from_path(path), "path": str(path), "bytes": self.paths[file_id],
+                "runStartedAt": self.task.get("runStartedAt", self.started_at), "rawFileName": path.name,
+                "indexPath": str(path.with_suffix(".index.jsonl")), "segmentNumber": self._segment_number(path),
+                "sessionStartedAt": self.started_at, "firstSequence": chunk.sequence, "status": "OPEN"}
         self.input_bytes += len(chunk.data)
         self.frame_number += 1
         frame = {"type": "data", "fileId": file_id, "sessionId": chunk.session_id,
@@ -83,17 +95,43 @@ class SessionRuntime:
         while self.frame_bytes > 8*1024*1024 and self.frames:
             self.frame_bytes -= self.frames.popleft()["size"]
         if previous == 0 or time.monotonic()-self.last_catalog >= 1:
+            await self._publish_catalog()
+
+    async def _publish_catalog(self):
+        """发布全部脏水位；失败不移除内存项，下一周期继续尝试。"""
+        async with self.catalog_lock:
+            dirty = list(self.catalog_dirty.items())
+            for file_id, entry in dirty:
+                # 重新读取当前水位，避免快照把同一文件的后续字节写小。
+                value = entry | {"updatedAt": now()}
+                set_on_insert = {"createdAt": now()}
+                if entry["status"] == "OPEN":
+                    value["bytes"] = self.paths.get(file_id, entry["bytes"])
+                    value.pop("firstSequence")
+                    set_on_insert["firstSequence"] = entry["firstSequence"]
+                else:
+                    # 已存在的 OPEN 文档持有首次会话时间；归档不能用当前运行实例
+                    # 的时间重写它。首次直接收到 READY 时才由插入路径提供这些值。
+                    set_on_insert["runStartedAt"] = value.pop("runStartedAt")
+                    set_on_insert["sessionStartedAt"] = value.pop("sessionStartedAt")
+                await self.repo.db.files.update_one({"id": file_id}, {"$set": value,
+                    "$setOnInsert": set_on_insert}, upsert=True)
+                # update_one 可让出事件循环；仅消费仍是本次快照的条目，不能丢掉
+                # 期间收到的后续日志水位或归档最终状态。
+                if self.catalog_dirty.get(file_id) is entry:
+                    self.catalog_dirty.pop(file_id, None)
             self.last_catalog = time.monotonic()
-            hour = self._hour_from_path(path)
-            await self.repo.db.files.update_one({"id": file_id}, {"$set": {
-                "id": file_id, "taskId": chunk.task_id, "runId": chunk.run_id, "sessionId": chunk.session_id,
-                "nodeId": self.repo.settings.node_id, "hour": hour, "path": str(path), "bytes": self.paths[file_id],
-                "status": "OPEN", "runStartedAt": self.task.get("runStartedAt", self.started_at),
-                "rawFileName": path.name,
-                "indexPath": str(path.with_suffix(".index.jsonl")),
-                "segmentNumber": self._segment_number(path),
-                "sessionStartedAt": self.started_at, "updatedAt": now()},
-                "$setOnInsert": {"createdAt": now(), "firstSequence": chunk.sequence}}, upsert=True)
+
+    async def _catalog_loop(self):
+        """每秒独立冲刷目录尾部，不依赖设备持续输出。"""
+        while not self.stopping:
+            await asyncio.sleep(1)
+            if self.catalog_dirty:
+                try:
+                    await self._publish_catalog()
+                except Exception:
+                    # 脏水位保留到下一周期重试。
+                    logger.exception("日志目录水位发布失败 task=%s", self.task["id"])
 
     @staticmethod
     def _segment_number(path):
@@ -125,17 +163,21 @@ class SessionRuntime:
                 "segmentNumber": self._segment_number(log_path)}
         if index_path:
             member_fields["indexPath"] = str(index_path)
-        await self.repo.db.files.update_one({"id": file_id}, {"$set": {
-            "id": file_id, "taskId": archive.task_id, "runId": archive.run_id, "sessionId": archive.session_id,
-            "nodeId": self.repo.settings.node_id,
-            "hour": archive.hour_start.astimezone(UTC).isoformat(),
-            "path": str(path),
-            "archiveName": path.name,
-            "bytes": archive.raw_size, "archiveBytes": path.stat().st_size, "sha256": archive.sha256,
-            "firstSequence": archive.first_sequence, "lastSequence": archive.last_sequence, "status": "READY",
-            **member_fields, "updatedAt": now()}, "$setOnInsert": {
+        async with self.catalog_lock:
+            # archive 是该不可变分卷的最终状态；清掉脏 OPEN 快照后再发布 READY，
+            # 周期任务不会用最后实时水位把 READY 覆盖回 OPEN。
+            self.catalog_dirty.pop(file_id, None)
+            self.catalog_ready.add(file_id)
+            self.catalog_dirty[file_id] = {"id": file_id, "taskId": archive.task_id, "runId": archive.run_id,
+                "sessionId": archive.session_id, "nodeId": self.repo.settings.node_id,
+                "hour": archive.hour_start.astimezone(UTC).isoformat(), "path": str(path),
+                "archiveName": path.name, "bytes": archive.raw_size, "archiveBytes": path.stat().st_size,
+                "sha256": archive.sha256, "firstSequence": archive.first_sequence,
+                "lastSequence": archive.last_sequence, "status": "READY", **member_fields,
                 "runStartedAt": self.task.get("runStartedAt", self.started_at),
-                "sessionStartedAt": self.started_at, "createdAt": now()}}, upsert=True)
+                "sessionStartedAt": self.started_at}
+        # READY 也由统一发布器落库。失败时条目保留，下一周期不会遗漏已删原始正文。
+        await self._publish_catalog()
 
     async def on_state(self, state, details):
         """将会话状态映射到运行状态；压缩失败单独告警，不伪装成连接中断。"""
@@ -338,11 +380,28 @@ class SessionRuntime:
     async def stop(self):
         """禁用重试并等待采集器收尾，连接释放完成后才能取消运行等待。"""
         self.stopping = True
-        if self.collector:
-            await self._stop_collector()
-        if not self.background.done():
-            self.background.cancel()
-        await asyncio.gather(self.background, return_exceptions=True)
+        failure = None
+        try:
+            if self.collector:
+                await self._stop_collector()
+        except Exception as error:  # noqa: BLE001 - 收尾后必须把未确认结果交给监督器。
+            failure = error
+        try:
+            if self.catalog_dirty:
+                await self._publish_catalog()
+        except Exception as error:
+            logger.exception("停止时日志目录水位发布失败 task=%s", self.task["id"])
+            failure = failure or error
+        finally:
+            catalog_task = self.catalog_task
+            if not catalog_task.done():
+                catalog_task.cancel()
+                await asyncio.gather(catalog_task, return_exceptions=True)
+            if not self.background.done():
+                self.background.cancel()
+            await asyncio.gather(self.background, return_exceptions=True)
+        if failure:
+            raise failure
 
     async def _stop_collector(self):
         """握手失败在连接和文件已关闭后作为运行错误返回，不误标为隔离失败。"""

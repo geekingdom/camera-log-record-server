@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import camera_logs.collection.collector as collector_module
 import pytest
@@ -34,6 +36,34 @@ class FakeConnection:
 class FailingReadConnection(FakeConnection):
     async def read(self, _: int = 65536) -> bytes:
         raise OSError("read failed")
+
+
+async def test_pending_batch_read_wait_ends_at_original_flush_deadline(tmp_path, monkeypatch):
+    """批窗口结束前再次收到小包，下一次读等待不能再完整延长 100ms。"""
+    collector = Collector({"id": "deadline", "runId": "run", "storageIdentity": "synthetic"}, tmp_path,
+                          connection_factory=lambda _: FakeConnection())
+    clock, timeouts = [0.0], []
+    chunks = iter([(.06, b"first"), (.099, b"second"), (.1, b"")])
+
+    async def read():
+        clock[0], data = next(chunks)
+        return data
+
+    async def wait_for(awaitable, timeout):
+        timeouts.append(timeout)
+        return await awaitable
+
+    collector._connection = SimpleNamespace(read=read)
+    collector._accepting_commands = True
+    collector._close_connection = AsyncMock()
+    collector._writer.close = AsyncMock(return_value=None)
+    collector._flush = AsyncMock()
+    collector._publish_archives = AsyncMock()
+    monkeypatch.setattr(collector_module, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: clock[0]),
+        wait_for=wait_for, CancelledError=asyncio.CancelledError, current_task=asyncio.current_task))
+    await collector._reader_loop()
+    assert 0 < timeouts[2] <= .002
 
 
 def test_collector_writes_received_chunks_in_exact_order_and_initializes_commands(tmp_path):

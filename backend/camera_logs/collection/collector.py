@@ -335,7 +335,9 @@ class Collector:
             assert self._connection is not None
             while self._accepting_commands:
                 try:
-                    data = await asyncio.wait_for(self._connection.read(), timeout=0.1)
+                    # 已有待写数据时按原批截止时间缩短等待，避免末尾小包再延长整个窗口。
+                    read_timeout = min(.1, max(.001, flush_deadline - asyncio.get_running_loop().time())) if pending else .1
+                    data = await asyncio.wait_for(self._connection.read(), timeout=read_timeout)
                 except TimeoutError:
                     if pending:
                         to_flush, pending = pending, []

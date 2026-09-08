@@ -1,5 +1,6 @@
 """共享小时包目录回调保持每个分卷身份与既有会话时间。"""
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -14,6 +15,8 @@ async def test_archive_callback_keeps_member_ids_and_original_session_times(tmp_
                                    settings=SimpleNamespace(log_root=tmp_path, node_id="node"))
     runtime.task = {"id": "task", "runStartedAt": datetime(2026, 9, 8, tzinfo=UTC)}
     runtime.started_at = datetime(2026, 9, 8, 2, tzinfo=UTC)
+    runtime.paths, runtime.catalog_dirty, runtime.catalog_ready = {}, {}, set()
+    runtime.catalog_lock = asyncio.Lock()
     archive_path = tmp_path / "hour.tar.gz"
     archive_path.write_bytes(b"synthetic-archive")
     original = datetime(2026, 9, 8, 1, tzinfo=UTC)
