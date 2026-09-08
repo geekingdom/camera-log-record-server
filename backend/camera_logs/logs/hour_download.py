@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from zoneinfo import ZoneInfo
 
-from camera_logs.logs.archive_access import LimitedReader, snapshot
+from camera_logs.logs.archive_access import LimitedReader, LimitedWriter, snapshot
 from camera_logs.logs.naming import safe_filename_component
 from camera_logs.logs.order import ordered_files
 
@@ -80,14 +80,17 @@ def source_member(path: Path, member_name: str | None) -> Iterator[tuple[tarfile
             stream.close()
 
 
-def write_hour_archive(destination: Path, sources: list[Source]) -> int:
+def write_hour_archive(destination: Path, sources: list[Source], *, max_output_bytes: int | None = None) -> int:
     """按稳定顺序重组一个小时，并将旧的大成员拆为最多 10 MiB 的分卷。"""
     by_id = {source[0]["id"]: source for source in sources}
     ordered = ordered_files([frozen | file for frozen, file, _, _ in sources])
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     number = 1
-    with tarfile.open(destination, "w:gz", compresslevel=1) as output:
+    with destination.open("wb") as target, tarfile.open(
+        fileobj=LimitedWriter(target, max_output_bytes, "export output exceeds size limit"),
+        mode="w:gz", compresslevel=1,
+    ) as output:
         for document in ordered:
             frozen, file, path, _temporary = by_id[document["id"]]
             with source_member(path, file.get("archiveMember")) as (member, stream):

@@ -34,15 +34,16 @@ class ReadLimiter:
 read_limiter = ReadLimiter()
 
 
-class SnapshotWriter:
-    """在压缩字节落盘前检查预留上限，覆盖 gzip 文件头和关闭时的尾部。"""
+class LimitedWriter:
+    """在产物字节落盘前检查上限；流式接口让 gzip/ZIP 尾部也纳入计费。"""
 
-    def __init__(self, output: BinaryIO, limit: int | None) -> None:
+    def __init__(self, output: BinaryIO, limit: int | None, error: str = "snapshot storage limit exceeded") -> None:
         self.output, self.limit, self.written = output, limit, 0
+        self.error = error
 
     def write(self, data: bytes) -> int:
         if self.limit is not None and self.written + len(data) > self.limit:
-            raise ValueError("snapshot storage limit exceeded")
+            raise ValueError(self.error)
         size = self.output.write(data)
         self.written += size
         return size
@@ -102,7 +103,7 @@ def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None =
     try:
         if available < raw_bytes:
             raise OSError("日志字节数小于冻结水位，无法生成完整快照")
-        with target.open("wb") as destination, tarfile.open(fileobj=SnapshotWriter(destination, max_output_bytes), mode="w:gz", compresslevel=1) as output:
+        with target.open("wb") as destination, tarfile.open(fileobj=LimitedWriter(destination, max_output_bytes), mode="w:gz", compresslevel=1) as output:
             raw_info = tarfile.TarInfo(raw_name); raw_info.size = size
             output.addfile(raw_info, LimitedReader(raw, size, raw_hash))
             if index and index_name:
@@ -118,10 +119,11 @@ def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None =
     return target
 
 
-def copy_limited(source: Path, target: Path) -> int:
+def copy_limited(source: Path, target: Path, *, max_output_bytes: int | None = None) -> int:
     """分块复制归档并计费读取预算，避免大型导出驻留内存。"""
     target.parent.mkdir(parents=True, exist_ok=True)
-    with source.open("rb") as reader, target.open("wb") as writer:
+    with source.open("rb") as reader, target.open("wb") as destination:
+        writer = LimitedWriter(destination, max_output_bytes, "export output exceeds size limit")
         while data := reader.read(1024 * 1024):
             read_limiter.consume(len(data)); writer.write(data)
     return target.stat().st_size

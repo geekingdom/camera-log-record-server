@@ -11,7 +11,6 @@ import os
 import shutil
 import tarfile
 import threading
-import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from typing import Any
 import httpx
 
 from camera_logs.logs.archive_access import LimitedReader, copy_limited, read_limiter, snapshot
+from camera_logs.logs.export_output import write_zip
 from camera_logs.logs.hour_download import (
     Source,
     hour_export_name,
@@ -273,7 +273,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 hourly.append(reusable)
                 continue
             hourly_path = scratch / hour_export_name(job, hour)
-            await job_thread(write_hour_archive, hourly_path, members)
+            await job_thread(write_hour_archive, hourly_path, members, max_output_bytes=OUTPUT_LIMIT)
             hourly.append(hourly_path)
         await job_thread(output.mkdir, parents=True, exist_ok=True)
         result_path: Path
@@ -285,22 +285,15 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                     await job_thread(os.link, hourly[0], result_path)
                     size = result_path.stat().st_size
                 except OSError:
-                    size = await job_thread(copy_limited, hourly[0], result_path)
+                    size = await job_thread(copy_limited, hourly[0], result_path, max_output_bytes=OUTPUT_LIMIT)
             else:
-                size = await job_thread(copy_limited, hourly[0], output / filename)
+                size = await job_thread(copy_limited, hourly[0], output / filename, max_output_bytes=OUTPUT_LIMIT)
                 result_path = output / filename
         else:
             task_component = safe_filename_component(str(job.get("taskName") or job.get("taskId") or job["id"]), fallback=job["id"])
             filename = f"{task_component}-hours.zip"
             destination = output / filename
-            def make_zip() -> int:
-                with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_STORED) as bundle:
-                    for path in hourly:
-                        with path.open("rb") as source, bundle.open(path.name, "w") as entry:
-                            while data := source.read(1024 * 1024):
-                                read_limiter.consume(len(data)); entry.write(data)
-                return destination.stat().st_size
-            size = await job_thread(make_zip)
+            size = await job_thread(write_zip, destination, hourly, OUTPUT_LIMIT)
             result_path = destination
         if size > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")

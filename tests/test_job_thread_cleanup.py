@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import tarfile
 import threading
 from datetime import UTC, datetime
 
@@ -37,6 +39,32 @@ async def repository(tmp_path):
     }
     await repo.db.files.insert_one(file)
     return repo, file
+
+
+async def test_zip_overhead_failure_removes_output_and_releases_reservation(tmp_path, monkeypatch):
+    """正文总量未超限但 ZIP 目录超限时，整个下载失败并回收所有作业产物。"""
+    repo, _ = await repository(tmp_path)
+    files = []
+    total = 0
+    for number in range(2):
+        path = tmp_path / f"hour-{number}.tar.gz"
+        with tarfile.open(path, "w:gz") as archive:
+            member = tarfile.TarInfo("part-000001.log")
+            member.size = 1
+            archive.addfile(member, io.BytesIO(b"a"))
+        file = {"id": f"hour-{number}", "nodeId": "node", "status": "READY", "bytes": 1,
+                "path": str(path), "hour": f"2026-09-08T0{number}:00:00+00:00",
+                "archiveGroupId": f"group-{number}", "archiveMember": "part-000001.log"}
+        await repo.db.files.insert_one(file)
+        files.append(file)
+        total += path.stat().st_size
+    monkeypatch.setattr(jobs, "OUTPUT_LIMIT", total + 1)
+    job = {"id": "zip-limit", "files": files}
+    with pytest.raises(ValueError, match="export output"):
+        await jobs._download(repo, job)
+    assert not (tmp_path / "exports" / job["id"]).exists()
+    assert not (tmp_path / "exports" / ".tmp" / job["id"]).exists()
+    assert job["id"] not in jobs._temp_reservations
 
 
 async def test_search_reserves_space_before_creating_snapshot(tmp_path, monkeypatch):
