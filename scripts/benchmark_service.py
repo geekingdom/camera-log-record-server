@@ -1,4 +1,4 @@
-"""经正式 API 和真实 Telnet 连接测量多路采集，下载小时包比对逐路源摘要。
+"""经正式 API 和真实 SSH/Telnet 连接测量多路采集，下载小时包比对逐路源摘要。
 
 不修改节点容量、不访问实体设备，不用配置时长冒充持续吞吐证据。输出目录
 保存任务身份、每秒节点指标、下载和最终报告；异常也通过正式接口停止合成任务。
@@ -19,6 +19,7 @@ from camera_logs.common.config import Settings
 from service_benchmark_io import LoadSource, verify_download
 from service_benchmark_realtime import observe_realtime
 from service_benchmark_search import observe_searches
+from service_benchmark_ssh import DeviceInfoSource, SshLoadSource
 
 
 async def wait_observer_ready(observer, ready, timeout):
@@ -124,6 +125,9 @@ async def execute(args):
     finished = asyncio.Event()
     suffix = uuid4().hex
     cleanup_errors = []
+    protocol = getattr(args, "protocol", "TELNET_SERIAL")
+    password = uuid4().hex
+    device_info = DeviceInfoSource(args.bind_host, password, getattr(args, "device_info_port", 80)) if protocol == "SSH" else None
     downloads = asyncio.Semaphore(args.download_concurrency)
     # 不把整个采集时长放进信号量，确保所有已创建路由能够同时输出。
     creating = asyncio.Semaphore(16)
@@ -140,8 +144,12 @@ async def execute(args):
                             for node in node_data["items"] if node.get("accepting"))
             if available < args.routes:
                 raise ValueError(f"节点当前可用容量 {available} 小于请求路数 {args.routes}")
+            resource_body = {"name": f"协议压测-{suffix}", "kind": "SERIAL_SERVER", "ip": args.device_host}
+            if device_info:
+                await device_info.start()
+                resource_body.update(kind="HIKVISION_NETWORK", username="benchmark", password=password, authType="BASIC")
             resource = await request(client, "POST", "/api/v1/resources",
-                json={"name": f"协议压测-{suffix}", "kind": "SERIAL_SERVER", "ip": args.device_host},
+                json=resource_body,
                 headers={"Idempotency-Key": f"benchmark-resource-{suffix}"})
             resource_id = resource["id"]
             (output / "resource.json").write_text(json.dumps({"resourceId": resource_id}), encoding="utf-8")
@@ -149,13 +157,15 @@ async def execute(args):
 
             async def route(number):
                 """一条连接独立发送、排空、停止及下载；归档按源摘要验证不混路。"""
-                source = LoadSource(number, args.bind_host, args.lines_per_second, args.line_bytes)
+                source_args = (number, args.bind_host, args.lines_per_second, args.line_bytes)
+                source = SshLoadSource(*source_args, password=password) if protocol == "SSH" else LoadSource(*source_args)
                 sources.append(source)
                 await source.start()
                 async with creating:
                     task = await request(client, "POST", "/api/v1/tasks", json={
                         "name": f"协议压测-{suffix[:8]}-{number:04d}", "resourceId": resource_id,
-                        "protocol": "TELNET_SERIAL", "ip": args.device_host, "port": source.port,
+                        "protocol": protocol, "ip": args.device_host, "port": source.port,
+                        **({"username": "benchmark", "password": password} if protocol == "SSH" else {}),
                         "initialCommands": [], "scheduledCommands": [], "autoStart": True},
                         headers={"Idempotency-Key": f"benchmark-task-{suffix}-{number}"})
                     task_id = task["id"]
@@ -199,6 +209,8 @@ async def execute(args):
                     raise AssertionError(f"路由 {number} 登记字节数与源日志不一致")
                 await stop(client, task_id, args.timeout)
                 await asyncio.wait_for(source.peer_closed.wait(), timeout=args.timeout)
+                if protocol == "SSH":
+                    await asyncio.wait_for(source.transport_closed.wait(), timeout=args.timeout)
                 if source.connection_count != 1:
                     raise AssertionError(f"路由 {number} 发生了重连，不能作为正常连续采集通过")
                 hours = await wait_until(client, f"/api/v1/tasks/{task_id}/log-hours",
@@ -249,6 +261,11 @@ async def execute(args):
             for index, outcome in enumerate(closed):
                 if isinstance(outcome, BaseException):
                     cleanup_errors.append({"source": index, "closeError": type(outcome).__name__})
+            if device_info:
+                try:
+                    await device_info.close()
+                except Exception as error:  # noqa: BLE001 - 模拟端清理失败不能跳过资源软删除。
+                    cleanup_errors.append({"deviceInfoError": type(error).__name__})
             if resource_id:
                 try:
                     resource = await request(client, "GET", f"/api/v1/resources/{resource_id}")
@@ -265,7 +282,7 @@ async def execute(args):
                     cleanup_errors.append({"metricsError": type(observation).__name__})
             (output / "cleanup.json").write_text(json.dumps({"errors": cleanup_errors}, indent=2), encoding="utf-8")
     overlap = max(0, min(end for _, end in intervals) - max(begin for begin, _ in intervals))
-    report = {"scope": "real-telnet-api-worker-mongo-download", "routes": args.routes,
+    report = {"scope": f"real-{'ssh' if protocol == 'SSH' else 'telnet'}-api-worker-mongo-download", "protocol": protocol, "routes": args.routes,
         "configuredSeconds": args.seconds, "linesPerSecondPerRoute": args.lines_per_second,
         "lineBytes": args.line_bytes, "allRoutesOverlapSeconds": round(overlap, 3),
         "totalElapsedSeconds": round(time.monotonic() - started, 3),
@@ -300,6 +317,9 @@ def parse_args():
     parser.add_argument("--url", default="http://127.0.0.1:5173")
     parser.add_argument("--device-host", default="127.0.0.1")
     parser.add_argument("--bind-host", default="127.0.0.1")
+    parser.add_argument("--protocol", choices=["TELNET_SERIAL", "SSH"], default="TELNET_SERIAL")
+    parser.add_argument("--device-info-port", type=int, default=80,
+                        help="SSH 模拟 ISAPI 监听端口；非 80 时须由测试环境转发设备地址的 80 端口")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--routes", type=int, default=8)
     parser.add_argument("--seconds", type=int, default=36)
@@ -311,6 +331,8 @@ def parse_args():
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if not 1 <= args.device_info_port <= 65535:
+        parser.error("设备信息监听端口须在 1..65535")
     if not 1 <= args.routes <= 500 or not 1 <= args.seconds <= 172800:
         parser.error("路数须在 1..500，秒数须在 1..172800")
     if not 1 <= args.lines_per_second <= 1200 or not 64 <= args.line_bytes <= 65536:
