@@ -70,7 +70,8 @@ class TaskCreate(TemplateCreate):
     password: str = Field(default="", max_length=4096)
     sourceTemplateId: str | None = None
     sourceTemplateVersion: int | None = None
-    deviceId: str | None = None
+    resourceId: str = Field(min_length=1, max_length=64)
+    serialServerResourceId: str | None = Field(default=None, min_length=1, max_length=64)
     autoStart: bool = False
     encoding: str = "utf-8"
     loginPrompt: str = Field(default="login:", max_length=256)
@@ -116,6 +117,7 @@ class TaskPatch(Model):
     encoding: str | None = None
     loginPrompt: str | None = None
     passwordPrompt: str | None = None
+    serialServerResourceId: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class TemplatePatch(TemplateCreate):

@@ -3,6 +3,7 @@
 import { ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
+import { confirmAction } from "../../shared/confirm";
 import type { Template } from "../../shared/types";
 import CommandEditor from "../commands/CommandEditor.vue";
 const open = defineModel<boolean>({ required: true });
@@ -41,6 +42,7 @@ watch(
 async function save() {
   if (saving.value || !editorRef.value?.validate()) return;
   if (!form.value.name.trim()) return ElMessage.warning("请输入模板名称");
+  if (!await confirmAction(`确认保存命令模板“${form.value.name}”吗？`, "确认保存模板")) return;
   saving.value = true;
   try {
     if (props.template)

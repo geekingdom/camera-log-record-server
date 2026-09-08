@@ -14,26 +14,18 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     args = parser.parse_args()
     config = Settings()
+    devices = json.loads(args.devices.read_text())
+    for device in devices:
+        if not device.get("resourceId"):
+            raise ValueError(f"设备 {device.get('name', device['ip'])} 缺少 resourceId；请先添加资源或在设备清单填写 resourceId")
     with httpx.Client(base_url=args.url, headers={"Authorization": "Bearer "+config.bootstrap_token}, timeout=30) as client:
-        for device in json.loads(args.devices.read_text()):
+        for index, device in enumerate(devices):
             # 设备不保证支持 shell 分号语法，因此维持四条独立且有序的初始化命令。
             device["initialCommands"] = [{"command": command, "delaySeconds": .3} for command in (
                 "outputClose", "outputOpen", "setDebug -m all -l 7 -d 111", "prtHardInfo")]
             device["autoStart"] = True
-            listing = client.get("/api/v1/tasks", params={"search": device["ip"], "pageSize": 100})
-            listing.raise_for_status()
-            existing = next((task for task in listing.json()["items"] if all(
-                task.get(key) == device.get(key) for key in ("name", "ip", "port", "protocol"))), None)
-            if existing:
-                # 重跑联调脚本只复用同名同端点任务，不额外消耗设备有限的 SSH 连接。
-                if [item["command"] for item in existing["initialCommands"]] != [item["command"] for item in device["initialCommands"]]:
-                    response = client.patch("/api/v1/tasks/" + existing["id"], json={
-                        "version": existing["version"], "initialCommands": device["initialCommands"]})
-                    response.raise_for_status()
-                print(json.dumps({"id": existing["id"], "name": existing["name"], "status": existing["status"], "reused": True}, ensure_ascii=False))
-                continue
             response = client.post("/api/v1/tasks", json=device,
-                headers={"Idempotency-Key": f"local-device-v3-{device['protocol']}-{device['ip']}-{device['port']}"})
+                headers={"Idempotency-Key": f"local-device-v4-{index}"})
             response.raise_for_status()
             task = response.json()
             print(json.dumps({"id": task["id"], "name": task["name"], "status": task["status"]}, ensure_ascii=False))

@@ -82,7 +82,7 @@ async def execute(args: argparse.Namespace) -> dict[str, object]:
     sources = [Source() for _ in range(args.routes)]
     archives: list[list] = [[] for _ in sources]
     collectors = [Collector(
-        {"id": f"route-{route}", "runId": f"run-{route}", "initialCommands": []}, output,
+        {"id": f"route-{route}", "runId": f"run-{route}", "storageIdentity": "benchmark", "initialCommands": []}, output,
         connection_factory=lambda _task, source=source: source,
         on_archive=lambda archive, route=route: archives[route].append(archive),
     ) for route, source in enumerate(sources)]

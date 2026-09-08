@@ -5,16 +5,16 @@ from pydantic import ValidationError
 
 
 def test_serial_optional_credentials_and_ssh_required():
-    task = TaskCreate(name=" test ", protocol="TELNET_SERIAL", ip="::1", port=9000)
+    task = TaskCreate(name=" test ", protocol="TELNET_SERIAL", ip="::1", port=9000, resourceId="device")
     assert task.name == "test"
     assert task.initialCommands == []
     with pytest.raises(ValidationError):
-        TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22)
+        TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22, resourceId="device")
 
 
 def test_password_spaces_are_preserved():
     task = TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22,
-                      username="root", password="  secret  ")
+                      username="root", password="  secret  ", resourceId="device")
     assert task.password == "  secret  "
 
 

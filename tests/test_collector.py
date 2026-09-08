@@ -41,6 +41,7 @@ def test_collector_writes_received_chunks_in_exact_order_and_initializes_command
             {
                 "id": "task-a",
                 "runId": "run-a",
+                "storageIdentity": "testingdevice",
                 "protocolType": "TELNET_SERIAL",
                 "initialCommands": [{"command": "prepare"}, {"command": "start", "newline": "\r\n"}],
                 "scheduledCommands": [],
@@ -68,7 +69,7 @@ def test_manual_command_is_serialized_after_initialization_and_never_replayed(tm
     async def scenario():
         connection = FakeConnection()
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "protocolType": "TELNET_SERIAL", "initialCommands": []},
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "protocolType": "TELNET_SERIAL", "initialCommands": []},
             tmp_path,
             connection_factory=lambda _: connection,
         )
@@ -88,7 +89,7 @@ def test_manual_command_waits_for_its_prompt_within_serial_queue(tmp_path):
         connection = FakeConnection()
         connection.reply_on_write = b"manual-ready>"
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": []},
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []},
             tmp_path,
             connection_factory=lambda _: connection,
         )
@@ -110,6 +111,7 @@ def test_initial_command_prompt_is_read_by_live_reader_before_collecting(tmp_pat
             {
                 "id": "task-a",
                 "runId": "run-a",
+                "storageIdentity": "testingdevice",
                 "initialCommands": [{"command": "configure", "prompt": "device-ready>"}],
             },
             tmp_path,
@@ -134,7 +136,7 @@ def test_stopping_before_scheduled_send_does_not_consume_durable_budget(tmp_path
 
         collector = Collector(
             {
-                "id": "task-a", "runId": "run-a", "initialCommands": [],
+                "id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": [],
                 "scheduledCommands": [{"id": "periodic", "command": "status", "totalExecutions": 1, "intervalSeconds": 10}],
             },
             tmp_path,
@@ -155,7 +157,7 @@ def test_idle_timeout_closes_connection_and_reports_without_writing_commands(tmp
         connection = FakeConnection()
         states = []
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": [], "logIdleTimeoutSeconds": .02},
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": [], "logIdleTimeoutSeconds": .02},
             tmp_path, connection_factory=lambda _: connection, on_state=lambda state, _details: states.append(state),
         )
         await collector.start()
@@ -171,7 +173,7 @@ def test_stop_waits_for_reader_final_flush_and_archive(tmp_path):
         connection = FakeConnection()
         archives = []
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": []}, tmp_path,
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
             connection_factory=lambda _: connection, on_archive=archives.append,
         )
         await collector.start()
@@ -190,7 +192,7 @@ def test_reader_failure_still_unblocks_wait_closed_and_releases_connection(tmp_p
         connection = FailingReadConnection()
         states = []
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": []}, tmp_path,
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
             connection_factory=lambda _: connection, on_state=lambda state, _details: states.append(state),
         )
         await collector.start()
@@ -207,7 +209,7 @@ def test_stop_allows_reconnect_after_network_reader_error(tmp_path):
     async def scenario():
         connection = FailingReadConnection()
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": []}, tmp_path,
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
             connection_factory=lambda _: connection,
         )
         await collector.start()
@@ -221,7 +223,7 @@ def test_storage_failure_is_not_retried_during_stop(tmp_path):
     async def scenario():
         connection = FakeConnection()
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": []}, tmp_path,
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
             connection_factory=lambda _: connection,
         )
         attempts = 0
@@ -247,7 +249,7 @@ def test_log_prefixes_cross_chunk_lines_empty_lines_and_duplicate_content(tmp_pa
         connection = FakeConnection()
         chunks = []
         collector = Collector(
-            {"id": "task-a", "runId": "run-a", "initialCommands": []}, tmp_path,
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
             connection_factory=lambda _: connection, on_log=lambda chunk: chunks.append(chunk.data),
         )
         await collector.start()

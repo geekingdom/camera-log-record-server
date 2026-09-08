@@ -10,6 +10,7 @@ await context.addInitScript(() => sessionStorage.setItem("camera-log-record-toke
 const originalError = "未收到完整调试密文，疑似锁定或响应超时；已停止任务，不自动重试";
 const task = {
   id: "status-fixture", name: "串口任务状态验收-" + "长名称".repeat(15),
+  resourceId: "serial-resource-fixture",
   protocol: "TELNET_SERIAL", ip: "192.0.2.1", port: 10003,
   status: "ERROR", desiredState: "STOPPED", error: originalError,
   shellMode: "PSH", debugPhase: "FAILED", runId: "r".repeat(64), sessionId: "s".repeat(64),
@@ -25,6 +26,7 @@ await context.route("**/api/v1/**", async route => {
     seenFilters.push(url.searchParams.get("status"));
     items = [task];
   }
+  if (url.pathname === "/api/v1/resources") items = [{ id: "serial-resource-fixture", name: "状态串口服务器", kind: "SERIAL_SERVER", ip: task.ip, version: 1 }];
   await route.fulfill({ json: { items, total: items.length, page: 1, pageSize: 20 } });
 });
 const page = await context.newPage();
@@ -37,6 +39,7 @@ const output = "output/playwright";
 try {
   await mkdir(output, { recursive: true });
   await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("cell", { name: "采集失败", exact: true }).waitFor();
   await page.locator(".task-filters .el-select").click();
   const filtered = page.waitForResponse(response => response.url().includes("status=BLOCKED"));

@@ -70,6 +70,7 @@ def test_blocked_manual_debug_recovers_channel_without_replaying_password_or_los
             {
                 "id": "task",
                 "runId": "run",
+                "storageIdentity": "testingdevice",
                 "initialCommands": [{"command": "debug", "timeoutSeconds": 0.03}],
             },
             tmp_path,

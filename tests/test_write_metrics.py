@@ -82,7 +82,7 @@ async def test_collector_measures_batch_wait_and_write_but_not_websocket_callbac
     async def publish(_chunk):
         clock[0] += 5
 
-    collector = Collector({"id": "task"}, tmp_path, connection_factory=lambda _: None, on_log=publish)
+    collector = Collector({"id": "task", "storageIdentity": "testingdevice"}, tmp_path, connection_factory=lambda _: None, on_log=publish)
     collector.write_latency = WriteLatency(clock=lambda: clock[0])
     write = collector._writer.write_many
 
@@ -101,7 +101,7 @@ async def test_collector_measures_batch_wait_and_write_but_not_websocket_callbac
 
 async def test_failed_write_never_becomes_a_successful_latency_sample(tmp_path):
     clock = [0.0]
-    collector = Collector({"id": "task"}, tmp_path, connection_factory=lambda _: None)
+    collector = Collector({"id": "task", "storageIdentity": "testingdevice"}, tmp_path, connection_factory=lambda _: None)
     collector.write_latency = WriteLatency(clock=lambda: clock[0])
 
     async def failed_write(_chunks):

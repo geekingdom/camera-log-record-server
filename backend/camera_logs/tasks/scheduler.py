@@ -12,6 +12,7 @@ from pymongo.errors import DuplicateKeyError
 
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.resources.lifecycle import reconcile_deleted_resources
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 async def schedule_once(repo):
     """在一次持有调度租约的周期内处理停止、失联和待分配任务。"""
     db = repo.db
+    await reconcile_deleted_resources(repo)
     cutoff = now() - timedelta(seconds=30)
     async for node in db.nodes.find({"heartbeat": {"$lt": cutoff}}):
         await db.tasks.update_many({"nodeId": node["id"], "status": {"$nin": ["STOPPED", "BLOCKED"]}},
@@ -32,6 +34,7 @@ async def schedule_once(repo):
     if active >= repo.settings.cluster_capacity:
         return
     async for task in db.tasks.find({"desiredState": "RUNNING", "nodeId": None,
+                                    "resourceDeleted": {"$ne": True},
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True})]
@@ -81,7 +84,7 @@ async def schedule_once(repo):
                     {"$unset": {"resumeClaimToken": "", "resumeClaimExpires": ""}},
                 )
             await db.tasks.update_one({"id": task["id"], "nodeId": None},
-                {"$set": {"status": "BLOCKED", "error": "采集端点已被活动任务占用"}})
+                {"$set": {"status": "BLOCKED", "error": "同一任务已有活动运行锁"}})
             continue
         if resuming:
             owned_lock = await db.endpoint_locks.find_one(
@@ -93,7 +96,8 @@ async def schedule_once(repo):
                     {"$unset": {"resumeClaimToken": "", "resumeClaimExpires": ""}},
                 )
                 continue
-        claim_query = {"id": task["id"], "nodeId": None, "desiredState": "RUNNING"}
+        claim_query = {"id": task["id"], "nodeId": None, "desiredState": "RUNNING",
+                       "resourceDeleted": {"$ne": True}}
         if resuming:
             claim_query.update({
                 "runId": run_id, "status": "PAUSED", "resumeClaimToken": claim_token,

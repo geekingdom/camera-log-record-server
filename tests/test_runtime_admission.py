@@ -25,7 +25,8 @@ async def test_obsolete_assignment_does_not_open_connection(tmp_path, change):
     """即使旧运行对象仍存活，数据库准入失败也必须在调用连接工厂前退出。"""
     repo = repository(tmp_path)
     task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
-            "status": "PENDING", "passwordEncrypted": repo.encrypt(""), "scheduledCommands": []}
+            "status": "PENDING", "passwordEncrypted": repo.encrypt(""), "scheduledCommands": [],
+            "storageIdentity": "testingdevice"}
     await repo.db.tasks.insert_one(task | change)
     factory = AsyncMock(side_effect=asyncssh.PermissionDenied("synthetic denied"))
     runtime = SessionRuntime(repo, task, factory)
@@ -38,7 +39,8 @@ async def test_blocking_during_connecting_callback_prevents_factory(tmp_path, mo
     """复位已成功但 CONNECTING 回调前刚被阻塞，仍不能继续打开连接。"""
     repo = repository(tmp_path)
     task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
-            "status": "PENDING", "passwordEncrypted": repo.encrypt(""), "scheduledCommands": []}
+            "status": "PENDING", "passwordEncrypted": repo.encrypt(""), "scheduledCommands": [],
+            "storageIdentity": "testingdevice"}
     await repo.db.tasks.insert_one(task.copy())
     original = SessionRuntime.on_state
 

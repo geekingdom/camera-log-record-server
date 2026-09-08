@@ -5,6 +5,10 @@ import type {
   LogHour,
   Node,
   Page,
+  Resource,
+  ResourceAuthentication,
+  ResourceAuthType,
+  ResourceKind,
   Task,
   Template,
 } from "./types";
@@ -87,6 +91,8 @@ const taskFields = [
   "encoding",
   "loginPrompt",
   "passwordPrompt",
+  "resourceId",
+  "serialServerResourceId",
   "clearPassword",
 ];
 const templateFields = [
@@ -103,11 +109,49 @@ function pick(source: object, fields: string[]) {
   );
 }
 export const api = {
+  resources: (
+    page?: number,
+    pageSize?: number,
+    filters?: { search?: string; kind?: ResourceKind; includeDeleted?: string },
+  ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
+  resource: (id: string) => request<Resource>(`/resources/${id}`),
+  updateResource: (id: string, resource: object) => request<Resource>(`/resources/${id}`, {
+    method: "PATCH", body: JSON.stringify(resource),
+  }),
+  deleteResource: (id: string, version: number) => request<Resource>(`/resources/${id}?version=${version}`, {
+    method: "DELETE",
+  }),
+  authenticateResource: (input: {
+    name: string;
+    kind: ResourceKind;
+    ip: string;
+    username: string;
+    password: string;
+    authType: ResourceAuthType;
+  }) =>
+    request<ResourceAuthentication>("/resources/authenticate", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: JSON.stringify(input),
+    }),
+  createResource: (resource: {
+    name: string;
+    kind: ResourceKind;
+    ip: string;
+    username?: string;
+    password?: string;
+    authType?: ResourceAuthType;
+  }) =>
+    request<Resource>("/resources", {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: JSON.stringify(resource),
+    }),
   // 列表筛选通过后端分页完成，避免只搜索当前页造成“找不到”错觉。
   tasks: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; status?: string },
+    filters?: { search?: string; status?: string; resourceId?: string },
   ) => request<Page<Task>>(`/tasks${query(page, pageSize, filters)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (

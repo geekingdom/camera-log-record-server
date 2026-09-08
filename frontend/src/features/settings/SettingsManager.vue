@@ -4,6 +4,7 @@ import { onMounted, ref } from "vue";
 import { Edit3, Plus, RefreshCw, Save, ServerCog, Settings2 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { ApiError } from "../../shared/api";
+import { confirmAction } from "../../shared/confirm";
 import { settingsApi, type NodeConfig, type NodeRegistration, type PlatformSettings } from "./api";
 
 const loading = ref(false);
@@ -35,6 +36,7 @@ async function load() {
 
 async function saveRetention() {
   if (savingRetention.value || !settings.value) return;
+  if (!await confirmAction(`确认将日志保存天数设为 ${retentionDays.value} 天吗？`, "确认保存配置")) return;
   savingRetention.value = true;
   try {
     settings.value = await settingsApi.updatePlatform({ retentionDays: retentionDays.value, version: settings.value.version });
@@ -67,6 +69,7 @@ function openEdit(node: NodeConfig) {
 async function saveNode() {
   if (savingNode.value) return;
   if (!nodeForm.value.id.trim() || !nodeForm.value.url.trim()) return ElMessage.warning("请填写节点 ID 和服务地址");
+  if (!await confirmAction(`确认保存节点“${nodeForm.value.id.trim()}”的配置吗？`, "确认保存配置")) return;
   savingNode.value = true;
   try {
     if (editingNode.value) {

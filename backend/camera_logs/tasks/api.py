@@ -11,6 +11,7 @@ from pymongo import ReturnDocument
 from camera_logs.common.database import now, public
 from camera_logs.common.models import TaskCreate, TaskPatch, new_id
 from camera_logs.common.security import actor, authorize
+from camera_logs.tasks.resource_binding import bind_resource
 
 
 def install_task_routes(app, repo, listing):
@@ -19,15 +20,16 @@ def install_task_routes(app, repo, listing):
 
     @app.get("/api/v1/tasks")
     async def tasks(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
-                    status: str | None = None, search: str | None = None, deviceId: str | None = None):
+                    status: str | None = None, search: str | None = None,
+                    resourceId: str | None = None):
         authorize(user, "tasks:read")
         query = {}
         if user.get("taskIds") is not None:
             query["id"] = {"$in": user["taskIds"]}
         if status:
             query["status"] = status
-        if deviceId:
-            query["deviceId"] = deviceId
+        if resourceId:
+            query["$and"] = [{"$or": [{"resourceId": resourceId}, {"serialServerResourceId": resourceId}]}]
         if search:
             import re
             query["$or"] = [{key: {"$regex": re.escape(search), "$options": "i"}} for key in ("name", "ip")]
@@ -42,16 +44,25 @@ def install_task_routes(app, repo, listing):
         if user.get("taskIds") is not None:
             raise HTTPException(403, "受限账号不能创建授权范围外的新任务")
         async def build(identifier):
+            binding = await bind_resource(repo(), body)
             doc = body.model_dump()
             password = doc.pop("password")
             auto_start = doc.pop("autoStart")
             for cmd in doc["scheduledCommands"]:
                 cmd["id"] = new_id()
-            doc.update(id=identifier, version=1, deviceId=body.deviceId or identifier,
+            doc.update(id=identifier, version=1,
                        passwordEncrypted=repo().encrypt(password), hasPassword=bool(password),
                        desiredState="STOPPED", status="STOPPED", nodeId=None,
                        createdAt=now(), updatedAt=now(), generation=0)
+            doc.update(binding)
             await repo().db.tasks.insert_one(doc)
+            # 资源删除可能与创建交错；落库后再次检查，禁止删除完成后启动迟到任务。
+            for resource_id in filter(None, (body.resourceId, body.serialServerResourceId)):
+                resource = await repo().get("resources", resource_id)
+                if resource.get("deletedAt"):
+                    await repo().db.tasks.update_one({"id": identifier},
+                        {"$set": {"resourceDeleted": True, "desiredState": "STOPPED"}})
+                    raise HTTPException(409, "设备资源已删除，任务不会启动")
             if auto_start:
                 operation = await change_state(identifier, "RUNNING", user)
                 doc = await repo().get("tasks", identifier)
@@ -88,6 +99,7 @@ def install_task_routes(app, repo, listing):
         except ValueError as exc:
             raise HTTPException(422, "任务配置无效，请检查协议、账号和命令字段") from exc
         doc = checked.model_dump(exclude={"autoStart", "password"})
+        doc.update(await bind_resource(repo(), checked))
         if "scheduledCommands" in updates:
             for cmd in doc["scheduledCommands"]:
                 cmd["id"] = new_id()
@@ -98,10 +110,11 @@ def install_task_routes(app, repo, listing):
         if restarting:
             authorize(user, "tasks:control", task_id)
             doc.update(desiredState="STOPPED", restartRequested=True)
-        changed = await repo().db.tasks.find_one_and_update({"id": task_id, "version": body.version},
+        changed = await repo().db.tasks.find_one_and_update(
+            {"id": task_id, "version": body.version, "resourceDeleted": {"$ne": True}},
             {"$set": doc, "$inc": {"version": 1}}, return_document=ReturnDocument.AFTER)
         if not changed:
-            raise HTTPException(409, "配置版本已变化，请刷新")
+            raise HTTPException(409, "配置版本已变化或设备资源已删除，请刷新")
         await repo().audit(user["id"], "edit_task", task_id)
         return public(changed)
 
@@ -109,6 +122,11 @@ def install_task_routes(app, repo, listing):
         """记录用户控制意图并返回可轮询操作；连接释放成功前不报告暂停或停止完成。"""
         authorize(user, "tasks:control", task_id)
         task = await repo().get("tasks", task_id)
+        if desired != "STOPPED":
+            for resource_id in filter(None, (task["resourceId"], task.get("serialServerResourceId"))):
+                resource = await repo().get("resources", resource_id)
+                if resource.get("deletedAt") or task.get("resourceDeleted"):
+                    raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
         if desired == "PAUSED" and task["protocol"] != "SSH":
             raise HTTPException(409, "只有SSH任务支持暂停")
         if desired == "PAUSED" and task["desiredState"] not in ("RUNNING", "PAUSED"):
@@ -135,7 +153,14 @@ def install_task_routes(app, repo, listing):
             if task["status"] == "PAUSED" and task.get("nodeId") is None:
                 await repo().db.endpoint_locks.delete_one({"taskId": task_id, "runId": task.get("runId")})
                 await repo().db.runs.update_one({"id": task.get("runId")}, {"$set": {"endedAt": now()}})
-        await repo().db.tasks.update_one({"id": task_id}, {"$set": state_update})
+        state_query = {"id": task_id}
+        if desired != "STOPPED":
+            state_query["resourceDeleted"] = {"$ne": True}
+        changed = await repo().db.tasks.update_one(state_query, {"$set": state_update})
+        if not changed.matched_count:
+            await repo().db.operations.update_one({"id": operation["id"]},
+                {"$set": {"status": "CANCELLED", "completedAt": now()}})
+            raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
         await repo().audit(user["id"], "control:"+desired, task_id)
         return operation
 

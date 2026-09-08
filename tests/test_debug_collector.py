@@ -7,13 +7,18 @@ import base64
 import re
 
 import pytest
-from camera_logs.collection.collector import Collector
+from camera_logs.collection.collector import Collector as RuntimeCollector
 
 # 261 个合成字节编码后恰为 348 字符，接近设备实际 PSH 密文长度但不含真实数据。
 CHALLENGE = base64.b64encode(b"x" * 261).decode()
 PASSWORD = "synthetic-debug-password"
 PREFIX = re.compile(rb"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
 PSH_LS = b"'ls' Not Supported, Try 'help'\r\n# "
+
+
+def Collector(task, *args, **kwargs):
+    """为本模块所有合成采集任务显式附加统一的设备存储身份。"""
+    return RuntimeCollector({"storageIdentity": "testingdevice", **task}, *args, **kwargs)
 
 
 class FakeConnection:

@@ -33,14 +33,18 @@ class Repository:
 
     async def initialize(self):
         """创建唯一、查询和 TTL 索引；重复调用不会改变已有业务数据。"""
-        for name in ("tasks", "templates", "operations", "commands", "nodes", "node_configs", "platform_settings", "files", "jobs", "tokens", "runs"):
+        for name in ("tasks", "templates", "operations", "commands", "nodes", "node_configs", "platform_settings", "files", "jobs", "tokens", "runs", "resources"):
             await self.db[name].create_index("id", unique=True)
         await self.db.templates.create_index("name", unique=True)
         await self.db.idempotency.create_index([("actor", 1), ("key", 1)], unique=True)
         await self.db.idempotency.create_index("expiresAt", expireAfterSeconds=0)
-        await self.db.endpoint_locks.create_index("endpoint", unique=True)
+        # 每个任务只保留一个活动运行锁；不同任务可以使用同一设备端点。
+        await self.db.endpoint_locks.create_index("taskId", unique=True)
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1)])
+        await self.db.tasks.create_index("resourceId")
+        await self.db.tasks.create_index("serialServerResourceId")
+        await self.db.resources.create_index("deletionState")
         await self.db.commands.create_index([("taskId", 1), ("createdAt", -1)])
         await self.db.tokens.create_index("tokenHash", unique=True)
         await self.db.download_sessions.create_index("expiresAt", expireAfterSeconds=0)

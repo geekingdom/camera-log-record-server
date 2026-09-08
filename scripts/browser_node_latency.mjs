@@ -54,7 +54,7 @@ await context.route("**/api/v1/**", async (route) => {
   const request = route.request();
   const path = new URL(request.url()).pathname;
   if (request.method() !== "GET") throw new Error(`未模拟的写请求：${request.method()} ${path}`);
-  if (path === "/api/v1/tasks" || path === "/api/v1/command-templates" || path === "/api/v1/service-tokens"
+  if (path === "/api/v1/resources" || path === "/api/v1/tasks" || path === "/api/v1/command-templates" || path === "/api/v1/service-tokens"
     || path === "/api/v1/audit-events" || path === "/api/v1/runtime-events")
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (path === "/api/v1/nodes") return json(route, { items: nodes, total: nodes.length, page: 1, pageSize: 100 });

@@ -71,7 +71,7 @@ async def test_telnet_psh_syslog_interleaving_keeps_single_connection_and_raw_lo
             return PASSWORD
 
         collector = Collector(
-            {"id": "telnet-debug", "runId": "run", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": port,
+            {"id": "telnet-debug", "runId": "run", "storageIdentity": "testingdevice", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": port,
              "pshSerialCharacterInterval": .001,
              "initialCommands": [{"command": "debug", "timeoutSeconds": 3}, {"command": "next"}], "scheduledCommands": []},
             tmp_path, connection_factory=connect, resolve_debug_password=resolve,

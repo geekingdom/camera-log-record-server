@@ -4,6 +4,7 @@ import { onBeforeUnmount, ref, watch } from "vue";
 import { Download, FileSearch, RefreshCw, X } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
+import { confirmAction } from "../../shared/confirm";
 import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
 import LogFileViewer from "./LogFileViewer.vue";
@@ -152,6 +153,7 @@ async function search() {
 }
 async function cancel() {
   if (!runningJob) return;
+  if (!await confirmAction("确认取消当前日志作业吗？", "确认取消作业")) return;
   try {
     await api.cancelJob(runningJob.id, runningJob.kind);
   } catch (error) {

@@ -152,3 +152,53 @@ async def test_expired_resume_claim_is_recovered_after_scheduler_crash(tmp_path)
     assert "resumeClaimToken" not in task
     assert lock is not None
     assert "claimToken" not in lock
+
+
+async def test_scheduler_assigns_same_endpoint_to_separate_tasks(tmp_path):
+    """同一设备端点的不同任务各自持有运行锁，不能因端点重复被阻塞。"""
+    repo = Repository(
+        AsyncMongoMockClient().db,
+        Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path),
+    )
+    await repo.initialize()
+    await repo.db.nodes.insert_one(
+        {"id": "node-a", "heartbeat": now(), "diskPercent": 10, "accepting": True, "capacity": 100}
+    )
+    await repo.db.tasks.insert_many([
+        {"id": "first", "ip": "127.0.0.1", "port": 22, "nodeId": None,
+         "status": "PENDING", "desiredState": "RUNNING"},
+        {"id": "second", "ip": "127.0.0.1", "port": 22, "nodeId": None,
+         "status": "PENDING", "desiredState": "RUNNING"},
+    ])
+
+    await schedule_once(repo)
+
+    assert (await repo.get("tasks", "first"))["nodeId"] == "node-a"
+    assert (await repo.get("tasks", "second"))["nodeId"] == "node-a"
+    assert await repo.db.endpoint_locks.count_documents({"endpoint": "127.0.0.1:22"}) == 2
+
+
+async def test_task_lock_conflict_is_not_recovered_as_a_legacy_endpoint_conflict(tmp_path):
+    """同任务已有运行锁仍保持阻塞，初始化迁移不能把它误恢复为待领取。"""
+    repo = Repository(
+        AsyncMongoMockClient().db,
+        Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path),
+    )
+    await repo.initialize()
+    await repo.db.nodes.insert_one(
+        {"id": "node-a", "heartbeat": now(), "diskPercent": 10, "accepting": True, "capacity": 100}
+    )
+    await repo.db.tasks.insert_one(
+        {"id": "task", "ip": "127.0.0.1", "port": 22, "nodeId": None,
+         "status": "PENDING", "desiredState": "RUNNING"}
+    )
+    await repo.db.endpoint_locks.insert_one(
+        {"endpoint": "127.0.0.1:22", "taskId": "task", "runId": "active-run"}
+    )
+
+    await schedule_once(repo)
+    await repo.initialize()
+
+    task = await repo.get("tasks", "task")
+    assert task["status"] == "BLOCKED"
+    assert task["error"] == "同一任务已有活动运行锁"

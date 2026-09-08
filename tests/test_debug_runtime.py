@@ -26,7 +26,7 @@ async def repository(tmp_path):
     task = {
         "id": "debug-task", "runId": "debug-run", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 23,
         "passwordEncrypted": repo.encrypt(""), "scheduledCommands": [], "nodeId": "node-debug",
-        "status": "COLLECTING", "desiredState": "RUNNING",
+        "status": "COLLECTING", "desiredState": "RUNNING", "storageIdentity": "testingdevice",
     }
     await repo.db.tasks.insert_one(task)
     await repo.db.runs.insert_one({"id": "debug-run"})

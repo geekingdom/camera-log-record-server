@@ -1,5 +1,24 @@
 // 前后端共享的数据契约。状态保留 string 扩展，兼容服务端后续增加状态而不阻断列表渲染。
 export type Protocol = "SSH" | "TELNET_DEVICE" | "TELNET_SERIAL";
+export type ResourceKind = "HIKVISION_NETWORK" | "SERIAL_SERVER";
+export type ResourceAuthType = "DIGEST" | "BASIC";
+export interface ResourceAuthentication {
+  model?: string;
+  subSerialNumber?: string;
+  softwareVersion?: string;
+}
+export interface Resource extends ResourceAuthentication {
+  id: string;
+  name: string;
+  kind: ResourceKind;
+  ip: string;
+  username?: string;
+  authType?: ResourceAuthType;
+  version?: number;
+  deletedAt?: string | null;
+  taskCount?: number;
+  activeTaskCount?: number;
+}
 export type TaskActualStatus =
   | "STOPPED"
   | "CONNECTING"
@@ -42,9 +61,11 @@ export interface Task {
   updatedAt?: string;
   version?: number;
   description?: string;
-  deviceId?: string;
   sourceTemplateId?: string | null;
   sourceTemplateVersion?: number | null;
+  resourceId: string;
+  resourceDeleted?: boolean;
+  serialServerResourceId?: string | null;
   encoding?: string;
   loginPrompt?: string;
   passwordPrompt?: string;

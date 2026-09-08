@@ -62,6 +62,7 @@ class HourlyWriter:
         session_id: str,
         root: Path,
         *,
+        storage_identity: str,
         task_name: str | None = None,
         device_ip: str | None = None,
         timezone: str = "Asia/Shanghai",
@@ -70,6 +71,7 @@ class HourlyWriter:
         self.task_id, self.run_id, self.session_id = task_id, run_id, session_id
         self.task_name = safe_filename_component(task_name or task_id)
         self.device_ip = safe_device_address(device_ip or "unknown")
+        self.storage_identity = safe_filename_component(storage_identity)
         self.root = Path(root)
         self.zone = ZoneInfo(timezone)
         self._now = now or (lambda: datetime.now(UTC))
@@ -123,15 +125,17 @@ class HourlyWriter:
         return value.astimezone(zone).replace(minute=0, second=0, microsecond=0)
 
     def _base(self, hour: datetime) -> Path:
+        """按设备身份建立共享父目录，并用任务、运行和会话继续隔离日志。"""
+        parent = self.root / "resources" / self.storage_identity
         return (
-            self.root / self.task_id / self.run_id / self.session_id /
+            parent / self.task_id / self.run_id / self.session_id /
             f"{hour:%Y}" / f"{hour:%m}" / f"{hour:%d}" / f"{hour:%H}"
         )
 
     def _open_sync(self, hour: datetime) -> None:
         base = self._base(hour)
         base.mkdir(parents=True, exist_ok=True)
-        # 同时识别新格式和历史 part-001 格式，避免升级后覆写既有分段。
+        # 同一小时内按现有分段号递增，避免并发收尾后的文件名碰撞。
         parts = []
         for path in base.iterdir():
             if not path.is_file():

@@ -256,9 +256,14 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 if not asset.content:
                     raise AssertionError("前端模块入口为空")
             await wait_for(client, "/api/v1/nodes", lambda item: bool(item.get("items")), "采集节点注册")
+            resource = await client.post("/api/v1/resources", json={
+                "name": f"容器验收串口资源-{suffix}", "kind": "SERIAL_SERVER", "ip": args.device_host,
+            }, headers={"Idempotency-Key": f"container-resource-{suffix}"})
+            resource.raise_for_status()
             body = {"name": f"容器验收串口-{suffix}", "description": "脚本自动清理的合成任务",
                     "protocol": "TELNET_SERIAL", "ip": args.device_host, "port": simulator.port,
-                    "initialCommands": [{"command": command} for command in INITIAL], "scheduledCommands": [], "autoStart": True}
+                    "resourceId": resource.json()["id"], "initialCommands": [{"command": command} for command in INITIAL],
+                    "scheduledCommands": [], "autoStart": True}
             response = await client.post("/api/v1/tasks", json=body, headers={"Idempotency-Key": f"container-verify-{suffix}"})
             response.raise_for_status()
             task_id = response.json()["id"]

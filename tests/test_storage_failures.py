@@ -11,7 +11,7 @@ from camera_logs.logs.storage import HourlyWriter
 @pytest.mark.parametrize("failed_sync", [1, 2])
 async def test_close_sync_failure_releases_handle_and_remains_failed(tmp_path, monkeypatch, failed_sync):
     """分别注入正文和索引同步失败，不允许第二次关闭把不确定结果变成成功。"""
-    writer = HourlyWriter("task", "run", "session", tmp_path)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")
     await writer.write(b"preserve-this-line\n")
     handle, path = writer._handle, writer.active_path
     calls = 0
@@ -61,7 +61,7 @@ async def test_collector_sync_failure_closes_device_and_reports_stop_failure(tmp
     connection = Connection()
     handles, archives = [], []
     collector = Collector(
-        {"id": "task", "runId": "run", "initialCommands": []}, tmp_path,
+        {"id": "task", "runId": "run", "initialCommands": [], "storageIdentity": "testingdevice"}, tmp_path,
         connection_factory=lambda _: connection,
         on_log=lambda _: handles.append(collector._writer._handle),
         on_archive=archives.append,

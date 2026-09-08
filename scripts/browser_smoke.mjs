@@ -24,6 +24,7 @@ page.setDefaultTimeout(8000);
 const errors = [];
 const screenshots = "output/playwright";
 const name = `浏览器验收-${Date.now()}`;
+let createdTemplateId;
 page.on("pageerror", (error) => errors.push(error.message));
 page.on("console", (message) => {
   if (message.type() === "error") errors.push(message.text());
@@ -83,6 +84,9 @@ async function assertMobileDrawer(heading) {
 try {
   await mkdir(screenshots, { recursive: true });
   await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
+  await page.screenshot({ path: `${screenshots}/resources-desktop.png`, fullPage: true });
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("button", { name: "编辑任务" }).first().waitFor();
   await page.screenshot({
     path: `${screenshots}/tasks-desktop.png`,
@@ -95,7 +99,10 @@ try {
   await page.getByLabel("新增初始化命令", { exact: true }).fill("prtHardInfo");
   await page.getByLabel("新增初始化命令", { exact: true }).press("Enter");
   await page.getByLabel("初始化命令 1", { exact: true }).waitFor();
+  const templateCreated = page.waitForResponse(response => new URL(response.url()).pathname === "/api/v1/command-templates" && response.request().method() === "POST");
   await page.getByRole("button", { name: "保存模板", exact: true }).click();
+  await page.getByRole("dialog", { name: "确认保存模板", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
+  createdTemplateId = (await (await templateCreated).json()).id;
   await page
     .getByRole("row")
     .filter({ has: page.getByRole("cell", { name, exact: true }) })
@@ -213,5 +220,11 @@ try {
     );
   console.log(JSON.stringify({ passed: true, screenshots, consoleErrors: 0 }));
 } finally {
-  await browser.close();
+  try {
+    if (createdTemplateId) {
+      await context.request.delete(`http://127.0.0.1:5173/api/v1/command-templates/${createdTemplateId}?version=1`, {
+        headers: { Authorization: `Bearer ${process.env.BOOTSTRAP_TOKEN}` },
+      });
+    }
+  } finally { await browser.close(); }
 }

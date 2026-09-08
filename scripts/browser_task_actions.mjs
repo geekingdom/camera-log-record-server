@@ -18,13 +18,16 @@ const tasks = [
   { id: "error", name: "未归属错误", protocol: "SSH", ip: "192.0.2.8", port: 22, status: "ERROR", desiredState: "STOPPED", nodeId: null },
   { id: "blocked", name: "隔离等待", protocol: "SSH", ip: "192.0.2.9", port: 22, status: "BLOCKED", desiredState: "RUNNING" },
   { id: "stopping", name: "停止中过渡", protocol: "SSH", ip: "192.0.2.5", port: 22, status: "STOPPING", desiredState: "STOPPED" },
-].map(task => ({ ...task, initialCommands: [], scheduledCommands: [] }));
+].map(task => ({ ...task, resourceId: task.protocol === "TELNET_SERIAL" ? "serial-resource-fixture" : "network-resource-fixture", initialCommands: [], scheduledCommands: [] }));
 
 await context.route("**/api/v1/**", async route => {
   const request = route.request();
   assert.equal(request.method(), "GET", "操作可见性验收不得发出修改请求");
   const url = new URL(request.url());
-  const items = url.pathname === "/api/v1/tasks" ? tasks : [];
+  const items = url.pathname === "/api/v1/tasks" ? tasks : url.pathname === "/api/v1/resources" ? [
+    { id: "serial-resource-fixture", name: "模拟串口服务器", kind: "SERIAL_SERVER", ip: "192.0.2.1", version: 1 },
+    { id: "network-resource-fixture", name: "模拟网络设备", kind: "HIKVISION_NETWORK", ip: "192.0.2.2", model: "fixture", subSerialNumber: "fixture", version: 1 },
+  ] : [];
   await route.fulfill({ json: { items, total: items.length, page: 1, pageSize: 20 } });
 });
 
@@ -46,6 +49,7 @@ async function actionNames(name) {
 try {
   await mkdir("output/playwright", { recursive: true });
   await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByText("采集中串口", { exact: true }).waitFor();
   assert.deepEqual(await actionNames("采集中串口"), ["停止任务"]);
   assert.deepEqual(await actionNames("采集中设备"), ["停止任务"]);

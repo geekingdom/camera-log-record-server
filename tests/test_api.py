@@ -13,11 +13,16 @@ def client(tmp_path):
                         log_root=tmp_path, node_id="test", start_background=False)
     with TestClient(create_app(settings, AsyncMongoMockClient().camera_logs)) as client:
         client.headers["Authorization"] = "Bearer test-admin-token"
+        client.portal.call(client.app.state.repo.db.resources.insert_one, {
+            "id": "fixture-device", "name": "测试设备", "kind": "HIKVISION_NETWORK",
+            "ip": "127.0.0.1", "model": "test-model", "subSerialNumber": "test-serial",
+            "authenticatedAt": "2026-09-08T00:00:00Z"})
         yield client
 
 
 def test_task_idempotency_and_password_secrecy(client):
-    body = {"name": "camera", "protocol": "SSH", "ip": "127.0.0.1", "port": 22, "username": "root", "password": " secret "}
+    body = {"name": "camera", "protocol": "SSH", "ip": "127.0.0.1", "port": 22, "username": "root",
+            "password": " secret ", "resourceId": "fixture-device"}
     headers = {"Idempotency-Key": "create-task-1"}
     result = client.post("/api/v1/tasks", json=body, headers=headers)
     assert result.status_code == 201, result.text
@@ -39,6 +44,7 @@ def test_template_snapshot_and_separate_command_ids(client):
               "scheduledCommands": [{"command": "uptime", "totalExecutions": 2, "intervalSeconds": 1}]}).json()
     tasks = [client.post("/api/v1/tasks", headers={"Idempotency-Key": str(i)}, json={
         "name": str(i), "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9000+i,
+        "resourceId": "fixture-device",
         "sourceTemplateId": template["id"], "sourceTemplateVersion": template["version"],
         "initialCommands": template["initialCommands"], "scheduledCommands": template["scheduledCommands"]}).json() for i in range(2)]
     assert tasks[0]["scheduledCommands"][0]["id"] != tasks[1]["scheduledCommands"][0]["id"]
@@ -54,7 +60,8 @@ def test_auth_and_invalid_commands(client):
 
 def test_stop_idempotence_and_start_endpoints(client):
     task = client.post("/api/v1/tasks", headers={"Idempotency-Key": "serial"},
-        json={"name": "serial", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9900}).json()
+        json={"name": "serial", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9900,
+              "resourceId": "fixture-device"}).json()
     for _ in range(2):
         result = client.post(f'/api/v1/tasks/{task["id"]}/stop')
         assert result.status_code == 202

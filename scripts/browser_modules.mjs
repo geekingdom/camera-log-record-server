@@ -8,6 +8,7 @@ const output = "output/playwright";
 const timestamp = "2026-09-08T08:00:00.000Z";
 const task = {
   id: "task-fixture", name: "模拟日志任务", protocol: "TELNET_SERIAL", ip: "192.0.2.10", port: 2001,
+  resourceId: "serial-resource-fixture",
   status: "STOPPED", desiredState: "STOPPED", initialCommands: [], scheduledCommands: [], updatedAt: timestamp,
 };
 const state = {
@@ -42,6 +43,8 @@ await context.route("**/api/v1/**", async (route) => {
 
   if (method === "GET" && path === "/api/v1/tasks")
     return json(route, { items: [task], total: 1, page: 1, pageSize: 100 });
+  if (method === "GET" && path === "/api/v1/resources")
+    return json(route, { items: [{ id: "serial-resource-fixture", name: "模块串口服务器", kind: "SERIAL_SERVER", ip: task.ip, version: 1 }], total: 1, page: 1, pageSize: 20 });
   if (method === "GET" && path === "/api/v1/command-templates")
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (method === "GET" && path === "/api/v1/nodes")
@@ -109,7 +112,7 @@ async function navigate(label) {
 try {
   await mkdir(output, { recursive: true });
   await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "采集任务", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
 
   await navigate("后台配置");
   await page.getByLabel("日志保存天数", { exact: true }).fill("14");

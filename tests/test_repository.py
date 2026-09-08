@@ -24,3 +24,19 @@ async def test_failed_create_retry_preserves_resource_identity(tmp_path):
     result = await repo.idem("user", "key", "create", {}, "tasks", build)
     assert identifiers == [result["id"], result["id"]]
     assert await repo.db.tasks.count_documents({}) == 1
+
+
+async def test_initialize_does_not_change_existing_task_state(tmp_path):
+    """开发期初始化只创建索引，不应依据历史错误文本修改任务状态。"""
+    database = AsyncMongoMockClient().db
+    await database.tasks.insert_one(
+        {"id": "blocked-task", "nodeId": None, "desiredState": "RUNNING", "status": "BLOCKED",
+         "error": "采集端点已被活动任务占用"}
+    )
+    repo = Repository(database, Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+
+    await repo.initialize()
+
+    task = await repo.get("tasks", "blocked-task")
+    assert task["status"] == "BLOCKED"
+    assert task["error"] == "采集端点已被活动任务占用"

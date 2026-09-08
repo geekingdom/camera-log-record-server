@@ -8,6 +8,7 @@ const output = "output/playwright";
 const token = "synthetic-ansi-token";
 const task = {
   id: "ansi-task", name: "ANSI 显示验证任务", protocol: "TELNET_SERIAL",
+  resourceId: "serial-resource-fixture",
   ip: "192.0.2.101", port: 23, status: "RUNNING", desiredState: "RUNNING", version: 1,
   initialCommands: [], scheduledCommands: [], updatedAt: "2026-09-08T08:00:00.000Z",
 };
@@ -46,6 +47,8 @@ await context.route("**/api/v1/**", async (route) => {
   const path = new URL(request.url()).pathname;
   if (request.method() === "GET" && path === "/api/v1/tasks")
     return json(route, { items: [task], total: 1, page: 1, pageSize: 100 });
+  if (request.method() === "GET" && path === "/api/v1/resources")
+    return json(route, { items: [{ id: "serial-resource-fixture", name: "ANSI 串口服务器", kind: "SERIAL_SERVER", ip: task.ip, version: 1 }], total: 1, page: 1, pageSize: 20 });
   if (request.method() === "GET" && path === `/api/v1/tasks/${task.id}`) return json(route, task);
   if (request.method() === "GET" && path === `/api/v1/tasks/${task.id}/log-hours`)
     return json(route, { items: [], total: 0, page: 1, pageSize: 24 });

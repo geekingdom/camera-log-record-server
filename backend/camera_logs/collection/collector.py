@@ -88,6 +88,7 @@ class Collector:
             self._root,
             task_name=str(self.task.get("name") or self.task_id),
             device_ip=str(self.task.get("ip") or "unknown"),
+            storage_identity=self.task["storageIdentity"],
         )
         self.write_latency = WriteLatency()
         self._queue: asyncio.PriorityQueue[

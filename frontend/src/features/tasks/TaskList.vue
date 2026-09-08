@@ -4,6 +4,7 @@ import { computed, ref } from "vue";
 import { CirclePause, CirclePlay, CircleStop, Edit3, Info } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
+import { confirmAction } from "../../shared/confirm";
 import type { Task } from "../../shared/types";
 import TaskDiagnostics from "./TaskDiagnostics.vue";
 import { availableTaskActions, type TaskAction } from "./taskActions";
@@ -38,7 +39,7 @@ function busy(task: Task) {
   return pendingIds.value.has(task.id);
 }
 function showsAction(task: Task, action: TaskAction) {
-  return availableTaskActions(task).includes(action);
+  return !task.resourceDeleted && availableTaskActions(task).includes(action);
 }
 // pendingIds 以任务 ID 隔离，避免某一行提交操作时误禁用其它任务。
 async function state(
@@ -46,6 +47,7 @@ async function state(
   action: "start" | "stop" | "pause" | "resume",
 ) {
   if (busy(task)) return;
+  if (!await confirmAction(`确认${action === "start" ? "启动" : action === "stop" ? "停止" : action === "pause" ? "暂停" : "继续"}任务“${task.name}”吗？`, "确认任务操作")) return;
   pendingIds.value = new Set(pendingIds.value).add(task.id);
   try {
     await api.operation(task.id, action);
@@ -106,7 +108,7 @@ const rows = computed(() => props.items);
         <el-tooltip :content="`查看任务状态 · ID: ${row.id}`">
           <el-button text :icon="Info" aria-label="查看任务状态" @click="showDiagnostics(row)" />
         </el-tooltip>
-        <el-tooltip :content="`编辑任务 · ID: ${row.id}`"
+        <el-tooltip v-if="!row.resourceDeleted" :content="`编辑任务 · ID: ${row.id}`"
           ><el-button
             text
             :icon="Edit3"

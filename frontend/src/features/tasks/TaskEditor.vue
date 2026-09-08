@@ -3,13 +3,14 @@
 import { computed, ref, watch } from "vue";
 import { ElMessage, ElMessageBox, type FormInstance } from "element-plus";
 import { api } from "../../shared/api";
-import type { Task, Template } from "../../shared/types";
+import { confirmAction } from "../../shared/confirm";
+import type { Resource, Task, Template } from "../../shared/types";
 import CommandEditor from "../commands/CommandEditor.vue";
 import LiveLogs from "../logs/LiveLogs.vue";
 import LogArchives from "../logs/LogArchives.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string }>();
+const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource }>();
 const emit = defineEmits<{ saved: [] }>();
 const blank = (): Task => ({
   id: "",
@@ -21,6 +22,8 @@ const blank = (): Task => ({
   password: "",
   initialCommands: [],
   scheduledCommands: [],
+  resourceId: "",
+  serialServerResourceId: null,
 });
 const form = ref<Task>(blank()),
   original = ref<Task>(blank());
@@ -35,12 +38,20 @@ const autoStart = ref(false),
   templateLoading = ref(false),
   saving = ref(false),
   loading = ref(false);
+const resources = ref<Resource[]>([]), resourceLoading = ref(false);
+const serialServerMode = ref<"custom" | "resource">("custom");
 const templatePageSize = 20;
 const portTouched = ref(false),
   workspace = ref("config"),
   serial = computed(() => form.value.protocol === "TELNET_SERIAL");
+const linkedResource = computed(() => resources.value.find((item) => item.id === form.value.resourceId));
+const linkedSerialServer = computed(() => resources.value.find((item) => item.id === form.value.serialServerResourceId));
+const serialUsesResource = computed(() => serial.value && Boolean(form.value.serialServerResourceId));
+const serialServerOwnedTask = computed(() => linkedResource.value?.kind === "SERIAL_SERVER" ||
+  (!props.task && props.initialResource?.id === form.value.resourceId && props.initialResource?.kind === "SERIAL_SERVER"));
 let generation = 0;
 let templateGeneration = 0;
+let resourceGeneration = 0;
 // 模板选择器独立分页；序号保证抽屉关闭、重开或翻页时旧响应不会覆盖当前页。
 async function loadTemplatePage(page: number) {
   const current = ++templateGeneration;
@@ -56,6 +67,25 @@ async function loadTemplatePage(page: number) {
       ElMessage.error(error instanceof Error ? error.message : "读取命令模板失败");
   } finally {
     if (current === templateGeneration) templateLoading.value = false;
+  }
+}
+async function loadResources() {
+  const current = ++resourceGeneration;
+  resourceLoading.value = true;
+  try {
+    const items: Resource[] = [];
+    let page = 1;
+    let total = 0;
+    do {
+      const response = await api.resources(page, 100);
+      items.push(...response.items); total = response.total; page += 1;
+      if (!response.items.length) break;
+    } while (items.length < total && current === resourceGeneration);
+    if (current === resourceGeneration && open.value) resources.value = items;
+  } catch (error) {
+    if (current === resourceGeneration && open.value) ElMessage.error(error instanceof Error ? error.message : "读取设备资源失败");
+  } finally {
+    if (current === resourceGeneration) resourceLoading.value = false;
   }
 }
 const rules = computed(() => ({
@@ -88,6 +118,9 @@ const rules = computed(() => ({
       trigger: "blur",
     },
   ],
+  resourceId: [{ required: !props.task, message: "请选择设备资源", trigger: "change" }],
+  serialServerResourceId: [{ required: serial.value && !serialServerOwnedTask.value &&
+    serialServerMode.value === "resource", message: "请选择串口服务器", trigger: "change" }],
 }));
 // generation 防止快速切换任务时较慢的详情请求覆盖当前编辑表单。
 watch(
@@ -97,9 +130,13 @@ watch(
     ++templateGeneration;
     if (!visible) {
       templateLoading.value = false;
+      ++resourceGeneration;
+      resourceLoading.value = false;
       return;
     }
     loading.value = true;
+    saving.value = false;
+    resources.value = props.initialResource ? [props.initialResource] : [];
     workspace.value = props.initialWorkspace ?? "config";
     clearPassword.value = false;
     templateId.value = "";
@@ -107,10 +144,17 @@ watch(
     templatePage.value = 1;
     templateTotal.value = 0;
     void loadTemplatePage(1);
+    void loadResources();
     autoStart.value = false;
+    serialServerMode.value = task?.serialServerResourceId ? "resource" : "custom";
     portTouched.value = Boolean(task);
     try {
-      const loaded = task ? await api.task(task.id) : blank();
+      const loaded: Task = task ? await api.task(task.id) : {
+        ...blank(), resourceId: props.initialResource?.id ?? "",
+        protocol: props.initialResource?.kind === "SERIAL_SERVER" ? "TELNET_SERIAL" as const : "SSH" as const,
+        ip: props.initialResource?.ip ?? "",
+        port: props.initialResource?.kind === "SERIAL_SERVER" ? undefined : 22,
+      };
       if (current !== generation) return;
       loaded.password = "";
       form.value = structuredClone(loaded);
@@ -132,6 +176,24 @@ watch(
     if (protocol !== "TELNET_SERIAL") clearPassword.value = false;
   },
 );
+watch([linkedResource, serial], ([resource]) => {
+  if (resource?.kind === "SERIAL_SERVER") {
+    form.value.protocol = "TELNET_SERIAL";
+    form.value.serialServerResourceId = null;
+  }
+  if (!resource || (serial.value && resource.kind === "HIKVISION_NETWORK")) return;
+  form.value.ip = resource.ip;
+}, { immediate: true });
+watch(linkedSerialServer, (resource) => {
+  if (!resource || !serial.value) return;
+  form.value.ip = resource.ip;
+});
+watch(serial, (isSerial) => {
+  if (!isSerial) form.value.serialServerResourceId = null;
+});
+watch(serialServerMode, (mode) => {
+  if (mode === "custom") form.value.serialServerResourceId = null;
+});
 async function replaceTemplate() {
   const template = templateItems.value.find((item) => item.id === templateId.value);
   if (!template) return;
@@ -166,51 +228,52 @@ async function replaceTemplate() {
 }
 // 仅提交与初始快照不同的字段，保留编辑密码为空时“不覆盖原密码”的后端语义。
 async function save() {
+  const current = generation;
   if (
     saving.value ||
     !editorRef.value?.validate() ||
     !(await formRef.value?.validate().catch(() => false))
   )
     return;
+  if (current !== generation || !open.value || saving.value) return;
   saving.value = true;
   try {
     const payload = JSON.parse(JSON.stringify(form.value)) as Task;
+    if (serialUsesResource.value && linkedSerialServer.value) payload.ip = linkedSerialServer.value.ip;
+    else if ((!serial.value || serialServerOwnedTask.value) && linkedResource.value) payload.ip = linkedResource.value.ip;
     if (props.task) {
       const changes = Object.fromEntries(
         Object.entries(payload).filter(
           ([key, value]) =>
+            key !== "resourceId" &&
             JSON.stringify(value) !==
             JSON.stringify(original.value[key as keyof Task]),
         ),
       );
       if (clearPassword.value) changes.clearPassword = true;
-      if (
-        props.task.desiredState === "RUNNING" &&
+      const restarting = props.task.desiredState === "RUNNING" &&
         Object.keys(changes).some(
           (key) => !["name", "description"].includes(key),
-        )
-      ) {
-        try {
-          await ElMessageBox.confirm(
-            "修改连接或命令将重新开启任务，定时命令次数从零计算。",
-            "应用运行配置",
-          );
-        } catch {
-          return;
-        }
-      }
+        );
+      if (!(await confirmAction(restarting
+        ? `确认修改任务“${payload.name}”？修改连接或命令将重新开启任务，定时命令次数从零计算。`
+        : `确认保存任务“${payload.name}”的修改？`, "确认编辑任务"))) return;
+      if (current !== generation || !open.value) return;
       await api.updateTask(props.task.id, {
         ...changes,
         version: payload.version ?? 1,
       });
     } else await api.createTask(payload, autoStart.value);
-    ElMessage.success("任务已保存");
-    open.value = false;
     emit("saved");
+    if (current === generation && open.value) {
+      ElMessage.success("任务已保存");
+      open.value = false;
+    }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "保存失败");
+    if (current === generation && open.value)
+      ElMessage.error(error instanceof Error ? error.message : "保存失败");
   } finally {
-    saving.value = false;
+    if (current === generation) saving.value = false;
   }
 }
 </script>
@@ -227,6 +290,7 @@ async function save() {
           ref="formRef"
           :model="form"
           :rules="rules"
+          :disabled="saving"
           label-position="top"
           class="editor-form"
           v-loading="loading"
@@ -238,17 +302,40 @@ async function save() {
                 ><el-input v-model="form.name" maxlength="128"
               /></el-form-item>
               <el-form-item label="连接协议" required
-                ><el-select v-model="form.protocol"
+                ><el-select v-model="form.protocol" :disabled="serialServerOwnedTask"
                   ><el-option label="SSH" value="SSH" /><el-option
                     label="Telnet 设备"
                     value="TELNET_DEVICE" /><el-option
                     label="Telnet 串口"
                     value="TELNET_SERIAL" /></el-select
               ></el-form-item>
+              <el-form-item v-if="!serial" label="设备资源" prop="resourceId">
+                <el-select v-model="form.resourceId" :loading="resourceLoading" :disabled="Boolean(props.task?.resourceId)" placeholder="选择已认证的海康设备">
+                  <el-option v-for="item in resources.filter(resource => resource.kind === 'HIKVISION_NETWORK')" :key="item.id" :label="`${item.name} · ${item.ip}`" :value="item.id" />
+                </el-select>
+                <small v-if="props.task?.resourceId" class="inline-option">已关联任务不能转移资源</small>
+              </el-form-item>
+              <template v-else-if="serial">
+                <el-form-item label="关联设备资源" prop="resourceId">
+                  <el-select v-model="form.resourceId" :loading="resourceLoading" :disabled="Boolean(props.task?.resourceId)" placeholder="选择海康网络设备">
+                    <el-option v-for="item in resources" :key="item.id" :label="`${item.name} · ${item.ip}`" :value="item.id" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="!serialServerOwnedTask" label="串口服务器来源">
+                  <el-radio-group v-model="serialServerMode">
+                    <el-radio value="custom">自定义地址</el-radio><el-radio value="resource">已有串口服务器</el-radio>
+                  </el-radio-group>
+                </el-form-item>
+                <el-form-item v-if="!serialServerOwnedTask && serialServerMode === 'resource'" label="串口服务器资源" prop="serialServerResourceId">
+                  <el-select v-model="form.serialServerResourceId" :loading="resourceLoading" placeholder="选择串口服务器">
+                    <el-option v-for="item in resources.filter(resource => resource.kind === 'SERIAL_SERVER')" :key="item.id" :label="`${item.name} · ${item.ip}`" :value="item.id" />
+                  </el-select>
+                </el-form-item>
+              </template>
               <el-form-item
                 :label="serial ? '串口服务器 IP' : '设备 IP'"
                 prop="ip"
-                ><el-input v-model="form.ip"
+                ><el-input v-model="form.ip" :disabled="serialServerOwnedTask || (!serial && Boolean(form.resourceId)) || serialUsesResource"
               /></el-form-item>
               <el-form-item label="端口" prop="port"
                 ><el-input-number
@@ -272,9 +359,8 @@ async function save() {
                   :disabled="clearPassword"
               /></el-form-item>
             </div>
-            <el-checkbox v-if="serial && props.task" v-model="clearPassword"
-              >清除已保存密码</el-checkbox
-            ><el-checkbox v-if="!props.task" v-model="autoStart"
+            <el-checkbox v-if="serial && props.task" v-model="clearPassword">清除已保存密码</el-checkbox>
+            <el-checkbox v-if="!props.task" v-model="autoStart"
               >保存后立即启动</el-checkbox
             >
           </section>
@@ -333,7 +419,7 @@ async function save() {
         v-if="workspace === 'config'"
         type="primary"
         :loading="saving"
-        :disabled="loading"
+        :disabled="loading || resourceLoading"
         @click="save"
         >保存任务</el-button
       ></template

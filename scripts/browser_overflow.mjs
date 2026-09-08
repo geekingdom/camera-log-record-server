@@ -15,6 +15,7 @@ const scheduledCommands = Array.from({ length: 12 }, (_, index) => ({
 }));
 const task = {
   id: "overflow-task-" + "x".repeat(64), name: "任务名称-" + "标题".repeat(40), protocol: "TELNET_SERIAL",
+  resourceId: "serial-resource-fixture",
   ip: "192.0.2.100", port: 65535, status: "ERROR", desiredState: "STOPPED", version: 1,
   runId: "run-" + "r".repeat(128), sessionId: "session-" + "s".repeat(128), shellMode: "PSH",
   debugPhase: "FAILED", error: `${long}\n${long}\n${long}`, updatedAt: timestamp, initialCommands, scheduledCommands,
@@ -43,6 +44,8 @@ await context.route("**/api/v1/**", async (route) => {
   const path = url.pathname;
   if (request.method() === "GET" && path === "/api/v1/tasks")
     return json(route, { items: [task], total: 1, page: 1, pageSize: 100 });
+  if (request.method() === "GET" && path === "/api/v1/resources")
+    return json(route, { items: [{ id: "serial-resource-fixture", name: "溢出串口服务器", kind: "SERIAL_SERVER", ip: task.ip, version: 1 }], total: 1, page: 1, pageSize: 20 });
   if (request.method() === "GET" && path === `/api/v1/tasks/${task.id}`) return json(route, task);
   if (request.method() === "GET" && path === "/api/v1/command-templates")
     return json(route, { items: [], total: 0, page: 1, pageSize: 20 });
@@ -283,6 +286,7 @@ async function logs(label) {
 try {
   await mkdir(output, { recursive: true });
   await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("heading", { name: "采集任务", exact: true }).waitFor();
   for (const [width, height] of [[1440, 800], [390, 650], [320, 568]]) {
     const label = `${width}x${height}`;

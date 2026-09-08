@@ -28,7 +28,7 @@ def test_parallel_streams_archive_each_route_without_cross_contamination(tmp_pat
         archives = [[], []]
         collectors = [
             Collector(
-                {"id": f"task-{index}", "runId": f"run-{index}", "initialCommands": []},
+                {"id": f"task-{index}", "runId": f"run-{index}", "storageIdentity": "testingdevice", "initialCommands": []},
                 tmp_path,
                 connection_factory=lambda _task, stream=stream: stream,
                 on_archive=lambda archive, index=index: archives[index].append(archive),

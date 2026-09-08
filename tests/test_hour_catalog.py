@@ -22,7 +22,8 @@ def test_mixed_fragment_status_is_order_independent():
 
 def test_hour_date_filter_uses_shanghai_day_and_keeps_pagination(client):
     task = client.post("/api/v1/tasks", headers={"Idempotency-Key": "hours"}, json={
-        "name": "hours", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9090}).json()
+        "name": "hours", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9090,
+        "resourceId": "fixture-device"}).json()
     for i, hour in enumerate(["2026-09-07T15:00:00+00:00", "2026-09-07T16:00:00+00:00", "2026-09-08T15:00:00+00:00", "2026-09-08T16:00:00+00:00"]):
         client.portal.call(client.app.state.repo.db.files.insert_one, {
             "id": str(i), "taskId": task["id"], "hour": hour, "status": "OPEN", "bytes": 10})

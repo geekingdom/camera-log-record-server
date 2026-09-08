@@ -1,0 +1,174 @@
+"""提供设备资源的认证预览、保存和受限读取接口。"""
+
+import re
+from typing import Annotated
+
+from fastapi import Depends, HTTPException, Query, Request
+from pymongo import ReturnDocument
+
+from camera_logs.common.database import now, public
+from camera_logs.common.security import actor, authorize
+from camera_logs.resources.authentication import authenticate_network_resource
+from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
+from camera_logs.resources.models import ResourceInput, ResourcePatch
+
+
+def _resource_public(document):
+    """统一移除连接密文和内部认证时间以外的敏感资源字段。"""
+    return public(document)
+
+
+async def _accessible_resource_ids(repo, user: dict) -> list[str] | None:
+    """将受限令牌的任务白名单投影为已关联的资源 ID，避免越权读取资源。"""
+    task_ids = user.get("taskIds")
+    if task_ids is None:
+        return None
+    query = {"id": {"$in": task_ids}}
+    primary = await repo().db.tasks.distinct("resourceId", query)
+    serial = await repo().db.tasks.distinct("serialServerResourceId", query)
+    return [identifier for identifier in set(primary) | set(serial) if identifier is not None]
+
+
+async def _resource_view(repo, document, user: dict | None = None):
+    """补齐资源关联任务总数与活动数，便于删除前确认影响范围。"""
+    item = _resource_public(document)
+    task_query = task_resource_query(item["id"])
+    if user and user.get("taskIds") is not None:
+        task_query = {"$and": [task_query, {"id": {"$in": user["taskIds"]}}]}
+    item["taskCount"] = await repo().db.tasks.count_documents(task_query)
+    item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {"$or": [
+        {"nodeId": {"$exists": True, "$ne": None}}, {"desiredState": {"$in": ["RUNNING", "PAUSED"]}},
+    ]}]})
+    return item
+
+
+async def _verified_metadata(body: ResourceInput) -> dict[str, str]:
+    """仅网络资源需要实时认证；串口服务器没有可探测的海康设备身份。"""
+    if body.kind == "SERIAL_SERVER":
+        return {}
+    try:
+        return await authenticate_network_resource(
+            ip=body.ip, username=body.username, password=body.password, auth_type=body.authType,
+        )
+    except PermissionError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+def install_resource_routes(app, repo, listing):
+    """注册资源路由，复用统一令牌鉴权、分页和审计约定。"""
+    User = Annotated[dict, Depends(actor)]
+
+    @app.get("/api/v1/resources")
+    async def resources(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
+                        kind: str | None = None, search: str | None = None, includeDeleted: bool = False):
+        """按资源类型和名称或地址搜索，并在受限令牌下收窄到授权资源 ID。"""
+        authorize(user, "tasks:read")
+        query = {} if includeDeleted else {"deletedAt": None}
+        resource_ids = await _accessible_resource_ids(repo, user)
+        if resource_ids is not None:
+            query["id"] = {"$in": resource_ids}
+        if kind:
+            query["kind"] = kind
+        if search:
+            query["$or"] = [{field: {"$regex": re.escape(search), "$options": "i"}} for field in ("name", "ip")]
+        result = await listing("resources", query, page, pageSize)
+        result["items"] = [await _resource_view(repo, item, user) for item in result["items"]]
+        return result
+
+    @app.get("/api/v1/resources/{identifier}")
+    async def get_resource(identifier: str, user: User):
+        """读取单个资源前按受限令牌的资源 ID 白名单授权。"""
+        authorize(user, "tasks:read")
+        resource_ids = await _accessible_resource_ids(repo, user)
+        if resource_ids is not None and identifier not in resource_ids:
+            raise HTTPException(403, "资源不在授权范围内")
+        return await _resource_view(repo, await repo().get("resources", identifier), user)
+
+    @app.post("/api/v1/resources/authenticate")
+    async def authenticate_resource(body: ResourceInput, user: User):
+        """返回网络设备认证预览，结果只来自本次服务端设备请求。"""
+        authorize(user, "tasks:write")
+        if user.get("taskIds") is not None:
+            raise HTTPException(403, "受限账号不能探测授权范围外的新资源")
+        if body.kind == "SERIAL_SERVER":
+            return {}
+        return await _verified_metadata(body)
+
+    @app.post("/api/v1/resources", status_code=201)
+    async def create_resource(body: ResourceInput, request: Request, user: User):
+        """重新认证网络设备后保存密文凭据，客户端不能提交设备元数据。"""
+        authorize(user, "tasks:write")
+        if user.get("taskIds") is not None:
+            raise HTTPException(403, "受限账号不能创建授权范围外的新资源")
+        async def build(identifier):
+            metadata = await _verified_metadata(body)
+            document = {"id": identifier, "name": body.name, "kind": body.kind, "ip": body.ip,
+                        "version": 1, "createdAt": now(), "updatedAt": now()}
+            if body.kind == "HIKVISION_NETWORK":
+                document.update(username=body.username, authType=body.authType,
+                                passwordEncrypted=repo().encrypt(body.password), authenticatedAt=now(), **metadata)
+            await repo().db.resources.insert_one(document)
+            return document
+
+        result = await repo().idem(user["id"], request.headers.get("Idempotency-Key"), "create_resource",
+                                   body.model_dump(), "resources", build)
+        return await _resource_view(repo, result, user)
+
+    @app.patch("/api/v1/resources/{identifier}")
+    async def edit_resource(identifier: str, body: ResourcePatch, user: User):
+        """以版本条件更新名称或 HTTP 凭据；物理 IP、类型和设备身份始终固定。"""
+        authorize(user, "tasks:write")
+        if user.get("taskIds") is not None:
+            raise HTTPException(403, "受限账号不能编辑共享资源")
+        old = await repo().get("resources", identifier)
+        if old.get("deletedAt") is not None:
+            raise HTTPException(409, "资源已删除，不能编辑")
+        if body.ip != old["ip"] or body.kind != old["kind"]:
+            raise HTTPException(422, "资源 IP 和类型不可编辑；请新建资源")
+        password = body.password or repo().decrypt(old.get("passwordEncrypted", ""))
+        try:
+            checked = ResourceInput(name=body.name, kind=body.kind, ip=body.ip, username=body.username,
+                                    password=password, authType=body.authType)
+        except ValueError as exc:
+            raise HTTPException(422, "资源配置无效") from exc
+        metadata = await _verified_metadata(checked)
+        if checked.kind == "HIKVISION_NETWORK" and (
+            metadata["model"] != old.get("model") or metadata["subSerialNumber"] != old.get("subSerialNumber")
+        ):
+            raise HTTPException(409, "认证设备身份已变化；请新建资源")
+        update = {"name": checked.name, "updatedAt": now()}
+        if checked.kind == "HIKVISION_NETWORK":
+            update.update(username=checked.username, authType=checked.authType,
+                          passwordEncrypted=repo().encrypt(password), authenticatedAt=now(), **metadata)
+        changed = await repo().db.resources.find_one_and_update(
+            {"id": identifier, "version": body.version, "deletedAt": None},
+            {"$set": update, "$inc": {"version": 1}}, return_document=ReturnDocument.AFTER,
+        )
+        if not changed:
+            raise HTTPException(409, "资源版本已变化或已删除，请刷新")
+        await repo().audit(user["id"], "edit_resource", identifier)
+        return await _resource_view(repo, changed, user)
+
+    @app.delete("/api/v1/resources/{identifier}", status_code=202)
+    async def delete_resource(identifier: str, user: User, version: int = Query(ge=1)):
+        """软删除资源并请求所有关联任务受控停止，保留任务、文件和历史目录。"""
+        authorize(user, "tasks:write")
+        authorize(user, "tasks:control")
+        if user.get("taskIds") is not None:
+            raise HTTPException(403, "受限账号不能删除共享资源")
+        old = await repo().get("resources", identifier)
+        if old.get("deletedAt") is not None:
+            result = await reconcile_resource_deletion(repo(), identifier)
+            return await _resource_view(repo, result or old, user)
+        changed = await repo().db.resources.find_one_and_update(
+            {"id": identifier, "version": version, "deletedAt": None},
+            {"$set": {"deletedAt": now(), "deletionState": "PENDING", "updatedAt": now()}, "$inc": {"version": 1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not changed:
+            raise HTTPException(409, "资源版本已变化，请刷新")
+        completed = await reconcile_resource_deletion(repo(), identifier)
+        await repo().audit(user["id"], "delete_resource", identifier)
+        return await _resource_view(repo, completed or changed, user)

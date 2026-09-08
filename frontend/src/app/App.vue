@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // 根协调层只保存会话、页签和列表数据；具体编辑器与业务动作下沉到 feature 目录。
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { KeyRound, RefreshCw, Terminal, Plus, Radio, FileCode2, Server, LogOut, Search, ChevronRight, BookOpen, ShieldCheck, ScrollText, Settings2, PanelLeftClose, PanelLeftOpen } from "lucide-vue-next";
+import { KeyRound, RefreshCw, Terminal, Plus, Radio, FileCode2, Server, LogOut, Search, ChevronRight, BookOpen, ShieldCheck, ScrollText, Settings2, PanelLeftClose, PanelLeftOpen, HardDrive } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api, clearToken, getToken, setToken } from "../shared/api";
-import type { Node, Task, Template } from "../shared/types";
+import type { Node, Resource, Task, Template } from "../shared/types";
 import TaskEditor from "../features/tasks/TaskEditor.vue";
 import TemplateEditor from "../features/templates/TemplateEditor.vue";
 import TaskList from "../features/tasks/TaskList.vue";
@@ -16,7 +16,9 @@ import LogsWorkspace from "../features/logs/LogsWorkspace.vue";
 import AccessManager from "../features/access/AccessManager.vue";
 import AuditWorkspace from "../features/audit/AuditWorkspace.vue";
 import SettingsManager from "../features/settings/SettingsManager.vue";
+import ResourceWorkspace from "../features/resources/ResourceWorkspace.vue";
 const navigation = [
+  { key: "resources", label: "设备资源", icon: HardDrive },
   { key: "tasks", label: "采集任务", icon: Radio },
   { key: "logs", label: "日志工作台", icon: Terminal },
   { key: "templates", label: "命令模板", icon: FileCode2 },
@@ -35,7 +37,7 @@ function toggleSidebar() {
 const templatePage = ref(1);
 const selectedWorkspace = ref("config");
 const selectedLogTask = ref("");
-const activeTab = ref("tasks"),
+const activeTab = ref("resources"),
   token = ref(getToken()),
   authenticated = ref(Boolean(getToken())),
   busy = ref(false);
@@ -48,16 +50,22 @@ const totals = ref({ tasks: 0, templates: 0, nodes: 0 }),
 const taskSearch = ref(""),
   taskStatus = ref("");
 const selectedTask = ref<Task>(),
+  selectedResource = ref<Resource>(),
   selectedTemplate = ref<Template>(),
   taskEditorOpen = ref(false),
   templateEditorOpen = ref(false);
+const resourceWorkspace = ref<InstanceType<typeof ResourceWorkspace>>();
+let taskGeneration = 0;
 const error = (value: unknown) =>
   ElMessage.error(value instanceof Error ? value.message : "请求失败");
 async function loadTasks() {
+  const current = ++taskGeneration;
   const data = await api.tasks(page.value, pageSize.value, {
     search: taskSearch.value.trim() || undefined,
     status: taskStatus.value || undefined,
+    resourceId: selectedResource.value?.id,
   });
+  if (current !== taskGeneration) return;
   tasks.value = data.items;
   totals.value.tasks = data.total;
   lastUpdated.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -79,7 +87,8 @@ async function refresh(quiet = false) {
   if (!authenticated.value || busy.value) return;
   if (!quiet) busy.value = true;
   try {
-    if (activeTab.value === "tasks") await loadTasks();
+    if (activeTab.value === "resources") await resourceWorkspace.value?.reload();
+    else if (activeTab.value === "tasks") await loadTasks();
     else if (activeTab.value === "templates") await loadTemplates();
     else if (activeTab.value === "nodes") await loadNodes();
   } catch (value) {
@@ -104,6 +113,7 @@ async function login() {
   }
 }
 function logout() {
+  ++taskGeneration;
   clearToken();
   token.value = "";
   authenticated.value = false;
@@ -112,12 +122,29 @@ function logout() {
   nodes.value = [];
   taskEditorOpen.value = false;
   templateEditorOpen.value = false;
+  selectedResource.value = undefined;
+  selectedTask.value = undefined;
+  selectedLogTask.value = "";
+  activeTab.value = "resources";
 }
 function createTask() {
   selectedWorkspace.value = "config";
   selectedTask.value = undefined;
   taskEditorOpen.value = true;
   void loadTemplates().catch(error);
+}
+function viewResourceTasks(resource: Resource) {
+  selectedResource.value = resource;
+  page.value = 1;
+  activeTab.value = "tasks";
+}
+function navigate(key: string) {
+  if (key === "tasks") {
+    selectedResource.value = undefined;
+    page.value = 1;
+    void loadTasks().catch(error);
+  }
+  activeTab.value = key;
 }
 function editTask(task: Task) {
   selectedWorkspace.value = "config";
@@ -160,7 +187,7 @@ onBeforeUnmount(() => clearInterval(timer));
       <div class="sidebar-brand"><span class="brand-mark"><Terminal :size="23" /></span><div><strong>设备日志服务</strong><small>LOG RECORD</small></div></div>
       <div class="nav-caption">工作空间</div>
       <nav role="tablist" aria-label="工作空间导航" class="side-nav">
-        <button v-for="item in navigation" :key="item.key" role="tab" :aria-label="item.label" :title="sidebarCollapsed ? item.label : undefined" :aria-selected="activeTab === item.key" :class="{ active: activeTab === item.key }" @click="activeTab = item.key">
+        <button v-for="item in navigation" :key="item.key" role="tab" :aria-label="item.label" :title="sidebarCollapsed ? item.label : undefined" :aria-selected="activeTab === item.key" :class="{ active: activeTab === item.key }" @click="navigate(item.key)">
           <component :is="item.icon" :size="18" /><span>{{ item.label }}</span><ChevronRight v-if="activeTab === item.key" :size="14" />
         </button>
       </nav>
@@ -196,13 +223,13 @@ onBeforeUnmount(() => clearInterval(timer));
           {{ navigation.find(item => item.key === activeTab)?.label }}
         </h1>
         <div>
-          <el-tooltip v-if="['tasks', 'templates', 'nodes'].includes(activeTab)" content="刷新列表"
+          <el-tooltip v-if="['resources', 'tasks', 'templates', 'nodes'].includes(activeTab)" content="刷新列表"
             ><el-button
               :icon="RefreshCw"
               aria-label="刷新列表"
               @click="refresh()" /></el-tooltip
           ><el-button
-            v-if="['tasks', 'templates'].includes(activeTab)"
+            v-if="activeTab === 'templates' || (activeTab === 'tasks' && !selectedResource?.deletedAt)"
             type="primary"
             :icon="Plus"
             @click="activeTab === 'tasks' ? createTask() : createTemplate()"
@@ -212,7 +239,7 @@ onBeforeUnmount(() => clearInterval(timer));
       </div>
       <template v-if="activeTab === 'tasks'">
         <TaskOverview :tasks="tasks" :total="totals.tasks" :nodes="totals.nodes" />
-        <div class="list-heading"><h2>全部采集任务</h2><span>{{ totals.tasks }} 条记录</span></div>
+        <div class="list-heading"><h2>{{ selectedResource ? selectedResource.name + ' · 采集任务' : '全部采集任务' }}</h2><span>{{ totals.tasks }} 条记录</span><el-button v-if="selectedResource" text @click="selectedResource = undefined; applyTaskFilters()">查看全部任务</el-button></div>
         <div class="task-filters">
           <el-input
             v-model="taskSearch"
@@ -237,6 +264,7 @@ onBeforeUnmount(() => clearInterval(timer));
           @view="viewTask"
           @changed="refresh()"
       /></template>
+      <ResourceWorkspace v-else-if="activeTab === 'resources'" ref="resourceWorkspace" @tasks="viewResourceTasks" />
       <TemplateList
         v-else-if="activeTab === 'templates'"
         :items="templates"
@@ -271,6 +299,7 @@ onBeforeUnmount(() => clearInterval(timer));
     v-model="taskEditorOpen"
     :task="selectedTask"
     :initial-workspace="selectedWorkspace"
+    :initial-resource="selectedResource"
     :templates="templates"
     @saved="refresh()"
   />

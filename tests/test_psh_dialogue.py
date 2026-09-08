@@ -39,7 +39,7 @@ async def test_serial_password_typing_stops_before_sending_more_bytes(tmp_path):
     from camera_logs.collection.psh_dialogue import PshSwitchError
 
     sent = []
-    collector = Collector({"id": "serial", "protocol": "TELNET_SERIAL", "pshSerialCharacterInterval": .001},
+    collector = Collector({"id": "serial", "storageIdentity": "testingdevice", "protocol": "TELNET_SERIAL", "pshSerialCharacterInterval": .001},
                           tmp_path, connection_factory=lambda _: None)
 
     class Connection:

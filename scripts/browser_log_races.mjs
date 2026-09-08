@@ -5,6 +5,7 @@ const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
 const task = {
   id: "log-race-fixture", name: "归档竞态验收任务", protocol: "TELNET_SERIAL",
+  resourceId: "serial-resource-fixture",
   ip: "192.0.2.20", port: 10003, status: "COLLECTING", desiredState: "RUNNING",
   initialCommands: [], scheduledCommands: [], updatedAt: "2030-01-01T00:00:00.000Z",
 };
@@ -35,6 +36,8 @@ await context.route("**/api/v1/**", async (route) => {
   if (request.method() !== "GET") throw new Error(`不应发出写请求：${request.method()} ${url.pathname}`);
   if (url.pathname === "/api/v1/tasks")
     return json(route, { items: [task], total: 1, page: 1, pageSize: 100 });
+  if (url.pathname === "/api/v1/resources")
+    return json(route, { items: [{ id: "serial-resource-fixture", name: "竞态串口服务器", kind: "SERIAL_SERVER", ip: task.ip, version: 1 }], total: 1, page: 1, pageSize: 20 });
   if (url.pathname === `/api/v1/tasks/${task.id}`) return json(route, task);
   if (url.pathname === "/api/v1/command-templates")
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
@@ -68,6 +71,7 @@ page.on("console", (message) => { if (message.type() === "error") errors.push(me
 
 try {
   await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByText(task.name, { exact: true }).waitFor();
   await page.getByRole("button", { name: "编辑任务", exact: true }).first().click();
   await page.getByRole("tab", { name: "小时归档", exact: true }).click();

@@ -86,6 +86,8 @@ def create_app(settings=None, db=None):
 
     from camera_logs.tasks.api import install_task_routes
     install_task_routes(app, repo, listing)
+    from camera_logs.resources.api import install_resource_routes
+    install_resource_routes(app, repo, listing)
     from camera_logs.commands.templates import install_template_routes
     install_template_routes(app, repo, listing)
     from camera_logs.commands.api import install_command_routes

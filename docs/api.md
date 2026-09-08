@@ -6,7 +6,27 @@
 Authorization: Bearer <access-token>
 ```
 
-创建任务、模板、手动命令、搜索和下载作业要求 `Idempotency-Key`；编辑使用版本号，启停接口按期望状态幂等处理。以下值均为示例，不能作为真实凭据使用。
+创建设备资源、任务、模板、手动命令、搜索和下载作业要求 `Idempotency-Key`；编辑使用版本号，启停接口按期望状态幂等处理。以下值均为示例，不能作为真实凭据使用。
+
+## 设备资源
+
+新任务必须先有设备资源。`POST /api/v1/resources/authenticate` 预览认证，`POST /api/v1/resources` 保存时重新执行服务端认证；后者需要幂等键。海康请求示例：
+
+```json
+{"name":"机房摄像机","kind":"HIKVISION_NETWORK","ip":"192.0.2.10","username":"admin","password":"<http-password>","authType":"DIGEST"}
+```
+
+`authType` 默认 `DIGEST`，也支持 `BASIC`。成功返回 `model`、`subSerialNumber`、`softwareVersion`，创建结果另含资源 `id`。设备最终返回 401 时接口报告设备凭据错误；超时、其他非 200 和非法 XML 报告设备异常，均不会创建资源。串口服务器创建请求只需：
+
+```json
+{"name":"机房串口服务器","kind":"SERIAL_SERVER","ip":"192.0.2.8"}
+```
+
+`GET /api/v1/resources?page=1&pageSize=20&kind=HIKVISION_NETWORK&search=机房` 分页查询，`GET /api/v1/resources/{id}` 查询详情。读写沿用 `tasks:read`、`tasks:write` 权限，受任务白名单限制的账号不能创建资源或执行认证探测。完整连接与目录约束见 [设备资源说明](device-resources.md)。
+
+`PATCH /api/v1/resources/{id}` 提交上述完整资源字段及 `version` 修改名称或 HTTP 凭据；空密码表示保留原值，IP、类型和物理设备身份不允许改变。`DELETE /api/v1/resources/{id}?version=1` 返回 202 并软删除资源，需要 `tasks:write` 和 `tasks:control`；受任务白名单限制的令牌不能编辑或删除共享资源。关联任务受控停止，任务记录和已有日志不删除。重复 DELETE 可重试未完成的停止请求，调度器也会补偿。
+
+列表及详情包含 `taskCount`、`activeTaskCount`，受限令牌只看到其授权任务计数。列表默认排除已删除资源，增加 `includeDeleted=true` 可查询；已删除资源详情保留 `deletedAt`，`deletionState=PENDING` 表示关联任务仍在停止或等待回收，所有任务停止且运行锁释放后才标记 `DONE`。文件查询和下载接口保持可用。
 
 ## 任务
 
@@ -19,6 +39,7 @@ Content-Type: application/json
 
 {
   "name": "机房摄像机 01",
+  "resourceId": "<saved-resource-id>",
   "protocol": "SSH",
   "ip": "192.0.2.10",
   "port": 22,
@@ -30,6 +51,8 @@ Content-Type: application/json
 ```
 
 响应包含服务端生成的 `id`、`version`、`status` 和 `desiredState`，不会返回 `password` 或 `passwordEncrypted`。列表接口为 `GET /api/v1/tasks?page=1&pageSize=20`；单项读取与更新分别为 `GET`、`PATCH /api/v1/tasks/{taskId}`。更新 body 必须带当前 `version`，版本过期返回 `409`。
+
+列表可使用 `resourceId` 筛选所属资源。所有任务必须带 `resourceId`，缺失返回 422；保存后不能更换所属资源。海康 SSH/Telnet 设备任务和串口服务器串口任务的 IP 必须匹配资源。海康的 Telnet 串口任务支持 `serialServerResourceId` 选择已添加串口服务器，IP 必须匹配；省略或置 null 则允许自定义串口目标 IP。端口无重复限制，仍须是 1–65535 的整数。本版使用统一资源结构，不提供历史独立任务的兼容或迁移接口。
 
 SSH 任务默认可直接启动：服务以任务的 `username` 和 `password` 认证，不要求请求携带主机指纹、`known_hosts` 内容或任何登记确认。默认部署不校验 SSH 主机密钥，因此同一 IP 和端口的设备替换或密钥轮换不会使任务因指纹变化被拒绝。主机密钥严格校验仅能由部署设置 `SSH_VERIFY_HOST_KEY=true` 启用；该部署模式下无效 `KNOWN_HOSTS` 文件或已登记密钥失配会使 SSH 会话失败，客户端仍无需通过 API 管理指纹。
 

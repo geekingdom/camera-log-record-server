@@ -19,7 +19,7 @@ async def test_rollback_seals_a_new_fragment_without_reordering(tmp_path, rollba
     """小时内和跨小时回拨均分片，已归档内容不被覆盖。"""
     first = datetime(2026, 9, 8, 2, 30, tzinfo=UTC)
     earlier = first - timedelta(seconds=rollback_seconds)
-    writer = HourlyWriter("task", "run", "session", tmp_path)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")
     positions = await writer.write_many([
         (b"first\n", first), (b"second\n", earlier), (b"third\n", earlier),
         (b"fourth\n", first),
@@ -60,7 +60,7 @@ async def test_repeated_rollbacks_bound_pending_archives_and_preserve_sequence(t
     monkeypatch.setattr(storage, "compress", slow_compress)
     first = datetime(2026, 9, 8, 2, 30, tzinfo=UTC)
     chunks = [(f"chunk-{number}\n".encode(), first-timedelta(seconds=number)) for number in range(6)]
-    writer = HourlyWriter("task", "run", "session", tmp_path)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")
     writing = asyncio.create_task(writer.write_many(chunks))
 
     await asyncio.wait_for(started.wait(), 1)
@@ -86,7 +86,7 @@ async def test_repeated_rollbacks_bound_pending_archives_and_preserve_sequence(t
 async def test_collector_publishes_rollback_with_original_session_and_file(tmp_path):
     """从写入器经采集器贯通到事件数据库，告警不得把任务状态改为异常。"""
     runtime = object.__new__(SessionRuntime)
-    runtime.task = {"id": "task", "runId": "run"}
+    runtime.task = {"id": "task", "runId": "run", "storageIdentity": "testingdevice"}
     events, tasks = AsyncMock(), AsyncMock()
     runtime.repo = SimpleNamespace(
         settings=SimpleNamespace(log_root=tmp_path, node_id="node"),

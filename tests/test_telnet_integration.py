@@ -97,7 +97,7 @@ async def test_protocol_traffic_does_not_reset_default_ten_second_log_timeout(tm
         reader, writer = await telnetlib3.open_connection(
             "127.0.0.1", server.sockets[0].getsockname()[1], encoding=False, connect_maxwait=.05)
         connection = _TelnetConnection(reader, writer, interval=.1)
-        collector = Collector({"id": "silent", "runId": "run", "initialCommands": []},
+        collector = Collector({"id": "silent", "runId": "run", "storageIdentity": "testingdevice", "initialCommands": []},
             tmp_path, connection_factory=lambda _: connection,
             on_state=lambda state, _: states.append(state))
         started = asyncio.get_running_loop().time()
