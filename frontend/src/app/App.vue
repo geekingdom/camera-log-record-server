@@ -3,20 +3,23 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { KeyRound, RefreshCw, Terminal, Plus, Radio, FileCode2, Server, LogOut, Search, ChevronRight, BookOpen, ShieldCheck, ScrollText, Settings2, PanelLeftClose, PanelLeftOpen, HardDrive } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
+import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { api, clearToken, getToken, setToken } from "../shared/api";
 import type { Node, Resource, Task, Template } from "../shared/types";
-import TaskEditor from "../features/tasks/TaskEditor.vue";
-import TemplateEditor from "../features/templates/TemplateEditor.vue";
-import TaskList from "../features/tasks/TaskList.vue";
-import TemplateList from "../features/templates/TemplateList.vue";
-import NodeList from "../features/nodes/NodeList.vue";
 import { taskStatusLabels } from "../features/tasks/taskStatus";
-import TaskOverview from "../features/tasks/TaskOverview.vue";
-import LogsWorkspace from "../features/logs/LogsWorkspace.vue";
-import AccessManager from "../features/access/AccessManager.vue";
-import AuditWorkspace from "../features/audit/AuditWorkspace.vue";
-import SettingsManager from "../features/settings/SettingsManager.vue";
-import ResourceWorkspace from "../features/resources/ResourceWorkspace.vue";
+import AsyncView from "../shared/AsyncView.vue";
+
+const loadTaskOverview = () => import("../features/tasks/TaskOverview.vue");
+const loadTaskList = () => import("../features/tasks/TaskList.vue");
+const loadTaskEditor = () => import("../features/tasks/TaskEditor.vue");
+const loadTemplateList = () => import("../features/templates/TemplateList.vue");
+const loadTemplateEditor = () => import("../features/templates/TemplateEditor.vue");
+const loadNodeList = () => import("../features/nodes/NodeList.vue");
+const loadLogsWorkspace = () => import("../features/logs/LogsWorkspace.vue");
+const loadAccessManager = () => import("../features/access/AccessManager.vue");
+const loadAuditWorkspace = () => import("../features/audit/AuditWorkspace.vue");
+const loadSettingsManager = () => import("../features/settings/SettingsManager.vue");
+const loadResourceWorkspace = () => import("../features/resources/ResourceWorkspace.vue");
 const navigation = [
   { key: "resources", label: "设备资源", icon: HardDrive },
   { key: "tasks", label: "采集任务", icon: Radio },
@@ -54,7 +57,7 @@ const selectedTask = ref<Task>(),
   selectedTemplate = ref<Template>(),
   taskEditorOpen = ref(false),
   templateEditorOpen = ref(false);
-const resourceWorkspace = ref<InstanceType<typeof ResourceWorkspace>>();
+const resourceWorkspace = ref<InstanceType<typeof AsyncView>>();
 let taskGeneration = 0;
 const error = (value: unknown) =>
   ElMessage.error(value instanceof Error ? value.message : "请求失败");
@@ -182,6 +185,7 @@ onMounted(() => {
 onBeforeUnmount(() => clearInterval(timer));
 </script>
 <template>
+  <el-config-provider :locale="zhCn">
   <main class="shell" :class="{ 'is-authenticated': authenticated, 'sidebar-collapsed': sidebarCollapsed }">
     <aside v-if="authenticated" class="sidebar">
       <div class="sidebar-brand"><span class="brand-mark"><Terminal :size="23" /></span><div><strong>设备日志服务</strong><small>LOG RECORD</small></div></div>
@@ -238,7 +242,7 @@ onBeforeUnmount(() => clearInterval(timer));
         </div>
       </div>
       <template v-if="activeTab === 'tasks'">
-        <TaskOverview :tasks="tasks" :total="totals.tasks" :nodes="totals.nodes" />
+        <AsyncView :loader="loadTaskOverview" :component-props="{ tasks, total: totals.tasks, nodes: totals.nodes }" />
         <div class="list-heading"><h2>{{ selectedResource ? selectedResource.name + ' · 采集任务' : '全部采集任务' }}</h2><span>{{ totals.tasks }} 条记录</span><el-button v-if="selectedResource" text @click="selectedResource = undefined; applyTaskFilters()">查看全部任务</el-button></div>
         <div class="task-filters">
           <el-input
@@ -257,25 +261,24 @@ onBeforeUnmount(() => clearInterval(timer));
             ><el-option v-for="(label, value) in taskStatusLabels" :key="value" :label="label" :value="value" /></el-select
           ><el-button @click="applyTaskFilters">筛选</el-button>
         </div>
-        <TaskList
-          :items="tasks"
-          :loading="busy"
-          @edit="editTask"
-          @view="viewTask"
-          @changed="refresh()"
-      /></template>
-      <ResourceWorkspace v-else-if="activeTab === 'resources'" ref="resourceWorkspace" @tasks="viewResourceTasks" />
-      <TemplateList
+        <AsyncView
+          :loader="loadTaskList"
+          :component-props="{ items: tasks, loading: busy }"
+          :listeners="{ edit: editTask, view: viewTask, changed: () => refresh() }"
+        />
+      </template>
+      <AsyncView v-else-if="activeTab === 'resources'" ref="resourceWorkspace" :loader="loadResourceWorkspace" :listeners="{ tasks: viewResourceTasks }" />
+      <AsyncView
         v-else-if="activeTab === 'templates'"
-        :items="templates"
-        @edit="editTemplate"
-        @changed="refresh()"
+        :loader="loadTemplateList"
+        :component-props="{ items: templates }"
+        :listeners="{ edit: editTemplate, changed: () => refresh() }"
       />
-      <NodeList v-else-if="activeTab === 'nodes'" :items="nodes" :loading="busy" />
-      <LogsWorkspace v-else-if="activeTab === 'logs'" v-model="selectedLogTask" />
-      <AccessManager v-else-if="activeTab === 'access'" />
-      <AuditWorkspace v-else-if="activeTab === 'audit'" />
-      <SettingsManager v-else-if="activeTab === 'settings'" />
+      <AsyncView v-else-if="activeTab === 'nodes'" :loader="loadNodeList" :component-props="{ items: nodes, loading: busy }" />
+      <AsyncView v-else-if="activeTab === 'logs'" :loader="loadLogsWorkspace" :component-props="{ modelValue: selectedLogTask }" :listeners="{ 'update:modelValue': (value: string) => selectedLogTask = value }" />
+      <AsyncView v-else-if="activeTab === 'access'" :loader="loadAccessManager" />
+      <AsyncView v-else-if="activeTab === 'audit'" :loader="loadAuditWorkspace" />
+      <AsyncView v-else-if="activeTab === 'settings'" :loader="loadSettingsManager" />
       <el-pagination
         v-if="activeTab === 'templates'"
         v-model:current-page="templatePage"
@@ -295,17 +298,19 @@ onBeforeUnmount(() => clearInterval(timer));
     <footer v-if="authenticated" class="workspace-footer"><span>设备日志记录平台</span><span>SSH / Telnet</span></footer>
     </div>
   </main>
-  <TaskEditor
-    v-model="taskEditorOpen"
-    :task="selectedTask"
-    :initial-workspace="selectedWorkspace"
-    :initial-resource="selectedResource"
-    :templates="templates"
-    @saved="refresh()"
+  <AsyncView
+    v-if="taskEditorOpen"
+    overlay
+    :loader="loadTaskEditor"
+    :component-props="{ modelValue: taskEditorOpen, task: selectedTask, initialWorkspace: selectedWorkspace, initialResource: selectedResource, templates }"
+    :listeners="{ 'update:modelValue': (value: boolean) => taskEditorOpen = value, saved: () => refresh() }"
   />
-  <TemplateEditor
-    v-model="templateEditorOpen"
-    :template="selectedTemplate"
-    @saved="refresh()"
+  <AsyncView
+    v-if="templateEditorOpen"
+    overlay
+    :loader="loadTemplateEditor"
+    :component-props="{ modelValue: templateEditorOpen, template: selectedTemplate }"
+    :listeners="{ 'update:modelValue': (value: boolean) => templateEditorOpen = value, saved: () => refresh() }"
   />
+  </el-config-provider>
 </template>

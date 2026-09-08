@@ -1,8 +1,8 @@
-// 前端唯一入口：在此统一注册 Element Plus，并加载全局样式后挂载根应用。
+// 前端唯一入口：组件由构建插件按需引入；服务和 loading 指令样式在此显式保留。
 import { createApp } from "vue";
-import ElementPlus from "element-plus";
-import zhCn from "element-plus/es/locale/lang/zh-cn";
-import "element-plus/dist/index.css";
+import "element-plus/es/components/loading/style/css";
+import "element-plus/es/components/message/style/css";
+import "element-plus/es/components/message-box/style/css";
 import "./shared/styles.css";
 import App from "./app/App.vue";
-createApp(App).use(ElementPlus, { locale: zhCn }).mount("#app");
+createApp(App).mount("#app");

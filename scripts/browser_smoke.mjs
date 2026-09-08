@@ -3,6 +3,7 @@
 import { mkdir } from "node:fs/promises";
 
 process.loadEnvFile(".env");
+const baseUrl = process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
 const playwrightModule = await import(
   process.env.PLAYWRIGHT_MODULE || "playwright"
 );
@@ -22,7 +23,7 @@ const page = await context.newPage();
 // 让验收脚本在某个 UI 契约失配时快速失败，而不是用 Playwright 默认值长时间挂起。
 page.setDefaultTimeout(8000);
 const errors = [];
-const screenshots = "output/playwright";
+const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const name = `浏览器验收-${Date.now()}`;
 let createdTemplateId;
 page.on("pageerror", (error) => errors.push(error.message));
@@ -83,9 +84,19 @@ async function assertMobileDrawer(heading) {
 
 try {
   await mkdir(screenshots, { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   await page.screenshot({ path: `${screenshots}/resources-desktop.png`, fullPage: true });
+  // 逐页等待业务组件，根布局标题出现不足以证明异步页面及其样式已加载。
+  for (const [tab, selector] of [
+    ["服务节点", ".workspace .data-table"],
+    ["服务账号", ".access-manager"],
+    ["审计与事件", ".audit-workspace"],
+    ["后台配置", ".settings-manager"],
+  ]) {
+    await page.getByRole("tab", { name: tab, exact: true }).click();
+    await page.locator(selector).waitFor();
+  }
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("button", { name: "编辑任务" }).first().waitFor();
   await page.screenshot({
@@ -225,7 +236,7 @@ try {
 } finally {
   try {
     if (createdTemplateId) {
-      await context.request.delete(`http://127.0.0.1:5173/api/v1/command-templates/${createdTemplateId}?version=1`, {
+      await context.request.delete(`${baseUrl}/api/v1/command-templates/${createdTemplateId}?version=1`, {
         headers: { Authorization: `Bearer ${process.env.BOOTSTRAP_TOKEN}` },
       });
     }

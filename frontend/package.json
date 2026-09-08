@@ -20,6 +20,7 @@
     "@types/node": "^22.10.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "^5.7.2",
+    "unplugin-vue-components": "^0.27.5",
     "vite": "^6.0.3",
     "vitest": "^3.0.8",
     "vue-tsc": "^2.2.0"

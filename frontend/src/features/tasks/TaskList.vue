@@ -6,9 +6,11 @@ import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { Task } from "../../shared/types";
-import TaskDiagnostics from "./TaskDiagnostics.vue";
+import AsyncView from "../../shared/AsyncView.vue";
 import { availableTaskActions, type TaskAction } from "./taskActions";
 import { taskStatusLabel, taskStatusTone } from "./taskStatus";
+
+const loadTaskDiagnostics = () => import("./TaskDiagnostics.vue");
 
 const props = defineProps<{ items: Task[]; loading: boolean }>();
 const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: [] }>();
@@ -152,5 +154,11 @@ const rows = computed(() => props.items);
         /></el-tooltip> </template
     ></el-table-column>
   </el-table>
-  <TaskDiagnostics v-model="diagnosticsOpen" :task="diagnosticTask" />
+  <AsyncView
+    v-if="diagnosticsOpen"
+    overlay
+    :loader="loadTaskDiagnostics"
+    :component-props="{ modelValue: diagnosticsOpen, task: diagnosticTask }"
+    :listeners="{ 'update:modelValue': (value: boolean) => diagnosticsOpen = value }"
+  />
 </template>

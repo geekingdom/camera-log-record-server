@@ -6,7 +6,9 @@ import { Activity, Archive, Edit3, Eye, Network, Plus, Search, Server, Trash2 } 
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { Resource, ResourceKind } from "../../shared/types";
-import ResourceEditor from "./ResourceEditor.vue";
+import AsyncView from "../../shared/AsyncView.vue";
+
+const loadResourceEditor = () => import("./ResourceEditor.vue");
 
 const emit = defineEmits<{ tasks: [Resource] }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
@@ -74,7 +76,13 @@ defineExpose({ reload: load });
     </div></template></el-table-column>
   </el-table>
   <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" />
-  <ResourceEditor v-model="editorOpen" :resource="selectedResource" @saved="load" />
+  <AsyncView
+    v-if="editorOpen"
+    overlay
+    :loader="loadResourceEditor"
+    :component-props="{ modelValue: editorOpen, resource: selectedResource }"
+    :listeners="{ 'update:modelValue': (value: boolean) => editorOpen = value, saved: () => load() }"
+  />
 </template>
 <style scoped>
 .resource-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
