@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import httpx
 from camera_logs.common.config import Settings
+from service_benchmark_diagnostics import capture_failure
 from service_benchmark_io import LoadSource, verify_download
 from service_benchmark_latency import BatchLatency, observe_read_latency
 from service_benchmark_realtime import observe_realtime
@@ -39,20 +40,46 @@ async def wait_observer_ready(observer, ready, timeout):
         await asyncio.gather(waiting, return_exceptions=True)
 
 
-async def emit_observed(source, seconds, timeout, observers):
+async def emit_observed(source, seconds, timeout, observers, *, after_emission=None, after_capture=None,
+                        background=(), failure_path=None):
     """发送与实时校验共同监督；任一观察器失败立即取消并等待当前输出。"""
+    started = time.monotonic()
+    stages = {}
+
     async def emit():
         await asyncio.wait_for(source.emit(seconds), timeout=timeout)
-        return time.monotonic()
+        stages["emissionCompletedSeconds"] = time.monotonic() - started
+        end = time.monotonic()
+        if after_emission is not None:
+            await after_emission()
+        stages["sourceStoppedSeconds"] = time.monotonic() - started
+        return end
 
     emitter = asyncio.create_task(emit())
-    try:
+
+    async def capture():
+        """接收观察器完成即关闭采集，慢搜索继续使用已冻结文件并独立受监督。"""
         end, *observed = await asyncio.gather(emitter, *observers)
+        stages["observersCompletedSeconds"] = time.monotonic() - started
+        if after_capture is not None:
+            await after_capture(observed)
+        stages["captureStoppedSeconds"] = time.monotonic() - started
         return end, observed
+
+    captured = asyncio.create_task(capture())
+    try:
+        (end, observed), *remaining = await asyncio.gather(captured, *background)
+        return end, observed + remaining
+    except Exception as error:
+        if failure_path is not None:
+            capture_failure(failure_path, source, error, stages, time.monotonic() - started,
+                            observers, background)
+        raise
     finally:
-        if not emitter.done():
-            emitter.cancel()
-        await asyncio.gather(emitter, return_exceptions=True)
+        for pending in (captured, emitter):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(captured, emitter, return_exceptions=True)
 
 
 async def request(client, method, path, **kwargs):
@@ -205,31 +232,43 @@ async def execute(args):
                         args.seconds * args.lines_per_second, tracker, args.seconds * 2 + args.timeout))
                     observers.append(latency)
                     latency_observers.append(latency)
+                async def finish_emission():
+                    """实时缓冲收齐后关闭连接，内容观察器可继续读取已落盘正文。"""
+                    # 停止任务会释放节点实时环形缓冲；只等待实时订阅收齐，不能
+                    # 等待历史内容扫描。实时推送本身过慢导致重连仍应验收失败。
+                    if route_observers:
+                        await asyncio.gather(*route_observers)
+                    if source.failure:
+                        raise RuntimeError(f"模拟源 {number} 发送失败") from source.failure
+                    expected_stored = source.source_bytes + source.source_lines * 22
+                    catalog = await wait_until(client, f"/api/v1/tasks/{task_id}/log-hours",
+                        lambda item: sum(hour["bytes"] for hour in item["items"]) >= expected_stored, args.timeout)
+                    if sum(hour["bytes"] for hour in catalog["items"]) != expected_stored:
+                        raise AssertionError(f"路由 {number} 登记字节数与源日志不一致")
+                    await stop(client, task_id, args.timeout)
+                    await asyncio.wait_for(source.peer_closed.wait(), timeout=args.timeout)
+                    if protocol == "SSH":
+                        await asyncio.wait_for(source.transport_closed.wait(), timeout=args.timeout)
+                    if source.connection_count != 1:
+                        raise AssertionError(f"路由 {number} 发生了重连，不能作为正常连续采集通过")
+
+                async def finish_capture(observed):
+                    """停止后的读取延迟仍计入观察结果，正文完整性检查保持不变。"""
+                    if any(item["sourceSha256"] != source.source_sha256
+                           or item["sourceLines"] != source.source_lines for item in observed):
+                        raise AssertionError(f"路由 {number} 接收正文与源日志不一致")
+
                 source.release.set()
                 end, observations = await emit_observed(source, args.seconds, args.seconds * 2 + args.timeout,
-                                                        route_observers + route_searches + latency_observers)
+                    route_observers + latency_observers, after_emission=finish_emission,
+                    after_capture=finish_capture, background=route_searches,
+                    failure_path=output / f"route-{number:04d}-failure.json")
                 realtime = observations[:len(route_observers)]
-                searches = observations[len(route_observers):len(route_observers) + len(route_searches)]
-                latency_results = observations[len(route_observers) + len(route_searches):]
+                latency_end = len(route_observers) + len(latency_observers)
+                latency_results, searches = observations[len(route_observers):latency_end], observations[latency_end:]
                 if args.search_interval and (not searches or searches[0]["count"] < 1):
                     raise AssertionError(f"路由 {number} 未完成任何并发搜索")
                 intervals.append((begin, end))
-                if source.failure:
-                    raise RuntimeError(f"模拟源 {number} 发送失败") from source.failure
-                if any(item["sourceSha256"] != source.source_sha256
-                       or item["sourceLines"] != source.source_lines for item in realtime):
-                    raise AssertionError(f"路由 {number} 实时正文与源日志不一致")
-                expected_stored = source.source_bytes + source.source_lines * 22
-                hours = await wait_until(client, f"/api/v1/tasks/{task_id}/log-hours",
-                    lambda item: sum(hour["bytes"] for hour in item["items"]) >= expected_stored, args.timeout)
-                if sum(hour["bytes"] for hour in hours["items"]) != expected_stored:
-                    raise AssertionError(f"路由 {number} 登记字节数与源日志不一致")
-                await stop(client, task_id, args.timeout)
-                await asyncio.wait_for(source.peer_closed.wait(), timeout=args.timeout)
-                if protocol == "SSH":
-                    await asyncio.wait_for(source.transport_closed.wait(), timeout=args.timeout)
-                if source.connection_count != 1:
-                    raise AssertionError(f"路由 {number} 发生了重连，不能作为正常连续采集通过")
                 hours = await wait_until(client, f"/api/v1/tasks/{task_id}/log-hours",
                     lambda item: bool(item["items"]) and all(h["status"] == "READY" for h in item["items"]), args.timeout)
                 async with downloads:

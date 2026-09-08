@@ -8,7 +8,6 @@ import json
 import time
 from datetime import datetime
 from urllib.parse import quote, urlsplit, urlunsplit
-from zoneinfo import ZoneInfo
 
 import websockets
 from service_benchmark_io import BODY, PREFIX
@@ -31,9 +30,8 @@ def _complete_line(raw, *, route, line_bytes, sequence, digest):
     if prefix is None:
         raise AssertionError("实时日志缺少服务器时间前缀")
     try:
-        datetime.strptime(prefix.group(1).decode("ascii"), "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=ZoneInfo("Asia/Shanghai")
-        )
+        # PREFIX 已严格限定格式；这里只校验日历合法性，无需逐行构造时区或编译格式。
+        datetime.fromisoformat(prefix.group(1).decode("ascii"))
     except ValueError as error:
         raise AssertionError("实时日志时间前缀格式错误") from error
     body = raw[prefix.end():] + b"\n"

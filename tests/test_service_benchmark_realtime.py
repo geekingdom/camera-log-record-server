@@ -92,6 +92,23 @@ async def observe(module, monkeypatch, frames, *, route=7, line_bytes=64, expect
     return result, ready, connector
 
 
+@pytest.mark.parametrize("stamp,valid", [
+    ("2024-02-29 23:59:59", True), ("2026-02-29 00:00:00", False),
+    ("2026-13-01 00:00:00", False), ("2026-09-09 24:00:00", False),
+    ("2026-09-09 12:00:60", False), ("0000-01-01 00:00:00", False),
+])
+def test_timestamp_validation_preserves_calendar_checks(realtime_module, stamp, valid):
+    """快速日期解析仍需拒绝无效闰日、月份、年份和时分秒。"""
+    raw = f"[{stamp}] ".encode() + source_line(7, 0, 64).rstrip(b"\n")
+    digest = hashlib.sha256()
+    if valid:
+        realtime_module._complete_line(raw, route=7, line_bytes=64, sequence=0, digest=digest)
+        assert digest.hexdigest() == hashlib.sha256(source_line(7, 0, 64)).hexdigest()
+    else:
+        with pytest.raises(AssertionError, match="时间前缀格式错误"):
+            realtime_module._complete_line(raw, route=7, line_bytes=64, sequence=0, digest=digest)
+
+
 async def test_observer_reassembles_split_lines_across_packets_and_files(realtime_module, monkeypatch):
     """分片和文件轮转都不能改变行数、摘要或原始字节统计。"""
     route, line_bytes = 7, 64

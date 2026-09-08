@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 
-async def test_observer_failure_cancels_emitter_immediately(monkeypatch):
+@pytest.mark.parametrize("background_failure", [False, True])
+async def test_observer_failure_cancels_emitter_immediately(monkeypatch, tmp_path, background_failure):
     """实时校验失败后不能继续运行完整长测；发送取消完成后才返回异常。"""
     scripts = Path(__file__).resolve().parents[1] / "scripts"
     monkeypatch.syspath_prepend(str(scripts))
@@ -30,8 +31,78 @@ async def test_observer_failure_cancels_emitter_immediately(monkeypatch):
 
     observer = asyncio.create_task(failed_observer())
     with pytest.raises(ValueError, match="realtime mismatch"):
-        await asyncio.wait_for(module["emit_observed"](SimpleNamespace(emit=emit), 86400, 86410, [observer]), 1)
+        await asyncio.wait_for(module["emit_observed"](
+            SimpleNamespace(emit=emit), 86400, 86410, [] if background_failure else [observer],
+            background=[observer] if background_failure else [], failure_path=tmp_path / "failure.json"), 1)
     assert stopped.is_set()
+    report_text = (tmp_path / "failure.json").read_text()
+    report = json.loads(report_text)
+    assert report["passed"] is False
+    assert report["errorType"] == "ValueError"
+    assert report["stages"] == {}
+    assert report["background" if background_failure else "observers"] == [
+        {"status": "FAILED", "errorType": "ValueError"}]
+    assert "injected realtime mismatch" not in report_text
+
+
+async def test_capture_stop_is_not_delayed_by_slow_search(monkeypatch):
+    """接收校验完成即可停止采集，不能等待慢搜索而触发十秒静默重连。"""
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    module = runpy.run_path(str(scripts / "benchmark_service.py"))
+    stopped = asyncio.Event()
+
+    async def emit(_seconds):
+        return None
+
+    async def captured():
+        return {"sourceLines": 1}
+
+    async def stop_capture(results):
+        assert results == [{"sourceLines": 1}]
+        stopped.set()
+
+    async def search():
+        await stopped.wait()
+        return {"count": 1}
+
+    capture, background = asyncio.create_task(captured()), asyncio.create_task(search())
+    try:
+        _, results = await asyncio.wait_for(module["emit_observed"](
+            SimpleNamespace(emit=emit), 1, 1, [capture],
+            after_capture=stop_capture, background=[background]), 1)
+        assert results == [{"sourceLines": 1}, {"count": 1}]
+    finally:
+        capture.cancel()
+        background.cancel()
+        await asyncio.gather(capture, background, return_exceptions=True)
+
+
+async def test_emission_stop_does_not_wait_for_reader_drain(monkeypatch):
+    """慢观察器从停止后的文件续读，不能让无输出连接等待观察器直至静默重连。"""
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts))
+    module = runpy.run_path(str(scripts / "benchmark_service.py"))
+    stopped = asyncio.Event()
+
+    async def emit(_seconds):
+        return None
+
+    async def stop_emission():
+        stopped.set()
+
+    async def delayed_reader():
+        await stopped.wait()
+        return {"sourceLines": 144000, "p99Ms": 39000}
+
+    reader = asyncio.create_task(delayed_reader())
+    try:
+        _, observations = await asyncio.wait_for(module["emit_observed"](
+            SimpleNamespace(emit=emit), 120, 1, [reader], after_emission=stop_emission), 1)
+        assert observations == [{"sourceLines": 144000, "p99Ms": 39000}]
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
 
 
 @pytest.mark.parametrize("task_created", [False, True])

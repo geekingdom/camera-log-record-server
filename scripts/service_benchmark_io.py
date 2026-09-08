@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import telnetlib3
 
@@ -157,9 +156,8 @@ def _line(state: dict[str, Any], raw: bytes) -> None:
     if match is None:
         raise AssertionError("日志缺少服务器上海时间前缀")
     try:
-        datetime.strptime(match.group(1).decode("ascii"), "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=ZoneInfo("Asia/Shanghai")
-        )
+        # 正则约束固定格式后，直接解析验证闰年与时分秒范围，避免校验器占满负载端 CPU。
+        datetime.fromisoformat(match.group(1).decode("ascii"))
     except ValueError as error:
         raise AssertionError("日志时间前缀格式错误") from error
     body = raw[match.end():] + b"\n"
