@@ -20,7 +20,7 @@ from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
-from camera_logs.common.ownership import owner_filter
+from camera_logs.common.ownership import OwnershipLost, owner_filter
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ class SessionRuntime:
         self.repo, self.task, self.factory = repo, dict(task), connection_factory
         self.collector = None
         self.stopping = False
+        self.retired = False
         self.frames = deque()
         self.frame_bytes = 0
         self.frame_number = 0
@@ -51,9 +52,10 @@ class SessionRuntime:
             "sessionId": self.collector.session_id, "type": "DEBUG_MODE", "phase": event,
             "mode": details["mode"], "commandBlocked": command_blocked,
             "debugError": debug_error, "createdAt": now()})
-        await self.repo.db.tasks.update_one(owner_filter(self.task),
-            {"$set": {"shellMode": details["mode"], "debugPhase": event,
-                "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()}})
+        if not getattr(self, "retired", False):
+            await self.repo.db.tasks.update_one(owner_filter(self.task),
+                {"$set": {"shellMode": details["mode"], "debugPhase": event,
+                    "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()}})
         logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
 
     def file_id(self, path):
@@ -131,6 +133,10 @@ class SessionRuntime:
                 "previousReceivedAt": details["previousReceivedAt"], "receivedAt": details["receivedAt"],
             }})
             return
+        if getattr(self, "retired", False):
+            if state == "CONNECTING":
+                raise OwnershipLost("运行实例已隔离，禁止重新连接")
+            return
         if state == "CLOSED":
             state = "STOPPING" if self.stopping else "RECONNECTING"
         elif state in {"READ_ERROR", "IDLE_TIMEOUT"}:
@@ -142,8 +148,10 @@ class SessionRuntime:
                 {"$set": {"archiveError": details.get("error"), "updatedAt": now()}},
             )
             return
-        changed = await self.repo.db.tasks.update_one(owner_filter(self.task),
+        changed = await self.repo.db.tasks.update_one({**owner_filter(self.task), "status": {"$ne": "BLOCKED"}},
             {"$set": {"status": state, "sessionId": details.get("sessionId"), "updatedAt": now()}})
+        if state == "CONNECTING" and not changed.matched_count:
+            raise OwnershipLost("建连前任务归属或准入已失效")
         if state == "COLLECTING" and changed.matched_count:
             await self.repo.db.operations.update_many({"taskId": self.task["id"], "desiredState": "RUNNING", "status": "PENDING"},
                 {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
@@ -217,8 +225,11 @@ class SessionRuntime:
                 config["pshSerialCharacterInterval"] = self.repo.settings.psh_serial_character_interval
                 self.started_at = now()
                 reset = {"shellMode": "UNKNOWN", "debugPhase": None, "commandBlocked": False, "debugError": None}
-                await self.repo.db.tasks.update_one(owner_filter(self.task),
+                admitted = await self.repo.db.tasks.update_one(
+                    {**owner_filter(self.task), "status": {"$ne": "BLOCKED"}},
                     {"$set": reset})
+                if not admitted.matched_count:
+                    raise OwnershipLost("重连前任务归属或准入已失效")
                 self.collector = Collector(config, self.repo.settings.log_root, connection_factory=self.factory,
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
                     reserve_execution=self.reserve, update_execution=self.update_execution,
@@ -231,6 +242,10 @@ class SessionRuntime:
                 await self.collector.wait_closed()
             except asyncio.CancelledError:
                 raise
+            except OwnershipLost:
+                self.retired = self.stopping = True
+                logger.info("运行实例停止重连，归属或准入已失效 task=%s", self.task["id"])
+                break
             except PshSwitchError as exc:
                 self.error = str(exc)
                 break

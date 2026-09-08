@@ -1,6 +1,10 @@
 """任务领取身份条件：所有旧实例回写必须受运行、节点与代次约束。"""
 
 
+class OwnershipLost(RuntimeError):
+    """归属或准入条件已失效，调用方应关闭旧实例而非自动重连。"""
+
+
 def owner_filter(task):
     """匹配领取时的不可变身份；缺省代次只匹配缺省值，不能匹配新代次。"""
     return {"id": task["id"], "runId": task["runId"],

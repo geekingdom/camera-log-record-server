@@ -52,6 +52,7 @@ async def test_runtime_cleanup_does_not_touch_other_runs_or_sessions(monkeypatch
                                  psh_serial_character_interval=0, log_root=tmp_path),
     )
     runtime.task = {"id": "task", "runId": "old-run", "passwordEncrypted": ""}
+    await database.tasks.insert_one(runtime.task.copy())
     runtime.collector, runtime.error = None, None
     runtime.factory = runtime.debug_passwords = None
     runtime.stopping = False

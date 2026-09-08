@@ -44,6 +44,29 @@ class Worker:
         if self.active.get(task_id) is runtime:
             self.active.pop(task_id)
 
+    async def finish_runtime(self, runtime, action):
+        """绑定旧实例处理异步收尾异常；隔离关闭不代表可以释放数据库归属。"""
+        ownership = owner_filter(runtime.task)
+        try:
+            if action == "isolate":
+                await runtime.stop()
+                self.discard_closed(runtime)
+            elif action == "pause":
+                await self.pause(runtime)
+            else:
+                await self.release(runtime)
+        except Exception:
+            if action != "isolate":
+                changed = await self.repo.db.tasks.update_one(ownership, {"$set": {
+                    "status": "BLOCKED", "error": "连接或日志关闭未完成，禁止重新连接",
+                }})
+                if changed.matched_count:
+                    await self.repo.db.operations.update_many(
+                        {"taskId": ownership["id"], "status": "PENDING"},
+                        {"$set": {"status": "FAILED", "completedAt": now()}},
+                    )
+            raise
+
     def write_latency(self):
         """汇总活动会话的最近写入快照；最慢会话决定新会话准入。"""
         snapshots = []
@@ -209,13 +232,19 @@ class Worker:
                     future.result()
                 except Exception:
                     logger.exception("运行实例释放失败 task=%s", task_id)
-                    await self.repo.db.tasks.update_one({"id": task_id}, {"$set": {"status": "BLOCKED", "error": "连接或日志关闭未完成，禁止重新连接"}})
-                    await self.repo.db.operations.update_many(
-                        {"taskId": task_id, "status": "PENDING"},
-                        {"$set": {"status": "FAILED", "completedAt": now()}},
-                    )
                 self.releases.pop(task_id, None)
         tasks = [t async for t in self.repo.db.tasks.find({"nodeId": self.repo.settings.node_id})]
+        assigned = {task["id"]: task for task in tasks}
+        # 仅成功取得数据库快照后核对归属；读取失败不能被解释成任务已经消失。
+        for task_id, runtime in list(self.active.items()):
+            current = assigned.get(task_id)
+            if task_id not in self.releases and (
+                current is None or owner_filter(runtime.task) != owner_filter(current)
+                or current["status"] == "BLOCKED" or reported.get("isolated", False)
+            ):
+                runtime.retired = True
+                runtime.stopping = True
+                self.releases[task_id] = asyncio.create_task(self.finish_runtime(runtime, "isolate"))
         for task in tasks:
             if task["id"] in self.releases:
                 continue
@@ -223,8 +252,8 @@ class Worker:
             if task["status"] == "BLOCKED":
                 continue
             if runtime and task["desiredState"] == "PAUSED":
-                await self.repo.db.tasks.update_one({"id": task["id"]}, {"$set": {"status": "PAUSING"}})
-                self.releases[task["id"]] = asyncio.create_task(self.pause(runtime))
+                await self.repo.db.tasks.update_one(owner_filter(task), {"$set": {"status": "PAUSING"}})
+                self.releases[task["id"]] = asyncio.create_task(self.finish_runtime(runtime, "pause"))
                 continue
             if runtime is None and task["desiredState"] == "PAUSED" and task["status"] == "PENDING":
                 await self.pause_pending(task)
@@ -235,7 +264,7 @@ class Worker:
             if runtime and (task["desiredState"] == "STOPPED" or disk_percent >= 95 or runtime.background.done()):
                 if disk_percent >= 95:
                     runtime.error = "磁盘空间不足，已停止采集"
-                self.releases[task["id"]] = asyncio.create_task(self.release(runtime))
+                self.releases[task["id"]] = asyncio.create_task(self.finish_runtime(runtime, "release"))
                 continue
             elif runtime is None and task["status"] == "PENDING" and task["desiredState"] == "RUNNING":
                 # 调度心跳可能已经过期，建连前以本周期磁盘值复核；保留排队任务直到空间恢复。
@@ -243,7 +272,7 @@ class Worker:
                     continue
                 self.active[task["id"]] = SessionRuntime(self.repo, task, connect)
             elif runtime is None and task["status"] not in ("STOPPED", "BLOCKED"):
-                await self.repo.db.tasks.update_one({"id": task["id"]},
+                await self.repo.db.tasks.update_one(owner_filter(task),
                     {"$set": {"status": "BLOCKED", "error": "运行实例已丢失，等待隔离确认"}})
             if runtime and not runtime.stopping and task["status"] == "COLLECTING":
                 manual = self.manual_jobs.get(task["id"])
@@ -284,8 +313,11 @@ class Worker:
         await asyncio.gather(*self.releases.values(), return_exceptions=True)
         for runtime in list(self.active.values()):
             try:
-                await self.repo.db.tasks.update_one(owner_filter(runtime.task), {"$set": {"desiredState": "STOPPED"}})
-                await self.release(runtime)
+                if getattr(runtime, "retired", False):
+                    await self.finish_runtime(runtime, "isolate")
+                else:
+                    await self.repo.db.tasks.update_one(owner_filter(runtime.task), {"$set": {"desiredState": "STOPPED"}})
+                    await self.finish_runtime(runtime, "release")
             except Exception:
                 logger.exception("节点停止失败")
         for job in self.jobs | set(self.manual_jobs.values()):
