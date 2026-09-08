@@ -16,10 +16,9 @@ from fastapi import Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from camera_logs.logs.archive_access import LimitedReader, read_limiter, snapshot
+from camera_logs.logs.archive_access import snapshot
+from camera_logs.logs.file_reads import FileReads
 from camera_logs.logs.job_threads import job_thread
-from camera_logs.logs.read_threads import ReadThreads
-from camera_logs.logs.source import open_log_source
 
 
 def _root(runtime: Any, repo: Any) -> Path:
@@ -56,9 +55,9 @@ def _read_watermark(runtime: Any, file: dict[str, Any]) -> int | None:
     return max(registered or 0, confirmed) if confirmed is not None else registered
 
 
-def install_node_routes(app: Any, repo: Any, runtime: Any) -> ReadThreads:
+def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
     """注册仅供节点和 API 使用的内部路由，每次调用都校验内部令牌。"""
-    reads = ReadThreads()
+    reads = FileReads()
     # 独立测试应用使用默认 ASGI 生命周期；正式 Worker 在自己的 lifespan 中显式关闭。
     app.router.add_event_handler("shutdown", reads.close)
     async def internal(authorization: str | None = Header(default=None)) -> None:
@@ -78,26 +77,9 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> ReadThreads:
         path = _path(runtime, repo, file, require_exists=False)
         # 在事件循环中固定本次读取边界，工作线程不再访问可变化的会话映射。
         watermark = _read_watermark(runtime, file) if path.suffix == ".log" else file.get("bytes")
-        def load() -> bytes:
-            with open_log_source(path, file.get("archiveMember")) as source:
-                cap = min(int(watermark) if watermark is not None else source.size, source.size)
-                # 已验证源身份且请求位于冻结水位之外，无须扫描已读正文或占用带宽。
-                if offset >= cap:
-                    return b""
-                if source.archive is None:
-                    source.stream.seek(offset)
-                    data = source.stream.read(min(limit, max(0, cap - offset)))
-                    read_limiter.consume(len(data))
-                    return data
-                stream = LimitedReader(source.stream, cap)
-                remaining = offset
-                while remaining:
-                    skipped = stream.read(min(262144, remaining))
-                    if not skipped: return b""
-                    remaining -= len(skipped)
-                return stream.read(limit)
         try:
-            data = await reads.run(load)
+            identity = tuple(file.get(key) for key in ("id", "taskId", "runId", "sessionId", "nodeId"))
+            data = await reads.read(identity, path, file.get("archiveMember"), offset, limit, watermark)
         except FileNotFoundError as error:
             raise HTTPException(404, "归档成员不存在") from error
         return {"fileId": identifier, "sessionId": file.get("sessionId"), "data": base64.b64encode(data).decode(), "nextOffset": offset + len(data)}

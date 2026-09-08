@@ -19,6 +19,12 @@ class LogSource:
     name: str
     size: int
     archive: tarfile.TarFile | None = None
+    version: tuple | None = None
+
+
+def file_version(stat: os.stat_result) -> tuple:
+    """文件句柄与路径用相同指纹识别原子替换及原地修改，不只按名称复用。"""
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
 def _published_member(path: Path) -> tuple[Path, int]:
@@ -63,7 +69,9 @@ def open_log_source(path: Path, member_name: str | None = None):
             else:
                 yield LogSource(raw, path.name, os.fstat(raw.fileno()).st_size)
                 return
-        archive = stack.enter_context(tarfile.open(path, "r:gz"))
+        archive_file = stack.enter_context(path.open("rb"))
+        version = file_version(os.fstat(archive_file.fileno()))
+        archive = stack.enter_context(tarfile.open(fileobj=archive_file, mode="r:gz"))
         try:
             member = archive.getmember(member_name) if member_name else next(
                 (item for item in archive if item.isfile() and item.name.endswith(".log")), None)
@@ -77,4 +85,4 @@ def open_log_source(path: Path, member_name: str | None = None):
         if raw is None:
             raise FileNotFoundError(member.name)
         stack.callback(raw.close)
-        yield LogSource(raw, member.name, member.size, archive)
+        yield LogSource(raw, member.name, member.size, archive, version)
