@@ -35,6 +35,7 @@ export interface Task {
   shellMode?: string;
   debugPhase?: string | null;
   commandBlocked?: boolean;
+  nodeId?: string | null;
   debugError?: string | null;
   runId?: string;
   sessionId?: string;

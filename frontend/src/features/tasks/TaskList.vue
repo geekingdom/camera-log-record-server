@@ -6,12 +6,12 @@ import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import type { Task } from "../../shared/types";
 import TaskDiagnostics from "./TaskDiagnostics.vue";
+import { availableTaskActions, type TaskAction } from "./taskActions";
 import { taskStatusLabel, taskStatusTone } from "./taskStatus";
 
 const props = defineProps<{ items: Task[]; loading: boolean }>();
 const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: [] }>();
 const pendingIds = ref(new Set<string>());
-const activeStatuses = new Set(["COLLECTING", "CONNECTING", "RECONNECTING"]);
 const diagnosticId = ref<string>();
 const diagnosticsOpen = ref(false);
 // 轮询替换任务对象后仍按 ID 选择新快照，不保留打开弹窗时的过期错误。
@@ -37,21 +37,8 @@ function label(value: string | undefined, labels: Record<string, string>) {
 function busy(task: Task) {
   return pendingIds.value.has(task.id);
 }
-function canPause(task: Task) {
-  return (
-    task.protocol === "SSH" &&
-    task.status !== "PAUSED" &&
-    (activeStatuses.has(task.status ?? "") || task.desiredState === "RUNNING")
-  );
-}
-function canResume(task: Task) {
-  return task.protocol === "SSH" && task.status === "PAUSED";
-}
-function pauseAction(task: Task) {
-  return canResume(task) ? "resume" : "pause";
-}
-function actionName(task: Task) {
-  return canResume(task) ? "继续任务" : "暂停任务";
+function showsAction(task: Task, action: TaskAction) {
+  return availableTaskActions(task).includes(action);
 }
 // pendingIds 以任务 ID 隔离，避免某一行提交操作时误禁用其它任务。
 async function state(
@@ -127,16 +114,16 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="emit('edit', row)"
         /></el-tooltip>
-        <el-tooltip :content="`启动任务 · ID: ${row.id}`"
+        <el-tooltip v-if="showsAction(row, 'start')" :content="`启动任务 · ID: ${row.id}`"
           ><el-button
             text
             type="success"
             :icon="CirclePlay"
             aria-label="启动任务"
-            :disabled="busy(row) || row.status === 'PAUSED'"
+            :disabled="busy(row)"
             @click="state(row, 'start')"
         /></el-tooltip>
-        <el-tooltip :content="`停止任务 · ID: ${row.id}`"
+        <el-tooltip v-if="showsAction(row, 'stop')" :content="`停止任务 · ID: ${row.id}`"
           ><el-button
             text
             type="danger"
@@ -145,15 +132,21 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="state(row, 'stop')"
         /></el-tooltip>
-        <el-tooltip
-          v-if="canPause(row) || canResume(row)"
-          :content="`${actionName(row)} · ID: ${row.id}`"
+        <el-tooltip v-if="showsAction(row, 'pause')" :content="`暂停任务 · ID: ${row.id}`"
           ><el-button
             text
-            :icon="canResume(row) ? CirclePlay : CirclePause"
-            :aria-label="actionName(row)"
+            :icon="CirclePause"
+            aria-label="暂停任务"
             :disabled="busy(row)"
-            @click="state(row, pauseAction(row))"
+            @click="state(row, 'pause')"
+        /></el-tooltip>
+        <el-tooltip v-if="showsAction(row, 'resume')" :content="`继续任务 · ID: ${row.id}`"
+          ><el-button
+            text
+            :icon="CirclePlay"
+            aria-label="继续任务"
+            :disabled="busy(row)"
+            @click="state(row, 'resume')"
         /></el-tooltip> </template
     ></el-table-column>
   </el-table>
