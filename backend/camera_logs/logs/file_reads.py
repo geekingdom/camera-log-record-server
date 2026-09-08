@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from time import perf_counter
 
 from camera_logs.logs.archive_readers import ArchiveReaders
 from camera_logs.logs.job_threads import job_thread
@@ -24,13 +25,24 @@ class FileReads:
         """快照继续共用有界专用读取线程，不进入连续分页缓存。"""
         return await self._threads.run(function, *args, **kwargs)
 
-    async def read(self, *args):
+    async def read(self, *args, timings=None):
         """首次请求启动清理协程；安装路由时尚无事件循环也能构造读取服务。"""
         if self._closed:
             raise RuntimeError("节点文件读取服务已关闭")
         if self._sweeper is None:
             self._sweeper = asyncio.create_task(self._sweep())
-        return await self.run(self._sources.read, *args)
+        queued = perf_counter()
+
+        def read_source():
+            """线程开始前的等待与实际文件操作分别计量，异常仍由原调用链传播。"""
+            started = perf_counter()
+            try:
+                return self._sources.read(*args)
+            finally:
+                if timings is not None:
+                    timings.update(queue=(started - queued) * 1000, io=(perf_counter() - started) * 1000)
+
+        return await self.run(read_source)
 
     async def _sweep(self):
         while True:

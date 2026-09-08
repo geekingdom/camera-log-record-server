@@ -10,10 +10,11 @@ import hmac
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from fastapi import Depends, Header, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
 from camera_logs.logs.archive_access import snapshot
@@ -73,16 +74,27 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
 
     @app.get("/internal/read/{identifier}")
     async def read(identifier: str, _: None = Depends(internal), offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
+        started = perf_counter()
         file = await get_file(identifier)
+        catalog_done = perf_counter()
         path = _path(runtime, repo, file, require_exists=False)
         # 在事件循环中固定本次读取边界，工作线程不再访问可变化的会话映射。
         watermark = _read_watermark(runtime, file) if path.suffix == ".log" else file.get("bytes")
+        timings = {"catalog": (catalog_done - started) * 1000,
+                   "path": (perf_counter() - catalog_done) * 1000}
         try:
             identity = tuple(file.get(key) for key in ("id", "taskId", "runId", "sessionId", "nodeId"))
-            data = await reads.read(identity, path, file.get("archiveMember"), offset, limit, watermark)
+            data = await reads.read(identity, path, file.get("archiveMember"), offset, limit, watermark,
+                                    timings=timings)
         except FileNotFoundError as error:
             raise HTTPException(404, "归档成员不存在") from error
-        return {"fileId": identifier, "sessionId": file.get("sessionId"), "data": base64.b64encode(data).decode(), "nextOffset": offset + len(data)}
+        encoding = perf_counter()
+        response = JSONResponse({"fileId": identifier, "sessionId": file.get("sessionId"),
+                                 "data": base64.b64encode(data).decode(), "nextOffset": offset + len(data)})
+        timings["encode"] = (perf_counter() - encoding) * 1000
+        # 只返回固定阶段名和毫秒值；不记录正文、路径、凭据或用户输入。
+        response.headers["Server-Timing"] = ", ".join(f"{key};dur={value:.3f}" for key, value in timings.items())
+        return response
 
     @app.get("/internal/archive/{identifier}")
     async def archive(identifier: str, _: None = Depends(internal), bytes: int | None = Query(default=None, ge=0), includeIndex: bool = Query(default=False)):

@@ -7,11 +7,12 @@ import asyncio
 import logging
 from datetime import date as CalendarDate
 from datetime import datetime, timedelta
+from time import perf_counter
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import httpx
-from fastapi import Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from camera_logs.common.database import now, public
@@ -24,9 +25,11 @@ from camera_logs.logs.order import ordered_files
 logger = logging.getLogger(__name__)
 
 
-async def node_request(repo, node_id, path, params=None, *, client):
+async def node_request(repo, node_id, path, params=None, *, client, downstream=None):
     """通过内部令牌请求节点 JSON 数据，将网络故障转换为可重试服务错误。"""
+    started = perf_counter()
     node = await repo.get("nodes", node_id)
+    node_found = perf_counter()
     try:
         # 这两个内部 GET 均无发送命令等副作用。响应尚未完整返回时，按同一
         # 文件偏移或实时游标重试一次，不推进游标；超时与连接池排队不重试。
@@ -42,7 +45,16 @@ async def node_request(repo, node_id, path, params=None, *, client):
                                node_id, path, type(exc).__name__)
         if response.status_code != 200:
             raise HTTPException(503, "采集节点文件暂不可用")
-        return response.json()
+        received = perf_counter()
+        body = response.json()
+        if downstream is not None:
+            # 上游耗时包含节点内部阶段，不能与节点阶段再次相加。
+            api_timing = (f"api_node;dur={(node_found-started)*1000:.3f}, "
+                          f"api_upstream;dur={(received-node_found)*1000:.3f}, "
+                          f"api_decode;dur={(perf_counter()-received)*1000:.3f}")
+            downstream.headers["Server-Timing"] = ", ".join(part for part in (
+                downstream.headers.get("Server-Timing"), response.headers.get("server-timing"), api_timing) if part)
+        return body
     except httpx.HTTPError as exc:
         logger.warning("节点 JSON 转发失败 node=%s path=%s error=%s", node_id, path, type(exc).__name__)
         raise HTTPException(503, "采集节点暂不可用") from exc
@@ -97,11 +109,14 @@ def install_log_routes(app):
         return {"items": values[(page-1)*pageSize:page*pageSize], "total": len(values), "page": page, "pageSize": pageSize}
 
     @app.get("/api/v1/log-files/{identifier}/content")
-    async def content(identifier: str, request: Request, user: User, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
+    async def content(identifier: str, request: Request, response: Response, user: User, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
+        started = perf_counter()
         file = await repo().get("files", identifier)
         authorize(user, "logs:read", file["taskId"])
+        response.headers["Server-Timing"] = f"api_catalog;dur={(perf_counter()-started)*1000:.3f}"
         return await node_request(repo(), file["nodeId"], f"/internal/read/{identifier}",
-                                  {"offset": offset, "limit": limit}, client=request.app.state.node_http)
+                                  {"offset": offset, "limit": limit}, client=request.app.state.node_http,
+                                  downstream=response)
 
     async def create_job(body, request, user, kind):
         """冻结任务文件目录，申请保留期保护，并通过幂等键提交后台作业。"""
