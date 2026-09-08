@@ -46,3 +46,24 @@ def test_internal_read_reads_ready_archive_raw_member(tmp_path):
     with TestClient(app) as client:
         response = client.get("/internal/read/ready?offset=2&limit=3", headers={"Authorization": "Bearer node-secret"})
     assert base64.b64decode(response.json()["data"]) == b"cde"
+
+
+def test_internal_read_uses_exact_shared_archive_member(tmp_path):
+    """共享小时包必须按文件记录的成员名读取，不能回退到包内第一段。"""
+    async def scenario():
+        settings = Settings(encryption_key=Fernet.generate_key().decode(), internal_token="node-secret", log_root=tmp_path, node_id="node")
+        repo = Repository(AsyncMongoMockClient().db, settings)
+        archive = tmp_path / "shared.tar.gz"
+        with tarfile.open(archive, "w:gz") as output:
+            import io
+            for name, data in (("part-000001.log", b"first"), ("part-000002.log", b"second")):
+                info = tarfile.TarInfo(name); info.size = len(data); output.addfile(info, io.BytesIO(data))
+        await repo.db.files.insert_one({"id": "second", "path": str(archive), "archiveMember": "part-000002.log", "status": "READY", "bytes": 6, "nodeId": "node"})
+        await repo.db.files.insert_one({"id": "missing", "path": str(archive), "archiveMember": "part-999999.log", "status": "READY", "bytes": 1, "nodeId": "node"})
+        return repo
+    repo = asyncio.run(scenario()); app = FastAPI(); install_node_routes(app, repo, type("Runtime", (), {"log_root": tmp_path})())
+    with TestClient(app) as client:
+        response = client.get("/internal/read/second", headers={"Authorization": "Bearer node-secret"})
+        missing = client.get("/internal/read/missing", headers={"Authorization": "Bearer node-secret"})
+    assert base64.b64decode(response.json()["data"]) == b"second"
+    assert missing.status_code == 404

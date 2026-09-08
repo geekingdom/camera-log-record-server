@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import re
 import time
 from collections import deque
 from datetime import UTC, datetime
@@ -59,7 +60,7 @@ class SessionRuntime:
         logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
 
     def file_id(self, path):
-        """原始文件与压缩文件共享逻辑 ID，路径包含运行及会话以避免跨任务碰撞。"""
+        """以不可变原始分卷路径生成逻辑 ID，多个成员可共享一个小时归档。"""
         relative = str(Path(path).relative_to(self.repo.settings.log_root))
         return hashlib.sha256(relative.removesuffix(".tar.gz").removesuffix(".log").encode()).hexdigest()[:32]
 
@@ -89,8 +90,16 @@ class SessionRuntime:
                 "nodeId": self.repo.settings.node_id, "hour": hour, "path": str(path), "bytes": self.paths[file_id],
                 "status": "OPEN", "runStartedAt": self.task.get("runStartedAt", self.started_at),
                 "rawFileName": path.name,
+                "indexPath": str(path.with_suffix(".index.jsonl")),
+                "segmentNumber": self._segment_number(path),
                 "sessionStartedAt": self.started_at, "updatedAt": now()},
                 "$setOnInsert": {"createdAt": now(), "firstSequence": chunk.sequence}}, upsert=True)
+
+    @staticmethod
+    def _segment_number(path):
+        """从固定宽度分卷名恢复小时内顺序；旧片段没有分卷号。"""
+        match = re.search(r"part-(\d+)\.log$", Path(path).name)
+        return int(match.group(1)) if match else 0
 
     @staticmethod
     def _hour_from_path(path):
@@ -105,7 +114,17 @@ class SessionRuntime:
     async def on_archive(self, archive):
         """仅在压缩校验和原子发布成功后把目录记录设为可下载。"""
         path = archive.path
-        file_id = self.file_id(path)
+        log_path = getattr(archive, "log_path", None) or path
+        file_id = self.file_id(log_path)
+        member_name = getattr(archive, "member_name", None)
+        index_path = getattr(archive, "index_path", None)
+        member_fields = {}
+        if member_name:
+            member_fields = {"archiveMember": member_name, "rawFileName": member_name,
+                "archiveGroupId": hashlib.sha256(str(path.relative_to(self.repo.settings.log_root)).encode()).hexdigest(),
+                "segmentNumber": self._segment_number(log_path)}
+        if index_path:
+            member_fields["indexPath"] = str(index_path)
         await self.repo.db.files.update_one({"id": file_id}, {"$set": {
             "id": file_id, "taskId": archive.task_id, "runId": archive.run_id, "sessionId": archive.session_id,
             "nodeId": self.repo.settings.node_id,
@@ -114,8 +133,9 @@ class SessionRuntime:
             "archiveName": path.name,
             "bytes": archive.raw_size, "archiveBytes": path.stat().st_size, "sha256": archive.sha256,
             "firstSequence": archive.first_sequence, "lastSequence": archive.last_sequence, "status": "READY",
-            "runStartedAt": self.task.get("runStartedAt", self.started_at), "sessionStartedAt": self.started_at,
-            "updatedAt": now()}}, upsert=True)
+            **member_fields, "updatedAt": now()}, "$setOnInsert": {
+                "runStartedAt": self.task.get("runStartedAt", self.started_at),
+                "sessionStartedAt": self.started_at, "createdAt": now()}}, upsert=True)
 
     async def on_state(self, state, details):
         """将会话状态映射到运行状态；压缩失败单独告警，不伪装成连接中断。"""

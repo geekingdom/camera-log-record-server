@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import shutil
 import tarfile
 from datetime import UTC, datetime, timedelta
@@ -19,7 +20,7 @@ from typing import Any
 from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
-from camera_logs.logs.compression import _hash_stream
+from camera_logs.logs.compression import _hash_stream, compress_hour
 
 logger = logging.getLogger(__name__)
 
@@ -37,31 +38,128 @@ def _contained(repo: Any, path: str | Path) -> Path:
 
 
 def _archive_id(root: Path, path: Path) -> str:
-    relative = str(path.relative_to(root)).removesuffix(".tar.gz")
+    """根据原始日志相对路径生成稳定目录 ID，与运行时登记规则一致。"""
+    relative = str(path.relative_to(root)).removesuffix(".log")
     return hashlib.sha256(relative.encode()).hexdigest()[:32]
 
 
-def _manifest(path: Path) -> dict[str, Any]:
-    """恢复前重新校验正文和索引；只读取归档成员，不解包到文件系统。"""
+def _metadata_path(path: Path) -> Path:
+    """共享小时归档的成员清单固定放在同目录旁路文件中。"""
+    return Path(str(path) + ".metadata.json")
+
+
+def _pending_path(path: Path) -> Path:
+    """压缩事务清单存在时，归档尚未完成 metadata 发布和原始分卷清理。"""
+    return Path(str(path) + ".pending.json")
+
+
+def _pending_segments(path: Path) -> list[dict[str, Any]] | None:
+    """读取待提交清单；格式损坏交由压缩器拒绝，维护不把它误作已完成归档。"""
+    pending = _pending_path(path)
+    if not pending.is_file() or pending.stat().st_size > 1024 * 1024:
+        return None
+    value = json.loads(pending.read_text(encoding="utf-8"))
+    segments = value.get("segments") if isinstance(value, dict) else None
+    return segments if isinstance(value, dict) and value.get("formatVersion") == 1 and isinstance(segments, list) and segments else None
+
+
+async def _pending_is_active(repo: Any, segments: list[dict[str, Any]]) -> bool:
+    """当前节点仍使用该任务和会话时，让其自身压缩流程完成事务，避免并行改写。"""
+    for segment in segments:
+        current = await repo.db.tasks.find_one({
+            "id": segment.get("taskId"), "runId": segment.get("runId"), "sessionId": segment.get("sessionId"),
+            "nodeId": repo.settings.node_id, "status": {"$in": ["CONNECTING", "COLLECTING", "RECONNECTING", "PAUSING"]},
+        })
+        if current is not None:
+            return True
+    return False
+
+
+def _member_path(archive: Path, name: Any, suffix: str) -> Path:
+    """限制外部成员名称为当前小时目录的普通文件，阻止旁路元数据逃逸目录。"""
+    if not isinstance(name, str) or not name.endswith(suffix) or Path(name).name != name:
+        raise ValueError("invalid archive sidecar member name")
+    return archive.parent / name
+
+
+def _legacy_members(path: Path) -> list[dict[str, Any]]:
+    """兼容旧单分卷 manifest，避免已发布历史归档在每轮维护中重复报错。"""
     with tarfile.open(path, "r:gz") as archive:
-        member = archive.getmember("manifest.json")
-        if not member.isfile() or member.size > 1024 * 1024:
-            raise ValueError("invalid archive manifest")
-        stream = archive.extractfile(member)
-        if stream is None:
-            raise ValueError("archive manifest is unreadable")
+        manifest_file = archive.getmember("manifest.json")
+        stream = archive.extractfile(manifest_file)
+        if not manifest_file.isfile() or manifest_file.size > 1024 * 1024 or stream is None:
+            raise ValueError("invalid legacy archive manifest")
         manifest = json.loads(stream.read())
-        checks = [(".log", manifest["sha256"], manifest["rawSize"])]
-        if "indexSha256" in manifest or "indexBytes" in manifest:
-            checks.append((".index.jsonl", manifest["indexSha256"], manifest["indexBytes"]))
-        for suffix, digest, size in checks:
-            members = [item for item in archive.getmembers() if item.name.endswith(suffix)]
-            if len(members) != 1 or not members[0].isfile():
-                raise ValueError("invalid archive data members")
-            source = archive.extractfile(members[0])
-            if source is None or _hash_stream(source) != (digest, size):
-                raise ValueError("archive checksum or size mismatch")
-        return manifest
+        log = next((item for item in archive.getmembers() if item.isfile() and item.name.endswith(".log")), None)
+        if log is None or not isinstance(manifest, dict):
+            raise ValueError("invalid legacy archive log")
+        source = archive.extractfile(log)
+        if source is None or _hash_stream(source) != (manifest["sha256"], manifest["rawSize"]):
+            raise ValueError("legacy archive checksum or size mismatch")
+        index = next((item for item in archive.getmembers() if item.isfile() and item.name.endswith(".index.jsonl")), None)
+        if index is not None:
+            source = archive.extractfile(index)
+            if source is None or _hash_stream(source) != (manifest["indexSha256"], manifest["indexBytes"]):
+                raise ValueError("legacy archive index checksum or size mismatch")
+        return [manifest | {"logName": log.name, "_legacy": True}]
+
+
+def _members(path: Path) -> list[dict[str, Any]]:
+    """校验共享小时 tar 正文及元数据引用的外部索引，返回成员清单。"""
+    metadata_path = _metadata_path(path)
+    if not metadata_path.is_file():
+        return _legacy_members(path)
+    if metadata_path.stat().st_size > 1024 * 1024:
+        raise ValueError("archive metadata is too large")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    members = metadata.get("members") if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict) or metadata.get("formatVersion") != 2 or not isinstance(members, list) or not members:
+        raise ValueError("invalid archive metadata")
+    required = {"taskId", "runId", "sessionId", "hourStart", "rawSize", "sha256", "firstSequence", "lastSequence",
+                "logName", "indexName", "indexSha256", "indexBytes"}
+    names: set[str] = set()
+    with tarfile.open(path, "r:gz") as archive:
+        archive_members = {item.name: item for item in archive.getmembers() if item.isfile()}
+        if len(archive_members) != len(members) or any(not name.endswith(".log") for name in archive_members):
+            raise ValueError("archive contains non-log or duplicate members")
+        for member in members:
+            if not isinstance(member, dict) or not required <= member.keys():
+                raise ValueError("archive metadata member is incomplete")
+            log_path = _member_path(path, member["logName"], ".log")
+            index_path = _member_path(path, member["indexName"], ".index.jsonl")
+            if log_path.name in names or not isinstance(member["rawSize"], int) or not isinstance(member["indexBytes"], int):
+                raise ValueError("archive metadata member is invalid")
+            names.add(log_path.name)
+            source = archive.extractfile(archive_members.get(log_path.name))
+            if source is None or _hash_stream(source) != (member["sha256"], member["rawSize"]):
+                raise ValueError("archive log checksum or size mismatch")
+            with index_path.open("rb") as index:
+                if _hash_stream(index) != (member["indexSha256"], member["indexBytes"]):
+                    raise ValueError("archive index checksum or size mismatch")
+    return members
+
+
+def _sidecar_member_names(path: Path) -> set[str] | None:
+    """仅读取小型元数据以判断已登记归档是否可跳过逐字节恢复校验。"""
+    metadata_path = _metadata_path(path)
+    if not metadata_path.is_file() or metadata_path.stat().st_size > 1024 * 1024:
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    members = metadata.get("members") if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict) or metadata.get("formatVersion") != 2 or not isinstance(members, list) or not members:
+        return None
+    names = {item.get("logName") for item in members if isinstance(item, dict)}
+    return names if len(names) == len(members) and all(isinstance(name, str) for name in names) else None
+
+
+async def _ready_group_matches(repo: Any, path: Path) -> bool:
+    """大小和成员数均未变化的完整 READY 组无需每次维护重新读取全部 tar 正文。"""
+    names = await asyncio.to_thread(_sidecar_member_names, path)
+    if names is None:
+        return False
+    records = [record async for record in repo.db.files.find({"path": str(path), "status": "READY"})]
+    return (len(records) == len(names) and {record.get("archiveMember") for record in records} == names
+            and all(record.get("archiveBytes") == path.stat().st_size for record in records))
 
 
 async def recover_orphan_archives(repo: Any) -> int:
@@ -71,39 +169,54 @@ async def recover_orphan_archives(repo: Any) -> int:
     for path in root.rglob("*.tar.gz"):
         if "exports" in path.parts:
             continue
-        identifier = _archive_id(root, path)
-        existing = await repo.db.files.find_one({"id": identifier})
-        if existing and existing.get("status") != "OPEN":
-            continue
         try:
-            manifest = await asyncio.to_thread(_manifest, path)
-            identity = {key: manifest[key] for key in ("taskId", "runId", "sessionId")}
-            identity["nodeId"] = repo.settings.node_id
-            if existing and any(existing.get(key) != value for key, value in identity.items()):
-                raise ValueError("archive identity differs from open catalog record")
-            hour = datetime.fromisoformat(manifest["hourStart"]).astimezone(UTC).isoformat()
-            document = {
-                "id": identifier, **identity,
-                "hour": hour, "path": str(path), "archiveName": path.name, "bytes": manifest["rawSize"],
-                "archiveBytes": path.stat().st_size,
-                "sha256": manifest["sha256"], "firstSequence": manifest.get("firstSequence"),
-                "lastSequence": manifest.get("lastSequence"), "status": "READY", "updatedAt": now(),
-            }
-            if existing:
-                result = await repo.db.files.update_one(
-                    {"id": identifier, "status": "OPEN", **identity}, {"$set": document})
-                registered += result.modified_count
-            else:
-                result = await repo.db.files.update_one(
-                    {"id": identifier}, {"$setOnInsert": {**document, "createdAt": now()}}, upsert=True)
-                registered += int(result.upserted_id is not None)
+            pending = await asyncio.to_thread(_pending_segments, path)
+            if pending is not None:
+                if await _pending_is_active(repo, pending):
+                    continue
+                await compress_hour([], path)
+            if await _ready_group_matches(repo, path):
+                continue
+            members = await asyncio.to_thread(_members, path)
+            group_id = hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()
+            for member in members:
+                log_path = _member_path(path, member["logName"], ".log")
+                index_path = None if member.get("_legacy") else _member_path(path, member["indexName"], ".index.jsonl")
+                identifier = _archive_id(root, log_path)
+                existing = await repo.db.files.find_one({"id": identifier})
+                if existing and existing.get("status") != "OPEN":
+                    continue
+                identity = {key: member[key] for key in ("taskId", "runId", "sessionId")}
+                identity["nodeId"] = repo.settings.node_id
+                if existing and any(existing.get(key) != value for key, value in identity.items()):
+                    raise ValueError("archive identity differs from open catalog record")
+                document = {
+                    "id": identifier, **identity,
+                    "hour": datetime.fromisoformat(member["hourStart"]).astimezone(UTC).isoformat(),
+                    "path": str(path), "archiveName": path.name, "archiveMember": log_path.name,
+                    "archiveGroupId": group_id, "rawFileName": log_path.name,
+                    "bytes": member["rawSize"], "archiveBytes": path.stat().st_size, "sha256": member["sha256"],
+                    "firstSequence": member["firstSequence"], "lastSequence": member["lastSequence"],
+                    "segmentNumber": int(match.group(1)) if (match := re.search(r"-part-(\d+)\.log$", log_path.name)) else 0,
+                    "status": "READY", "updatedAt": now(),
+                }
+                if index_path is not None:
+                    document["indexPath"] = str(index_path)
+                if existing:
+                    result = await repo.db.files.update_one(
+                        {"id": identifier, "status": "OPEN", **identity}, {"$set": document})
+                    registered += result.modified_count
+                else:
+                    result = await repo.db.files.update_one(
+                        {"id": identifier}, {"$setOnInsert": {**document, "createdAt": now()}}, upsert=True)
+                    registered += int(result.upserted_id is not None)
         except Exception:
             logger.exception("归档恢复失败 path=%s", path)
     return registered
 
 
 async def apply_retention(repo: Any) -> dict[str, int]:
-    """Delete only expired, ready archives with no queued/running job reference."""
+    """按物理归档路径领取全部成员后删除，避免共享小时包留下悬空目录记录。"""
     cutoff = now() - timedelta(days=await get_retention_days(repo)) - timedelta(hours=1)
     removed = skipped = failures = 0
     cursor = repo.db.files.find({
@@ -113,34 +226,76 @@ async def apply_retention(repo: Any) -> dict[str, int]:
         ],
     })
     async for document in cursor:
-        # DELETING 已拒绝新的下载保护，可幂等续做崩溃前尚未完成的物理删除。
-        claimed = document if document["status"] == "DELETING" else None
-        if claimed is None:
-            active = await repo.db.jobs.find_one({"status": {"$in": ["QUEUED", "RUNNING"]}, "files.id": document["id"]})
-            if active:
-                skipped += 1
+        # 一个共享小时 tar 可被多个 files 成员引用。先读取完整成员组，任一
+        # 受保护、未过期、非本节点或未进入可删除状态都阻止物理删除。
+        if _pending_path(Path(document["path"])).exists():
+            skipped += 1
+            continue
+        group = [item async for item in repo.db.files.find({"path": document["path"]})]
+        eligible = bool(group)
+        for member in group:
+            if member.get("nodeId") != repo.settings.node_id or member.get("status") not in {"READY", "DELETING"}:
+                eligible = False
+                break
+            if member.get("status") == "READY":
+                if member.get("hour", cutoff.isoformat()) >= cutoff.isoformat():
+                    eligible = False
+                    break
+                retain_until = member.get("retainUntil")
+                if retain_until is not None:
+                    if not isinstance(retain_until, datetime):
+                        eligible = False
+                        break
+                    retain_until = retain_until.replace(tzinfo=UTC) if retain_until.tzinfo is None else retain_until
+                    if retain_until > now():
+                        eligible = False
+                        break
+                active = await repo.db.jobs.find_one({
+                    "status": {"$in": ["QUEUED", "RUNNING"]}, "files.id": member["id"]
+                })
+                if active:
+                    eligible = False
+                    break
+        if not eligible:
+            skipped += 1
+            continue
+        for member in group:
+            if member.get("status") != "READY":
                 continue
             claimed = await repo.db.files.find_one_and_update(
-                {"id": document["id"], "status": "READY", "$or": [
+                {"id": member["id"], "status": "READY", "$or": [
                     {"retainUntil": None}, {"retainUntil": {"$lte": now()}},
                 ]},
                 {"$set": {"status": "DELETING", "retentionClaimedAt": now()}},
                 return_document=ReturnDocument.AFTER,
             )
-        if not claimed:
+            if not claimed:
+                eligible = False
+                break
+        if not eligible:
+            skipped += 1
+            continue
+        claimed_group = [item async for item in repo.db.files.find({"path": document["path"]})]
+        if not claimed_group or any(item.get("status") != "DELETING" for item in claimed_group):
+            skipped += 1
             continue
         try:
-            path = _contained(repo, claimed["path"])
+            path = _contained(repo, document["path"])
             if path.suffixes[-2:] != [".tar", ".gz"]:
                 raise ValueError("retention only deletes published archives")
             await asyncio.to_thread(path.unlink, missing_ok=True)
-            await repo.db.files.delete_one({"id": claimed["id"], "status": "DELETING"})
-            removed += 1
+            sidecars = {_metadata_path(path)}
+            for member in claimed_group:
+                if member.get("indexPath"):
+                    sidecars.add(_contained(repo, member["indexPath"]))
+            await asyncio.gather(*(asyncio.to_thread(sidecar.unlink, missing_ok=True) for sidecar in sidecars))
+            deleted = await repo.db.files.delete_many({"path": str(path), "status": "DELETING"})
+            removed += deleted.deleted_count
         except Exception:
             failures += 1
-            logger.exception("归档保留清理失败 fileId=%s", claimed.get("id"))
-            await repo.db.files.update_one(
-                {"id": claimed["id"], "status": "DELETING"},
+            logger.exception("归档保留清理失败 path=%s", document.get("path"))
+            await repo.db.files.update_many(
+                {"path": document["path"], "status": "DELETING"},
                 {"$set": {"retentionErrorAt": now()}},
             )
     return {"removed": removed, "skipped": skipped, "failures": failures}

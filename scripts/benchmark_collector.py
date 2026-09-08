@@ -50,14 +50,17 @@ def verify_route_archives(archives: list) -> tuple[str, int, int]:
     digest = hashlib.sha256()
     stored_bytes = compressed_bytes = 0
     pending = b""
+    seen_archives = set()
     prefix = re.compile(rb"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
     for archive in sorted(archives, key=lambda item: item.first_sequence or 0):
         archived_digest = hashlib.sha256()
-        compressed_bytes += archive.path.stat().st_size
+        if archive.path not in seen_archives:
+            compressed_bytes += archive.path.stat().st_size
+            seen_archives.add(archive.path)
         with tarfile.open(archive.path, "r:gz") as bundle:
             members = [item for item in bundle.getmembers() if item.name.endswith(".log")]
-            assert len(members) == 1, "归档必须包含唯一正文文件"
-            stream = bundle.extractfile(members[0])
+            assert len(members) == len(bundle.getmembers()), "归档只能包含日志"
+            stream = bundle.extractfile(getattr(archive, "member_name", None) or members[0])
             assert stream is not None, "归档正文不是普通文件"
             while chunk := stream.read(256 * 1024):
                 archived_digest.update(chunk)
@@ -128,7 +131,8 @@ async def execute(args: argparse.Namespace) -> dict[str, object]:
         "timestampPrefixVerified": True,
         "verified": passed,
         "rssBytes": maximum_rss,
-        "archives": sum(len(value) for value in archives),
+        "archives": len({item.path for route_archives in archives for item in route_archives}),
+        "logParts": sum(len(value) for value in archives),
     }
 
 

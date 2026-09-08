@@ -6,13 +6,16 @@ from camera_logs.common.database import public
 def summarize_hours(files):
     """聚合状态按固定优先级归并，不受 MongoDB 同小时文档返回顺序影响。"""
     groups = {}
+    archive_sizes = {}
     for file in files:
         hour = file["hour"]
         entry = groups.setdefault(hour, {"hourId": hour, "hour": hour, "bytes": 0, "archiveBytes": 0, "files": []})
         entry["bytes"] += file.get("bytes", 0)
-        entry["archiveBytes"] += file.get("archiveBytes", 0)
+        archive_key = (hour, file.get("nodeId"), file.get("archiveGroupId") or file["id"])
+        archive_sizes[archive_key] = max(archive_sizes.get(archive_key, 0), file.get("archiveBytes", 0))
         entry["files"].append(public(file))
     for entry in groups.values():
+        entry["archiveBytes"] = sum(size for key, size in archive_sizes.items() if key[0] == entry["hour"])
         fragments = entry["files"]
         fragments.sort(key=lambda f: (str(f.get("runStartedAt", "")), str(f.get("sessionStartedAt", "")), f.get("firstSequence") or 0, f["id"]))
         states = {f["status"] for f in fragments}

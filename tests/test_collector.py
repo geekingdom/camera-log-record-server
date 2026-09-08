@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
+import camera_logs.collection.collector as collector_module
 import pytest
 from camera_logs.collection.collector import Collector
+from camera_logs.logs.storage import MAX_LOG_BYTES
 
 
 class FakeConnection:
@@ -63,6 +66,32 @@ def test_collector_writes_received_chunks_in_exact_order_and_initializes_command
     assert b"".join(received).count(b"[") == 1
     assert collector.session_id
     assert connection.closed
+
+
+def test_collector_uses_incremental_pending_byte_count_for_small_packets(tmp_path, monkeypatch):
+    """大量小分包不应在每次接收时遍历整个待刷写队列计算总长度。"""
+    def forbidden_sum(*args, **kwargs):
+        raise AssertionError("reader loop must not aggregate pending chunks with sum")
+
+    monkeypatch.setattr(collector_module, "sum", forbidden_sum, raising=False)
+
+    async def scenario():
+        connection = FakeConnection()
+        received: list[bytes] = []
+        collector = Collector(
+            {"id": "task-small", "runId": "run-small", "storageIdentity": "testingdevice",
+             "protocolType": "TELNET_SERIAL", "initialCommands": [], "scheduledCommands": []},
+            tmp_path, connection_factory=lambda _: connection, on_log=lambda chunk: received.append(chunk.data),
+        )
+        await collector.start()
+        for _ in range(2_000):
+            await connection._received.put(b"x")
+        await connection._received.put(None)
+        await collector.wait_closed()
+        return received
+
+    received = asyncio.run(scenario())
+    assert b"".join(received).endswith(b"x" * 2_000)
 
 
 def test_manual_command_is_serialized_after_initialization_and_never_replayed(tmp_path):
@@ -267,3 +296,22 @@ def test_log_prefixes_cross_chunk_lines_empty_lines_and_duplicate_content(tmp_pa
     assert lines[0].endswith(b"same\r\n")
     assert lines[1].endswith(b"\n")
     assert lines[2].endswith(b"same\n")
+
+
+def test_flush_publishes_every_piece_when_one_prefixed_chunk_crosses_10_mib(tmp_path):
+    """写入器拆分大块后，采集器必须按 source offset 发布完整字节流。"""
+    async def scenario():
+        chunks = []
+        collector = Collector(
+            {"id": "task", "runId": "run", "storageIdentity": "device", "initialCommands": []}, tmp_path,
+            connection_factory=lambda _: FakeConnection(), on_log=lambda chunk: chunks.append(chunk),
+        )
+        data = b"[2026-09-08 09:00:00] partial-line-" + b"x" * (MAX_LOG_BYTES + 31)
+        await collector._flush([(data, datetime.now(UTC))])
+        await collector._writer.close()
+        return data, chunks
+
+    data, chunks = asyncio.run(scenario())
+    assert len(chunks) == 2
+    assert b"".join(chunk.data for chunk in chunks) == data
+    assert [chunk.offset for chunk in chunks] == [0, 0]

@@ -50,24 +50,32 @@ class LimitedReader:
         return data
 
 
-def _members(path: Path, index_path: Path | None):
+def _members(path: Path, index_path: Path | None, archive_member: str | None = None, include_index: bool = False):
     """统一打开未压缩文件和归档成员，返回的资源由快照调用者负责关闭。"""
     if path.suffixes[-2:] == [".tar", ".gz"]:
         archive = tarfile.open(path, "r:gz")  # noqa: SIM115 - ownership spans returned member streams
-        raw = next((item for item in archive.getmembers() if item.name.endswith(".log")), None)
-        index = next((item for item in archive.getmembers() if item.name.endswith(".index.jsonl")), None)
+        try:
+            raw = archive.getmember(archive_member) if archive_member else next((item for item in archive.getmembers() if item.name.endswith(".log")), None)
+        except KeyError:
+            raw = None
+        if raw and (not raw.isfile() or not raw.name.endswith(".log")):
+            raw = None
         if raw is None:
             archive.close()
             raise FileNotFoundError("archive contains no raw log")
-        return archive, archive.extractfile(raw), raw.name, raw.size, archive.extractfile(index) if index else None, index.name if index else None, index.size if index else 0
-    index = index_path.open("rb") if index_path and index_path.is_file() else None
+        embedded = next((item for item in archive.getmembers() if item.name.endswith(".index.jsonl")), None)
+        if include_index and index_path and index_path.is_file():
+            index = index_path.open("rb")
+            return archive, archive.extractfile(raw), raw.name, raw.size, index, index_path.name, index_path.stat().st_size
+        return archive, archive.extractfile(raw), raw.name, raw.size, archive.extractfile(embedded) if include_index and embedded else None, embedded.name if include_index and embedded else None, embedded.size if include_index and embedded else 0
+    index = index_path.open("rb") if include_index and index_path and index_path.is_file() else None
     return None, path.open("rb"), path.name, path.stat().st_size, index, index_path.name if index else None, index_path.stat().st_size if index else 0
 
 
-def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None = None, file_id: str | None = None) -> Path:
+def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None = None, file_id: str | None = None, archive_member: str | None = None, include_index: bool = False) -> Path:
     """复制冻结正文前缀和索引，附带摘要清单；不允许把缺失尾部当成完整快照。"""
     target.parent.mkdir(parents=True, exist_ok=True)
-    archive, raw, raw_name, available, index, index_name, index_size = _members(path, index_path)
+    archive, raw, raw_name, available, index, index_name, index_size = _members(path, index_path, archive_member, include_index)
     if raw is None:
         raise FileNotFoundError(path)
     size, raw_hash, index_hash = min(max(0, raw_bytes), available), hashlib.sha256(), hashlib.sha256()

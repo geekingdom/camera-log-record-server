@@ -105,8 +105,9 @@ async def run(url, browser):
                     download.raise_for_status()
                     with tarfile.open(fileobj=io.BytesIO(download.content), mode="r:gz") as bundle:
                         members = [member for member in bundle.getmembers() if member.name.endswith(".log")]
-                        assert len(members) == 1
-                        raw = bundle.extractfile(members[0]).read()
+                        assert members and len(members) == len(bundle.getmembers())
+                        assert all(member.size <= 10 * 1024 * 1024 for member in members)
+                        raw = b"".join(bundle.extractfile(member).read() for member in members)
                         sequence.extend(int(value) for value in re.findall(rb"resource-workflow seq=(\d+)", raw))
                 assert sequence and sequence == list(range(len(sequence))), "采集顺序或完整性不一致"
             assert not connections, "资源删除后仍残留采集连接"

@@ -326,6 +326,7 @@ class Collector:
 
     async def _reader_loop(self) -> None:
         pending: list[tuple[bytes, object]] = []
+        pending_bytes = 0
         prompt_tail = b""
         flush_deadline = asyncio.get_running_loop().time() + 0.1
         last_received = asyncio.get_running_loop().time()
@@ -338,6 +339,7 @@ class Collector:
                 except TimeoutError:
                     if pending:
                         to_flush, pending = pending, []
+                        pending_bytes = 0
                         await self._flush(to_flush)
                     await self._publish_archives()
                     await self._writer.sync_due()
@@ -367,9 +369,12 @@ class Collector:
                     prompt_tail = (prompt_tail + data)[-max(len(needle) - 1, 0):]
                 received_at = datetime.now(UTC)
                 self.write_latency.begin()
-                pending.append((self._prefixer.prefix(data, received_at), received_at))
-                if sum(len(chunk) for chunk, _ in pending) >= 256 * 1024 or asyncio.get_running_loop().time() >= flush_deadline:
+                prefixed = self._prefixer.prefix(data, received_at)
+                pending.append((prefixed, received_at))
+                pending_bytes += len(prefixed)
+                if pending_bytes >= 256 * 1024 or asyncio.get_running_loop().time() >= flush_deadline:
                     to_flush, pending = pending, []
+                    pending_bytes = 0
                     await self._flush(to_flush)
                     flush_deadline = asyncio.get_running_loop().time() + 0.1
         except asyncio.CancelledError:
@@ -387,6 +392,7 @@ class Collector:
                 await self._close_connection()
                 if pending:
                     to_flush, pending = pending, []
+                    pending_bytes = 0
                     await self._flush(to_flush)
                 archive = await self._writer.close()
                 if archive:
@@ -419,7 +425,9 @@ class Collector:
         self.write_latency.begin()
         positions = await self._writer.write_many(pending)
         self.write_latency.finish()
-        for (data, received_at), position in zip(pending, positions, strict=True):
+        for position in positions:
+            data, received_at = pending[position.source_index]
+            piece = data[position.source_offset:position.source_offset + position.length]
             await _call(
                 self._on_log,
                 LogChunk(
@@ -427,7 +435,7 @@ class Collector:
                     self.run_id,
                     self.session_id,
                     position.sequence,
-                    data,
+                    piece,
                     position.offset,
                     str(position.path),
                 ),

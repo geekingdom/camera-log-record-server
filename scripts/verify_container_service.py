@@ -189,23 +189,18 @@ def archive_members(content: bytes) -> list[bytes]:
 
 
 def verify_archive(content: bytes, expected: list[bytes]) -> str:
-    """逐归档核对 manifest 摘要和大小，再拼接验证设备序列没有乱序或缺失。"""
-    parts: list[tuple[tuple[str, int], bytes]] = []
+    """核对下载包仅含限长日志，再按成员顺序比对源端完整序列。"""
+    all_raw = bytearray()
     for packed in archive_members(content):
         with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as archive:
-            log = next(item for item in archive if item.name.endswith(".log"))
-            manifest = archive.extractfile("manifest.json")
-            stream = archive.extractfile(log)
-            if manifest is None or stream is None:
-                raise AssertionError("归档缺少正文或完整性清单")
-            metadata, raw = json.load(manifest), stream.read()
-        digest = hashlib.sha256(raw).hexdigest()
-        if metadata.get("rawSize") != len(raw) or metadata.get("sha256") != digest:
-            raise AssertionError("归档 manifest 的正文大小或摘要不匹配")
-        parts.append(((str(metadata.get("hourStart", "")), int(metadata.get("firstSequence") or -1)), raw))
-    all_raw = bytearray()
-    for _order, raw in sorted(parts, key=lambda item: item[0]):
-        all_raw.extend(raw)
+            members = archive.getmembers()
+            assert members and len({member.name for member in members}) == len(members)
+            for member in members:
+                assert member.isfile() and member.name.endswith(".log")
+                assert member.size <= 10 * 1024 * 1024
+                stream = archive.extractfile(member)
+                assert stream is not None
+                all_raw.extend(stream.read())
     recovered = strip_prefixed_lines(bytes(all_raw))
     if recovered != expected:
         raise AssertionError(f"归档正文顺序或完整性错误，实际 {len(recovered)} 行，期望 {len(expected)} 行")

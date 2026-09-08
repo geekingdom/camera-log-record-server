@@ -20,6 +20,16 @@ def test_mixed_fragment_status_is_order_independent():
     assert summarize_hours([files[1] | {"sha256": "a" * 64}])[0]["integrity"] == "VERIFIED"
 
 
+def test_shared_hour_archive_size_counted_once_per_node():
+    files = [{"id": str(i), "hour": "2026-09-08T00:00:00+00:00", "status": "READY",
+              "bytes": 10, "archiveBytes": 100 + i, "archiveGroupId": "shared", "nodeId": "n1"}
+             for i in range(3)]
+    hour = summarize_hours(files)[0]
+    assert hour["bytes"] == 30
+    assert hour["archiveBytes"] == 102
+    assert summarize_hours(files + [files[0] | {"nodeId": "n2"}])[0]["archiveBytes"] == 202
+
+
 def test_hour_date_filter_uses_shanghai_day_and_keeps_pagination(client):
     task = client.post("/api/v1/tasks", headers={"Idempotency-Key": "hours"}, json={
         "name": "hours", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9090,

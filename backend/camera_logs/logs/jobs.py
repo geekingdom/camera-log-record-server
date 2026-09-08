@@ -9,6 +9,7 @@ import asyncio
 import bisect
 import json
 import logging
+import os
 import shutil
 import tarfile
 import threading
@@ -20,6 +21,7 @@ from typing import Any
 import httpx
 
 from camera_logs.logs.archive_access import LimitedReader, copy_limited, read_limiter, snapshot
+from camera_logs.logs.hour_download import Source, hour_export_name, reusable_hour_archive, write_hour_archive
 from camera_logs.logs.naming import safe_filename_component
 
 OUTPUT_LIMIT = 20_000_000_000
@@ -54,10 +56,12 @@ async def _file_doc(repo: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
-async def _remote_archive(repo: Any, file: dict[str, Any], frozen: dict[str, Any], target: Path) -> Path:
+async def _remote_archive(repo: Any, file: dict[str, Any], frozen: dict[str, Any], target: Path, include_index: bool = False) -> Path:
     """跨节点取回冻结快照，并限制读取速率和临时文件大小。"""
     node = await repo.get("nodes", file["nodeId"])
-    params = {"bytes": frozen.get("bytes", file.get("bytes", 0))} if frozen.get("status") != "READY" else None
+    params = {"includeIndex": "true"} if include_index else {}
+    if frozen.get("status") != "READY":
+        params["bytes"] = frozen.get("bytes", file.get("bytes", 0))
     written = 0
     async with httpx.AsyncClient(timeout=120) as client, client.stream("GET", node["url"] + f"/internal/archive/{file['id']}", params=params, headers={"Authorization": "Bearer " + repo.settings.internal_token}) as response:
         response.raise_for_status()
@@ -142,19 +146,23 @@ async def _archive(
     frozen: dict[str, Any],
     scratch: Path,
     scratch_name: str | None = None,
+    include_index: bool = False,
 ) -> tuple[Path, bool]:
     """查找已封存归档或建立固定水位快照，返回路径及是否为临时文件。"""
     file = await _file_doc(repo, frozen)
     local = file.get("nodeId") == repo.settings.node_id
     target = scratch / (scratch_name or _archive_name(file, str(file["id"]), use_path=local))
     if not local:
-        await _remote_archive(repo, file, frozen, target)
+        if include_index:
+            await _remote_archive(repo, file, frozen, target, True)
+        else:
+            await _remote_archive(repo, file, frozen, target)
         return target, True
     path = _file_path(repo, file)
-    if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"]:
+    if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"] and not include_index:
         return path, False
     index = _contained(repo, file["indexPath"]) if file.get("indexPath") else None
-    await asyncio.to_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"])
+    await asyncio.to_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index)
     return target, True
 
 
@@ -206,11 +214,11 @@ class JobProgress:
 
 
 async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
-    """组装选中片段；缺失必须显式报告，多片段使用 ZIP STORE 避免再次压缩。"""
+    """按小时重组用户下载；用户包只包含日志 tar，不包含索引或清单。"""
     exports = _root(repo) / "exports"
     scratch = exports / ".tmp" / job["id"]
     output = exports / job["id"]
-    sources: list[tuple[dict[str, Any], Path, bool]] = []
+    sources: list[Source] = []
     missing: list[str] = []
     progress: JobProgress | None = job.get("_progress")
     await _reserve_temp(repo, job["id"], _estimated_temp_bytes(job["files"]))
@@ -227,7 +235,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                     _archive_name(file, frozen["id"], use_path=local), scratch_names
                 )
                 path, temporary = await _archive(repo, frozen, scratch, scratch_name)
-                sources.append((frozen, path, temporary))
+                sources.append((frozen, file, path, temporary))
             except Exception:  # noqa: BLE001 - partial exports deliberately record each unavailable source
                 _log.exception("export source unavailable fileId=%s", frozen.get("id"))
                 missing.append(frozen.get("id", "unknown"))
@@ -238,36 +246,52 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             raise FileNotFoundError("no selected archives are available")
         if missing and not job.get("allowPartial", False):
             raise FileNotFoundError("selected archive is unavailable")
-        if sum(path.stat().st_size for _, path, _ in sources) > OUTPUT_LIMIT:
+        if sum(path.stat().st_size for path in {item[2] for item in sources}) > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
-        if len(sources) == 1 and not missing:
-            filename = sources[0][1].name
-            size = await asyncio.to_thread(copy_limited, sources[0][1], output / filename)
+        by_hour: dict[str, list[Source]] = {}
+        for source in sources:
+            by_hour.setdefault(str(source[0].get("hour") or source[1].get("hour") or "unknown-hour"), []).append(source)
+        hourly: list[Path] = []
+        for hour, members in sorted(by_hour.items()):
+            if await _cancelled(repo, job["id"]):
+                raise asyncio.CancelledError()
+            reusable = await asyncio.to_thread(reusable_hour_archive, members)
+            if reusable is not None:
+                hourly.append(reusable)
+                continue
+            hourly_path = scratch / hour_export_name(job, hour)
+            await asyncio.to_thread(write_hour_archive, hourly_path, members)
+            hourly.append(hourly_path)
+        await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True)
+        result_path: Path
+        if len(hourly) == 1:
+            filename = hourly[0].name
+            if hourly[0] in {path for _frozen, _file, path, _temporary in sources}:
+                result_path = output / filename
+                try:
+                    await asyncio.to_thread(os.link, hourly[0], result_path)
+                    size = result_path.stat().st_size
+                except OSError:
+                    size = await asyncio.to_thread(copy_limited, hourly[0], result_path)
+            else:
+                size = await asyncio.to_thread(copy_limited, hourly[0], output / filename)
+                result_path = output / filename
         else:
-            filename = f"{job['id']}.zip"
+            task_component = safe_filename_component(str(job.get("taskName") or job.get("taskId") or job["id"]), fallback=job["id"])
+            filename = f"{task_component}-hours.zip"
             destination = output / filename
             def make_zip() -> int:
-                manifest = {"jobId": job["id"], "files": [item[0]["id"] for item in sources], "missing": missing}
                 with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_STORED) as bundle:
-                    used_names: set[str] = set()
-                    for _frozen, path, _ in sources:
-                        entry_name = path.name
-                        suffix = "".join(Path(entry_name).suffixes)
-                        stem = entry_name.removesuffix(suffix)
-                        while entry_name in used_names:
-                            entry_name = f"{stem}-{len(used_names) + 1}{suffix}"
-                        used_names.add(entry_name)
-                        with path.open("rb") as source, bundle.open(entry_name, "w") as entry:
+                    for path in hourly:
+                        with path.open("rb") as source, bundle.open(path.name, "w") as entry:
                             while data := source.read(1024 * 1024):
-                                read_limiter.consume(len(data))
-                                entry.write(data)
-                    bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, sort_keys=True))
+                                read_limiter.consume(len(data)); entry.write(data)
                 return destination.stat().st_size
-            await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True)
             size = await asyncio.to_thread(make_zip)
+            result_path = destination
         if size > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
-        return {"resultPath": str(output / filename), "filename": filename, "missing": missing, "bytes": size}
+        return {"resultPath": str(result_path), "filename": filename, "missing": missing, "bytes": size}
     except BaseException:
         await asyncio.to_thread(shutil.rmtree, output, True)
         raise
@@ -299,24 +323,29 @@ def _blocks(stream: Any, needle: bytes, index: list[dict[str, Any]], start: date
         offset += len(chunk)
 
 
-def _search_archive(path: Path, needle: bytes, start: datetime, end: datetime, cancelled):
+def _search_archive(path: Path, needle: bytes, start: datetime, end: datetime, cancelled, archive_member: str | None = None):
     """按旁路索引关联接收时间，流式扫描解压后的日志正文。"""
     if path.suffix == ".log":
         with path.open("rb") as raw:
             yield from _blocks(LimitedReader(raw, path.stat().st_size), needle, [], start, end, cancelled)
         return
     with tarfile.open(path, "r:gz") as archive:
-        raw = next((item for item in archive.getmembers() if item.name.endswith(".log")), None)
+        try:
+            raw = archive.getmember(archive_member) if archive_member else next((item for item in archive.getmembers() if item.name.endswith(".log")), None)
+        except KeyError:
+            raw = None
         index = next((item for item in archive.getmembers() if item.name.endswith(".index.jsonl")), None)
+        if raw is None or not raw.name.endswith(".log"):
+            raise FileNotFoundError(archive_member or path.name)
         entries = [json.loads(line) for line in LimitedReader(archive.extractfile(index), index.size).read().splitlines()] if index else []
         stream = archive.extractfile(raw)
         if stream:
             yield from _blocks(LimitedReader(stream, raw.size), needle, entries, start, end, cancelled)
 
 
-def _search_limited(path: Path, needle: bytes, start: datetime, end: datetime, limit: int, cancelled):
+def _search_limited(path: Path, needle: bytes, start: datetime, end: datetime, limit: int, cancelled, archive_member: str | None = None):
     results = []
-    for offset, text in _search_archive(path, needle, start, end, cancelled):
+    for offset, text in _search_archive(path, needle, start, end, cancelled, archive_member):
         results.append((offset, text))
         if len(results) >= limit:
             break
@@ -339,8 +368,9 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             if await _cancelled(repo, job["id"]):
                 stopped.set()
                 raise asyncio.CancelledError()
-            path, _temporary = await _archive(repo, frozen, scratch)
-            matches = await asyncio.to_thread(_search_limited, path, needle, start, end, 1000 - len(results), stopped.is_set)
+            file = await _file_doc(repo, frozen)
+            path, _temporary = await _archive(repo, frozen, scratch, include_index=True)
+            matches = await asyncio.to_thread(_search_limited, path, needle, start, end, 1000 - len(results), stopped.is_set, file.get("archiveMember"))
             if progress is not None:
                 await progress.advance()
             for offset, text in matches:

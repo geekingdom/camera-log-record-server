@@ -2,7 +2,6 @@
 
 import hashlib
 import io
-import json
 import runpy
 import tarfile
 import zipfile
@@ -15,12 +14,10 @@ PREFIX = b"[2026-09-08 13:59:59] "
 
 
 def packed(raw, sequence, wrong_digest=False):
-    """构造不含实际设备数据的归档与完整性清单。"""
+    """构造按序命名的纯日志归档，损坏注入直接修改正文。"""
     output = io.BytesIO()
-    metadata = {"rawSize": len(raw), "sha256": "invalid" if wrong_digest else hashlib.sha256(raw).hexdigest(),
-        "hourStart": "2026-09-08T05:00:00+00:00", "firstSequence": sequence}
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
-        for name, data in (("output.log", raw), ("manifest.json", json.dumps(metadata).encode())):
+        for name, data in ((f"part-{sequence:06d}.log", raw + b"corrupt" if wrong_digest else raw),):
             member = tarfile.TarInfo(name)
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
@@ -31,13 +28,13 @@ def test_archive_verifier_orders_fragments_and_rejoins_split_lines():
     output = io.BytesIO()
     first, second = PREFIX + b"fir", b"st\n" + PREFIX + b"second\n"
     with zipfile.ZipFile(output, "w") as bundle:
-        bundle.writestr("a-second.tar.gz", packed(second, 2))
-        bundle.writestr("z-first.tar.gz", packed(first, 1))
+        bundle.writestr("20260908140000.tar.gz", packed(second, 2))
+        bundle.writestr("20260908130000.tar.gz", packed(first, 1))
     digest = verifier["verify_archive"](output.getvalue(), [b"first\n", b"second\n"])
     assert digest == hashlib.sha256(first + second).hexdigest()
 
 
-def test_archive_verifier_rejects_corrupted_manifest():
+def test_archive_verifier_rejects_corrupted_log():
     with pytest.raises(AssertionError):
         verifier["verify_archive"](packed(PREFIX + b"first\n", 1, wrong_digest=True), [b"first\n"])
 

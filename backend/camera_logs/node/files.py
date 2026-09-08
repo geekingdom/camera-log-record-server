@@ -64,7 +64,13 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
                     data = handle.read(min(limit, max(0, cap - offset)))
                     read_limiter.consume(len(data)); return data
             with tarfile.open(path, "r:gz") as archive:
-                member = next((item for item in archive if item.name.endswith(".log")), None)
+                member_name = file.get("archiveMember")
+                try:
+                    member = archive.getmember(member_name) if member_name else next((item for item in archive if item.name.endswith(".log")), None)
+                except KeyError:
+                    member = None
+                if member and (not member.isfile() or not member.name.endswith(".log")):
+                    member = None
                 if member is None: raise FileNotFoundError(path)
                 stream = LimitedReader(archive.extractfile(member), min(cap or member.size, member.size))
                 remaining = offset
@@ -73,18 +79,21 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
                     if not skipped: return b""
                     remaining -= len(skipped)
                 return stream.read(limit)
-        data = await asyncio.to_thread(load)
+        try:
+            data = await asyncio.to_thread(load)
+        except FileNotFoundError as error:
+            raise HTTPException(404, "归档成员不存在") from error
         return {"fileId": identifier, "sessionId": file.get("sessionId"), "data": base64.b64encode(data).decode(), "nextOffset": offset + len(data)}
 
     @app.get("/internal/archive/{identifier}")
-    async def archive(identifier: str, _: None = Depends(internal), bytes: int | None = Query(default=None, ge=0)):
+    async def archive(identifier: str, _: None = Depends(internal), bytes: int | None = Query(default=None, ge=0), includeIndex: bool = Query(default=False)):
         file = await get_file(identifier)
         path = _path(runtime, repo, file)
-        if bytes is None and file.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"]:
+        if bytes is None and not includeIndex and file.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"]:
             return FileResponse(path, media_type="application/gzip", filename=path.name)
         snapshot_path = _root(runtime, repo) / "exports" / ".snapshots" / f"{identifier}-{uuid.uuid4().hex}.tar.gz"
-        index = _path(runtime, repo, {"path": file["indexPath"]}) if file.get("indexPath") else None
-        await asyncio.to_thread(snapshot, path, snapshot_path, bytes if bytes is not None else file.get("bytes", path.stat().st_size), index, identifier)
+        index = _path(runtime, repo, {"path": file["indexPath"]}) if includeIndex and file.get("indexPath") else None
+        await asyncio.to_thread(snapshot, path, snapshot_path, bytes if bytes is not None else file.get("bytes", path.stat().st_size), index, identifier, file.get("archiveMember"), includeIndex)
         return FileResponse(snapshot_path, media_type="application/gzip", filename=f"{identifier}.tar.gz", background=BackgroundTask(snapshot_path.unlink, missing_ok=True))
 
     @app.get("/internal/downloads/{identifier}")

@@ -122,11 +122,16 @@ def install_log_routes(app):
                     raise HTTPException(409, "日志片段正在清理，请刷新后重试")
             if kind == "DOWNLOAD" and not body.allowPartial and set(body.hourIds)-{f["hour"] for f in files}:
                 raise HTTPException(409, "部分小时没有可用片段")
-            estimate = sum(f.get("archiveBytes") or f.get("bytes", 0) for f in files)
+            archive_sizes = {}
+            for file in files:
+                group = (file["nodeId"], file.get("archiveGroupId") or file["id"])
+                archive_sizes[group] = max(archive_sizes.get(group, 0), file.get("archiveBytes") or file.get("bytes", 0))
+            estimate = sum(archive_sizes.values())
             if kind == "DOWNLOAD" and estimate > 20_000_000_000:
                 raise HTTPException(422, "预计下载超过20GB，请拆分小时")
             doc = body.model_dump() | {"id": identifier, "kind": kind, "status": "QUEUED", "progress": 0,
                 "actor": user["id"], "files": files, "nodeId": task.get("nodeId") or files[0]["nodeId"],
+                "taskName": task["name"], "taskIp": task["ip"],
                 "createdAt": now(), "expiresAt": now()+timedelta(hours=24)}
             if kind == "SEARCH":
                 doc.update(start=start.isoformat(), end=end.isoformat())

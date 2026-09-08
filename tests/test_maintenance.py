@@ -24,19 +24,22 @@ def repository(root):
 
 
 def archive_at(root, *, wrong_digest=False):
-    """构造带正文及完整性清单的已发布归档，模拟进程在数据库回写前退出。"""
+    """构造共享小时归档、外部索引和成员清单，模拟目录回写前退出。"""
     path = root / "task" / "run" / "session" / "part-001.tar.gz"
     path.parent.mkdir(parents=True)
     raw = b"ordered device output\n"
+    index = b'{"offset":0}\n'
     manifest = {"taskId": "task", "runId": "run", "sessionId": "session",
         "hourStart": now().replace(minute=0, second=0, microsecond=0).isoformat(),
         "rawSize": len(raw), "sha256": "invalid" if wrong_digest else hashlib.sha256(raw).hexdigest(),
-        "firstSequence": 1, "lastSequence": 1}
+        "firstSequence": 1, "lastSequence": 1, "logName": "part-001.log", "indexName": "part-001.index.jsonl",
+        "indexSha256": hashlib.sha256(index).hexdigest(), "indexBytes": len(index)}
     with tarfile.open(path, "w:gz") as bundle:
-        for name, data in (("part-001.log", raw), ("manifest.json", json.dumps(manifest).encode())):
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            bundle.addfile(info, io.BytesIO(data))
+        info = tarfile.TarInfo("part-001.log")
+        info.size = len(raw)
+        bundle.addfile(info, io.BytesIO(raw))
+    (path.parent / manifest["indexName"]).write_bytes(index)
+    Path(str(path) + ".metadata.json").write_text(json.dumps({"formatVersion": 2, "members": [manifest]}))
     return path, manifest
 
 
@@ -70,10 +73,75 @@ async def test_retention_preserves_recent_protected_remote_and_job_references(tm
     assert len(list(tmp_path.glob("*.tar.gz"))) == 4
 
 
+async def test_retention_keeps_shared_archive_while_another_member_is_protected(tmp_path):
+    """共享小时包必须等待全部成员均可删除，不能由一个过期记录提前 unlink。"""
+    repo = repository(tmp_path)
+    path = tmp_path / "shared.tar.gz"
+    path.write_bytes(b"published")
+    metadata = Path(str(path) + ".metadata.json")
+    first_index, second_index = tmp_path / "first.index.jsonl", tmp_path / "second.index.jsonl"
+    metadata.write_text("{}")
+    first_index.write_text("first")
+    second_index.write_text("second")
+    old_hour = (now() - timedelta(days=8)).isoformat()
+    await repo.db.files.insert_many([
+        {"id": "expired-member", "nodeId": "node", "status": "READY", "hour": old_hour, "path": str(path),
+         "indexPath": str(first_index)},
+        {"id": "protected-member", "nodeId": "node", "status": "READY", "hour": old_hour, "path": str(path),
+         "retainUntil": now() + timedelta(hours=1), "indexPath": str(second_index)},
+    ])
+    result = await apply_retention(repo)
+    assert result["removed"] == 0
+    assert path.exists()
+    assert await repo.db.files.count_documents({"path": str(path)}) == 2
+    await repo.db.files.update_one({"id": "protected-member"}, {"$set": {"retainUntil": now() - timedelta(hours=1)}})
+    assert (await apply_retention(repo))["removed"] == 2
+    assert not path.exists()
+    assert not metadata.exists()
+    assert not first_index.exists()
+    assert not second_index.exists()
+    assert await repo.db.files.count_documents({"path": str(path)}) == 0
+
+
+async def test_retention_preserves_archive_while_compression_pending_journal_exists(tmp_path):
+    """事务清单代表未完成发布，保留任务不得删除其 tar、索引或目录记录。"""
+    repo = repository(tmp_path)
+    path = tmp_path / "pending.tar.gz"
+    path.write_bytes(b"published")
+    Path(str(path) + ".pending.json").write_text('{"formatVersion":1,"segments":[]}')
+    await repo.db.files.insert_one({"id": "pending", "nodeId": "node", "status": "READY",
+                                    "hour": (now() - timedelta(days=8)).isoformat(), "path": str(path)})
+    assert (await apply_retention(repo))["removed"] == 0
+    assert path.exists()
+    assert await repo.db.files.find_one({"id": "pending"})
+
+
+async def test_recovery_completes_inactive_pending_archive_before_catalog_registration(tmp_path, monkeypatch):
+    """节点重启后应完成旧会话的 pending 事务，即使同小时没有新的采集。"""
+    repo = repository(tmp_path)
+    path, member = archive_at(tmp_path)
+    raw = path.parent / member["logName"]
+    raw.write_bytes(b"ordered device output\n")
+    pending_member = member | {"logPath": str(raw)}
+    Path(str(path) + ".pending.json").write_text(json.dumps({"formatVersion": 1, "segments": [pending_member]}))
+    calls = []
+
+    async def complete(segments, target):
+        calls.append((segments, target))
+        Path(str(target) + ".pending.json").unlink()
+        raw.unlink()
+        return target
+
+    monkeypatch.setattr("camera_logs.logs.maintenance.compress_hour", complete)
+    assert await recover_orphan_archives(repo) == 1
+    assert calls == [([], path)]
+    assert not Path(str(path) + ".pending.json").exists()
+
+
 async def test_recovery_repairs_open_record_after_archive_publication(tmp_path):
     repo = repository(tmp_path)
     path, manifest = archive_at(tmp_path)
-    identifier = _archive_id(tmp_path, path)
+    identifier = _archive_id(tmp_path, path.parent / manifest["logName"])
     await repo.db.files.insert_one({"id": identifier, "status": "OPEN", "nodeId": "node",
         "taskId": "task", "runId": "run", "sessionId": "session",
         "path": str(path.with_suffix("").with_suffix(".log")), "bytes": 1})
@@ -86,6 +154,35 @@ async def test_recovery_repairs_open_record_after_archive_publication(tmp_path):
     assert await recover_orphan_archives(repo) == 0
 
 
+async def test_recovery_registers_each_shared_archive_member_with_stable_log_identity(tmp_path):
+    """恢复共享小时包时，每个日志成员保留其自身任务、运行和会话身份。"""
+    repo = repository(tmp_path)
+    path = tmp_path / "shared" / "2026" / "09" / "08" / "12" / "hour.tar.gz"
+    path.parent.mkdir(parents=True)
+    hour = now().replace(minute=0, second=0, microsecond=0).isoformat()
+    members = []
+    with tarfile.open(path, "w:gz") as bundle:
+        for number, task in enumerate(("task-a", "task-b"), start=1):
+            log_name, index_name = f"part-{number:06d}.log", f"part-{number:06d}.index.jsonl"
+            raw, index = f"{task}\n".encode(), b'{"offset":0}\n'
+            info = tarfile.TarInfo(log_name); info.size = len(raw); bundle.addfile(info, io.BytesIO(raw))
+            (path.parent / index_name).write_bytes(index)
+            members.append({"taskId": task, "runId": f"run-{number}", "sessionId": f"session-{number}",
+                            "hourStart": hour, "rawSize": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                            "firstSequence": number, "lastSequence": number, "logName": log_name, "indexName": index_name,
+                            "indexSha256": hashlib.sha256(index).hexdigest(), "indexBytes": len(index)})
+    Path(str(path) + ".metadata.json").write_text(json.dumps({"formatVersion": 2, "members": members}))
+
+    assert await recover_orphan_archives(repo) == 2
+    records = [item async for item in repo.db.files.find({"path": str(path)})]
+    assert {record["id"] for record in records} == {
+        _archive_id(tmp_path, path.parent / member["logName"]) for member in members
+    }
+    assert {(record["taskId"], record["runId"], record["sessionId"], record["archiveMember"]) for record in records} == {
+        (member["taskId"], member["runId"], member["sessionId"], member["logName"]) for member in members
+    }
+
+
 async def test_recovery_rejects_checksum_mismatch_and_preserves_archive(tmp_path):
     repo = repository(tmp_path)
     path, _ = archive_at(tmp_path, wrong_digest=True)
@@ -94,10 +191,28 @@ async def test_recovery_rejects_checksum_mismatch_and_preserves_archive(tmp_path
     assert path.exists()
 
 
+async def test_recovery_supports_legacy_manifest_archive_without_sidecar(tmp_path):
+    """已有单分卷归档缺少 v2 sidecar 时仍可恢复，避免维护循环持续报错。"""
+    repo = repository(tmp_path)
+    path = tmp_path / "legacy.tar.gz"
+    raw, index = b"legacy\n", b'{"offset":0}\n'
+    manifest = {"taskId": "task", "runId": "run", "sessionId": "session", "hourStart": now().isoformat(),
+                "rawSize": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "firstSequence": 1, "lastSequence": 1,
+                "indexBytes": len(index), "indexSha256": hashlib.sha256(index).hexdigest()}
+    with tarfile.open(path, "w:gz") as bundle:
+        for name, content in (("legacy.log", raw), ("legacy.index.jsonl", index), ("manifest.json", json.dumps(manifest).encode())):
+            info = tarfile.TarInfo(name); info.size = len(content); bundle.addfile(info, io.BytesIO(content))
+    assert await recover_orphan_archives(repo) == 1
+    record = await repo.db.files.find_one({})
+    assert record["status"] == "READY"
+    assert record["archiveMember"] == "legacy.log"
+    assert "indexPath" not in record
+
+
 async def test_recovery_does_not_resurrect_retention_claim(tmp_path):
     repo = repository(tmp_path)
     path, _ = archive_at(tmp_path)
-    await repo.db.files.insert_one({"id": _archive_id(tmp_path, path), "status": "DELETING"})
+    await repo.db.files.insert_one({"id": _archive_id(tmp_path, path.parent / "part-001.log"), "status": "DELETING"})
     assert await recover_orphan_archives(repo) == 0
     assert (await repo.db.files.find_one({}))["status"] == "DELETING"
 
@@ -105,7 +220,7 @@ async def test_recovery_does_not_resurrect_retention_claim(tmp_path):
 async def test_recovery_preserves_mismatched_session_identity(tmp_path):
     repo = repository(tmp_path)
     path, _ = archive_at(tmp_path)
-    await repo.db.files.insert_one({"id": _archive_id(tmp_path, path), "status": "OPEN",
+    await repo.db.files.insert_one({"id": _archive_id(tmp_path, path.parent / "part-001.log"), "status": "OPEN",
         "nodeId": "node", "taskId": "task", "runId": "run", "sessionId": "other"})
     assert await recover_orphan_archives(repo) == 0
     assert (await repo.db.files.find_one({}))["sessionId"] == "other"
