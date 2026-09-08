@@ -16,6 +16,7 @@ from pymongo import AsyncMongoClient, ReturnDocument
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
+from camera_logs.common.ownership import owner_filter
 from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,12 @@ class Worker:
         self.releases = {}
         self.disk_level = "NORMAL"
         self.write_pressure = WritePressure()
+
+    def discard_closed(self, runtime):
+        """仅移除已关闭的同一对象，等待期间安装的后继实例不得被旧回调移除。"""
+        task_id = runtime.task["id"]
+        if self.active.get(task_id) is runtime:
+            self.active.pop(task_id)
 
     def write_latency(self):
         """汇总活动会话的最近写入快照；最慢会话决定新会话准入。"""
@@ -68,7 +75,7 @@ class Worker:
     async def stop_pending(self, task):
         """取消尚未建连的本机任务；无会话需要关闭，可直接结束运行并释放端点锁。"""
         changed = await self.repo.db.tasks.update_one(
-            {"id": task["id"], "runId": task["runId"], "nodeId": self.repo.settings.node_id,
+            {**owner_filter(task), "nodeId": self.repo.settings.node_id,
              "status": "PENDING", "desiredState": "STOPPED"},
             {"$set": {"status": "STOPPED", "nodeId": None, "updatedAt": now()}})
         if not changed.matched_count:
@@ -83,7 +90,7 @@ class Worker:
             {"$set": {"status": "FAILED", "error": "启动前已停止", "completedAt": now()}})
         # 编辑排队任务也沿用受控重启语义；显式停止已由 API 清除 restartRequested。
         await self.repo.db.tasks.update_one(
-            {"id": task["id"], "runId": task["runId"], "status": "STOPPED", "restartRequested": True},
+            {**owner_filter(task), "nodeId": None, "status": "STOPPED", "restartRequested": True},
             {"$set": {"desiredState": "RUNNING", "restartRequested": False}})
 
     async def pause(self, runtime):
@@ -91,7 +98,7 @@ class Worker:
         task = runtime.task
         await runtime.stop()
         changed = await self.repo.db.tasks.update_one(
-            {"id": task["id"], "runId": task["runId"], "desiredState": "PAUSED"},
+            {**owner_filter(task), "desiredState": "PAUSED"},
             {"$set": {"status": "PAUSED", "nodeId": None, "pausedAt": now()}})
         if not changed.matched_count:
             await self.release(runtime)
@@ -99,12 +106,12 @@ class Worker:
         await self.repo.db.operations.update_many({"taskId": task["id"], "desiredState": "PAUSED", "status": "PENDING"},
             {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
         await self.repo.db.events.insert_one({"taskId": task["id"], "runId": task["runId"], "type": "USER_PAUSED", "createdAt": now()})
-        self.active.pop(task["id"], None)
+        self.discard_closed(runtime)
 
     async def pause_pending(self, task):
         """任务已领取但尚未建连时直接暂停；与普通暂停一样保留运行及端点锁。"""
         changed = await self.repo.db.tasks.update_one(
-            {"id": task["id"], "runId": task["runId"], "desiredState": "PAUSED", "status": "PENDING"},
+            {**owner_filter(task), "desiredState": "PAUSED", "status": "PENDING"},
             {"$set": {"status": "PAUSED", "nodeId": None, "pausedAt": now()}},
         )
         if not changed.matched_count:
@@ -125,7 +132,16 @@ class Worker:
         update = {"nodeId": None, "status": "ERROR" if failed else "STOPPED", "error": str(failed) if failed else None, "updatedAt": now()}
         if failed:
             update["desiredState"] = "STOPPED"
-        await self.repo.db.tasks.update_one({"id": task["id"], "runId": task["runId"]}, {"$set": update})
+        # 数据库收尾期间保留归属，防止中途失败后无法凭原领取身份继续完成清理。
+        closing = {key: value for key, value in update.items() if key != "nodeId"}
+        closing["status"] = "STOPPING"
+        changed = await self.repo.db.tasks.update_one(owner_filter(task), {"$set": closing})
+        if not changed.matched_count:
+            # 物理连接已确认关闭，但数据库归属已改变；不得释放后继的锁或结束其操作。
+            self.discard_closed(runtime)
+            logger.info("旧运行实例已关闭，跳过过期归属回写 task=%s run=%s generation=%s",
+                        task["id"], task["runId"], task.get("generation"))
+            return
         await self.repo.db.endpoint_locks.delete_one({"taskId": task["id"], "runId": task["runId"]})
         await self.repo.db.runs.update_one({"id": task["runId"]}, {"$set": {"endedAt": now()}})
         await self.repo.db.operations.update_many({"taskId": task["id"], "desiredState": "STOPPED", "status": "PENDING"},
@@ -133,9 +149,11 @@ class Worker:
         if failed:
             await self.repo.db.operations.update_many({"taskId": task["id"], "desiredState": "RUNNING", "status": "PENDING"},
                 {"$set": {"status": "FAILED", "completedAt": now()}})
-        await self.repo.db.tasks.find_one_and_update({"id": task["id"], "restartRequested": True},
+        await self.repo.db.tasks.update_one(owner_filter(task), {"$set": update})
+        await self.repo.db.tasks.find_one_and_update(
+            {**owner_filter(task), "nodeId": None, "status": update["status"], "restartRequested": True},
             {"$set": {"desiredState": "RUNNING", "restartRequested": False}}, return_document=ReturnDocument.AFTER)
-        self.active.pop(task["id"], None)
+        self.discard_closed(runtime)
 
     async def isolate_active_sessions(self):
         """数据库长期失联时逐一关闭本机连接，不凭异常假定端点已经释放。
@@ -149,7 +167,8 @@ class Worker:
             except Exception:
                 logger.exception("数据库失联时关闭采集实例失败 task=%s", task_id)
             else:
-                self.active.pop(task_id, None)
+                if self.active.get(task_id) is runtime:
+                    self.active.pop(task_id)
 
     async def tick(self):
         """更新资源心跳、处理期望状态并分发作业，不在本周期等待耗时归档。"""
@@ -265,7 +284,7 @@ class Worker:
         await asyncio.gather(*self.releases.values(), return_exceptions=True)
         for runtime in list(self.active.values()):
             try:
-                await self.repo.db.tasks.update_one({"id": runtime.task["id"]}, {"$set": {"desiredState": "STOPPED"}})
+                await self.repo.db.tasks.update_one(owner_filter(runtime.task), {"$set": {"desiredState": "STOPPED"}})
                 await self.release(runtime)
             except Exception:
                 logger.exception("节点停止失败")

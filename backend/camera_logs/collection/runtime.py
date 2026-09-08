@@ -20,6 +20,7 @@ from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.common.ownership import owner_filter
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 class SessionRuntime:
     """节点独占的单任务运行，负责状态回写、重连和持久化执行记录。"""
     def __init__(self, repo, task, connection_factory):
-        self.repo, self.task, self.factory = repo, task, connection_factory
+        self.repo, self.task, self.factory = repo, dict(task), connection_factory
         self.collector = None
         self.stopping = False
         self.frames = deque()
@@ -50,7 +51,7 @@ class SessionRuntime:
             "sessionId": self.collector.session_id, "type": "DEBUG_MODE", "phase": event,
             "mode": details["mode"], "commandBlocked": command_blocked,
             "debugError": debug_error, "createdAt": now()})
-        await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
+        await self.repo.db.tasks.update_one(owner_filter(self.task),
             {"$set": {"shellMode": details["mode"], "debugPhase": event,
                 "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()}})
         logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
@@ -137,13 +138,13 @@ class SessionRuntime:
             state = "RECONNECTING"
         if state == "ARCHIVE_ERROR":
             await self.repo.db.tasks.update_one(
-                {"id": self.task["id"], "runId": self.task["runId"]},
+                owner_filter(self.task),
                 {"$set": {"archiveError": details.get("error"), "updatedAt": now()}},
             )
             return
-        await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
+        changed = await self.repo.db.tasks.update_one(owner_filter(self.task),
             {"$set": {"status": state, "sessionId": details.get("sessionId"), "updatedAt": now()}})
-        if state == "COLLECTING":
+        if state == "COLLECTING" and changed.matched_count:
             await self.repo.db.operations.update_many({"taskId": self.task["id"], "desiredState": "RUNNING", "status": "PENDING"},
                 {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
         logger.info("采集状态变化", extra={"context": {"taskId": self.task["id"], "state": state}})
@@ -216,7 +217,7 @@ class SessionRuntime:
                 config["pshSerialCharacterInterval"] = self.repo.settings.psh_serial_character_interval
                 self.started_at = now()
                 reset = {"shellMode": "UNKNOWN", "debugPhase": None, "commandBlocked": False, "debugError": None}
-                await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
+                await self.repo.db.tasks.update_one(owner_filter(self.task),
                     {"$set": reset})
                 self.collector = Collector(config, self.repo.settings.log_root, connection_factory=self.factory,
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
