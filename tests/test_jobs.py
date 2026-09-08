@@ -176,7 +176,8 @@ def test_zip_export_keeps_readable_names_and_disambiguates_duplicates(tmp_path):
     assert "manifest.json" not in names
 
 
-def test_download_reuses_complete_shared_hour_archive_without_member_leakage(tmp_path):
+@pytest.mark.parametrize("replace_during_validation", [False, True])
+def test_download_reuses_complete_shared_hour_archive_without_member_leakage(tmp_path, monkeypatch, replace_during_validation):
     """完整选择同一小时包时直接下载原始压缩包，成员顺序和正文保持不变。"""
     async def scenario():
         settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
@@ -201,6 +202,21 @@ def test_download_reuses_complete_shared_hour_archive_without_member_leakage(tmp
             {"id": "f1", "nodeId": "node", "status": "READY", "bytes": 5, "hour": hour},
         ]}
         await repo.db.jobs.insert_one(job)
+        if replace_during_validation:
+            original = jobs.reusable_hour_archive
+
+            def replace_after_check(sources):
+                """准确注入已检查成员但尚未固定下载文件的发布窗口。"""
+                selected = original(sources)
+                replacement = archive.with_suffix(".new.tar.gz")
+                with tarfile.open(replacement, "w:gz") as bundle:
+                    info = tarfile.TarInfo("unexpected.log")
+                    info.size = 3
+                    bundle.addfile(info, io.BytesIO(b"new"))
+                replacement.replace(archive)
+                return selected
+
+            monkeypatch.setattr(jobs, "reusable_hour_archive", replace_after_check)
         return await run_job(repo, job), archive
 
     result, archive = asyncio.run(scenario())
@@ -232,6 +248,28 @@ def test_hour_export_splits_legacy_large_member_at_format_limit(tmp_path, monkey
     with tarfile.open(output, "r:gz") as bundle:
         assert bundle.getnames() == ["part-000001.log", "part-000002.log", "part-000003.log"]
         assert [bundle.extractfile(name).read() for name in bundle.getnames()] == [b"123", b"456", b"7"]
+
+
+def test_pin_cross_filesystem_copies_only_frozen_member(tmp_path, monkeypatch):
+    """硬链接不可用时仅复制所选水位，不复制同包的其他大成员。"""
+    source = tmp_path / "hour.tar.gz"
+    with tarfile.open(source, "w:gz") as bundle:
+        for name, data in (("selected.log", b"selected-tail"), ("other.log", b"x" * 4096)):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            bundle.addfile(info, io.BytesIO(data))
+
+    def cross_device(*_):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(hour_download.os, "link", cross_device)
+    result = hour_download.pin_hour_sources([
+        ({"id": "file", "bytes": 8}, {"id": "file", "archiveMember": "selected.log"}, source, False),
+    ], tmp_path / "pinned")
+    assert result[0][3] is True
+    with tarfile.open(result[0][2]) as bundle:
+        assert "other.log" not in bundle.getnames()
+        assert bundle.extractfile("selected.log").read() == b"selected"
 
 
 def test_search_caps_results_at_one_thousand(tmp_path):

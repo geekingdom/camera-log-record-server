@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import tarfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -13,12 +14,37 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from zoneinfo import ZoneInfo
 
-from camera_logs.logs.archive_access import LimitedReader
+from camera_logs.logs.archive_access import LimitedReader, snapshot
 from camera_logs.logs.naming import safe_filename_component
 
 MAX_MEMBER_BYTES = 10 * 1024 * 1024
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 Source = tuple[dict[str, Any], dict[str, Any], Path, bool]
+
+
+def pin_hour_sources(sources: list[Source], directory: Path) -> list[Source]:
+    """校验前固定本地源归档 inode，校验和打包始终读取同一版本。"""
+    pinned = {}
+    result = []
+    directory.mkdir(parents=True, exist_ok=True)
+    for frozen, file, path, temporary in sources:
+        if not temporary:
+            if path not in pinned:
+                folder = directory / str(len(result))
+                folder.mkdir()
+                target = folder / path.name
+                try:
+                    os.link(path, target)
+                except OSError:
+                    # 跨挂载点只复制所选成员，不能为小水位复制整个大型小时包。
+                    snapshot(path, target, int(frozen.get("bytes", file.get("bytes", 0))),
+                             file_id=file.get("id"), archive_member=file.get("archiveMember"))
+                    result.append((frozen, file, target, True))
+                    continue
+                pinned[path] = target
+            path = pinned[path]
+        result.append((frozen, file, path, temporary))
+    return result
 
 
 def hour_export_name(job: dict[str, Any], hour: object) -> str:

@@ -21,7 +21,13 @@ from typing import Any
 import httpx
 
 from camera_logs.logs.archive_access import LimitedReader, copy_limited, read_limiter, snapshot
-from camera_logs.logs.hour_download import Source, hour_export_name, reusable_hour_archive, write_hour_archive
+from camera_logs.logs.hour_download import (
+    Source,
+    hour_export_name,
+    pin_hour_sources,
+    reusable_hour_archive,
+    write_hour_archive,
+)
 from camera_logs.logs.naming import safe_filename_component
 
 OUTPUT_LIMIT = 20_000_000_000
@@ -246,6 +252,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             raise FileNotFoundError("no selected archives are available")
         if missing and not job.get("allowPartial", False):
             raise FileNotFoundError("selected archive is unavailable")
+        sources = await asyncio.to_thread(pin_hour_sources, sources, scratch / "pinned")
         if sum(path.stat().st_size for path in {item[2] for item in sources}) > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
         by_hour: dict[str, list[Source]] = {}
