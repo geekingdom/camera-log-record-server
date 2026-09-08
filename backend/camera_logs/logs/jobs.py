@@ -117,18 +117,7 @@ def _directory_size(path: Path) -> int:
         try:
             if child.is_file():
                 total += child.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def _estimated_temp_bytes(files: list[dict[str, Any]]) -> int:
-    """按冻结水位估计新作业的临时空间，未知值按零处理但不影响已有占用检查。"""
-    total = 0
-    for file in files:
-        try:
-            total += max(0, int(file.get("bytes", 0)))
-        except (TypeError, ValueError):
+        except FileNotFoundError:
             continue
     return total
 
@@ -164,18 +153,23 @@ async def _archive(
     file = await _file_doc(repo, frozen)
     local = file.get("nodeId") == repo.settings.node_id
     target = scratch / (scratch_name or _archive_name(file, str(file["id"]), use_path=local))
-    if not local:
-        if include_index:
-            await _remote_archive(repo, file, frozen, target, True, max_output_bytes)
-        else:
-            await _remote_archive(repo, file, frozen, target)
+    try:
+        if not local:
+            if include_index or max_output_bytes is not None:
+                await _remote_archive(repo, file, frozen, target, include_index, max_output_bytes)
+            else:
+                await _remote_archive(repo, file, frozen, target)
+            return target, True
+        path = _file_path(repo, file)
+        if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"] and not include_index:
+            return path, False
+        index = _contained(repo, file["indexPath"]) if file.get("indexPath") else None
+        await job_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index, max_output_bytes=max_output_bytes)
         return target, True
-    path = _file_path(repo, file)
-    if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"] and not include_index:
-        return path, False
-    index = _contained(repo, file["indexPath"]) if file.get("indexPath") else None
-    await job_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index, max_output_bytes=max_output_bytes)
-    return target, True
+    except BaseException:
+        # job_thread 已等待快照写入退出，失败文件不应跨到下一个允许缺片的尝试。
+        await job_thread(target.unlink, missing_ok=True)
+        raise
 
 
 async def _cancelled(repo: Any, identifier: str) -> bool:
@@ -233,10 +227,11 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     sources: list[Source] = []
     missing: list[str] = []
     progress: JobProgress | None = job.get("_progress")
-    await _reserve_temp(repo, job["id"], _estimated_temp_bytes(job["files"]))
+    await _reserve_temp(repo, job["id"], OUTPUT_LIMIT * 2)
     try:
         await job_thread(scratch.mkdir, parents=True, exist_ok=True)
         scratch_names: set[str] = set()
+        snapshot_bytes = 0
         for frozen in job["files"]:
             if await _cancelled(repo, job["id"]):
                 raise asyncio.CancelledError()
@@ -246,7 +241,10 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 scratch_name = _unique_scratch_name(
                     _archive_name(file, frozen["id"], use_path=local), scratch_names
                 )
-                path, temporary = await _archive(repo, frozen, scratch, scratch_name)
+                path, temporary = await _archive(repo, frozen, scratch, scratch_name,
+                                                 max_output_bytes=OUTPUT_LIMIT - snapshot_bytes)
+                if temporary:
+                    snapshot_bytes += path.stat().st_size
                 sources.append((frozen, file, path, temporary))
             except Exception:  # noqa: BLE001 - partial exports deliberately record each unavailable source
                 _log.exception("export source unavailable fileId=%s", frozen.get("id"))
@@ -258,22 +256,27 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             raise FileNotFoundError("no selected archives are available")
         if missing and not job.get("allowPartial", False):
             raise FileNotFoundError("selected archive is unavailable")
-        sources = await job_thread(pin_hour_sources, sources, scratch / "pinned")
+        sources = await job_thread(pin_hour_sources, sources, scratch / "pinned", max_source_bytes=OUTPUT_LIMIT)
         if sum(path.stat().st_size for path in {item[2] for item in sources}) > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
         by_hour: dict[str, list[Source]] = {}
         for source in sources:
             by_hour.setdefault(str(source[0].get("hour") or source[1].get("hour") or "unknown-hour"), []).append(source)
         hourly: list[Path] = []
+        hourly_bytes = 0
         for hour, members in sorted(by_hour.items()):
             if await _cancelled(repo, job["id"]):
                 raise asyncio.CancelledError()
             reusable = await job_thread(reusable_hour_archive, members)
             if reusable is not None:
+                hourly_bytes += reusable.stat().st_size
+                if hourly_bytes > OUTPUT_LIMIT:
+                    raise ValueError("export output exceeds 20GB limit")
                 hourly.append(reusable)
                 continue
             hourly_path = scratch / hour_export_name(job, hour)
-            await job_thread(write_hour_archive, hourly_path, members, max_output_bytes=OUTPUT_LIMIT)
+            await job_thread(write_hour_archive, hourly_path, members, max_output_bytes=OUTPUT_LIMIT - hourly_bytes)
+            hourly_bytes += hourly_path.stat().st_size
             hourly.append(hourly_path)
         await job_thread(output.mkdir, parents=True, exist_ok=True)
         result_path: Path

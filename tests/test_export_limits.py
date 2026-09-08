@@ -9,6 +9,32 @@ from camera_logs.logs.archive_access import copy_limited
 from camera_logs.logs.hour_download import write_hour_archive
 
 
+def test_cross_filesystem_snapshots_share_one_source_budget(tmp_path, monkeypatch):
+    """跨文件系统复制多个片段时，每个片段只能使用源集合剩余空间。"""
+    from camera_logs.logs import hour_download
+
+    sources = []
+    for number in range(2):
+        source = tmp_path / f"source-{number}.tar.gz"
+        with tarfile.open(source, "w:gz") as archive:
+            member = tarfile.TarInfo("part-000001.log")
+            member.size = 1024
+            archive.addfile(member, io.BytesIO(b"x" * 1024))
+        document = {"id": str(number), "bytes": 1024, "archiveMember": "part-000001.log"}
+        sources.append((document, document, source, False))
+
+    def cross_device(*_args):
+        raise OSError("synthetic cross-device link")
+
+    monkeypatch.setattr(hour_download.os, "link", cross_device)
+    baseline = hour_download.pin_hour_sources(sources, tmp_path / "baseline")
+    limit = max(path.stat().st_size for _, _, path, _ in baseline) + 1
+    directory = tmp_path / "limited"
+    with pytest.raises(ValueError, match="snapshot storage"):
+        hour_download.pin_hour_sources(sources, directory, max_source_bytes=limit)
+    assert sum(path.stat().st_size for path in directory.rglob("*.tar.gz")) <= limit
+
+
 def test_hour_rebuild_rejects_before_exceeding_limit(tmp_path):
     source, target = tmp_path / "hour.tar.gz", tmp_path / "export.tar.gz"
     raw = b"needle\n" * 100

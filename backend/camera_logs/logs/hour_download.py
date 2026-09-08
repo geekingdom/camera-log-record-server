@@ -23,10 +23,13 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 Source = tuple[dict[str, Any], dict[str, Any], Path, bool]
 
 
-def pin_hour_sources(sources: list[Source], directory: Path) -> list[Source]:
+def pin_hour_sources(sources: list[Source], directory: Path, *, max_source_bytes: int | None = None) -> list[Source]:
     """校验前固定本地源归档 inode，校验和打包始终读取同一版本。"""
     pinned = {}
     result = []
+    used = sum(path.stat().st_size for path in {path for _, _, path, temporary in sources if temporary})
+    if max_source_bytes is not None and used > max_source_bytes:
+        raise ValueError("export source storage limit exceeded")
     directory.mkdir(parents=True, exist_ok=True)
     for frozen, file, path, temporary in sources:
         if not temporary:
@@ -39,9 +42,16 @@ def pin_hour_sources(sources: list[Source], directory: Path) -> list[Source]:
                 except OSError:
                     # 跨挂载点只复制所选成员，不能为小水位复制整个大型小时包。
                     snapshot(path, target, int(frozen.get("bytes", file.get("bytes", 0))),
-                             file_id=file.get("id"), archive_member=file.get("archiveMember"))
+                             file_id=file.get("id"), archive_member=file.get("archiveMember"),
+                             max_output_bytes=None if max_source_bytes is None else max_source_bytes - used)
+                    used += target.stat().st_size
                     result.append((frozen, file, target, True))
                     continue
+                # 硬链接不复制正文，但仍按固定后的 inode 大小保守计入源集合预算。
+                used += target.stat().st_size
+                if max_source_bytes is not None and used > max_source_bytes:
+                    target.unlink()
+                    raise ValueError("export source storage limit exceeded")
                 pinned[path] = target
             path = pinned[path]
         result.append((frozen, file, path, temporary))

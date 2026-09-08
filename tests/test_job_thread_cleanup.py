@@ -41,6 +41,41 @@ async def repository(tmp_path):
     return repo, file
 
 
+async def test_download_reserves_both_preparation_stages(tmp_path, monkeypatch):
+    """下载准入按源快照与小时重组的最大合计预留，不能只估算原始正文。"""
+    repo, file = await repository(tmp_path)
+    monkeypatch.setattr(jobs, "OUTPUT_LIMIT", 60)
+    monkeypatch.setattr(jobs, "TEMP_LIMIT", 100)
+    with pytest.raises(ValueError, match="temporary export storage"):
+        await jobs._download(repo, {"id": "admission", "files": [file]})
+    assert not (tmp_path / "exports" / ".tmp" / "admission").exists()
+
+
+async def test_failed_snapshot_is_removed_before_partial_export_continues(tmp_path):
+    """生成失败的快照不能在允许缺片时累积占用未计费的临时空间。"""
+    repo, file = await repository(tmp_path)
+    scratch = tmp_path / "scratch"
+    with pytest.raises(ValueError, match="snapshot storage"):
+        await jobs._archive(repo, file, scratch, "failed.tar.gz", max_output_bytes=32)
+    assert not (scratch / "failed.tar.gz").exists()
+
+
+async def test_partial_download_cannot_grow_past_shared_snapshot_budget(tmp_path, monkeypatch):
+    """两个快照单独都能放下、合计放不下时，仅显式允许缺片才保留首个。"""
+    repo, first = await repository(tmp_path)
+    second = first | {"id": "second"}
+    second.pop("_id", None)
+    await repo.db.files.insert_one(second)
+    baseline, _ = await jobs._archive(repo, first, tmp_path / "baseline")
+    monkeypatch.setattr(jobs, "OUTPUT_LIMIT", baseline.stat().st_size + 1)
+    result = await jobs._download(repo, {"id": "partial-budget", "files": [first, second], "allowPartial": True})
+    assert result["missing"] == ["second"]
+    with tarfile.open(result["resultPath"], "r:gz") as archive:
+        assert archive.extractfile("part-000001.log").read() == b"needle\n"
+        assert len(archive.getmembers()) == 1
+    assert not (tmp_path / "exports" / ".tmp" / "partial-budget").exists()
+
+
 async def test_zip_overhead_failure_removes_output_and_releases_reservation(tmp_path, monkeypatch):
     """正文总量未超限但 ZIP 目录超限时，整个下载失败并回收所有作业产物。"""
     repo, _ = await repository(tmp_path)

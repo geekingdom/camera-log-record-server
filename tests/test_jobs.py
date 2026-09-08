@@ -152,6 +152,25 @@ def test_node_temp_reservation_counts_existing_tmp_files(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+async def test_temp_admission_rejects_unreadable_inventory(tmp_path, monkeypatch):
+    """统计权限错误不能被当作零字节，从而错误放行新作业。"""
+    repo = SimpleNamespace(settings=SimpleNamespace(log_root=tmp_path))
+    occupied = tmp_path / "exports" / ".tmp" / "other" / "archive.tar.gz"
+    occupied.parent.mkdir(parents=True)
+    occupied.write_bytes(b"occupied")
+    original = Path.stat
+
+    def stat(path, *args, **kwargs):
+        if path == occupied:
+            raise PermissionError("synthetic unreadable inventory")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    with pytest.raises(PermissionError):
+        await jobs._reserve_temp(repo, "unreadable", 1)
+    assert "unreadable" not in jobs._temp_reservations
+
+
 def test_single_archive_download_rebuilds_user_hour_filename(tmp_path):
     async def scenario():
         settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
