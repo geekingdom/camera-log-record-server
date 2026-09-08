@@ -46,6 +46,8 @@ class Repository:
         await self.db.tasks.create_index("serialServerResourceId")
         await self.db.resources.create_index("deletionState")
         await self.db.commands.create_index([("taskId", 1), ("createdAt", -1)])
+        await self.db.commands.create_index([("taskId", 1), ("kind", 1), ("status", 1),
+                                            ("runId", 1), ("sessionId", 1), ("createdAt", 1), ("id", 1)])
         await self.db.tokens.create_index("tokenHash", unique=True)
         await self.db.download_sessions.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.download_sessions.create_index("tokenHash", unique=True)

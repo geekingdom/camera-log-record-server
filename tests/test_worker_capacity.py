@@ -117,7 +117,7 @@ async def test_slow_write_blocks_new_connection_without_stopping_existing_collec
                     "status": "PENDING", "desiredState": "RUNNING"}
     await repo.db.tasks.insert_many([active_task, pending_task])
     metrics = {"p99Ms": 100.0, "samples": 3, "pendingMs": 250.0, "windowSeconds": 60}
-    collector = SimpleNamespace(write_latency=SimpleNamespace(snapshot=lambda: dict(metrics)))
+    collector = SimpleNamespace(session_id="session", write_latency=SimpleNamespace(snapshot=lambda: dict(metrics)))
     runtime = SimpleNamespace(
         task=active_task,
         collector=collector,
@@ -159,7 +159,7 @@ async def test_write_pressure_events_only_record_threshold_crossings(tmp_path):
         encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
     await repo.initialize()
     metrics = {"p99Ms": 201.0, "samples": 1, "pendingMs": 0.0, "windowSeconds": 60}
-    collector = SimpleNamespace(write_latency=SimpleNamespace(snapshot=lambda: dict(metrics)))
+    collector = SimpleNamespace(session_id="session", write_latency=SimpleNamespace(snapshot=lambda: dict(metrics)))
     task = {"id": "active", "runId": "run", "nodeId": repo.settings.node_id,
             "status": "COLLECTING", "desiredState": "RUNNING"}
     runtime = SimpleNamespace(

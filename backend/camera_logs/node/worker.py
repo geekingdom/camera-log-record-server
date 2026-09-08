@@ -17,6 +17,7 @@ from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.common.ownership import owner_filter
+from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
 
 logger = logging.getLogger(__name__)
@@ -277,7 +278,7 @@ class Worker:
             if runtime and not runtime.stopping and task["status"] == "COLLECTING":
                 manual = self.manual_jobs.get(task["id"])
                 if manual is None or manual.done():
-                    command = await self.repo.db.commands.find_one({"taskId": task["id"], "kind": "MANUAL", "status": "QUEUED"}, sort=[("createdAt", 1)])
+                    command = await next_manual_command(self.repo, runtime)
                     if command:
                         self.manual_jobs[task["id"]] = asyncio.create_task(runtime.manual(command))
         self.jobs = {job for job in self.jobs if not job.done()}

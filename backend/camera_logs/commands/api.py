@@ -26,10 +26,12 @@ def install_command_routes(app, repo, listing):
         """将手动命令加入当前采集会话队列，并限制每任务待执行数量。"""
         authorize(user, "commands:send", task_id)
         task = await repo().get("tasks", task_id)
-        if task["status"] != "COLLECTING" or task["desiredState"] != "RUNNING":
+        if (task["status"] != "COLLECTING" or task["desiredState"] != "RUNNING"
+                or not task.get("sessionId") or not task.get("runId")):
             raise HTTPException(409, "任务未处于可交互采集状态")
         async def build(identifier):
-            if await repo().db.commands.count_documents({"taskId": task_id, "status": "QUEUED"}) >= 100:
+            if await repo().db.commands.count_documents({"taskId": task_id, "kind": "MANUAL",
+                "runId": task["runId"], "sessionId": task.get("sessionId"), "status": "QUEUED"}) >= 100:
                 raise HTTPException(429, "命令队列已满")
             doc = body.model_dump() | {"id": identifier, "taskId": task_id, "runId": task["runId"],
                 "sessionId": task.get("sessionId"), "actor": user["id"], "status": "QUEUED",

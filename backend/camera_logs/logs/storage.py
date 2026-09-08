@@ -279,11 +279,10 @@ class HourlyWriter:
         size, digest = self._size, self._digest.hexdigest()
         first, last = self._first_sequence, self._last_sequence
         assert log is not None and index is not None and hour is not None
-        archive_slot = False
-        if background:
-            # 在关闭文件前取得槽位；等待背压时取消不会遗留未登记的已关闭原始分片。
-            await self._archive_slots.acquire()
-            archive_slot = True
+        # 所有归档都必须先取得同一槽位。close() 的前台归档若绕过此处，会在
+        # 回拨产生的后台压缩仍运行时额外启动第三个压缩任务。
+        await self._archive_slots.acquire()
+        archive_slot = True
         try:
             await asyncio.to_thread(self._close_files_sync)
         except Exception as error:
@@ -316,7 +315,11 @@ class HourlyWriter:
         task = asyncio.create_task(
             self._archive(log, index, hour, size, digest, first, last)
         )
-        return await task
+        try:
+            return await task
+        finally:
+            # 前台任务不登记到 _archive_tasks，必须在本协程收尾时归还其槽位。
+            self._archive_slots.release()
 
     def _archive_done(self, task: asyncio.Task[HourArchive]) -> None:
         self._archive_tasks.discard(task)

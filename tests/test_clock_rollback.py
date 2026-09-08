@@ -40,37 +40,76 @@ async def test_rollback_seals_a_new_fragment_without_reordering(tmp_path, rollba
 
 
 async def test_repeated_rollbacks_bound_pending_archives_and_preserve_sequence(tmp_path, monkeypatch):
-    """慢压缩时回拨写入受背压限制，释放后所有分片仍按接收序列归档。"""
-    release, started = asyncio.Event(), asyncio.Event()
+    """close 也受回拨归档槽位限制，不能在两个后台压缩外启动第三个任务。"""
+    first_release, second_release, tail_release = (asyncio.Event() for _ in range(3))
+    started, third_started, close_started, fourth_closed = (asyncio.Event() for _ in range(4))
     active = maximum = 0
+    calls = 0
     original_compress = storage.compress
 
     async def slow_compress(log, index, manifest):
-        nonlocal active, maximum
+        nonlocal active, maximum, calls
+        calls += 1
+        call = calls
         active += 1
         maximum = max(maximum, active)
         if active == 2:
             started.set()
         try:
-            await release.wait()
+            if call == 1:
+                await first_release.wait()
+            elif call == 2:
+                await second_release.wait()
+            elif call == 3:
+                third_started.set()
+                await tail_release.wait()
+            else:
+                close_started.set()
+                await tail_release.wait()
             return await original_compress(log, index, manifest)
         finally:
             active -= 1
 
     monkeypatch.setattr(storage, "compress", slow_compress)
     first = datetime(2026, 9, 8, 2, 30, tzinfo=UTC)
-    chunks = [(f"chunk-{number}\n".encode(), first-timedelta(seconds=number)) for number in range(6)]
+    chunks = [(f"chunk-{number}\n".encode(), first-timedelta(seconds=number)) for number in range(4)]
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")
+    close_files = 0
+    loop = asyncio.get_running_loop()
+    original_close_files = writer._close_files_sync
+
+    def track_close_files():
+        """第 4 段只应在 close 取得归档槽位后关闭，线程内通过 loop 唤醒断言。"""
+        nonlocal close_files
+        original_close_files()
+        close_files += 1
+        if close_files == 4:
+            loop.call_soon_threadsafe(fourth_closed.set)
+
+    monkeypatch.setattr(writer, "_close_files_sync", track_close_files)
     writing = asyncio.create_task(writer.write_many(chunks))
 
     await asyncio.wait_for(started.wait(), 1)
-    await asyncio.sleep(0)
     assert not writing.done()
     assert maximum == 2 and len(writer._archive_tasks) == 2
 
-    release.set()
+    # 仅放行第一个后台压缩，第三个回拨归档立刻接替它，第二个仍保持运行。
+    first_release.set()
+    await asyncio.wait_for(third_started.wait(), 1)
     positions = await asyncio.wait_for(writing, 5)
-    await writer.close()
+    closing = asyncio.create_task(writer.close())
+    # 旧实现此时会绕过槽位并完成第 4 段文件关闭；新实现必须停在 acquire()。
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(fourth_closed.wait(), 0.1)
+    assert not close_started.is_set()
+    assert maximum == 2
+
+    # 放行第二个后台压缩后，close 才能取得其归档槽位、关闭第 4 段并开始最后一个片段。
+    second_release.set()
+    await asyncio.wait_for(fourth_closed.wait(), 1)
+    await asyncio.wait_for(close_started.wait(), 1)
+    tail_release.set()
+    await asyncio.wait_for(closing, 5)
 
     fragments = []
     for path in tmp_path.rglob("*.tar.gz"):
