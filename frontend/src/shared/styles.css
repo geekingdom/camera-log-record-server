@@ -1,0 +1,321 @@
+:root {
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #1d2939;
+  background: #f6f8fb;
+  font-synthesis: none;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 320px;
+}
+.shell {
+  min-height: 100vh;
+}
+.topbar {
+  height: 58px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #fff;
+  background: #172b4d;
+  border-bottom: 1px solid #0f203c;
+}
+.brand,
+.auth,
+.page-head,
+.section-heading,
+.manual-command,
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.brand span {
+  font-weight: 650;
+  font-size: 16px;
+}
+.brand small {
+  color: #adc4df;
+  padding-left: 10px;
+  border-left: 1px solid #496180;
+}
+.auth .el-input {
+  width: min(360px, 55vw);
+}
+.workspace {
+  max-width: 1440px;
+  padding: 0 28px 40px;
+  margin: 0 auto;
+}
+.work-tabs .el-tabs__header {
+  margin: 0;
+}
+.work-tabs .el-tabs__item {
+  height: 50px;
+  font-size: 14px;
+}
+.page-head {
+  justify-content: space-between;
+  padding: 26px 0 18px;
+}
+h1 {
+  font-size: 22px;
+  font-weight: 650;
+  margin: 0 0 6px;
+}
+h2 {
+  font-size: 16px;
+  margin: 0;
+}
+h3 {
+  font-size: 14px;
+  margin: 20px 0 9px;
+}
+p {
+  color: #667085;
+  margin: 0;
+  font-size: 13px;
+}
+.data-table {
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  overflow: hidden;
+  background: white;
+}
+.task-overview {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  background: #fff;
+}
+.task-overview span {
+  padding: 9px 16px;
+  color: #667085;
+  font-size: 13px;
+  border-right: 1px solid #eaecf0;
+}
+.task-overview b {
+  color: #1d2939;
+  font-size: 15px;
+}
+.task-filters {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.task-filters .el-input {
+  width: 260px;
+}
+.task-filters .el-select {
+  width: 140px;
+}
+.task-id {
+  color: #98a2b3;
+  font:
+    11px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.connection-address {
+  margin-left: 8px;
+  color: #475467;
+}
+code {
+  font-size: 11px;
+  white-space: normal;
+  word-break: break-all;
+}
+.login-state {
+  width: min(480px, calc(100% - 40px));
+  margin: 17vh auto;
+  text-align: center;
+  color: #475467;
+}
+.login-state svg {
+  color: #3478c3;
+}
+.login-state h1 {
+  margin-top: 16px;
+}
+.login-state p {
+  font-size: 14px;
+  line-height: 1.7;
+}
+.editor-form {
+  padding-bottom: 20px;
+}
+.form-section {
+  padding: 20px 0;
+  border-bottom: 1px solid #eaecf0;
+}
+.form-section:first-child {
+  padding-top: 0;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 16px;
+}
+.inline-option,
+.task-meta {
+  color: #667085;
+  font-size: 13px;
+}
+.task-meta {
+  display: flex;
+  gap: 18px;
+}
+.section-heading {
+  justify-content: space-between;
+}
+.section-heading .el-select {
+  width: 230px;
+}
+.command-row,
+.schedule-row {
+  display: grid;
+  grid-template-columns:
+    minmax(160px, 1fr) 110px minmax(130px, 0.55fr)
+    110px auto;
+  gap: 8px;
+  margin-bottom: 8px;
+  align-items: center;
+}
+.schedule-row {
+  grid-template-columns: minmax(200px, 1fr) 130px 130px auto;
+}
+.runtime {
+  background: #f8fafc;
+  margin: 18px -20px 0;
+  padding: 18px 20px;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+}
+.log-console {
+  height: 260px;
+  overflow: auto;
+  margin: 12px 0;
+  padding: 12px;
+  color: #d0d5dd;
+  background: #101828;
+  border: 1px solid #1d2939;
+  border-radius: 5px;
+  font:
+    12px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.log-console pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.virtual-log {
+  height: 264px;
+  padding: 0;
+  overflow-y: auto;
+  white-space: pre;
+  word-break: normal;
+}
+.log-line {
+  /* 虚拟窗口按固定行高计算；超长行在日志区域横向滚动，不能改变垂直偏移。 */
+  height: 24px;
+  min-width: max-content;
+  box-sizing: border-box;
+  padding: 2px 12px;
+  line-height: 20px;
+}
+.log-gap {
+  margin: 8px 0;
+  color: #b42318;
+}
+.omitted {
+  position: sticky;
+  top: -12px;
+  padding: 4px 0;
+  color: #fecdca;
+  background: #101828;
+}
+.manual-command {
+  margin: 0 0 12px;
+}
+.manual-command .el-input,
+.search-row .el-input {
+  flex: 1;
+}
+.archive-action {
+  margin: 10px 0 16px;
+}
+.search-row {
+  margin-bottom: 10px;
+}
+@media (max-width: 700px) {
+  /* 抽屉不能被内部表格的最小内容宽度撑出视口；横向滚动只交给局部表格容器。 */
+  .el-drawer {
+    width: 100vw !important;
+    max-width: 100vw;
+  }
+  .el-drawer__body,
+  .el-drawer__body .el-tabs,
+  .el-drawer__body .el-tabs__content,
+  .el-drawer__body .el-tab-pane,
+  .el-drawer__body .form-section {
+    min-width: 0;
+  }
+  .el-drawer__body {
+    overflow-x: hidden;
+  }
+  .topbar {
+    padding: 0 14px;
+  }
+  .brand small {
+    display: none;
+  }
+  .workspace {
+    padding: 0 14px 24px;
+  }
+  .page-head {
+    align-items: flex-start;
+    gap: 14px;
+  }
+  .page-head > div:last-child {
+    flex-shrink: 0;
+  }
+  .form-grid,
+  .command-row,
+  .schedule-row {
+    grid-template-columns: 1fr;
+  }
+  .command-row .el-button-group {
+    display: flex;
+  }
+  .task-meta {
+    flex-direction: column;
+    gap: 4px;
+  }
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .task-filters {
+    flex-wrap: wrap;
+  }
+  .task-filters .el-input {
+    width: 100%;
+  }
+  .task-filters .el-select {
+    flex: 1;
+  }
+  .task-overview span {
+    flex: 1 1 50%;
+    border-bottom: 1px solid #eaecf0;
+  }
+}

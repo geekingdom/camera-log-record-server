@@ -1,0 +1,15 @@
+# 每台 Linux 主机仅运行一个实例，配置稳定唯一 NODE_ID 与内部可路由 NODE_URL。
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/worker.Dockerfile
+    env_file: ../.env
+    environment:
+      LOG_ROOT: /var/lib/camera-logs/data
+      KNOWN_HOSTS: /etc/camera-logs/known_hosts
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ${HOST_LOG_ROOT:-/srv/camera-logs}:/var/lib/camera-logs
+      - ${KNOWN_HOSTS_FILE:?Set a verified known_hosts file}:/etc/camera-logs/known_hosts:ro

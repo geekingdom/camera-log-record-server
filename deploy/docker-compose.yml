@@ -1,0 +1,101 @@
+services:
+  mongo1:
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes: ["mongo1-data:/data/db"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [camera-logs]
+  mongo2:
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes: ["mongo2-data:/data/db"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [camera-logs]
+  mongo3:
+    image: mongo:7.0
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes: ["mongo3-data:/data/db"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [camera-logs]
+  mongo-init:
+    image: mongo:7.0
+    depends_on:
+      mongo1: { condition: service_healthy }
+      mongo2: { condition: service_healthy }
+      mongo3: { condition: service_healthy }
+    volumes:
+      - ./mongo-init.js:/scripts/mongo-init.js:ro
+    command: ["mongosh", "mongodb://mongo1:27017/admin", "/scripts/mongo-init.js"]
+    restart: "no"
+    networks: [camera-logs]
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+    env_file: ../.env
+    environment:
+      MONGO_URI: ${COMPOSE_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/camera_logs?replicaSet=rs0}
+      DATABASE_NAME: ${DATABASE_NAME:-camera_logs}
+      API_PORT: 8000
+      # API 不对宿主机发布端口，只接收受控容器网络内的代理请求。
+      FORWARDED_ALLOW_IPS: "*"
+      LOG_ROOT: /var/lib/camera-logs/data
+    depends_on:
+      mongo-init: { condition: service_completed_successfully }
+    expose: ["8000"]
+    volumes: ["api-data:/var/lib/camera-logs"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [camera-logs]
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/worker.Dockerfile
+    env_file: ../.env
+    environment:
+      MONGO_URI: ${COMPOSE_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/camera_logs?replicaSet=rs0}
+      DATABASE_NAME: ${DATABASE_NAME:-camera_logs}
+      LOG_ROOT: /var/lib/camera-logs/data
+      NODE_ID: ${COLLECTOR_NODE_ID:-}
+      NODE_URL: ${COLLECTOR_NODE_URL:-}
+      KNOWN_HOSTS: /etc/camera-logs/known_hosts
+    depends_on:
+      mongo-init: { condition: service_completed_successfully }
+    # 每个副本独享本地日志卷；生产节点需要绑定稳定路径和唯一节点标识。
+    volumes:
+      - /var/lib/camera-logs
+      - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
+    networks: [camera-logs]
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+    depends_on:
+      api: { condition: service_healthy }
+    ports: ["${FRONTEND_PORT:-5173}:80"]
+    networks: [camera-logs]
+
+volumes:
+  api-data:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:
+
+networks:
+  camera-logs:
+    driver: bridge
