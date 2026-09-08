@@ -2,11 +2,14 @@
 
 from datetime import timedelta
 
+import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.tasks.scheduler import schedule_once
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+
+pytestmark = pytest.mark.usefixtures("mock_claim_transaction")
 
 
 async def _repository(tmp_path, *, cluster_capacity=800):

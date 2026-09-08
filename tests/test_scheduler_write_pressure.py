@@ -1,10 +1,13 @@
 """调度器必须使用节点心跳中的实际写入延迟决定新任务归属。"""
 
+import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.tasks.scheduler import schedule_once
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+
+pytestmark = pytest.mark.usefixtures("mock_claim_transaction")
 
 
 async def test_scheduler_waits_for_write_pressure_recovery_before_claiming_task(tmp_path):

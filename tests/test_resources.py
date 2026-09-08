@@ -14,6 +14,8 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
 
+pytestmark = pytest.mark.usefixtures("mock_claim_transaction")
+
 DEVICE_INFO = """<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <DeviceInfo xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">
   <model>DS-2CD</model>

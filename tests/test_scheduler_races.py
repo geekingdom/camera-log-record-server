@@ -1,12 +1,15 @@
-"""调度领取竞态：恢复锁只在确认任务已停止后才能回收。"""
+"""调度领取竞态：事务 CAS 不得覆盖停止或后继归属。"""
 
 from datetime import timedelta
 
+import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.tasks.scheduler import schedule_once
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+
+pytestmark = pytest.mark.usefixtures("mock_claim_transaction")
 
 
 async def _repo_with_paused_task(tmp_path):
@@ -38,98 +41,78 @@ async def _repo_with_paused_task(tmp_path):
     return repo
 
 
-async def test_resume_claim_failure_after_stop_releases_stale_paused_lock(tmp_path, monkeypatch):
-    """停止在恢复锁确认后发生时，旧运行锁不得阻塞下一次启动。"""
+async def test_resume_claim_skips_task_stopped_before_transaction(tmp_path):
+    """任务在事务前停止时，恢复领取不能重新绑定原运行。"""
     repo = await _repo_with_paused_task(tmp_path)
-    collection_type = type(repo.db.tasks)
-    original_claim = collection_type.find_one_and_update
-
-    async def stop_before_claim(self, query, update, **kwargs):
-        token = query.get("resumeClaimToken")
-        if self.name != "tasks" or not isinstance(token, str):
-            return await original_claim(self, query, update, **kwargs)
-        await self.update_one(
-            {"id": "paused-task"},
-            {"$set": {"desiredState": "STOPPED"}},
-        )
-        return None
-
-    monkeypatch.setattr(collection_type, "find_one_and_update", stop_before_claim)
+    await repo.db.tasks.update_one({"id": "paused-task"}, {"$set": {"desiredState": "STOPPED"}})
 
     await schedule_once(repo)
 
     task = await repo.get("tasks", "paused-task")
     assert task["desiredState"] == "STOPPED"
     assert task["nodeId"] is None
-    assert await repo.db.endpoint_locks.find_one({"endpoint": "127.0.0.1:22"}) is None
+    assert task["status"] == "STOPPED"
+    assert await repo.db.endpoint_locks.find_one({"taskId": "paused-task", "runId": "paused-run"}) is not None
 
 
-async def test_resume_claim_failure_keeps_lock_when_another_owner_claimed_task(tmp_path, monkeypatch):
-    """并发领取已写入新归属时，失败恢复者不能删除该运行仍在使用的锁。"""
+async def test_resume_claim_cas_does_not_overwrite_successor_owner(tmp_path, monkeypatch):
+    """事务重读发现后继已领取时，旧快照不能覆盖其任务归属或运行锁。"""
     repo = await _repo_with_paused_task(tmp_path)
     collection_type = type(repo.db.tasks)
-    original_claim = collection_type.find_one_and_update
-
-    async def claim_elsewhere_before_claim(self, query, update, **kwargs):
-        token = query.get("resumeClaimToken")
-        if self.name != "tasks" or not isinstance(token, str):
-            return await original_claim(self, query, update, **kwargs)
-        await self.update_one(
-            {"id": "paused-task"},
-            {"$set": {"nodeId": "node-b", "status": "PENDING", "desiredState": "RUNNING"}},
-        )
-        return None
-
-    monkeypatch.setattr(collection_type, "find_one_and_update", claim_elsewhere_before_claim)
-
-    await schedule_once(repo)
-
-    lock = await repo.db.endpoint_locks.find_one({"endpoint": "127.0.0.1:22"})
-    assert lock is not None
-    assert lock["taskId"] == "paused-task"
-    assert lock["runId"] == "paused-run"
-
-
-async def test_stale_resume_cleanup_cannot_delete_successor_claim_token(tmp_path, monkeypatch):
-    """旧恢复补偿读到停止状态后，后继 token 的锁必须保留。"""
-    repo = await _repo_with_paused_task(tmp_path)
-    collection_type = type(repo.db.tasks)
-    original_claim = collection_type.find_one_and_update
     original_find = collection_type.find_one
+    replaced = False
 
-    async def stop_before_claim(self, query, update, **kwargs):
-        token = query.get("resumeClaimToken")
-        if self.name != "tasks" or not isinstance(token, str):
-            return await original_claim(self, query, update, **kwargs)
-        await self.update_one({"id": "paused-task"}, {"$set": {"desiredState": "STOPPED"}})
-        return None
-
-    async def successor_claims_after_stop_read(self, query, *args, **kwargs):
-        stopped = await original_find(self, query, *args, **kwargs)
-        token = query.get("resumeClaimToken")
-        if self.name == "tasks" and stopped and isinstance(token, str):
-            successor_token = "successor-token"
+    async def successor_claims_before_transaction_read(self, query, *args, **kwargs):
+        nonlocal replaced
+        is_resume_read = self.name == "tasks" and query.get("id") == "paused-task" and query.get("status") == "PAUSED"
+        if is_resume_read and not replaced:
+            replaced = True
             await self.update_one(
                 {"id": "paused-task"},
-                {"$set": {"nodeId": "node-b", "status": "PENDING", "desiredState": "RUNNING",
-                          "resumeClaimToken": successor_token,
-                          "resumeClaimExpires": now() + timedelta(seconds=10)}},
+                {"$set": {"nodeId": "node-b", "status": "PENDING", "desiredState": "RUNNING"}},
             )
-            await repo.db.endpoint_locks.update_one(
-                {"endpoint": "127.0.0.1:22"}, {"$set": {"claimToken": successor_token}}
-            )
-        return stopped
+        return await original_find(self, query, *args, **kwargs)
 
-    monkeypatch.setattr(collection_type, "find_one_and_update", stop_before_claim)
-    monkeypatch.setattr(collection_type, "find_one", successor_claims_after_stop_read)
+    monkeypatch.setattr(collection_type, "find_one", successor_claims_before_transaction_read)
 
     await schedule_once(repo)
 
     lock = await repo.db.endpoint_locks.find_one({"endpoint": "127.0.0.1:22"})
     task = await repo.get("tasks", "paused-task")
+    assert replaced
+    assert task["nodeId"] == "node-b"
+    assert task["status"] == "PENDING"
     assert lock is not None
-    assert lock["claimToken"] == "successor-token"
-    assert task["resumeClaimToken"] == "successor-token"
+    assert lock["taskId"] == "paused-task"
+    assert lock["runId"] == "paused-run"
+
+
+async def test_resume_claim_cas_failure_returns_without_touching_existing_lock(tmp_path, monkeypatch):
+    """任务 CAS 未命中时，领取返回失败且不删除暂停运行锁。"""
+    repo = await _repo_with_paused_task(tmp_path)
+    collection_type = type(repo.db.tasks)
+    original_claim = collection_type.find_one_and_update
+    rejected = False
+
+    async def reject_task_cas(self, query, update, **kwargs):
+        nonlocal rejected
+        is_claim = self.name == "tasks" and query.get("id") == "paused-task" and query.get("status") == "PAUSED"
+        if is_claim and not rejected:
+            rejected = True
+            return None
+        return await original_claim(self, query, update, **kwargs)
+
+    monkeypatch.setattr(collection_type, "find_one_and_update", reject_task_cas)
+
+    await schedule_once(repo)
+
+    lock = await repo.db.endpoint_locks.find_one({"endpoint": "127.0.0.1:22"})
+    task = await repo.get("tasks", "paused-task")
+    assert rejected
+    assert lock is not None
+    assert lock["runId"] == "paused-run"
+    assert task["nodeId"] is None
+    assert task["status"] == "PAUSED"
 
 
 async def test_expired_resume_claim_is_recovered_after_scheduler_crash(tmp_path):

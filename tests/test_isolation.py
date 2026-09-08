@@ -13,7 +13,7 @@ from mongomock_motor import AsyncMongoMockClient
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
+def repo(tmp_path, monkeypatch, mock_claim_transaction):
     """Mongo 替身不支持事务；仅在测试中显式替换事务执行器。"""
     async def mock_transaction(_repo, callback):
         return await callback(None)

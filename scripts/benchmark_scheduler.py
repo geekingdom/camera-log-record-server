@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -76,9 +77,12 @@ async def benchmark() -> dict[str, object]:
         repo = Repository(client[database_name], settings.model_copy(update={"cluster_capacity": 500}))
         await repo.initialize()
         await seed(repo)
+        lease = {"owner": uuid4().hex, "fence": 1}
+        await repo.db.leaders.insert_one({"_id": "scheduler", **lease,
+                                         "expires": now() + timedelta(seconds=10)})
         metrics.reset()
         started = time.perf_counter()
-        await schedule_once(repo)
+        await asyncio.wait_for(schedule_once(repo, lease=lease), timeout=8)
         elapsed_ms = (time.perf_counter() - started) * 1000
         # 调度结束立刻冻结监听器，后续分配与容量断言的 count_documents 不计入基线。
         command_counts = dict(metrics.counts)
@@ -94,6 +98,7 @@ async def benchmark() -> dict[str, object]:
             raise AssertionError("单节点调度数量超过容量 100")
         return {
             "passed": True,
+            "scope": "single-leased-transactional-scheduler-cycle",
             "nodes": 8,
             "pendingTasks": 500,
             "assignedTasks": assignments,
