@@ -34,6 +34,26 @@ class ReadLimiter:
 read_limiter = ReadLimiter()
 
 
+class SnapshotWriter:
+    """在压缩字节落盘前检查预留上限，覆盖 gzip 文件头和关闭时的尾部。"""
+
+    def __init__(self, output: BinaryIO, limit: int | None) -> None:
+        self.output, self.limit, self.written = output, limit, 0
+
+    def write(self, data: bytes) -> int:
+        if self.limit is not None and self.written + len(data) > self.limit:
+            raise ValueError("snapshot storage limit exceeded")
+        size = self.output.write(data)
+        self.written += size
+        return size
+
+    def tell(self) -> int:
+        return self.written
+
+    def flush(self) -> None:
+        self.output.flush()
+
+
 class LimitedReader:
     """把流限制在冻结字节数内，同时计费读带宽并可选累计 SHA-256。"""
     def __init__(self, source: BinaryIO, size: int, digest=None) -> None:
@@ -72,7 +92,7 @@ def _members(path: Path, index_path: Path | None, archive_member: str | None = N
     return None, path.open("rb"), path.name, path.stat().st_size, index, index_path.name if index else None, index_path.stat().st_size if index else 0
 
 
-def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None = None, file_id: str | None = None, archive_member: str | None = None, include_index: bool = False) -> Path:
+def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None = None, file_id: str | None = None, archive_member: str | None = None, include_index: bool = False, *, max_output_bytes: int | None = None) -> Path:
     """复制冻结正文前缀和索引，附带摘要清单；不允许把缺失尾部当成完整快照。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     archive, raw, raw_name, available, index, index_name, index_size = _members(path, index_path, archive_member, include_index)
@@ -82,7 +102,7 @@ def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None =
     try:
         if available < raw_bytes:
             raise OSError("日志字节数小于冻结水位，无法生成完整快照")
-        with tarfile.open(target, "w:gz", compresslevel=1) as output:
+        with target.open("wb") as destination, tarfile.open(fileobj=SnapshotWriter(destination, max_output_bytes), mode="w:gz", compresslevel=1) as output:
             raw_info = tarfile.TarInfo(raw_name); raw_info.size = size
             output.addfile(raw_info, LimitedReader(raw, size, raw_hash))
             if index and index_name:

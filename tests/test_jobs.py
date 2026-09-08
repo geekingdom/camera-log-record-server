@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
@@ -16,6 +17,37 @@ from camera_logs.logs.archive_access import snapshot
 from camera_logs.logs.jobs import run_job
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+
+
+def test_snapshot_enforces_compressed_byte_limit_before_write(tmp_path):
+    """gzip 头、正文及尾部都计入上限，不能先写超额数据再事后检查。"""
+    source, target = tmp_path / "source.log", tmp_path / "snapshot.tar.gz"
+    source.write_bytes(b"needle\n" * 100)
+    with pytest.raises(ValueError, match="snapshot storage limit"):
+        snapshot(source, target, source.stat().st_size, max_output_bytes=32)
+    assert target.stat().st_size <= 32
+
+
+async def test_remote_snapshot_checks_limit_before_writing_chunk(tmp_path, monkeypatch):
+    """远端返回超额正文时，不允许把导致越界的数据块写入临时文件。"""
+    class Chunks(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"a" * 1_048_576
+            yield b"b" * 1_048_576
+
+    client_type = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=Chunks()))
+    monkeypatch.setattr(jobs.httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs))
+
+    async def get_node(*_args):
+        return {"url": "http://remote.test"}
+
+    repo = SimpleNamespace(get=get_node, settings=SimpleNamespace(internal_token="synthetic"))
+    target = tmp_path / "remote.tar.gz"
+    with pytest.raises(ValueError, match="snapshot storage limit"):
+        await jobs._remote_archive(repo, {"id": "file", "nodeId": "remote"}, {"status": "READY"},
+                                   target, True, 1_048_577)
+    assert target.stat().st_size == 1_048_576
 
 
 def test_snapshot_uses_frozen_byte_length_and_records_checksum(tmp_path):

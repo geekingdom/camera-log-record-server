@@ -32,6 +32,7 @@ from camera_logs.logs.search_stream import StreamSearch, index_entries
 
 OUTPUT_LIMIT = 20_000_000_000
 TEMP_LIMIT = 100_000_000_000
+SEARCH_SNAPSHOT_LIMIT = 20_000_000_000
 _jobs = asyncio.Semaphore(2)
 _temp_reservation_lock = asyncio.Lock()
 _temp_reservations: dict[str, int] = {}
@@ -62,7 +63,7 @@ async def _file_doc(repo: Any, snapshot: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
-async def _remote_archive(repo: Any, file: dict[str, Any], frozen: dict[str, Any], target: Path, include_index: bool = False) -> Path:
+async def _remote_archive(repo: Any, file: dict[str, Any], frozen: dict[str, Any], target: Path, include_index: bool = False, max_output_bytes: int | None = None) -> Path:
     """跨节点取回冻结快照，并限制读取速率和临时文件大小。"""
     node = await repo.get("nodes", file["nodeId"])
     params = {"includeIndex": "true"} if include_index else {}
@@ -74,8 +75,8 @@ async def _remote_archive(repo: Any, file: dict[str, Any], frozen: dict[str, Any
         with target.open("wb") as output:
             async for chunk in response.aiter_bytes(1024 * 1024):
                 written += len(chunk)
-                if written > TEMP_LIMIT:
-                    raise ValueError("remote archive exceeds temporary storage limit")
+                if written > (TEMP_LIMIT if max_output_bytes is None else max_output_bytes):
+                    raise ValueError("snapshot storage limit exceeded")
                 await asyncio.to_thread(read_limiter.consume, len(chunk))
                 output.write(chunk)
     return target
@@ -157,6 +158,7 @@ async def _archive(
     scratch: Path,
     scratch_name: str | None = None,
     include_index: bool = False,
+    max_output_bytes: int | None = None,
 ) -> tuple[Path, bool]:
     """查找已封存归档或建立固定水位快照，返回路径及是否为临时文件。"""
     file = await _file_doc(repo, frozen)
@@ -164,7 +166,7 @@ async def _archive(
     target = scratch / (scratch_name or _archive_name(file, str(file["id"]), use_path=local))
     if not local:
         if include_index:
-            await _remote_archive(repo, file, frozen, target, True)
+            await _remote_archive(repo, file, frozen, target, True, max_output_bytes)
         else:
             await _remote_archive(repo, file, frozen, target)
         return target, True
@@ -172,7 +174,7 @@ async def _archive(
     if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"] and not include_index:
         return path, False
     index = _contained(repo, file["indexPath"]) if file.get("indexPath") else None
-    await job_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index)
+    await job_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index, max_output_bytes=max_output_bytes)
     return target, True
 
 
@@ -361,6 +363,8 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     results, truncated = [], False
     progress: JobProgress | None = job.get("_progress")
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()
+    # 每次只保留一个快照；以实际写入上限预留，不能把正文大小当作含索引压缩包上限。
+    await _reserve_temp(repo, job["id"], SEARCH_SNAPSHOT_LIMIT)
     try:
         await job_thread(scratch.mkdir, parents=True, exist_ok=True)
         for frozen in job["files"]:
@@ -368,7 +372,7 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 stopped.set()
                 raise asyncio.CancelledError()
             file = await _file_doc(repo, frozen)
-            path, temporary = await _archive(repo, frozen, scratch, include_index=True)
+            path, temporary = await _archive(repo, frozen, scratch, include_index=True, max_output_bytes=SEARCH_SNAPSHOT_LIMIT)
             matches = await job_thread(_search_limited, path, scanner, frozen,
                 1000 - len(results), stopped.is_set, file.get("archiveMember"), stop=stopped)
             if temporary:
@@ -383,7 +387,10 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
         return {"results": results, "truncated": truncated}
     finally:
         stopped.set()
-        await job_thread(shutil.rmtree, scratch, True)
+        try:
+            await job_thread(shutil.rmtree, scratch, True)
+        finally:
+            await _release_temp(job["id"])
 
 
 async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:

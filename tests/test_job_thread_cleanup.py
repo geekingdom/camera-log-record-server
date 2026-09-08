@@ -39,6 +39,35 @@ async def repository(tmp_path):
     return repo, file
 
 
+async def test_search_reserves_space_before_creating_snapshot(tmp_path, monkeypatch):
+    """搜索与下载共用准入配额，空间不足时不能先写入快照。"""
+    repo, file = await repository(tmp_path)
+    monkeypatch.setattr(jobs, "TEMP_LIMIT", 10)
+    monkeypatch.setattr(jobs, "SEARCH_SNAPSHOT_LIMIT", 8, raising=False)
+    jobs._temp_reservations["other-download"] = 3
+    job = {"id": "quota-search", "keyword": "needle", "files": [file],
+           "start": "2026-09-08T00:00:00+00:00", "end": "2026-09-10T00:00:00+00:00"}
+    try:
+        with pytest.raises(ValueError, match="temporary export storage"):
+            await jobs._search(repo, job)
+        assert not (tmp_path / "exports" / ".tmp" / job["id"]).exists()
+        assert job["id"] not in jobs._temp_reservations
+    finally:
+        jobs._temp_reservations.pop("other-download", None)
+
+
+async def test_search_oversized_snapshot_cleans_files_and_reservation(tmp_path, monkeypatch):
+    """压缩输出越界时必须失败并回收文件和搜索预留。"""
+    repo, file = await repository(tmp_path)
+    monkeypatch.setattr(jobs, "SEARCH_SNAPSHOT_LIMIT", 32, raising=False)
+    job = {"id": "oversized-search", "keyword": "needle", "files": [file],
+           "start": "2026-09-08T00:00:00+00:00", "end": "2026-09-10T00:00:00+00:00"}
+    with pytest.raises(ValueError, match="snapshot storage limit"):
+        await jobs._search(repo, job)
+    assert not (tmp_path / "exports" / ".tmp" / job["id"]).exists()
+    assert job["id"] not in jobs._temp_reservations
+
+
 def test_archive_cancellation_waits_for_snapshot_thread_before_returning(tmp_path, monkeypatch):
     """取消快照时不得让后台线程继续向已经开始回收的临时目录写入。"""
     async def scenario():
@@ -124,6 +153,7 @@ def test_search_cancellation_signals_thread_and_waits_before_removing_scratch(tm
         assert saw_cancelled.is_set()
         assert cleanup_after_thread == [True]
         assert not scratch.exists()
+        assert job["id"] not in jobs._temp_reservations
 
     asyncio.run(scenario())
 
