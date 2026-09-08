@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -84,3 +85,47 @@ async def test_storage_stop_error_is_not_absorbed_as_psh_failure(tmp_path):
     stored = await repo.get("tasks", task["id"])
     assert stored["status"] == "COLLECTING"
     assert await repo.db.endpoint_locks.count_documents({"taskId": task["id"]}) == 1
+
+
+@pytest.mark.parametrize("response", [None, b"# \r\n", b"Password:", b"Sep  8 12:00:00 app.debug continuing output\r\n"])
+async def test_debug_without_challenge_stops_runtime_without_password_or_reconnect(tmp_path, response):
+    """疑似锁定时即使仍有打印也不得重试 debug、调用解密或发送后续初始化命令。"""
+    repo, task = await repository(tmp_path)
+    task["pshSerialCharacterInterval"] = 0
+    repo.settings.psh_serial_character_interval = 0
+    task["initialCommands"] = [{"command": "debug", "timeoutSeconds": .05}, {"command": "next"}]
+
+    class Connection:
+        def __init__(self):
+            self.received = asyncio.Queue()
+            self.received.put_nowait(b"Protect Shell (psh)\r\n# ")
+            self.sent, self.closed = [], False
+
+        async def read(self):
+            return await self.received.get()
+
+        async def write(self, data):
+            self.sent.append(data)
+            if response is not None:
+                self.received.put_nowait(response)
+
+        async def close(self):
+            self.closed = True
+            self.received.put_nowait(b"")
+
+    connection = Connection()
+    factory = AsyncMock(return_value=connection)
+    runtime = SessionRuntime(repo, task, connection_factory=factory)
+    provider = AsyncMock(return_value="must-not-be-sent")
+    runtime.debug_passwords = provider
+    await asyncio.wait_for(runtime.background, 2)
+    assert "疑似锁定或响应超时" in runtime.error
+    factory.assert_awaited_once()
+    provider.assert_not_awaited()
+    assert connection.sent == [b"debug\n"]
+    assert connection.closed
+    worker = Worker(repo)
+    worker.active[task["id"]] = runtime
+    await worker.release(runtime)
+    stored = await repo.get("tasks", task["id"])
+    assert stored["status"] == "ERROR" and stored["desiredState"] == "STOPPED"

@@ -178,6 +178,7 @@ class PshDialogue:
             return
         self._active, self._buffer = True, b""
         self._response, self._source = PshResponse(), None
+        awaiting_challenge = False
         try:
             async with asyncio.timeout(timeout):
                 await _notify(self.on_event, "STARTED", {"mode": self.mode})
@@ -187,6 +188,7 @@ class PshDialogue:
                         await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})
                         return
                     self._buffer, self._response, self._source = b"", PshResponse(), None
+                awaiting_challenge = True
                 await write(("debug" + newline).encode())
                 response, source = await self._wait_response()
                 if response == "FALLBACK":
@@ -194,6 +196,7 @@ class PshDialogue:
                     self._response, self._source = PshResponse(), None
                     await write(("zhimakaimen" + newline).encode())
                     response, source = await self._wait_response()
+                awaiting_challenge = False
                 if response == "ASH":
                     await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})
                     return
@@ -218,6 +221,9 @@ class PshDialogue:
         except Exception:  # noqa: BLE001 - 第三方错误统一转换为不含密文口令的领域异常。
             # 隔离第三方异常文本，防止请求参数、响应正文或解密口令进入日志。
             await _notify(self.on_event, "FAILED", {"mode": self.mode})
+            if awaiting_challenge:
+                # 锁定设备可能只返回普通打印；没有完整密文不能调用解密或试探性发送口令。
+                raise PshSwitchError("未收到完整调试密文，疑似锁定或响应超时；已停止任务，不自动重试") from None
             raise PshSwitchError("PSH 到 ASH 切换失败或超时，已终止本次会话") from None
         finally:
             self._active, self._buffer = False, b""

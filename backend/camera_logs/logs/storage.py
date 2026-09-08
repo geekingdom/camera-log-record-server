@@ -85,6 +85,7 @@ class HourlyWriter:
         self._archive_errors: list[Exception] = []
         self._last_sync = time.monotonic()
         self._durable_size = 0
+        self._close_error: Exception | None = None
 
     @property
     def active_path(self) -> Path | None:
@@ -166,6 +167,8 @@ class HourlyWriter:
         if not chunks:
             return []
         async with self._lock:
+            if self._close_error is not None:
+                raise self._close_error
             positions: list[ChunkPosition] = []
             grouped: list[tuple[bytes, int, int, datetime]] = []
             for data, received_at in chunks:
@@ -228,8 +231,18 @@ class HourlyWriter:
     async def sync_due(self) -> None:
         """无新输入时也每秒推进持久化水位，由接收看门狗调用。"""
         async with self._lock:
+            if self._close_error is not None:
+                raise self._close_error
             if time.monotonic() - self._last_sync >= 1:
                 await asyncio.to_thread(self._sync_files)
+
+    def _close_files_sync(self) -> None:
+        """同步失败也关闭正文句柄；整段收尾在同一线程内执行，不中途遗留文件。"""
+        try:
+            self._handle.flush()
+            self._sync_files()
+        finally:
+            self._handle.close()
 
     async def rotate(self, now: datetime | None = None) -> HourArchive | None:
         async with self._lock:
@@ -246,15 +259,20 @@ class HourlyWriter:
             return archive
 
     async def _close_locked(self, *, background: bool = False) -> HourArchive | None:
+        if self._close_error is not None:
+            raise self._close_error
         if self._handle is None:
             return None
         log, index, hour = self._log, self._index, self._hour
         size, digest = self._size, self._digest.hexdigest()
         first, last = self._first_sequence, self._last_sequence
         assert log is not None and index is not None and hour is not None
-        await asyncio.to_thread(self._handle.flush)
-        await asyncio.to_thread(self._sync_files)
-        await asyncio.to_thread(self._handle.close)
+        try:
+            await asyncio.to_thread(self._close_files_sync)
+        except Exception as error:
+            # 保留原文件和失败状态，重复停止不能把未确认同步误报为成功并释放归属。
+            self._close_error = error
+            raise
         self._handle = None
         if size == 0:
             await asyncio.to_thread(log.unlink, missing_ok=True)
