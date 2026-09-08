@@ -7,10 +7,13 @@ TCP 保活只用于连接存活探测，绝不向设备 shell 发送服务生成
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 class Connection(Protocol):
@@ -61,11 +64,12 @@ class _TelnetConnection:
             while True:
                 await asyncio.sleep(interval)
                 # IAC NOP 是 Telnet 协议控制字节，不是 shell 输入，不会污染原始日志。
-                self._writer.iac(b"\xf1")
+                self._writer.send_iac(b"\xff\xf1")
                 await self._writer.drain()
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - any keepalive failure makes this transport unusable.
+        except Exception:
+            logger.exception("Telnet 协议保活失败，关闭底层连接")
             self._writer.close()
 
     async def read(self, size: int = 65536) -> bytes:

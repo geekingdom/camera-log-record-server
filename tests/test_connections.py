@@ -12,7 +12,7 @@ from camera_logs.collection.connections import _connect_ssh, _TelnetConnection
 
 class Writer:
     def __init__(self): self.nops = 0; self.closed = False
-    def iac(self, value): self.nops += 1; assert value == b"\xf1"
+    def send_iac(self, value): self.nops += 1; assert value == b"\xff\xf1"
     async def drain(self): pass
     def close(self): self.closed = True
     async def wait_closed(self): pass

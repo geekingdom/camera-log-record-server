@@ -73,3 +73,7 @@ python scripts/benchmark_websocket.py --task-id <taskId> --clients 500 --frames 
 ## 请求完成与下载异常日志
 
 API 访问日志在应用响应结束后写入，包含 `responseComplete` 和 `responseBytes`。字节数表示 ASGI 发送调用已成功返回的正文大小，不代表客户端已经保存到磁盘。下载已发送 200 响应头但随后失败时，保留真实的 200 状态，同时记录异常和 `responseComplete=false`；排障不能仅按 HTTP 状态判断成功。响应头尚未发出的取消记为 499，其他未处理异常记为 500。401、422 等已完整发送的错误响应仍为 `responseComplete=true`，该字段只表示传输完整性。
+
+## Telnet 协议保活
+
+Telnet 设备和 Telnet 串口共用连接适配器，使用 `send_iac(IAC + NOP)` 发送两字节协议保活。`telnetlib3.iac()` 仅适用于 DO、DONT、WILL、WONT 协商，不能用于 NOP，否则会因参数异常关闭连接。保活失败写入运行日志并关闭连接，交由运行实例重连。对端协议控制流量不算设备正文，不能重置默认十秒无日志看门狗；停止连接会同时取消保活协程。
