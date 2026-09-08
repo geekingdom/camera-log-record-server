@@ -176,11 +176,17 @@ async def execute(args):
                         target.write(json.dumps({"route": number, "taskId": task_id, "port": source.port}) + "\n")
                 await asyncio.wait_for(source.connected.wait(), timeout=args.timeout)
                 route_observers = []
+                initial_cursor = None
+                if args.realtime_clients_per_route:
+                    current_task = await request(client, "GET", f"/api/v1/tasks/{task_id}")
+                    if not current_task.get("runId"):
+                        raise RuntimeError("已连接的压测任务缺少运行实例")
+                    initial_cursor = f"{current_task['runId']}:0"
                 for _ in range(args.realtime_clients_per_route):
                     ready = asyncio.Event()
                     observer = asyncio.create_task(observe_realtime(
                         args.url, token, task_id, number, args.line_bytes,
-                        args.seconds * args.lines_per_second, ready, args.seconds * 2 + args.timeout))
+                        args.seconds * args.lines_per_second, ready, args.seconds * 2 + args.timeout, initial_cursor))
                     observers.append(observer)
                     route_observers.append(observer)
                     await wait_observer_ready(observer, ready, args.timeout)

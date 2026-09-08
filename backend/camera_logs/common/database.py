@@ -42,6 +42,8 @@ class Repository:
         await self.db.endpoint_locks.create_index("taskId", unique=True)
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1)])
+        await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1), ("status", 1)])
+        await self.db.operations.create_index([("desiredState", 1), ("status", 1)])
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
         await self.db.resources.create_index("deletionState")

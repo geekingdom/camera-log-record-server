@@ -47,11 +47,11 @@ def _complete_line(raw, *, route, line_bytes, sequence, digest):
     digest.update(body)
 
 
-async def observe_realtime(url, token, task_id, route, line_bytes, expected_lines, ready_event, timeout):
+async def observe_realtime(url, token, task_id, route, line_bytes, expected_lines, ready_event, timeout, initial_cursor=None):
     """订阅正式实时接口并校验单会话、顺序文件和逐行正文摘要。
 
     连接并发出首帧认证请求后设置 ``ready_event``；接口没有认证成功确认帧，调用方应同时监督本协程，连接或
-    鉴权失败时本协程会立即抛出，不能只等待事件而永久挂起。达到预期行数即返回，
+    鉴权失败时本协程会立即抛出，不能只等待事件而永久挂起。全量校验应传入运行起点游标，避免默认尾部窗口跳过早期块。达到预期行数即返回，
     同一数据帧中的额外完整行仍会作为错误报告。
     """
     if expected_lines < 0 or line_bytes <= 0 or timeout <= 0:
@@ -69,7 +69,10 @@ async def observe_realtime(url, token, task_id, route, line_bytes, expected_line
     lines = 0
 
     async with websockets.connect(socket_url, max_size=2 * 1024 * 1024, open_timeout=min(timeout, 15)) as socket:
-        await socket.send(json.dumps({"token": token}))
+        hello = {"token": token}
+        if initial_cursor is not None:
+            hello["cursor"] = initial_cursor
+        await socket.send(json.dumps(hello))
         ready_event.set()
         while lines < expected_lines:
             remaining = deadline - time.monotonic()

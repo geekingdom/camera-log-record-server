@@ -118,6 +118,15 @@ async def test_observer_reassembles_split_lines_across_packets_and_files(realtim
     assert [json.loads(item) for item in connector.socket.sent] == [{"token": "secret-token"}]
 
 
+async def test_observer_requests_explicit_run_start_cursor(realtime_module, monkeypatch):
+    """完整性压测必须请求运行首帧，不能依赖默认最近四块的尾部窗口。"""
+    connector = FakeConnect([data_frame(prefixed_line(7, 0, 64))])
+    monkeypatch.setattr(realtime_module.websockets, "connect", connector)
+    await realtime_module.observe_realtime("ws://service.example", "token", "task", 7, 64, 1,
+                                          asyncio.Event(), 1, "run-id:0")
+    assert json.loads(connector.socket.sent[0]) == {"token": "token", "cursor": "run-id:0"}
+
+
 @pytest.mark.parametrize(
     ("frames", "message"),
     [

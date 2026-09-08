@@ -17,6 +17,34 @@ from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task
 logger = logging.getLogger(__name__)
 
 
+async def reconcile_stopped_tasks(db):
+    """批量收尾无归属任务，避免已完成的历史记录逐项占用调度租约。
+
+    写入条件重新检查停止意图，不能覆盖并发启动。仅从待完成的停止操作
+    关联任务，过滤异常及仍有节点的任务后限量处理，避免其阻塞后续操作。
+    """
+    await db.tasks.update_many(
+        {"desiredState": "STOPPED", "nodeId": None,
+         "status": {"$nin": ["STOPPED", "BLOCKED", "ERROR"]}},
+        {"$set": {"status": "STOPPED"}},
+    )
+    cursor = await db.operations.aggregate([
+        {"$match": {"desiredState": "STOPPED", "status": "PENDING"}},
+        {"$lookup": {"from": "tasks", "localField": "taskId", "foreignField": "id", "as": "task"}},
+        {"$unwind": "$task"},
+        {"$match": {"task.desiredState": "STOPPED", "task.nodeId": None, "task.status": "STOPPED"}},
+        {"$limit": 500},
+        {"$project": {"id": 1, "_id": 0}},
+    ])
+    identifiers = [item["id"] async for item in cursor]
+    if identifiers:
+        # 启动 API 会先取消相反意图的待完成操作；不能把已取消操作改为成功。
+        await db.operations.update_many(
+            {"id": {"$in": identifiers}, "desiredState": "STOPPED", "status": "PENDING"},
+            {"$set": {"status": "SUCCEEDED", "completedAt": now()}},
+        )
+
+
 async def schedule_once(repo, lease=None):
     """在一次持有调度租约的周期内处理停止、失联和待分配任务。"""
     db = repo.db
@@ -25,11 +53,7 @@ async def schedule_once(repo, lease=None):
     async for node in db.nodes.find({"heartbeat": {"$lt": cutoff}}):
         await db.tasks.update_many({"nodeId": node["id"], "status": {"$nin": ["STOPPED", "BLOCKED"]}},
             {"$set": {"status": "BLOCKED", "error": "节点失联，必须确认旧实例停止或隔离后才能接管"}})
-    async for task in db.tasks.find({"desiredState": "STOPPED", "nodeId": None}):
-        if task["status"] not in ("BLOCKED", "ERROR"):
-            await db.tasks.update_one({"id": task["id"], "nodeId": None}, {"$set": {"status": "STOPPED"}})
-            await db.operations.update_many({"taskId": task["id"], "desiredState": "STOPPED", "status": "PENDING"},
-                                            {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
+    await reconcile_stopped_tasks(db)
     # 调度租约内只有本调度者新增归属，节点收尾只会释放归属。一次投影扫描统计
     # 全部占用（包括失联节点），本周期成功领取后递增；并发释放的容量下周期再用。
     # 只读取 nodeId，避免为每个任务的每个候选节点重复 count_documents。

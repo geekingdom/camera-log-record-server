@@ -241,6 +241,8 @@ async def test_benchmark_cancels_and_awaits_realtime_observer_after_route_failur
         if path == "/api/v1/log-searches/active-search":
             assert search_deleted.is_set()
             return {"status": "CANCELLED"}
+        if path == "/api/v1/tasks/task" and method == "GET":
+            return {"id": "task", "runId": "synthetic-run"}
         if path == "/api/v1/nodes":
             return {"items": [{"capacity": 1, "activeTasks": 0, "accepting": True}]}
         if path == "/api/v1/resources" and method == "POST":

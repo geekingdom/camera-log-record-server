@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
-from camera_logs.tasks.scheduler import schedule_once
+from camera_logs.tasks.scheduler import reconcile_stopped_tasks, schedule_once
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 
@@ -55,6 +55,76 @@ async def _insert_pending_tasks(repo, count):
         }
         for index in range(count)
     ])
+
+
+async def test_settled_history_does_not_generate_per_task_writes(tmp_path, monkeypatch):
+    """历史停止任务不应消耗调度租约内的逐项数据库往返预算。"""
+    repo = await _repository(tmp_path)
+    await _insert_nodes(repo, 1)
+    await _insert_pending_tasks(repo, 1)
+    await repo.db.tasks.insert_many([
+        {"id": f"history-{i}", "desiredState": "STOPPED", "status": "STOPPED", "nodeId": None}
+        for i in range(1000)
+    ])
+    collection_type = type(repo.db.tasks)
+    original = collection_type.update_one
+    writes = 0
+
+    async def count_writes(self, *args, **kwargs):
+        nonlocal writes
+        if self.name == "tasks":
+            writes += 1
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(collection_type, "update_one", count_writes)
+    await schedule_once(repo)
+    assert (await repo.get("tasks", "task-0"))["nodeId"] == "node-0"
+    assert writes <= 2
+
+
+async def test_stop_reconciliation_preserves_terminal_errors_and_running_intent(tmp_path):
+    """仅无节点且确认停止的任务完成停止操作，异常及新启动意图不能被覆盖。"""
+    repo = await _repository(tmp_path, cluster_capacity=0)
+    cases = [("stopped", "STOPPED", "STOPPED", None),
+             ("pending", "PENDING", "STOPPED", None),
+             ("blocked", "BLOCKED", "STOPPED", None),
+             ("error", "ERROR", "STOPPED", None),
+             ("running", "PENDING", "RUNNING", None),
+             ("owned", "COLLECTING", "STOPPED", "worker")]
+    for identifier, status, desired, owner in cases:
+        await repo.db.tasks.insert_one({"id": identifier, "status": status,
+                                       "desiredState": desired, "nodeId": owner})
+        await repo.db.operations.insert_one({"id": identifier, "taskId": identifier,
+                                            "desiredState": "STOPPED", "status": "PENDING"})
+    await schedule_once(repo)
+    for identifier, status, _, _ in cases:
+        completed = identifier in {"stopped", "pending"}
+        task = await repo.get("tasks", identifier)
+        operation = await repo.get("operations", identifier)
+        assert task["status"] == ("STOPPED" if completed else status)
+        assert operation["status"] == ("SUCCEEDED" if completed else "PENDING")
+
+
+async def test_stop_reconciliation_does_not_overwrite_cancelled_operation(tmp_path, monkeypatch):
+    """关联查询后发生启动请求时，收尾不得覆盖已取消操作或新的运行意图。"""
+    repo = await _repository(tmp_path)
+    await repo.db.tasks.insert_one({"id": "task", "desiredState": "STOPPED",
+                                    "status": "STOPPED", "nodeId": None})
+    await repo.db.operations.insert_one({"id": "stop", "taskId": "task",
+                                         "desiredState": "STOPPED", "status": "PENDING"})
+    collection_type = type(repo.db.operations)
+    original = collection_type.update_many
+
+    async def restart_before_operation_update(self, query, update, **kwargs):
+        if self.name == "operations":
+            await repo.db.operations.update_one({"id": "stop"}, {"$set": {"status": "CANCELLED"}})
+            await repo.db.tasks.update_one({"id": "task"}, {"$set": {"desiredState": "RUNNING"}})
+        return await original(self, query, update, **kwargs)
+
+    monkeypatch.setattr(collection_type, "update_many", restart_before_operation_update)
+    await reconcile_stopped_tasks(repo.db)
+    assert (await repo.get("operations", "stop"))["status"] == "CANCELLED"
+    assert (await repo.get("tasks", "task"))["desiredState"] == "RUNNING"
 
 
 async def test_schedule_once_batch_query_budget_and_capacity_assignment(tmp_path, monkeypatch):
