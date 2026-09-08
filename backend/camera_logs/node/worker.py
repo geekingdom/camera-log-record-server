@@ -16,6 +16,7 @@ from pymongo import AsyncMongoClient, ReturnDocument
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
+from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,24 @@ class Worker:
         self.maintenance_task = None
         self.releases = {}
         self.disk_level = "NORMAL"
+        self.write_pressure = WritePressure()
+
+    def write_latency(self):
+        """汇总活动会话的最近写入快照；最慢会话决定新会话准入。"""
+        snapshots = []
+        for runtime in self.active.values():
+            collector = getattr(runtime, "collector", None)
+            tracker = getattr(collector, "write_latency", None)
+            if tracker is not None:
+                snapshots.append(tracker.snapshot())
+        p99_ms = max((float(snapshot["p99Ms"]) for snapshot in snapshots), default=0.0)
+        pending_ms = max((float(snapshot["pendingMs"]) for snapshot in snapshots), default=0.0)
+        return {
+            "writeLatencyMs": max(p99_ms, pending_ms),
+            "writeLatencySamples": sum(int(snapshot["samples"]) for snapshot in snapshots),
+            "writeLatencyPendingMs": pending_ms,
+            "writeLatencyWindowSeconds": 60,
+        }
 
     async def report_disk_pressure(self, percent):
         """仅在磁盘阈值级别变化时记录告警及恢复，避免每秒重复事件。"""
@@ -145,7 +164,15 @@ class Worker:
         capacity = min(100, self.repo.settings.node_capacity, config.get("capacity", self.repo.settings.node_capacity))
         mismatch = bool(config.get("url") and config["url"].rstrip("/") != self.repo.settings.node_url.rstrip("/"))
         reported = await self.repo.db.nodes.find_one({"id": self.repo.settings.node_id}) or {}
-        accepting = disk_percent < 90 and config.get("accepting", True) and not mismatch and not reported.get("isolated", False)
+        write_latency = self.write_latency()
+        await self.write_pressure.report(self.repo.db, self.repo.settings.node_id, write_latency)
+        accepting = (
+            disk_percent < 90
+            and config.get("accepting", True)
+            and not mismatch
+            and not reported.get("isolated", False)
+            and write_latency["writeLatencyMs"] <= WRITE_LATENCY_LIMIT_MS
+        )
         current_bytes = sum(r.input_bytes for r in self.active.values())
         tick = time.monotonic()
         rate = max(0, current_bytes-self.last_bytes)/max(.01, tick-self.last_tick)
@@ -154,6 +181,7 @@ class Worker:
             "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "heartbeat": now(),
             "capacity": capacity, "activeTasks": len(self.active),
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
+            **write_latency,
             "accepting": accepting, "configurationMismatch": mismatch,
             "configuredUrl": config.get("url")}}, upsert=True)
         for task_id, future in list(self.releases.items()):

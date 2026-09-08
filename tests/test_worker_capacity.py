@@ -104,3 +104,85 @@ async def test_existing_collection_only_stops_at_critical_disk_pressure(tmp_path
         assert "磁盘" in result["error"]
     else:
         assert result["status"] == "COLLECTING" and task["id"] in worker.active
+
+
+async def test_slow_write_blocks_new_connection_without_stopping_existing_collection(tmp_path):
+    """写入延迟超限只关闭本地准入，恢复后允许排队任务建立新会话。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+    await repo.initialize()
+    active_task = {"id": "active", "runId": "active-run", "nodeId": repo.settings.node_id,
+                   "status": "COLLECTING", "desiredState": "RUNNING"}
+    pending_task = {"id": "pending", "runId": "pending-run", "nodeId": repo.settings.node_id,
+                    "status": "PENDING", "desiredState": "RUNNING"}
+    await repo.db.tasks.insert_many([active_task, pending_task])
+    metrics = {"p99Ms": 100.0, "samples": 3, "pendingMs": 250.0, "windowSeconds": 60}
+    collector = SimpleNamespace(write_latency=SimpleNamespace(snapshot=lambda: dict(metrics)))
+    runtime = SimpleNamespace(
+        task=active_task,
+        collector=collector,
+        input_bytes=0,
+        stopping=False,
+        error=None,
+        background=asyncio.get_running_loop().create_future(),
+        background_failure=lambda: None,
+        stop=AsyncMock(),
+    )
+    worker = Worker(repo)
+    worker.active[active_task["id"]] = runtime
+    worker.last_maintenance = time.monotonic()
+    disk = SimpleNamespace(used=50, total=100, free=50)
+    with patch("camera_logs.node.worker.shutil.disk_usage", return_value=disk), \
+            patch("camera_logs.node.worker.SessionRuntime") as factory:
+        await worker.tick()
+        factory.assert_not_called()
+        heartbeat = await repo.get("nodes", repo.settings.node_id)
+        assert heartbeat["accepting"] is False
+        assert heartbeat["writeLatencyMs"] == 250.0
+        assert heartbeat["writeLatencySamples"] == 3
+        assert heartbeat["writeLatencyWindowSeconds"] == 60
+        assert runtime.stop.await_count == 0
+
+        metrics.update({"p99Ms": 0.0, "samples": 0, "pendingMs": 0.0})
+        await worker.tick()
+        factory.assert_called_once()
+        heartbeat = await repo.get("nodes", repo.settings.node_id)
+        assert heartbeat["accepting"] is True
+        assert heartbeat["writeLatencyMs"] == 0.0
+        assert heartbeat["writeLatencySamples"] == 0
+        assert runtime.stop.await_count == 0
+
+
+async def test_write_pressure_events_only_record_threshold_crossings(tmp_path):
+    """连续的相同写压状态只更新心跳，不重复写入节点压力事件。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+    await repo.initialize()
+    metrics = {"p99Ms": 201.0, "samples": 1, "pendingMs": 0.0, "windowSeconds": 60}
+    collector = SimpleNamespace(write_latency=SimpleNamespace(snapshot=lambda: dict(metrics)))
+    task = {"id": "active", "runId": "run", "nodeId": repo.settings.node_id,
+            "status": "COLLECTING", "desiredState": "RUNNING"}
+    runtime = SimpleNamespace(
+        task=task,
+        collector=collector,
+        input_bytes=0,
+        stopping=False,
+        error=None,
+        background=asyncio.get_running_loop().create_future(),
+        background_failure=lambda: None,
+        stop=AsyncMock(),
+    )
+    await repo.db.tasks.insert_one(task)
+    worker = Worker(repo)
+    worker.active[task["id"]] = runtime
+    worker.last_maintenance = time.monotonic()
+    disk = SimpleNamespace(used=50, total=100, free=50)
+    with patch("camera_logs.node.worker.shutil.disk_usage", return_value=disk):
+        await worker.tick()
+        await worker.tick()
+        metrics["p99Ms"] = 200.0
+        await worker.tick()
+        await worker.tick()
+    events = [event async for event in repo.db.events.find({"type": "WRITE_PRESSURE_CHANGED"})]
+    assert [event["level"] for event in events] == ["NO_ADMISSION", "NORMAL"]
+    assert [event["previousLevel"] for event in events] == ["NORMAL", "NO_ADMISSION"]

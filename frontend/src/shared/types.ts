@@ -63,6 +63,10 @@ export interface Node {
   name?: string;
   status?: string;
   address?: string;
+  writeLatencyMs: number;
+  writeLatencySamples: number;
+  writeLatencyPendingMs: number;
+  writeLatencyWindowSeconds: number;
   [key: string]: unknown;
 }
 export interface Page<T> {

@@ -1,7 +1,7 @@
 """单路采集器：单连接接收、FIFO 原始字节写入和串行命令发送。
 
-本模块不按日志正文去重，也不在原始文件插入服务生成文本；每个实例只处理
-一个 task/run/session。连接断开、空闲超时和人工停止均由运行时决定是否重连。
+本模块保留重复正文，仅按约定添加上海时区行首时间戳，不混入命令审计文本；每个
+实例只处理一个 task/run/session。连接断开、空闲超时和人工停止均由运行时决定是否重连。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from camera_logs.common.write_metrics import WriteLatency
 from camera_logs.logs.storage import HourlyWriter
 
 from .line_prefix import LinePrefixer
@@ -88,6 +89,7 @@ class Collector:
             task_name=str(self.task.get("name") or self.task_id),
             device_ip=str(self.task.get("ip") or "unknown"),
         )
+        self.write_latency = WriteLatency()
         self._queue: asyncio.PriorityQueue[
             tuple[int, int, str, str, str | None, float, Callback | None, asyncio.Future[None]]
         ] = (
@@ -359,6 +361,7 @@ class Collector:
                         waiter.set_result(None)
                     prompt_tail = (prompt_tail + data)[-max(len(needle) - 1, 0):]
                 received_at = datetime.now(UTC)
+                self.write_latency.begin()
                 pending.append((self._prefixer.prefix(data, received_at), received_at))
                 if sum(len(chunk) for chunk, _ in pending) >= 256 * 1024 or asyncio.get_running_loop().time() >= flush_deadline:
                     to_flush, pending = pending, []
@@ -406,7 +409,11 @@ class Collector:
                 raise cleanup_error
 
     async def _flush(self, pending: list[tuple[bytes, object]]) -> None:
+        if not pending:
+            return
+        self.write_latency.begin()
         positions = await self._writer.write_many(pending)
+        self.write_latency.finish()
         for (data, received_at), position in zip(pending, positions, strict=True):
             await _call(
                 self._on_log,
