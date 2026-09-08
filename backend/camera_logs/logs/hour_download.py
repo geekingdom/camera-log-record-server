@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from camera_logs.logs.archive_access import LimitedReader, snapshot
 from camera_logs.logs.naming import safe_filename_component
+from camera_logs.logs.order import ordered_files
 
 MAX_MEMBER_BYTES = 10 * 1024 * 1024
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -81,20 +82,14 @@ def source_member(path: Path, member_name: str | None) -> Iterator[tuple[tarfile
 
 def write_hour_archive(destination: Path, sources: list[Source]) -> int:
     """按稳定顺序重组一个小时，并将旧的大成员拆为最多 10 MiB 的分卷。"""
-    def order(item: Source) -> tuple[str, str, int, int, str]:
-        frozen, file, _path, _temporary = item
-        return (
-            str(file.get("runStartedAt") or frozen.get("runStartedAt") or ""),
-            str(file.get("sessionStartedAt") or frozen.get("sessionStartedAt") or ""),
-            int(file.get("firstSequence") or frozen.get("firstSequence") or 0),
-            int(file.get("segmentNumber") or frozen.get("segmentNumber") or 0),
-            str(frozen.get("id")),
-        )
+    by_id = {source[0]["id"]: source for source in sources}
+    ordered = ordered_files([frozen | file for frozen, file, _, _ in sources])
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     number = 1
     with tarfile.open(destination, "w:gz", compresslevel=1) as output:
-        for frozen, file, path, _temporary in sorted(sources, key=order):
+        for document in ordered:
+            frozen, file, path, _temporary = by_id[document["id"]]
             with source_member(path, file.get("archiveMember")) as (member, stream):
                 frozen_bytes = int(frozen.get("bytes", member.size))
                 if frozen_bytes < 0 or member.size < frozen_bytes:

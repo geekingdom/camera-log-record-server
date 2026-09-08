@@ -272,6 +272,24 @@ def test_pin_cross_filesystem_copies_only_frozen_member(tmp_path, monkeypatch):
         assert bundle.extractfile("selected.log").read() == b"selected"
 
 
+def test_rebuilt_hour_preserves_parts_when_session_sequences_restart(tmp_path):
+    """目录丢失后恢复的分卷无会话时间，不能按重置的块序号打乱下载。"""
+    sources = []
+    for part, sequence in [(1, 1), (2, 50), (3, 1)]:
+        path = tmp_path / f"{part}.tar.gz"
+        with tarfile.open(path, "w:gz") as bundle:
+            member = tarfile.TarInfo("source.log")
+            member.size = 1
+            bundle.addfile(member, io.BytesIO(str(part).encode()))
+        file = {"id": str(part), "nodeId": "node", "taskId": "task", "hour": "hour",
+                "segmentNumber": part, "firstSequence": sequence, "archiveMember": "source.log"}
+        sources.append(({"id": str(part), "bytes": 1}, file, path, True))
+    output = tmp_path / "output.tar.gz"
+    hour_download.write_hour_archive(output, list(reversed(sources)))
+    with tarfile.open(output) as bundle:
+        assert b"".join(bundle.extractfile(m).read() for m in bundle.getmembers()) == b"123"
+
+
 def test_search_caps_results_at_one_thousand(tmp_path):
     async def scenario():
         settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")

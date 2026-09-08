@@ -163,8 +163,9 @@ async def test_recovery_registers_each_shared_archive_member_with_stable_log_ide
     members = []
     with tarfile.open(path, "w:gz") as bundle:
         for number, task in enumerate(("task-a", "task-b"), start=1):
-            log_name, index_name = f"part-{number:06d}.log", f"part-{number:06d}.index.jsonl"
-            raw, index = f"{task}\n".encode(), b'{"offset":0}\n'
+            log_name, index_name = f"task-part-{number:06d}.log", f"task-part-{number:06d}.index.jsonl"
+            raw = f"{task}\n".encode()
+            index = (json.dumps({"offset": 0, "receivedAt": hour}) + "\n").encode()
             info = tarfile.TarInfo(log_name); info.size = len(raw); bundle.addfile(info, io.BytesIO(raw))
             (path.parent / index_name).write_bytes(index)
             members.append({"taskId": task, "runId": f"run-{number}", "sessionId": f"session-{number}",
@@ -175,6 +176,8 @@ async def test_recovery_registers_each_shared_archive_member_with_stable_log_ide
 
     assert await recover_orphan_archives(repo) == 2
     records = [item async for item in repo.db.files.find({"path": str(path)})]
+    assert {record["segmentNumber"] for record in records} == {1, 2}
+    assert all(record["firstReceivedAt"] == hour for record in records)
     assert {record["id"] for record in records} == {
         _archive_id(tmp_path, path.parent / member["logName"]) for member in members
     }
@@ -195,7 +198,8 @@ async def test_recovery_supports_legacy_manifest_archive_without_sidecar(tmp_pat
     """已有单分卷归档缺少 v2 sidecar 时仍可恢复，避免维护循环持续报错。"""
     repo = repository(tmp_path)
     path = tmp_path / "legacy.tar.gz"
-    raw, index = b"legacy\n", b'{"offset":0}\n'
+    stamp = "2026-09-08T04:12:34+00:00"
+    raw, index = b"legacy\n", (json.dumps({"offset": 0, "receivedAt": stamp}) + "\n").encode()
     manifest = {"taskId": "task", "runId": "run", "sessionId": "session", "hourStart": now().isoformat(),
                 "rawSize": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "firstSequence": 1, "lastSequence": 1,
                 "indexBytes": len(index), "indexSha256": hashlib.sha256(index).hexdigest()}
@@ -206,6 +210,8 @@ async def test_recovery_supports_legacy_manifest_archive_without_sidecar(tmp_pat
     record = await repo.db.files.find_one({})
     assert record["status"] == "READY"
     assert record["archiveMember"] == "legacy.log"
+    assert record["firstReceivedAt"] == stamp
+    assert record["segmentNumber"] == 0
     assert "indexPath" not in record
 
 

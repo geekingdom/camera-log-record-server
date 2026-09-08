@@ -30,6 +30,37 @@ def test_shared_hour_archive_size_counted_once_per_node():
     assert summarize_hours(files + [files[0] | {"nodeId": "n2"}])[0]["archiveBytes"] == 202
 
 
+def test_recovered_sessions_keep_hour_part_order():
+    files = [{"id": str(part), "hour": "2026-09-08T00:00:00+00:00", "status": "READY",
+              "nodeId": "node", "taskId": "task", "segmentNumber": part,
+              "firstSequence": sequence, "sessionId": session}
+             for part, sequence, session in [(1, 1, "old"), (2, 50, "old"), (3, 1, "new")]]
+    for order in permutations(files):
+        assert [f["id"] for f in summarize_hours(order)[0]["files"]] == ["1", "2", "3"]
+
+
+def test_node_migration_merge_preserves_local_order_despite_clock_rollback():
+    files = [{"id": identifier, "hour": "2026-09-08T00:00:00+00:00", "status": "READY",
+              "nodeId": node, "taskId": "task", "segmentNumber": part,
+              "firstReceivedAt": f"2026-09-08T00:{minute:02d}:00+00:00"}
+             for identifier, node, part, minute in [
+                 ("a1", "a", 1, 1), ("b1", "b", 1, 2), ("a2", "a", 2, 3), ("a3", "a", 3, 0)]]
+    for order in permutations(files):
+        assert [f["id"] for f in summarize_hours(order)[0]["files"]] == ["a1", "b1", "a2", "a3"]
+
+
+def test_legacy_sessions_merge_with_new_hour_parts_by_received_time():
+    files = [{"id": identifier, "hour": "2026-09-08T00:00:00+00:00", "status": "READY",
+              "taskId": "task", "nodeId": "node", "sessionId": session,
+              "segmentNumber": part, "firstSequence": sequence,
+              "firstReceivedAt": f"2026-09-08T00:{minute:02d}:00+00:00"}
+             for identifier, session, part, sequence, minute in [
+                 ("old1", "old", 0, 100, 1), ("old2", "old", 0, 200, 0),
+                 ("other", "other", 0, 1, 2), ("new", "new", 1, 1, 3)]]
+    for order in permutations(files):
+        assert [f["id"] for f in summarize_hours(order)[0]["files"]] == ["old1", "old2", "other", "new"]
+
+
 def test_hour_date_filter_uses_shanghai_day_and_keeps_pagination(client):
     task = client.post("/api/v1/tasks", headers={"Idempotency-Key": "hours"}, json={
         "name": "hours", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9090,

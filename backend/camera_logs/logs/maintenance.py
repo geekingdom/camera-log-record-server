@@ -101,6 +101,10 @@ def _legacy_members(path: Path) -> list[dict[str, Any]]:
             source = archive.extractfile(index)
             if source is None or _hash_stream(source) != (manifest["indexSha256"], manifest["indexBytes"]):
                 raise ValueError("legacy archive index checksum or size mismatch")
+            source.seek(0)
+            first = source.readline()
+            if first:
+                manifest["firstReceivedAt"] = json.loads(first).get("receivedAt")
         return [manifest | {"logName": log.name, "_legacy": True}]
 
 
@@ -136,6 +140,10 @@ def _members(path: Path) -> list[dict[str, Any]]:
             with index_path.open("rb") as index:
                 if _hash_stream(index) != (member["indexSha256"], member["indexBytes"]):
                     raise ValueError("archive index checksum or size mismatch")
+                index.seek(0)
+                first = index.readline()
+                if first:
+                    member["firstReceivedAt"] = json.loads(first).get("receivedAt")
     return members
 
 
@@ -197,11 +205,14 @@ async def recover_orphan_archives(repo: Any) -> int:
                     "archiveGroupId": group_id, "rawFileName": log_path.name,
                     "bytes": member["rawSize"], "archiveBytes": path.stat().st_size, "sha256": member["sha256"],
                     "firstSequence": member["firstSequence"], "lastSequence": member["lastSequence"],
-                    "segmentNumber": int(match.group(1)) if (match := re.search(r"-part-(\d+)\.log$", log_path.name)) else 0,
+                    "segmentNumber": int(match.group(1)) if not member.get("_legacy") and (
+                        match := re.search(r"-part-(\d+)\.log$", log_path.name)) else 0,
                     "status": "READY", "updatedAt": now(),
                 }
                 if index_path is not None:
                     document["indexPath"] = str(index_path)
+                if member.get("firstReceivedAt"):
+                    document["firstReceivedAt"] = member["firstReceivedAt"]
                 if existing:
                     result = await repo.db.files.update_one(
                         {"id": identifier, "status": "OPEN", **identity}, {"$set": document})

@@ -18,6 +18,7 @@ from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.security import actor, authenticate, authorize
 from camera_logs.logs.download_sessions import download_actor
 from camera_logs.logs.hour_catalog import summarize_hours
+from camera_logs.logs.order import ordered_files
 
 
 async def node_request(repo, node_id, path, params=None):
@@ -106,7 +107,7 @@ def install_log_routes(app):
                     raise HTTPException(422, "时间范围须包含时区且不超过24小时") from exc
                 start, end = start.astimezone(now().tzinfo), end.astimezone(now().tzinfo)
                 query["hour"] = {"$gte": start.replace(minute=0, second=0, microsecond=0).isoformat(), "$lte": end.isoformat()}
-            files = [public(f) async for f in repo().db.files.find(query).sort([("runStartedAt", 1), ("sessionStartedAt", 1), ("firstSequence", 1)])]
+            files = ordered_files([public(f) async for f in repo().db.files.find(query)])
             if not files:
                 raise HTTPException(404, "所选范围没有日志")
             unavailable = [f for f in files if f["status"] not in ("OPEN", "READY")]
