@@ -42,7 +42,7 @@ async function exportableTaskId() {
   return page.evaluate(async () => {
     const token = sessionStorage.getItem("camera-log-record-token");
     const headers = { Authorization: `Bearer ${token}` };
-    const tasks = await fetch("/api/v1/tasks?page=1&pageSize=100", {
+    const tasks = await fetch("/api/v1/tasks?page=1&pageSize=20&status=COLLECTING", {
       headers,
     }).then((response) => response.json());
     for (const task of tasks.items) {
@@ -130,6 +130,9 @@ try {
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "刷新列表", exact: true }).click();
 
+  // 与 API 候选范围使用相同筛选和分页，历史合成任务增多不能挤走实时验收目标。
+  await page.locator(".task-filters .el-select").click();
+  await page.getByRole("option", { name: "采集中", exact: true }).click();
   const taskId = await exportableTaskId();
   const existing = page
     .locator(".el-table__body tbody tr")

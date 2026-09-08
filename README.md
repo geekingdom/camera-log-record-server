@@ -41,3 +41,5 @@ codegraph impact SessionRuntime
 ```
 
 当前验证证据见 [docs/validation.md](docs/validation.md)。
+
+经正式 API 驱动的多路真实 Telnet 压测、小时包流式摘要比对及报告判定见 [docs/service-benchmark.md](docs/service-benchmark.md)。该工具独立记录吞吐、并发重叠窗口和清理结果，不用进程内合成写入结果替代服务级验收。

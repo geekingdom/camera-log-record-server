@@ -68,6 +68,12 @@ jobs:
           python scripts/verify_container_service.py --url http://127.0.0.1:15173 --device-host "$gateway" --check-frontend
       - name: 验证真实副本集隔离事务和心跳冲突
         run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_isolation_transaction.py
+      - name: 验证真实数据库日志目录尾部水位
+        run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_catalog_watermarks.py
+      - name: 验证多路真实协议分卷与归档完整性
+        run: |
+          gateway="$(docker network inspect camera-log-ci_camera-logs --format '{{(index .IPAM.Config 0).Gateway}}')"
+          python scripts/benchmark_service.py --url http://127.0.0.1:15173 --device-host "$gateway" --bind-host 0.0.0.0 --routes 8 --seconds 60 --output .local/service-benchmark-ci
       - name: 收集容器诊断日志
         if: failure()
         run: docker compose -f deploy/docker-compose.yml logs --no-color --tail 150 api worker mongo-init frontend
