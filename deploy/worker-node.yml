@@ -6,6 +6,8 @@ services:
       dockerfile: deploy/worker.Dockerfile
     env_file: ../.env
     environment:
+      NODE_ID: ${NODE_ID:?Set a stable unique NODE_ID for this host}
+      NODE_URL: ${NODE_URL:?Set a stable NODE_URL reachable by the API}
       LOG_ROOT: /var/lib/camera-logs/data
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
     network_mode: host

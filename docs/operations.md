@@ -12,19 +12,26 @@ docker compose -f deploy/docker-compose.yml up --build
 
 Compose 默认使用容器内三成员 MongoDB 地址，不读取本机开发环境的 `MONGO_URI` 覆盖该地址。需要外置数据库时显式设置 `COMPOSE_MONGO_URI`。将已确认的设备公钥文件通过 `KNOWN_HOSTS_FILE` 挂载，不能用示例空文件代替主机身份校验。生产 HTTPS 和节点内部 TLS 由实际基础设施终止与管理。
 
-扩容 worker：
+默认 Compose 的 worker 使用 `compose-worker-1`、`http://worker:8001` 和独立命名卷，重建容器时保持节点身份与日志。可以使用 `COLLECTOR_NODE_ID` 和 `COLLECTOR_NODE_URL` 显式覆盖。该配置只运行一个 worker，不能直接通过 `--scale worker` 让多个实例共享同一身份和日志卷。
+
+多机扩容使用每台 Linux 主机的独立配置，先为该节点配置唯一的 `NODE_ID`、API 可访问的 `NODE_URL`、外部副本集 `MONGO_URI` 和已验证的 `KNOWN_HOSTS_FILE`。首次部署空日志目录时授予容器 UID/GID 10001 写权限：
 
 ```sh
-docker compose -f deploy/docker-compose.yml up -d --scale worker=3
+sudo install -d -o 10001 -g 10001 -m 0750 /srv/camera-logs
+docker compose -f deploy/worker-node.yml up -d --build
 ```
 
-未显式设置时，worker 入口用 Docker 分配的 hostname 作为 `NODE_ID`，每个副本不同；Compose 为每个副本创建独立的本地 `LOG_ROOT` 卷。多主机部署时为每台 worker 显式设置稳定的 `NODE_ID` 和 API 可访问的 `NODE_URL`，并将该节点的 `LOG_ROOT` 映射到持久磁盘。
+`HOST_LOG_ROOT` 默认 `/srv/camera-logs`，宿主机绑定目录不会继承镜像目录权限；已有日志目录应先检查所有权和挂载权限，避免无差别递归更改。多节点必须各自使用独立的持久磁盘路径与节点标识。
+
+构建上下文使用 `.dockerignore` 排除 `.env`、本地凭据、虚拟环境、依赖目录、设备日志及下载产物。镜像仍需访问 Python、Node、Nginx 基础镜像仓库及相应包仓库；上下文排除不能替代运行时密钥管理。
 
 ## 生产 TLS
 
 `deploy/nginx/tls-site.conf.example` 是外层 Nginx 的配置示例。将 `logs.example.com`、证书路径和上游网络改为实际值，并使用受信任 CA 签发与续期的证书。示例不提供自签名证书，也不应把测试证书作为生产 TLS 配置。
 
 ## 副本集检查与恢复
+
+初始化仅在 MongoDB 返回 NotYetInitialized（94）时执行 `rs.initiate`，其他异常直接失败。脚本最多等待 120 秒，确认一主两从健康后才允许 API 和 worker 启动；已有副本集不会被重复初始化或重配置。
 
 ```sh
 docker compose -f deploy/docker-compose.yml exec mongo1 mongosh --quiet --eval 'rs.status()'

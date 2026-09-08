@@ -71,14 +71,14 @@ services:
       MONGO_URI: ${COMPOSE_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/camera_logs?replicaSet=rs0}
       DATABASE_NAME: ${DATABASE_NAME:-camera_logs}
       LOG_ROOT: /var/lib/camera-logs/data
-      NODE_ID: ${COLLECTOR_NODE_ID:-}
-      NODE_URL: ${COLLECTOR_NODE_URL:-}
+      NODE_ID: ${COLLECTOR_NODE_ID:-compose-worker-1}
+      NODE_URL: ${COLLECTOR_NODE_URL:-http://worker:8001}
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
     depends_on:
       mongo-init: { condition: service_completed_successfully }
-    # 每个副本独享本地日志卷；生产节点需要绑定稳定路径和唯一节点标识。
+    # 默认单节点使用稳定身份与命名卷；多机扩容使用 worker-node.yml 独立部署。
     volumes:
-      - /var/lib/camera-logs
+      - worker-data:/var/lib/camera-logs
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
     networks: [camera-logs]
   frontend:
@@ -92,6 +92,7 @@ services:
 
 volumes:
   api-data:
+  worker-data:
   mongo1-data:
   mongo2-data:
   mongo3-data:
