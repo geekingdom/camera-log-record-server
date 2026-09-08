@@ -17,6 +17,7 @@ from uuid import uuid4
 import httpx
 from camera_logs.common.config import Settings
 from service_benchmark_io import LoadSource, verify_download
+from service_benchmark_latency import BatchLatency, observe_read_latency
 from service_benchmark_realtime import observe_realtime
 from service_benchmark_search import observe_searches
 from service_benchmark_ssh import DeviceInfoSource, SshLoadSource
@@ -126,6 +127,7 @@ async def execute(args):
     suffix = uuid4().hex
     cleanup_errors = []
     protocol = getattr(args, "protocol", "TELNET_SERIAL")
+    read_latency_enabled = getattr(args, "read_latency", False)
     password = uuid4().hex
     device_info = DeviceInfoSource(args.bind_host, password, getattr(args, "device_info_port", 80)) if protocol == "SSH" else None
     downloads = asyncio.Semaphore(args.download_concurrency)
@@ -189,11 +191,20 @@ async def execute(args):
                         args.search_interval, args.seconds * 2 + args.timeout, search_jobs))
                     observers.append(search)
                     route_searches.append(search)
+                latency_observers = []
+                if read_latency_enabled:
+                    tracker = BatchLatency()
+                    source.on_batch = tracker.record
+                    latency = asyncio.create_task(observe_read_latency(client, task_id, source,
+                        args.seconds * args.lines_per_second, tracker, args.seconds * 2 + args.timeout))
+                    observers.append(latency)
+                    latency_observers.append(latency)
                 source.release.set()
                 end, observations = await emit_observed(source, args.seconds, args.seconds * 2 + args.timeout,
-                                                        route_observers + route_searches)
+                                                        route_observers + route_searches + latency_observers)
                 realtime = observations[:len(route_observers)]
-                searches = observations[len(route_observers):]
+                searches = observations[len(route_observers):len(route_observers) + len(route_searches)]
+                latency_results = observations[len(route_observers) + len(route_searches):]
                 if args.search_interval and (not searches or searches[0]["count"] < 1):
                     raise AssertionError(f"路由 {number} 未完成任何并发搜索")
                 intervals.append((begin, end))
@@ -226,7 +237,7 @@ async def execute(args):
                     "sourceBytes": source.source_bytes, "sourceSha256": source.source_sha256,
                     "elapsedSeconds": source.elapsed_seconds, "maxTickLagSeconds": source.max_tick_lag_seconds,
                     "connectionCount": source.connection_count, "downloadBytes": size,
-                    "realtime": realtime, "searches": searches, "verification": verified}
+                    "realtime": realtime, "searches": searches, "readLatency": latency_results, "verification": verified}
                 results.append(result)
                 print(json.dumps({"route": number, "verified": True, "completedRoutes": len(results)}), flush=True)
 
@@ -304,9 +315,14 @@ async def execute(args):
         for search in item["searches"]), default=0)
     report["searchVerified"] = not args.search_interval or (len(results) == args.routes and all(
         len(item["searches"]) == 1 and item["searches"][0]["count"] > 0 for item in results))
+    report["readLatencyEnabled"] = read_latency_enabled
+    report["readLatencyVerified"] = not read_latency_enabled or (len(results) == args.routes and all(
+        len(item["readLatency"]) == 1 and item["readLatency"][0]["within200Ms"]
+        and item["readLatency"][0]["samples"] == item["sourceLines"] for item in results))
+    report["maxRouteReadP99Ms"] = max((value["p99Ms"] for item in results for value in item["readLatency"]), default=None)
     report["passed"] = all(report[key] for key in (
         "integrityVerified", "targetRateAchieved", "concurrentWindowVerified", "cleanupVerified",
-        "realtimeVerified", "searchVerified"))
+        "realtimeVerified", "searchVerified", "readLatencyVerified"))
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
@@ -328,6 +344,7 @@ def parse_args():
     parser.add_argument("--download-concurrency", type=int, default=2)
     parser.add_argument("--realtime-clients-per-route", type=int, default=0)
     parser.add_argument("--search-interval", type=int, default=0)
+    parser.add_argument("--read-latency", action="store_true", help="逐路读取正式内容 API，要求每路 P99 延迟上界不超过 200ms")
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
