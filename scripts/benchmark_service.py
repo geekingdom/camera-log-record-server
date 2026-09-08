@@ -17,6 +17,39 @@ from uuid import uuid4
 import httpx
 from camera_logs.common.config import Settings
 from service_benchmark_io import LoadSource, verify_download
+from service_benchmark_realtime import observe_realtime
+
+
+async def wait_observer_ready(observer, ready, timeout):
+    """订阅建立失败立即传播，不能只等 ready 而让设备源静默至重连。"""
+    waiting = asyncio.create_task(ready.wait())
+    try:
+        done, _ = await asyncio.wait({observer, waiting}, timeout=timeout,
+                                     return_when=asyncio.FIRST_COMPLETED)
+        if observer in done:
+            await observer
+            raise RuntimeError("实时观察器在开始发送前已退出")
+        if waiting not in done:
+            raise TimeoutError("等待实时订阅建立超时")
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+
+async def emit_observed(source, seconds, timeout, observers):
+    """发送与实时校验共同监督；任一观察器失败立即取消并等待当前输出。"""
+    async def emit():
+        await asyncio.wait_for(source.emit(seconds), timeout=timeout)
+        return time.monotonic()
+
+    emitter = asyncio.create_task(emit())
+    try:
+        end, *observed = await asyncio.gather(emitter, *observers)
+        return end, observed
+    finally:
+        if not emitter.done():
+            emitter.cancel()
+        await asyncio.gather(emitter, return_exceptions=True)
 
 
 async def request(client, method, path, **kwargs):
@@ -94,6 +127,7 @@ async def execute(args):
     # 不把整个采集时长放进信号量，确保所有已创建路由能够同时输出。
     creating = asyncio.Semaphore(16)
     workers = []
+    observers = []
     started = time.monotonic()
     async with httpx.AsyncClient(base_url=args.url.rstrip("/"),
         headers={"Authorization": "Bearer " + token}, timeout=120,
@@ -127,13 +161,25 @@ async def execute(args):
                     with (output / "tasks.jsonl").open("a", encoding="utf-8") as target:
                         target.write(json.dumps({"route": number, "taskId": task_id, "port": source.port}) + "\n")
                 await asyncio.wait_for(source.connected.wait(), timeout=args.timeout)
+                route_observers = []
+                for _ in range(args.realtime_clients_per_route):
+                    ready = asyncio.Event()
+                    observer = asyncio.create_task(observe_realtime(
+                        args.url, token, task_id, number, args.line_bytes,
+                        args.seconds * args.lines_per_second, ready, args.seconds * 2 + args.timeout))
+                    observers.append(observer)
+                    route_observers.append(observer)
+                    await wait_observer_ready(observer, ready, args.timeout)
                 begin = time.monotonic()
                 source.release.set()
-                await asyncio.wait_for(source.emit(args.seconds), timeout=args.seconds * 2 + args.timeout)
-                end = time.monotonic()
+                end, realtime = await emit_observed(source, args.seconds, args.seconds * 2 + args.timeout,
+                                                     route_observers)
                 intervals.append((begin, end))
                 if source.failure:
                     raise RuntimeError(f"模拟源 {number} 发送失败") from source.failure
+                if any(item["sourceSha256"] != source.source_sha256
+                       or item["sourceLines"] != source.source_lines for item in realtime):
+                    raise AssertionError(f"路由 {number} 实时正文与源日志不一致")
                 expected_stored = source.source_bytes + source.source_lines * 22
                 hours = await wait_until(client, f"/api/v1/tasks/{task_id}/log-hours",
                     lambda item: sum(hour["bytes"] for hour in item["items"]) >= expected_stored, args.timeout)
@@ -155,7 +201,8 @@ async def execute(args):
                 result = {"route": number, "taskId": task_id, "sourceLines": source.source_lines,
                     "sourceBytes": source.source_bytes, "sourceSha256": source.source_sha256,
                     "elapsedSeconds": source.elapsed_seconds, "maxTickLagSeconds": source.max_tick_lag_seconds,
-                    "connectionCount": source.connection_count, "downloadBytes": size, "verification": verified}
+                    "connectionCount": source.connection_count, "downloadBytes": size,
+                    "realtime": realtime, "verification": verified}
                 results.append(result)
                 print(json.dumps({"route": number, "verified": True, "completedRoutes": len(results)}), flush=True)
 
@@ -166,6 +213,10 @@ async def execute(args):
                 if not worker.done():
                     worker.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
+            for observer in observers:
+                if not observer.done():
+                    observer.cancel()
+            await asyncio.gather(*observers, return_exceptions=True)
             # 先向服务请求停止，再关闭模拟端，避免关闭监听触发不必要的重连。
             async def cleanup(task_id):
                 try:
@@ -205,8 +256,13 @@ async def execute(args):
         "sourceLines": sum(item["sourceLines"] for item in results),
         "sourceBytes": sum(item["sourceBytes"] for item in results),
         "cleanupVerified": not cleanup_errors, "results": sorted(results, key=lambda item: item["route"])}
+    report["realtimeClientsPerRoute"] = args.realtime_clients_per_route
+    report["realtimeFrames"] = sum(observer["frames"] for item in results for observer in item["realtime"])
+    report["realtimeLogBytes"] = sum(observer["logBytes"] for item in results for observer in item["realtime"])
+    report["realtimeVerified"] = all(len(item["realtime"]) == args.realtime_clients_per_route
+                                     for item in results) and len(results) == args.routes
     report["passed"] = all(report[key] for key in (
-        "integrityVerified", "targetRateAchieved", "concurrentWindowVerified", "cleanupVerified"))
+        "integrityVerified", "targetRateAchieved", "concurrentWindowVerified", "cleanupVerified", "realtimeVerified"))
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
@@ -223,6 +279,7 @@ def parse_args():
     parser.add_argument("--lines-per-second", type=int, default=1200)
     parser.add_argument("--line-bytes", type=int, default=256)
     parser.add_argument("--download-concurrency", type=int, default=2)
+    parser.add_argument("--realtime-clients-per-route", type=int, default=0)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -232,6 +289,8 @@ def parse_args():
         parser.error("每秒行数须在 1..1200，每行字节须在 64..65536")
     if not 1 <= args.download_concurrency <= 8 or args.timeout <= 0:
         parser.error("下载并发须在 1..8，超时须为正整数")
+    if not 0 <= args.realtime_clients_per_route <= 4:
+        parser.error("每路实时订阅数须在 0..4，0 表示不订阅")
     return args
 
 
