@@ -6,6 +6,7 @@ import io
 import runpy
 import tarfile
 import zipfile
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,8 @@ def prefixed(route, sequence):
 def test_load_source_real_telnet_releases_and_closes():
     """真实本地 Telnet 连接在 release 后精确发送，完成后仍可由 close 回收。"""
     async def scenario():
-        source = LoadSource(7, "127.0.0.1", 15, 64)
+        batches = []
+        source = LoadSource(7, "127.0.0.1", 15, 64, on_batch=lambda *batch: batches.append(batch))
         await source.start()
         reader, writer = await tools["telnetlib3"].open_connection(host="127.0.0.1", port=source.port, encoding=False)
         await asyncio.wait_for(source.connected.wait(), 2)
@@ -58,6 +60,8 @@ def test_load_source_real_telnet_releases_and_closes():
             received += await asyncio.wait_for(reader.read(source.source_bytes - len(received)), 2)
         assert hashlib.sha256(received).hexdigest() == source.source_sha256
         assert source.source_lines == 15 and source.connection_count == 1 and source.failure is None
+        assert batches[0][1:] == (0, 1) and batches[-1][2] == source.source_lines
+        assert all(previous[0] <= current[0] for previous, current in pairwise(batches))
         with pytest.raises(ValueError):
             await source.emit(0)
         writer.close()

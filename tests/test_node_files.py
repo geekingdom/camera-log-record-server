@@ -2,7 +2,9 @@
 import asyncio
 import base64
 import tarfile
+from types import SimpleNamespace
 
+import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
 from camera_logs.node.files import install_node_routes
@@ -10,6 +12,52 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
+
+
+def live_app(tmp_path, *, task_id="task", run_id="run", session_id="session", status="OPEN"):
+    """磁盘包含未确认尾部，目录与活跃会话水位分别落后，用于验证读边界。"""
+    settings = Settings(encryption_key=Fernet.generate_key().decode(), internal_token="node-secret",
+                        log_root=tmp_path, node_id="node")
+    repo = Repository(AsyncMongoMockClient().db, settings)
+    path = tmp_path / "live.log"
+    path.write_bytes(b"abcdefUNCONFIRMED")
+    asyncio.run(repo.db.files.insert_one({"id": "live", "taskId": "task", "runId": "run",
+        "sessionId": "session", "nodeId": "node", "status": status, "path": str(path), "bytes": 3}))
+    session = SimpleNamespace(task={"id": task_id, "runId": run_id},
+                              collector=SimpleNamespace(session_id=session_id), paths={"live": 6}, retired=False)
+    app = FastAPI()
+    install_node_routes(app, repo, SimpleNamespace(log_root=tmp_path, active={"task": session}))
+    return app
+
+
+def test_live_read_uses_confirmed_session_watermark_without_waiting_for_catalog(tmp_path):
+    """秒级目录落后时可以立即读取已确认的 def，但不能暴露磁盘未确认尾部。"""
+    with TestClient(live_app(tmp_path)) as client:
+        result = client.get("/internal/read/live?offset=3", headers={"Authorization": "Bearer node-secret"})
+    assert result.status_code == 200
+    assert base64.b64decode(result.json()["data"]) == b"def"
+    assert result.json()["nextOffset"] == 6
+
+
+@pytest.mark.parametrize("changed", [
+    {"task_id": "other"}, {"run_id": "other"}, {"session_id": "other"}, {"status": "READY"},
+])
+def test_live_read_cannot_use_another_identity_or_override_sealed_watermark(tmp_path, changed):
+    """新会话及其他运行的内存水位不能扩大旧文件或已封存文件的读取范围。"""
+    with TestClient(live_app(tmp_path, **changed)) as client:
+        result = client.get("/internal/read/live?offset=3", headers={"Authorization": "Bearer node-secret"})
+    assert result.status_code == 200
+    assert base64.b64decode(result.json()["data"]) == b""
+
+
+def test_current_hour_snapshot_keeps_explicit_frozen_watermark(tmp_path):
+    """实时读取水位扩大不能改变已请求的固定三字节下载快照。"""
+    import io
+    with TestClient(live_app(tmp_path)) as client:
+        result = client.get("/internal/archive/live?bytes=3", headers={"Authorization": "Bearer node-secret"})
+    assert result.status_code == 200
+    with tarfile.open(fileobj=io.BytesIO(result.content), mode="r:gz") as archive:
+        assert archive.extractfile("live.log").read() == b"abc"
 
 
 def test_internal_read_requires_token_and_returns_bounded_base64(tmp_path):

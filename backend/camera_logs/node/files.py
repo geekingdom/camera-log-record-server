@@ -39,6 +39,22 @@ def _path(runtime: Any, repo: Any, file: dict[str, Any]) -> Path:
     return path
 
 
+def _read_watermark(runtime: Any, file: dict[str, Any]) -> int | None:
+    """当前会话可读取已确认写入的尾部；历史文件只使用登记水位，不按磁盘大小推断成功。"""
+    registered = file.get("bytes")
+    identity = (file.get("taskId"), file.get("runId"), file.get("sessionId"))
+    if file.get("status") != "OPEN" or not all(identity):
+        return registered
+    session = getattr(runtime, "active", {}).get(identity[0])
+    if session is None or getattr(session, "retired", False):
+        return registered
+    collector = session.collector
+    if (session.task.get("id"), session.task.get("runId"), getattr(collector, "session_id", None)) != identity:
+        return registered
+    confirmed = session.paths.get(file["id"])
+    return max(registered or 0, confirmed) if confirmed is not None else registered
+
+
 def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
     """注册仅供节点和 API 使用的内部路由，每次调用都校验内部令牌。"""
     async def internal(authorization: str | None = Header(default=None)) -> None:
@@ -56,8 +72,10 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> None:
     async def read(identifier: str, _: None = Depends(internal), offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
         file = await get_file(identifier)
         path = _path(runtime, repo, file)
+        # 在事件循环中固定本次读取边界，工作线程不再访问可变化的会话映射。
+        watermark = _read_watermark(runtime, file) if path.suffix == ".log" else file.get("bytes")
         def load() -> bytes:
-            cap = int(file.get("bytes", path.stat().st_size))
+            cap = int(watermark if watermark is not None else path.stat().st_size)
             if path.suffix == ".log":
                 with path.open("rb") as handle:
                     handle.seek(offset)

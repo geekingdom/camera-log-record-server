@@ -6,6 +6,7 @@ import re
 import tarfile
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,7 @@ class LoadSource:
     max_tick_lag_seconds: float = 0
     connection_count: int = 0
     failure: BaseException | None = None
+    on_batch: Callable[[float, int, int], None] | None = None
     _server: Any = field(default=None, init=False, repr=False)
     _writer: Any = field(default=None, init=False, repr=False)
     _handlers: set[asyncio.Task] = field(default_factory=set, init=False, repr=False)
@@ -102,12 +104,16 @@ class LoadSource:
             started, deadline = time.monotonic(), time.monotonic()
             for tick in range(seconds * 10):
                 count = ((tick + 1) * self.lines_per_second // 10) - (tick * self.lines_per_second // 10)
-                payload = b"".join(self.line(self.source_lines + offset) for offset in range(count))
+                before = self.source_lines
+                payload = b"".join(self.line(before + offset) for offset in range(count))
+                write_started = time.monotonic()
                 self._writer.write(payload)
                 await self._writer.drain()
                 digest.update(payload)
                 self.source_lines += count
                 self.source_bytes += len(payload)
+                if count and self.on_batch is not None:
+                    self.on_batch(write_started, before, self.source_lines)
                 deadline += .1
                 self.max_tick_lag_seconds = max(self.max_tick_lag_seconds, time.monotonic() - deadline)
                 await asyncio.sleep(max(0, deadline - time.monotonic()))
