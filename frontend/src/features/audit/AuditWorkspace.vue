@@ -117,7 +117,7 @@ void load();
         <el-input v-model="taskId" placeholder="任务 ID" aria-label="按任务 ID 筛选" @keyup.enter="applyFilters" />
         <el-button type="primary" :icon="Search" :loading="loading" @click="applyFilters">查询</el-button>
       </div>
-      <el-table :data="rows" class="data-table" size="small" v-loading="loading" highlight-current-row @row-click="select">
+      <el-table scrollbar-always-on :data="rows" class="data-table" size="small" v-loading="loading" highlight-current-row @row-click="select">
           <el-table-column label="时间" min-width="170"><template #default="{ row }">{{ formatTime(row.createdAt ?? row.detectedAt) }}</template></el-table-column>
         <template v-if="activeTab === 'audit'">
           <el-table-column prop="action" label="操作" min-width="150" />

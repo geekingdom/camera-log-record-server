@@ -1,7 +1,8 @@
 """采集网络适配器。
 
-SSH 强制校验 known_hosts；Telnet 以二进制模式传递设备原始字节。协议保活和
-TCP 保活只用于连接存活探测，绝不向设备 shell 发送服务生成的业务命令。
+SSH 默认使用账号密码连接，设备更换主机密钥无需人工登记；部署可选择严格校验
+known_hosts。Telnet 以二进制模式传递设备原始字节。协议保活和 TCP 保活只用于连接
+存活探测，绝不向设备 shell 发送服务生成的业务命令。
 """
 
 from __future__ import annotations
@@ -122,19 +123,21 @@ def _tcp_keepalive(owner: Any) -> None:
 
 
 async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connection:
+    """创建 SSH shell；严格指纹校验仅在部署明确启用时生效。"""
     import asyncssh
 
-    known_hosts = task.get("knownHosts")
-    if not known_hosts:
-        raise ValueError("SSH task requires a configured knownHosts file")
-    known_hosts_path = Path(str(known_hosts))
-    if not known_hosts_path.is_file():
-        raise ValueError("configured SSH knownHosts file does not exist")
+    known_hosts = None
+    if task.get("verifyHostKey", False):
+        configured_path = task.get("knownHosts")
+        known_hosts_path = Path(str(configured_path)) if configured_path else None
+        if not known_hosts_path or not known_hosts_path.is_file():
+            raise ValueError("严格SSH主机指纹校验需要有效的knownHosts文件")
+        known_hosts = str(known_hosts_path)
     client = None
     try:
         client = await asyncio.wait_for(asyncssh.connect(
             host, port=port, username=task["username"], password=task["password"],
-            known_hosts=str(known_hosts_path), encoding=None, keepalive_interval=15, keepalive_count_max=3,
+            known_hosts=known_hosts, encoding=None, keepalive_interval=15, keepalive_count_max=3,
         ), timeout=30)
         process = await asyncio.wait_for(
             client.create_process(term_type=task.get("termType", "vt100"), encoding=None), timeout=30

@@ -7,7 +7,7 @@ import base64
 import re
 
 import pytest
-from camera_logs.collection.collector import Collector, PshSwitchError
+from camera_logs.collection.collector import Collector
 
 # 261 个合成字节编码后恰为 348 字符，接近设备实际 PSH 密文长度但不含真实数据。
 CHALLENGE = base64.b64encode(b"x" * 261).decode()
@@ -324,9 +324,214 @@ def test_password_prompt_without_ash_banner_rechecks_with_ls_before_next_command
     assert asyncio.run(scenario()) == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"ls\n", b"next\n"]
 
 
-@pytest.mark.parametrize("reply", [b"incorrect password\n", b"unrecognized prompt>\n", None])
-def test_debug_failures_do_not_send_following_command(tmp_path, reply):
+def test_debug_failure_recovers_command_channel_and_preserves_logs_without_second_password(tmp_path):
+    """debug 失败后 Ctrl-C 和无密码 ls 确认 PSH 提示符，后续命令、定时项和日志继续。"""
     async def scenario():
+        logs, reserved, updates, events = [], [], [], []
+        scheduled = asyncio.Event()
+        password_calls = 0
+        probes = 0
+        connection = FakeConnection()
+
+        async def write(data):
+            nonlocal password_calls, probes
+            if data == b"ls\n":
+                probes += 1
+                await connection.received.put(PSH_LS)
+            elif data == b"debug\n":
+                for piece in device_challenge():
+                    await connection.received.put(piece)
+            elif data == (PASSWORD + "\n").encode():
+                password_calls += 1
+                await connection.received.put(b"incorrect password\r\n")
+            elif data == b"\x03":
+                await connection.received.put(b"^C\r\n# ")
+            elif data == b"next\n":
+                await connection.received.put(b"next output\r\n")
+            elif data == b"manual\n":
+                await connection.received.put(b"manual output\r\n")
+            elif data == b"periodic\n":
+                await connection.received.put(b"periodic output\r\n")
+
+        connection.on_write = write
+        async def update(identifier, state, detail):
+            updates.append((identifier, state, detail))
+            if identifier == "periodic" and state == "SENT":
+                scheduled.set()
+        collector = Collector(
+            {
+                "id": "task", "runId": "run",
+                "initialCommands": [{"command": "debug", "timeoutSeconds": .05}, {"command": "next"}],
+                "scheduledCommands": [{"id": "periodic", "command": "periodic", "totalExecutions": 1, "intervalSeconds": .001}],
+            },
+            tmp_path, connection_factory=lambda _: connection,
+            resolve_debug_password=lambda _task, _challenge: PASSWORD,
+            reserve_execution=lambda identifier, detail: reserved.append((identifier, detail)) or True,
+            update_execution=update,
+            on_log=lambda chunk: logs.append(chunk.data),
+            on_debug=lambda event, details: events.append((event, details)),
+        )
+        await collector.start()
+        await collector.enqueue_manual("manual")
+        await asyncio.wait_for(scheduled.wait(), 1)
+        await connection.received.put(None)
+        await collector.wait_closed()
+        return connection.sent, logs, password_calls, probes, reserved, updates, events, connection.closed
+
+    sent, logs, password_calls, probes, reserved, updates, events, closed = asyncio.run(scenario())
+    assert sent == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"\x03", b"ls\n", b"next\n", b"manual\n", b"periodic\n"]
+    assert password_calls == 1 and probes == 2
+    assert reserved and reserved[0][0] == "periodic"
+    assert [state for _identifier, state, _detail in updates] == ["SENT"]
+    assert [event for event, _details in events][-2:] == ["FAILED", "RECOVERED"]
+    assert events[-1][1] == {"mode": "PSH", "commandBlocked": False, "debugError": "PSH 调试失败，本次命令未自动重试"}
+    assert b"".join(device_challenge()) in raw_logs(logs)
+    assert b"next output\r\nmanual output\r\nperiodic output\r\n" in raw_logs(logs)
+    assert closed
+
+
+def test_unconfirmed_debug_recovery_blocks_commands_without_stopping_log_reader_or_spending_budget(tmp_path):
+    """取消和 ls 都未获确认时继续接收日志，普通手动及定时命令均不写入设备。"""
+    async def scenario():
+        logs, reserved, updates, events = [], [], [], []
+        connection = FakeConnection()
+
+        async def write(data):
+            if data == b"ls\n" and b"debug\n" not in connection.sent:
+                await connection.received.put(PSH_LS)
+            elif data == b"debug\n":
+                for piece in device_challenge():
+                    await connection.received.put(piece)
+            elif data == (PASSWORD + "\n").encode():
+                await connection.received.put(b"incorrect password\r\n")
+            elif data == b"\x03":
+                await connection.received.put(b"Password: still waiting\r\n")
+
+        connection.on_write = write
+        collector = Collector(
+            {
+                "id": "task", "runId": "run",
+                "initialCommands": [{"command": "debug", "timeoutSeconds": .03}, {"command": "next"}],
+                "scheduledCommands": [{"id": "blocked", "command": "periodic", "totalExecutions": 1, "intervalSeconds": .001}],
+            },
+            tmp_path, connection_factory=lambda _: connection,
+            resolve_debug_password=lambda _task, _challenge: PASSWORD,
+            reserve_execution=lambda identifier, detail: reserved.append((identifier, detail)) or True,
+            update_execution=lambda identifier, state, detail: updates.append((identifier, state, detail)),
+            on_log=lambda chunk: logs.append(chunk.data),
+            on_debug=lambda event, details: events.append((event, details)),
+        )
+        await collector.start()
+        with pytest.raises(RuntimeError, match="暂不可发送命令"):
+            await collector.enqueue_manual("manual")
+        await connection.received.put(b"continuous raw log\r\n")
+        await asyncio.sleep(.05)
+        await collector.stop()
+        return connection.sent, logs, reserved, updates, events
+
+    sent, logs, reserved, updates, events = asyncio.run(scenario())
+    assert sent == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"\x03"]
+    assert reserved == [] and updates == []
+    assert [event for event, _details in events][-2:] == ["FAILED", "BLOCKED"]
+    assert events[-1][1]["commandBlocked"] is True
+    assert b"continuous raw log\r\n" in raw_logs(logs)
+
+
+def test_scheduled_debug_failure_records_current_attempt_then_allows_next_attempt(tmp_path):
+    """首次定时 debug 失败后，下一次定时 debug 先安全恢复再独立握手。"""
+    async def scenario():
+        logs, reserved, updates = [], [], []
+        failed = asyncio.Event()
+        password_calls = 0
+        connection = FakeConnection()
+
+        async def write(data):
+            nonlocal password_calls
+            if data == b"ls\n":
+                await connection.received.put(PSH_LS)
+            elif data == b"debug\n":
+                for piece in device_challenge():
+                    await connection.received.put(piece)
+            elif data == (PASSWORD + "\n").encode():
+                password_calls += 1
+                await connection.received.put(
+                    b"incorrect password\r\n" if password_calls == 1 else b"BusyBox built-in shell (ash)\n# ",
+                )
+            elif data == b"\x03":
+                await connection.received.put(b"^C\r\n# ")
+
+        connection.on_write = write
+        async def update(identifier, state, detail):
+            updates.append((identifier, state, detail))
+            if state == "SENT":
+                failed.set()
+        collector = Collector(
+            {"id": "task", "runId": "run", "initialCommands": [],
+             "scheduledCommands": [{"id": "debug-periodic", "command": "debug", "totalExecutions": 2, "intervalSeconds": .001}]},
+            tmp_path, connection_factory=lambda _: connection,
+            resolve_debug_password=lambda _task, _challenge: PASSWORD,
+            reserve_execution=lambda identifier, detail: reserved.append((identifier, detail)) or True,
+            update_execution=update, on_log=lambda chunk: logs.append(chunk.data),
+        )
+        await collector.start()
+        await asyncio.wait_for(failed.wait(), 1)
+        await connection.received.put(b"continued after scheduled failure\r\n")
+        await asyncio.sleep(.12)
+        await collector.stop()
+        return connection.sent, reserved, updates, password_calls, logs
+
+    sent, reserved, updates, password_calls, logs = asyncio.run(scenario())
+    assert sent == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"\x03", b"ls\n", b"debug\n", (PASSWORD + "\n").encode()]
+    assert len(reserved) == 2 and {entry[0] for entry in reserved} == {"debug-periodic"}
+    assert [(identifier, state) for identifier, state, _detail in updates] == [("debug-periodic", "FAILED"), ("debug-periodic", "SENT")]
+    assert password_calls == 2
+    assert b"continued after scheduled failure\r\n" in raw_logs(logs)
+
+
+def test_reconnected_collector_retries_initial_debug_as_a_new_command(tmp_path):
+    """断线后的新 Collector 不继承前次失败，可再次执行初始化 debug 并完成新的单次握手。"""
+    async def scenario():
+        first, second = FakeConnection(), FakeConnection()
+
+        async def first_write(data):
+            if data == b"ls\n":
+                await first.received.put(PSH_LS)
+            elif data == b"debug\n":
+                for piece in device_challenge():
+                    await first.received.put(piece)
+            elif data == (PASSWORD + "\n").encode():
+                await first.received.put(b"incorrect password\r\n")
+            elif data == b"\x03":
+                await first.received.put(b"^C\r\n# ")
+
+        async def second_write(data):
+            if data == b"ls\n":
+                await second.received.put(PSH_LS)
+            elif data == b"debug\n":
+                for piece in device_challenge():
+                    await second.received.put(piece)
+            elif data == (PASSWORD + "\n").encode():
+                await second.received.put(b"BusyBox built-in shell (ash)\n# ")
+
+        first.on_write, second.on_write = first_write, second_write
+        task = {"id": "task", "runId": "same-run", "initialCommands": [{"command": "debug", "timeoutSeconds": .05}]}
+        failed = Collector(task, tmp_path, connection_factory=lambda _: first, resolve_debug_password=lambda *_args: PASSWORD)
+        await failed.start()
+        await failed.stop()
+        reconnected = Collector(task, tmp_path, connection_factory=lambda _: second, resolve_debug_password=lambda *_args: PASSWORD)
+        await reconnected.start()
+        await reconnected.stop()
+        return first.sent, second.sent
+
+    first_sent, second_sent = asyncio.run(scenario())
+    assert first_sent == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"\x03", b"ls\n"]
+    assert second_sent == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode()]
+
+
+def test_cancel_write_failure_blocks_commands_but_keeps_log_reader_running(tmp_path):
+    """Ctrl-C 写入失败也必须进入命令阻断，不能假设设备已退出密码提示。"""
+    async def scenario():
+        logs = []
         connection = FakeConnection()
 
         async def write(data):
@@ -336,21 +541,28 @@ def test_debug_failures_do_not_send_following_command(tmp_path, reply):
                 for piece in device_challenge():
                     await connection.received.put(piece)
             elif data == (PASSWORD + "\n").encode():
-                await connection.received.put(reply)
+                await connection.received.put(b"incorrect password\r\n")
+            elif data == b"\x03":
+                raise OSError("synthetic cancel write failure")
 
         connection.on_write = write
         collector = Collector(
-            {"id": "task", "runId": "run", "initialCommands": [{"command": "debug", "timeoutSeconds": .05}, {"command": "next"}]},
+            {"id": "task", "runId": "run", "initialCommands": [{"command": "debug", "timeoutSeconds": .03}]},
             tmp_path, connection_factory=lambda _: connection,
             resolve_debug_password=lambda _task, _challenge: PASSWORD,
+            on_log=lambda chunk: logs.append(chunk.data),
         )
-        with pytest.raises(PshSwitchError):
-            await collector.start()
-        return connection.sent, connection.closed
+        await collector.start()
+        with pytest.raises(RuntimeError, match="暂不可发送命令"):
+            await collector.enqueue_manual("manual")
+        await connection.received.put(b"reader survives cancel write failure\r\n")
+        await asyncio.sleep(.12)
+        await collector.stop()
+        return connection.sent, logs
 
-    sent, closed = asyncio.run(scenario())
-    assert b"next\n" not in sent
-    assert closed
+    sent, logs = asyncio.run(scenario())
+    assert sent == [b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"\x03"]
+    assert b"reader survives cancel write failure\r\n" in raw_logs(logs)
 
 
 def test_only_trimmed_exact_debug_command_is_intercepted(tmp_path):

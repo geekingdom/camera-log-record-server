@@ -10,11 +10,11 @@ docker compose -f deploy/docker-compose.yml up --build
 
 前端默认发布到 `http://localhost:5173`，其 `/api/` 请求保留完整路径代理到 API，`/api/v1/tasks/{id}/logs` 保持 WebSocket Upgrade 头并禁用代理缓冲。容器 API 使用 `http://api:8000/health` 健康检查。
 
-Compose 默认使用容器内三成员 MongoDB 地址，不读取本机开发环境的 `MONGO_URI` 覆盖该地址。需要外置数据库时显式设置 `COMPOSE_MONGO_URI`。将已确认的设备公钥文件通过 `KNOWN_HOSTS_FILE` 挂载，不能用示例空文件代替主机身份校验。生产 HTTPS 和节点内部 TLS 由实际基础设施终止与管理。
+Compose 默认使用容器内三成员 MongoDB 地址，不读取本机开发环境的 `MONGO_URI` 覆盖该地址。需要外置数据库时显式设置 `COMPOSE_MONGO_URI`。默认 SSH 认证不使用 `KNOWN_HOSTS_FILE`；只有显式启用 `SSH_VERIFY_HOST_KEY=true` 的严格模式才需要挂载已确认的设备公钥文件。生产 HTTPS 和节点内部 TLS 由实际基础设施终止与管理。
 
 默认 Compose 的 worker 使用 `compose-worker-1`、`http://worker:8001` 和独立命名卷，重建容器时保持节点身份与日志。可以使用 `COLLECTOR_NODE_ID` 和 `COLLECTOR_NODE_URL` 显式覆盖。该配置只运行一个 worker，不能直接通过 `--scale worker` 让多个实例共享同一身份和日志卷。
 
-多机扩容使用每台 Linux 主机的独立配置，先为该节点配置唯一的 `NODE_ID`、API 可访问的 `NODE_URL`、外部副本集 `MONGO_URI` 和已验证的 `KNOWN_HOSTS_FILE`。首次部署空日志目录时授予容器 UID/GID 10001 写权限：
+多机扩容使用每台 Linux 主机的独立配置，先为该节点配置唯一的 `NODE_ID`、API 可访问的 `NODE_URL` 和外部副本集 `MONGO_URI`。默认模式不要求节点间共享或预置主机密钥；只有启用严格模式的节点才配置其本机有效的 `KNOWN_HOSTS` 文件。首次部署空日志目录时授予容器 UID/GID 10001 写权限：
 
 ```sh
 sudo install -d -o 10001 -g 10001 -m 0750 /srv/camera-logs
@@ -22,6 +22,12 @@ docker compose -f deploy/worker-node.yml up -d --build
 ```
 
 `HOST_LOG_ROOT` 默认 `/srv/camera-logs`，宿主机绑定目录不会继承镜像目录权限；已有日志目录应先检查所有权和挂载权限，避免无差别递归更改。多节点必须各自使用独立的持久磁盘路径与节点标识。
+
+## 前端日志显示
+
+实时打印、片段浏览和搜索结果使用纯文本展示。设备产生的 ANSI 颜色控制码（如 `ESC[1;31m`、`ESC[0m`）以及其字面 `^[[...` 表示仅在显示层移除；不会修改采集文件、归档、字节偏移或实时续传游标。实时数据先按字节范围去重、解码与拼行，再清理可见行；片段顺序读取会保留未完成 CSI 前缀到下一段。下载仍保留采集内容，因此用普通文本编辑器打开下载文件时仍可能看到终端控制码。
+
+弹窗正文和任务抽屉页签均为独立滚动区，底部操作固定。宽表格使用 Element Plus 内部水平滚动条，溢出时持续显示；日志正文使用原生双向滚动，不将长行压缩到视口宽度。
 
 ## 后台配置与访问控制
 
@@ -61,6 +67,10 @@ docker compose -f deploy/docker-compose.yml exec mongo1 mongosh --quiet --eval '
 ## 会话与下载
 
 SSH 任务支持 `pause` 与 `resume`；暂停时 worker 停止当前会话，恢复会重新进入调度。Telnet 设备和串口任务不支持暂停。collector 默认在 10 秒没有收到日志时关闭连接，运行时按重连策略建立新会话。初始化命令按数组顺序逐条发送，不能依赖以分号拼接多条命令。
+
+默认 `SSH_VERIFY_HOST_KEY=false`。SSH 新任务可直接运行，采集节点不会登记、固定或比较设备主机指纹；同一 IP 和端口的设备替换或主机密钥轮换不会阻断后续连接，认证仍使用任务中受加密保护的用户名和密码。普通控制台用户无需提交 `known_hosts`、登记指纹或确认密钥变化。
+
+需要受控主机密钥校验的部署可显式设置 `SSH_VERIFY_HOST_KEY=true`，并以忽略目录中的 `KNOWN_HOSTS` 提供有效文件。严格模式在认证前拒绝空路径或无效文件；已登记主机密钥失配会停止该次 SSH 运行且不自动重试。该模式是部署级安全策略，不能由任务 API 或普通用户切换；启用前应确认设备替换与密钥轮换的运维流程。
 
 `register_local_devices.py` 可读取本地 SSH 或 Telnet 串口任务清单；注册幂等键包含协议、IP 和端口，同一串口服务器的不同端口不会冲突。`verify_live_service.py --name-prefix 联调串口-` 可限定验证串口联调任务，默认仍只验证 SSH 联调任务；加 `--stop-after` 会经正式 API 停止所选任务，使用前应确认前缀范围。
 

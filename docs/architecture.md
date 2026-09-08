@@ -29,7 +29,9 @@
 
 `camera_logs.main:app` 是 HTTP 与 WebSocket 入口。`camera_logs.worker` 处理本地日志文件；每个 worker 以唯一 `NODE_ID` 注册，并公布其 `NODE_URL`。当 API 请求不在本机的文件时，根据路由记录转发到对应 `NODE_URL`，而不是共享本地路径。
 
-初始化命令是有序数组。每条命令按自身换行符、延迟、提示符和超时设置单独发送，服务不会将多条命令拼接为 `;` 分隔的 shell 表达式，因此不会假设设备具备 shell 语义。Telnet 使用 IAC NOP 与 TCP keepalive；SSH 使用主机密钥校验和协议 keepalive。默认连续 10 秒未收到日志时，collector 关闭会话并由运行时重连。
+初始化命令是有序数组。每条命令按自身换行符、延迟、提示符和超时设置单独发送，服务不会将多条命令拼接为 `;` 分隔的 shell 表达式，因此不会假设设备具备 shell 语义。Telnet 使用 IAC NOP 与 TCP keepalive；SSH 使用协议 keepalive。默认 `SSH_VERIFY_HOST_KEY=false`，连接显式禁用 AsyncSSH 的 `known_hosts` 主机密钥校验，不探测、不固定也不在 MongoDB 保存设备指纹；同 IP 和端口设备更换后直接按任务用户名和密码认证。默认连续 10 秒未收到日志时，collector 关闭会话并由运行时重连。
+
+部署可通过 `SSH_VERIFY_HOST_KEY=true` 切换到可选严格模式。此时 worker 读取本机 `KNOWN_HOSTS` 文件并将其交给 AsyncSSH 约束连接；空路径、无效文件或主机密钥失配会在建立会话前失败，且不会自动重试。`known_hosts` 只属于部署配置，不是任务配置、API 数据或 MongoDB 跨节点状态；默认模式和严格模式都不会把主机密钥登记交给普通控制台用户。
 
 ## 日志行时间前缀
 
@@ -49,6 +51,6 @@ SSH 暂停保留运行 ID、定时预算和端点锁，关闭连接并禁用重�
 
 部署目标为 8 个节点、500 路总并发、每节点上限 100 路。按每行设备正文 256 字节计算，600,000 行/秒产生 153.6 MB/s 正文；22 字节服务器前缀额外增加 13.2 MB/s，写入约 166.8 MB/s，日正文加前缀约 14.41 TB，尚不含索引、临时副本和服务日志。必须以真实输出验证压缩率、积压、磁盘同步延迟和容量；短时合成测试不证明 24 小时集群验收或 P99 指标。
 
-`ENCRYPTION_KEY` 必须为 Fernet 密钥，`BOOTSTRAP_TOKEN` 只用于首次管理员初始化，均只能从密钥管理系统或受限环境注入。反向代理在生产环境终止 TLS，API 和 MongoDB 不直接暴露至公网。`NODE_URL` 必须是 API 可达的受控内部地址，不能由不可信设备任意指定。
+`ENCRYPTION_KEY` 必须为 Fernet 密钥，`BOOTSTRAP_TOKEN` 只用于首次管理员初始化，均只能从密钥管理系统或受限环境注入。反向代理在生产环境终止 TLS，API 和 MongoDB 不直接暴露至公网。`NODE_URL` 必须是 API 可达的受控内部地址，不能由不可信设备任意指定。默认 SSH 认证只依赖任务账号密码；若部署启用严格主机密钥校验，`KNOWN_HOSTS` 也必须作为节点本地受控密钥材料管理。
 
 API 与 worker 使用队列式 JSONL 日志。访问日志记录 request ID、主体、方法、路由、状态和耗时，不记录请求 body 或 query；模块和操作失败使用异常追踪记录。密码、令牌、Authorization 和加密密码字段会递归脱敏。

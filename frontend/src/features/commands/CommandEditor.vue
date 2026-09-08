@@ -199,8 +199,10 @@ defineExpose({ validate });
 }
 @media (max-width: 640px) {
   .schedule-edit-row {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
+  .schedule-edit-row .el-form-item { min-width: 0; }
+  .schedule-edit-row .el-input-number { width: 100%; min-width: 0; }
   .schedule-edit-row .el-form-item:first-child {
     grid-column: 1/-1;
   }

@@ -51,3 +51,20 @@ async def test_serial_password_typing_stops_before_sending_more_bytes(tmp_path):
     with pytest.raises(PshSwitchError):
         await collector._write_debug(b"synthetic-password\r")
     assert sent == [b"s"]
+
+
+async def test_new_dialogue_does_not_inherit_previous_run_debug_failure():
+    """新会话不读取旧运行失败标记，仍可独立执行一次完整 debug 握手。"""
+    dialogue = PshDialogue({}, lambda *_args: "synthetic-password")
+    writes = []
+
+    async def write(data):
+        writes.append(data)
+        if data == b"debug\n":
+            dialogue.feed(("\n" + SOURCE + "\nPassword:").encode())
+        elif data == b"synthetic-password\n":
+            dialogue.feed(b"BusyBox built-in shell (ash)\n# ")
+
+    dialogue.mode = "PSH"
+    await dialogue.ensure_ash(write, "\n", .1)
+    assert writes == [b"debug\n", b"synthetic-password\n"]

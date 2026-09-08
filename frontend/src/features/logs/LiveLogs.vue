@@ -4,16 +4,31 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { LocateFixed, Pause, Play, Send, Trash2, FileSearch } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api, getToken } from "../../shared/api";
+import type { Task } from "../../shared/types";
 import {
   LiveLogBuffer,
   type LiveLogFrame,
 } from "../../shared/composables/liveLogBuffer";
+import { stripTerminalControls } from "../../shared/terminalDisplay";
 
 const props = defineProps<{ taskId: string }>();
 const emit = defineEmits<{ history: [] }>();
 const buffer = new LiveLogBuffer();
 const lines = ref<string[]>([]);
 const connected = ref(false);
+const taskState = ref<Task>();
+let stateTimer: ReturnType<typeof setTimeout> | undefined;
+let stateGeneration = 0;
+// 控制通道与实时接收独立显示，命令阻断不能使日志订阅断开。
+async function readTaskState(current: number) {
+  try {
+    const state = await api.task(props.taskId);
+    if (current === stateGeneration) taskState.value = state;
+  } catch { /* 短时状态请求失败不影响已建立的日志订阅。 */ }
+  finally {
+    if (current === stateGeneration) stateTimer = setTimeout(() => void readTaskState(current), 3000);
+  }
+}
 const command = ref("");
 const gaps = ref(0);
 const omitted = ref(0);
@@ -33,7 +48,10 @@ const last = computed(() =>
     first.value + Math.ceil(viewportHeight.value / rowHeight) + overscan * 2,
   ),
 );
-const visible = computed(() => lines.value.slice(first.value, last.value));
+// buffer 保留原始行与 offset；只为当前虚拟视口生成去终端控制码的显示文本。
+const visible = computed(() =>
+  lines.value.slice(first.value, last.value).map(stripTerminalControls),
+);
 const topSpacer = computed(() => ({
   height: String(first.value * rowHeight) + "px",
 }));
@@ -144,6 +162,7 @@ function onScroll(event: Event) {
 }
 async function send() {
   if (!command.value.trim()) return;
+  if (taskState.value?.commandBlocked && command.value.trim() !== "debug") return ElMessage.warning("命令通道尚未恢复，日志采集仍在继续");
   try {
     await api.command(props.taskId, {
       command: command.value,
@@ -159,6 +178,11 @@ async function send() {
   }
 }
 watch(() => props.taskId, connect, { immediate: true });
+watch(() => props.taskId, () => {
+  clearTimeout(stateTimer);
+  taskState.value = undefined;
+  void readTaskState(++stateGeneration);
+}, { immediate: true });
 // 日志窗高度随抽屉/工作台变化，虚拟列表按实际高度计算，避免放大后底部空白。
 const resize = new ResizeObserver(entries => {
   viewportHeight.value = entries[0]?.contentRect.height ?? 264;
@@ -167,7 +191,7 @@ watch(consoleRef, (current, previous) => {
   if (previous) resize.unobserve(previous);
   if (current) resize.observe(current);
 });
-onBeforeUnmount(() => { resize.disconnect(); close(); });
+onBeforeUnmount(() => { stateGeneration++; clearTimeout(stateTimer); resize.disconnect(); close(); });
 </script>
 <template>
   <section class="form-section runtime">
@@ -222,7 +246,8 @@ onBeforeUnmount(() => { resize.disconnect(); close(); });
         v-model="command"
         placeholder="输入手工命令"
         @keyup.enter="send"
-      /><el-button type="primary" :icon="Send" @click="send">发送</el-button>
+      /><el-button type="primary" :icon="Send" :disabled="taskState?.commandBlocked && command.trim() !== 'debug'" @click="send">发送</el-button>
     </div>
+    <el-alert v-if="taskState?.debugError || taskState?.commandBlocked" :title="taskState.commandBlocked ? '命令通道尚未恢复，日志采集继续' : '调试切换失败，普通命令与日志采集继续'" :description="taskState.debugError || undefined" type="warning" :closable="false" />
   </section>
 </template>

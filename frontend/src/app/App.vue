@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 根协调层只保存会话、页签和列表数据；具体编辑器与业务动作下沉到 feature 目录。
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { KeyRound, RefreshCw, Terminal, Plus, Radio, FileCode2, Server, LogOut, Search, ChevronRight, BookOpen, ShieldCheck, ScrollText, Settings2 } from "lucide-vue-next";
+import { KeyRound, RefreshCw, Terminal, Plus, Radio, FileCode2, Server, LogOut, Search, ChevronRight, BookOpen, ShieldCheck, ScrollText, Settings2, PanelLeftClose, PanelLeftOpen } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api, clearToken, getToken, setToken } from "../shared/api";
 import type { Node, Task, Template } from "../shared/types";
@@ -26,6 +26,12 @@ const navigation = [
   { key: "settings", label: "后台配置", icon: Settings2 },
 ];
 const lastUpdated = ref("");
+const sidebarCollapsed = ref(localStorage.getItem("camera-log-sidebar-collapsed") === "true");
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  try { localStorage.setItem("camera-log-sidebar-collapsed", String(sidebarCollapsed.value)); }
+  catch { /* 浏览器禁用存储时本次布局切换仍然有效。 */ }
+}
 const templatePage = ref(1);
 const selectedWorkspace = ref("config");
 const selectedLogTask = ref("");
@@ -149,12 +155,12 @@ onMounted(() => {
 onBeforeUnmount(() => clearInterval(timer));
 </script>
 <template>
-  <main class="shell" :class="{ 'is-authenticated': authenticated }">
+  <main class="shell" :class="{ 'is-authenticated': authenticated, 'sidebar-collapsed': sidebarCollapsed }">
     <aside v-if="authenticated" class="sidebar">
       <div class="sidebar-brand"><span class="brand-mark"><Terminal :size="23" /></span><div><strong>设备日志服务</strong><small>LOG RECORD</small></div></div>
       <div class="nav-caption">工作空间</div>
       <nav role="tablist" aria-label="工作空间导航" class="side-nav">
-        <button v-for="item in navigation" :key="item.key" role="tab" :aria-selected="activeTab === item.key" :class="{ active: activeTab === item.key }" @click="activeTab = item.key">
+        <button v-for="item in navigation" :key="item.key" role="tab" :aria-label="item.label" :title="sidebarCollapsed ? item.label : undefined" :aria-selected="activeTab === item.key" :class="{ active: activeTab === item.key }" @click="activeTab = item.key">
           <component :is="item.icon" :size="18" /><span>{{ item.label }}</span><ChevronRight v-if="activeTab === item.key" :size="14" />
         </button>
       </nav>
@@ -162,7 +168,7 @@ onBeforeUnmount(() => clearInterval(timer));
     </aside>
     <div class="main-column">
     <header class="topbar">
-      <div v-if="authenticated" class="breadcrumb"><span>工作空间</span><ChevronRight :size="14" /><strong>{{ navigation.find(item => item.key === activeTab)?.label }}</strong></div>
+      <div v-if="authenticated" class="breadcrumb"><el-tooltip :content="sidebarCollapsed ? '展开导航栏' : '折叠导航栏'"><el-button text :icon="sidebarCollapsed ? PanelLeftOpen : PanelLeftClose" :aria-label="sidebarCollapsed ? '展开导航栏' : '折叠导航栏'" :aria-expanded="!sidebarCollapsed" @click="toggleSidebar" /></el-tooltip><span>工作空间</span><ChevronRight :size="14" /><strong>{{ navigation.find(item => item.key === activeTab)?.label }}</strong></div>
       <div v-else class="brand"><Terminal :size="22" /><span>设备日志服务</span></div>
       <div v-if="authenticated" class="topbar-actions"><span class="refresh-time" v-if="lastUpdated">任务更新 {{ lastUpdated }}</span><el-tooltip content="退出控制台"><el-button text :icon="LogOut" aria-label="退出" @click="logout" /></el-tooltip></div>
     </header>

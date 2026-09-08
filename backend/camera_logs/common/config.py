@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     node_url: str = "http://127.0.0.1:8001"
     log_root: Path = Path("data/logs")
     known_hosts: str = ""
+    ssh_verify_host_key: bool = False
     node_capacity: int = 100
     cluster_capacity: int = 500
     retention_days: int = 7

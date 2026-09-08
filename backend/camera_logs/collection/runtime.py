@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pymongo import ReturnDocument
 
-from camera_logs.collection.collector import Collector
+from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.common.database import now
@@ -44,11 +44,15 @@ class SessionRuntime:
 
     async def on_debug(self, event, details):
         """记录调试模式切换阶段，只保存任务身份与模式，不保存密文或解密口令。"""
+        command_blocked = bool(details.get("commandBlocked", False))
+        debug_error = details.get("debugError")
         await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"],
             "sessionId": self.collector.session_id, "type": "DEBUG_MODE", "phase": event,
-            "mode": details["mode"], "createdAt": now()})
+            "mode": details["mode"], "commandBlocked": command_blocked,
+            "debugError": debug_error, "createdAt": now()})
         await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
-            {"$set": {"shellMode": details["mode"], "debugPhase": event, "updatedAt": now()}})
+            {"$set": {"shellMode": details["mode"], "debugPhase": event,
+                "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()}})
         logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
 
     def file_id(self, path):
@@ -159,6 +163,7 @@ class SessionRuntime:
         if not claimed:
             return
         status = "UNKNOWN"
+        error = None
         try:
             if self.stopping or not self.collector or document.get("sessionId") != self.collector.session_id:
                 status = "CANCELLED"
@@ -172,11 +177,17 @@ class SessionRuntime:
                     delay_seconds=float(document.get("delaySeconds", 0)),
                 )
                 status = "SENT"
+        except CommandChannelBlocked as exc:
+            status = "FAILED"
+            error = str(exc)
+        except PshSwitchError:
+            status = "FAILED"
+            error = "PSH 调试失败，本次命令未自动重试"
         except Exception:
             logger.exception("手动命令结果未知 task=%s command=%s", self.task["id"], document["id"])
         finally:
             await self.repo.db.commands.update_one({"id": document["id"]},
-                {"$set": {"status": status, "completedAt": now()}})
+                {"$set": {"status": status, "error": error, "completedAt": now()}})
 
     async def run(self):
         """连接失败指数退避，先释放旧连接再重试；每次登录后重新发送初始化命令。"""
@@ -186,10 +197,12 @@ class SessionRuntime:
                 config = dict(self.task)
                 config["password"] = self.repo.decrypt(config["passwordEncrypted"])
                 config["knownHosts"] = self.repo.settings.known_hosts
+                config["verifyHostKey"] = self.repo.settings.ssh_verify_host_key
                 config["pshSerialCharacterInterval"] = self.repo.settings.psh_serial_character_interval
                 self.started_at = now()
+                reset = {"shellMode": "UNKNOWN", "debugPhase": None, "commandBlocked": False, "debugError": None}
                 await self.repo.db.tasks.update_one({"id": self.task["id"], "runId": self.task["runId"]},
-                    {"$set": {"shellMode": "UNKNOWN", "debugPhase": None}})
+                    {"$set": reset})
                 self.collector = Collector(config, self.repo.settings.log_root, connection_factory=self.factory,
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
                     reserve_execution=self.reserve, update_execution=self.update_execution,
@@ -205,8 +218,13 @@ class SessionRuntime:
             except Exception as exc:
                 logger.exception("采集会话异常 task=%s", self.task["id"])
                 import asyncssh
-                if isinstance(exc, (asyncssh.PermissionDenied, asyncssh.HostKeyNotVerifiable)):
-                    self.error = "SSH认证或主机密钥校验失败"
+                if isinstance(exc, asyncssh.PermissionDenied):
+                    # 凭据被拒绝不会因重试自行恢复，保留失败状态等待管理员修正账号配置。
+                    self.error = "SSH账号认证失败"
+                    break
+                if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+                    # 指纹缺失或变化必须人工确认，绝不能绕过 known_hosts 自动重连。
+                    self.error = "SSH主机指纹未登记或不匹配"
                     break
             finally:
                 if self.collector:

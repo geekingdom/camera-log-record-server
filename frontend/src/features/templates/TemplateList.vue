@@ -20,7 +20,7 @@ async function remove(template: Template) {
 }
 </script>
 <template>
-  <el-table :data="props.items" class="data-table" empty-text="暂无模板"
+  <el-table scrollbar-always-on :data="props.items" class="data-table" empty-text="暂无模板"
     ><el-table-column
       prop="name"
       label="名称"

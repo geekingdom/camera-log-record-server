@@ -5,6 +5,7 @@ defineProps<{ items: Node[]; loading: boolean }>();
 </script>
 <template>
   <el-table
+    scrollbar-always-on
     v-loading="loading"
     :data="items"
     class="data-table"

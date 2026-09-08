@@ -128,7 +128,7 @@ onMounted(() => void load());
           <el-button type="primary" :icon="Plus" @click="openCreate">新建服务账号</el-button>
         </div>
       </div>
-      <el-table v-loading="loading" :data="items" class="data-table" empty-text="暂无服务账号">
+      <el-table scrollbar-always-on v-loading="loading" :data="items" class="data-table" empty-text="暂无服务账号">
         <el-table-column label="名称" min-width="180"><template #default="{ row }"><strong>{{ row.name }}</strong><span class="access-id">{{ row.id }}</span></template></el-table-column>
         <el-table-column label="权限" min-width="220"><template #default="{ row }"><el-tag v-for="scope in row.scopes" :key="scope" effect="plain">{{ scope }}</el-tag></template></el-table-column>
         <el-table-column label="设备范围" min-width="180"><template #default="{ row }"><span v-if="row.taskIds?.length">{{ row.taskIds.join("、") }}</span><span v-else class="access-muted">全部设备</span></template></el-table-column>

@@ -7,12 +7,16 @@ import { api } from "../../shared/api";
 import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
 import LogFileViewer from "./LogFileViewer.vue";
+import { stripTerminalControls } from "../../shared/terminalDisplay";
 const props = defineProps<{ taskId: string }>();
 const date = ref<string>(), hourPage = ref(1), hourTotal = ref(0), progress = ref(0);
 const file = ref<LogFile>(), viewerOpen = ref(false), resultPage = ref(1), resultTotal = ref(0), resultJob = ref("");
 const integrityLabels: Record<string, string> = { VERIFIED: "归档已校验", OPEN: "正在写入", UNAVAILABLE: "含不可用片段", UNVERIFIED: "待确认摘要" };
 const jobStatusLabels: Record<string, string> = { QUEUED: "等待执行", RUNNING: "正在执行", SUCCEEDED: "已完成", FAILED: "执行失败", CANCELLED: "已取消", EXPIRED: "已过期" };
 function viewFile(selectedFile: LogFile) { file.value = selectedFile; viewerOpen.value = true; }
+function displayResultText(row: Record<string, unknown>) {
+  return stripTerminalControls(typeof row.text === "string" ? row.text : "");
+}
 const hours = ref<LogHour[]>([]),
   selected = ref<string[]>([]),
   keyword = ref("");
@@ -203,6 +207,7 @@ onBeforeUnmount(() => {
     <div class="archive-date"><el-date-picker v-model="date" type="date" value-format="YYYY-MM-DD" placeholder="全部日期（上海时区）" aria-label="归档日期" clearable /></div>
     <div class="archive-table">
       <el-table
+        scrollbar-always-on
         :data="hours"
         size="small"
         @selection-change="
@@ -268,6 +273,7 @@ onBeforeUnmount(() => {
       :closable="false"
     />
     <el-table
+      scrollbar-always-on
       :data="results"
       size="small"
       max-height="320"
@@ -275,8 +281,8 @@ onBeforeUnmount(() => {
       ><el-table-column
         prop="offset"
         label="字节位置"
-        width="100" /><el-table-column prop="text" label="日志片段"
-    /></el-table>
+        width="100" /><el-table-column label="日志片段"><template #default="{ row }">{{ displayResultText(row) }}</template></el-table-column>
+    </el-table>
     <el-pagination v-if="resultTotal > 100" v-model:current-page="resultPage" :page-size="100" :total="resultTotal" layout="total, prev, pager, next" @current-change="loadResultPage" />
     <LogFileViewer v-model="viewerOpen" :file="file" />
   </section>
@@ -305,9 +311,6 @@ onBeforeUnmount(() => {
     min-width: 0;
     overflow-x: auto;
     overscroll-behavior-x: contain;
-  }
-  .archive-table :deep(.el-table) {
-    min-width: 620px;
   }
   .archive-controls {
     align-items: stretch;

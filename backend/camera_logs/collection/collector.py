@@ -45,6 +45,10 @@ class BudgetExhausted(RuntimeError):
     """定时命令在写入 socket 前被持久化执行预算拒绝。"""
 
 
+class CommandChannelBlocked(RuntimeError):
+    """PSH 失败后的恢复未确认，禁止把普通命令写入可能仍等待口令的设备。"""
+
+
 async def _call(callback: Callback | None, *args: Any) -> Any:
     if callback is None:
         return None
@@ -94,6 +98,7 @@ class Collector:
         self._scheduled: list[asyncio.Task[None]] = []
         self._closed = asyncio.Event()
         self._accepting_commands = True
+        self._command_blocked = False
         self._initializing = True
         self._counter = 0
         self._command_status: dict[str, str] = {}
@@ -135,13 +140,17 @@ class Collector:
 
     async def _send_initial(self, item: Mapping[str, Any]) -> None:
         command = str(item["command"])
-        await self._enqueue(
-            command,
-            str(item.get("newline", "\n")),
-            priority=0,
-            prompt=item.get("prompt"),
-            timeout_seconds=float(item.get("timeoutSeconds", 30)),
-        )
+        try:
+            await self._enqueue(
+                command,
+                str(item.get("newline", "\n")),
+                priority=0,
+                prompt=item.get("prompt"),
+                timeout_seconds=float(item.get("timeoutSeconds", 30)),
+            )
+        except (CommandChannelBlocked, PshSwitchError):
+            # 调试失败不应关闭采集；恢复未确认时跳过本次初始化项，避免被解释成口令。
+            return
         delay = float(item.get("delaySeconds", 0))
         if delay > 0:
             await asyncio.sleep(delay)
@@ -158,6 +167,8 @@ class Collector:
         """将人工命令加入唯一发送队列；提示符和发送后延时都在本会话内串行完成。"""
         if not command or not command.strip() or self._initializing or not self._accepting_commands or self._connection is None:
             raise RuntimeError("collector is not accepting manual commands")
+        if self._command_blocked:
+            raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
         command_id = str(uuid.uuid4())
         self._command_status[command_id] = "QUEUED"
         await self._enqueue(
@@ -212,12 +223,20 @@ class Collector:
                     continue
                 if self._connection is None or self._connection_closed or not self._accepting_commands:
                     raise ConnectionError("connection closed")
-                # 预算在真正写 socket 前才占用，取消排队命令不会消耗次数。
+                if self._command_blocked and command.strip() != "debug":
+                    raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
+                if self._command_blocked:
+                    # 后续 debug 先走无密码恢复入口，成功后才允许本次握手与预算占用。
+                    if not await self._debug.recover_command_channel(self._write_debug, newline, timeout_seconds):
+                        raise PshSwitchError("PSH 调试恢复未确认，本次 debug 未执行")
+                    self._command_blocked = False
+                # 预算在真正写 socket 前才占用，恢复未确认的命令不能虚耗执行次数。
                 if before_send and not await _call(before_send):
                     raise BudgetExhausted("scheduled command budget is exhausted")
                 if command.strip() == "debug":
                     # 整个解密握手占用同一发送槽，后续命令不能穿插为设备口令输入。
                     await self._debug.ensure_ash(self._write_debug, newline, timeout_seconds)
+                    self._command_blocked = False
                 elif prompt:
                     prompt_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
                     # 写入前安装等待器，防止漏过设备立即返回的提示符。
@@ -235,11 +254,8 @@ class Collector:
                 if future and not future.done():
                     future.set_exception(error)
                 if isinstance(error, PshSwitchError):
-                    # 模式未知时继续发送可能把业务命令当密码；终止运行也避免反复试错口令。
-                    self._terminal_error = error
-                    self._accepting_commands = False
-                    self._fail_queued(error)
-                    await self._close_connection()
+                    # 仅调试命令失败：恢复确认后继续 FIFO；未确认时只阻止命令，reader 保持运行。
+                    self._command_blocked = not self._debug.command_safe
             finally:
                 self._sending_future = None
                 self._queue.task_done()
@@ -280,6 +296,18 @@ class Collector:
                 await _call(self._update, command_id, "SENT", {"execution": execution + 1})
             except BudgetExhausted:
                 return
+            except CommandChannelBlocked:
+                # 通道阻断发生在预算占用前，本次没有设备写入或持久化执行记录。
+                return
+            except PshSwitchError as error:
+                await _call(
+                    self._update,
+                    command_id,
+                    "FAILED",
+                    {"execution": execution + 1, "error": str(error)},
+                )
+                # debug 失败只影响当前执行；下一次定时 debug 可先安全恢复后重新握手。
+                continue
             except (ConnectionError, OSError, TimeoutError) as error:
                 await _call(
                     self._update,

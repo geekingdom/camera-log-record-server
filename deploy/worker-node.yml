@@ -14,4 +14,5 @@ services:
     restart: unless-stopped
     volumes:
       - ${HOST_LOG_ROOT:-/srv/camera-logs}:/var/lib/camera-logs
-      - ${KNOWN_HOSTS_FILE:?Set a verified known_hosts file}:/etc/camera-logs/known_hosts:ro
+      # 默认账号密码模式无需主机公钥文件；仅严格模式需要覆盖为已确认的文件。
+      - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro

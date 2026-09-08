@@ -78,6 +78,7 @@ const rows = computed(() => props.items);
 
 <template>
   <el-table
+    scrollbar-always-on
     v-loading="props.loading"
     :data="rows"
     class="data-table"

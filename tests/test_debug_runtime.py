@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from camera_logs.collection.collector import CommandChannelBlocked
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
@@ -87,9 +89,8 @@ async def test_storage_stop_error_is_not_absorbed_as_psh_failure(tmp_path):
     assert await repo.db.endpoint_locks.count_documents({"taskId": task["id"]}) == 1
 
 
-@pytest.mark.parametrize("response", [None, b"# \r\n", b"Password:", b"Sep  8 12:00:00 app.debug continuing output\r\n"])
-async def test_debug_without_challenge_stops_runtime_without_password_or_reconnect(tmp_path, response):
-    """疑似锁定时即使仍有打印也不得重试 debug、调用解密或发送后续初始化命令。"""
+async def test_debug_without_challenge_keeps_runtime_collecting_without_password_or_reconnect(tmp_path):
+    """无密文时只封锁命令，运行与日志继续，且不再解密或自动重试 debug。"""
     repo, task = await repository(tmp_path)
     task["pshSerialCharacterInterval"] = 0
     repo.settings.psh_serial_character_interval = 0
@@ -106,8 +107,6 @@ async def test_debug_without_challenge_stops_runtime_without_password_or_reconne
 
         async def write(self, data):
             self.sent.append(data)
-            if response is not None:
-                self.received.put_nowait(response)
 
         async def close(self):
             self.closed = True
@@ -118,14 +117,114 @@ async def test_debug_without_challenge_stops_runtime_without_password_or_reconne
     runtime = SessionRuntime(repo, task, connection_factory=factory)
     provider = AsyncMock(return_value="must-not-be-sent")
     runtime.debug_passwords = provider
-    await asyncio.wait_for(runtime.background, 2)
-    assert "疑似锁定或响应超时" in runtime.error
+    for _ in range(100):
+        if len(connection.sent) >= 3:
+            break
+        await asyncio.sleep(.01)
+    await connection.received.put(b"continuous device log\r\n")
+    await asyncio.sleep(.15)
+    assert runtime.error is None
+    assert not runtime.background.done()
     factory.assert_awaited_once()
     provider.assert_not_awaited()
-    assert connection.sent == [b"debug\n"]
-    assert connection.closed
+    assert connection.sent == [b"debug\n", b"\x03"]
+    assert any(b"continuous device log" in __import__("base64").b64decode(frame["data"]) for frame in runtime.frames)
+    await runtime.stop()
+
+
+async def test_debug_events_persist_task_recovery_state_without_run_latch(tmp_path):
+    """FAILED 仅记录本次任务状态；RECOVERED 解除阻断，不向 runs 写失败锁存。"""
+    repo, task = await repository(tmp_path)
+    runtime = object.__new__(SessionRuntime)
+    runtime.repo, runtime.task = repo, task
+    runtime.collector = SimpleNamespace(session_id="debug-session")
+    failure = "PSH 调试失败，本次命令未自动重试"
+
+    await runtime.on_debug("FAILED", {"mode": "PSH", "commandBlocked": True, "debugError": failure})
+    await runtime.on_debug("RECOVERED", {"mode": "PSH", "commandBlocked": False, "debugError": failure})
+
+    stored_run = await repo.get("runs", task["runId"])
+    stored_task = await repo.get("tasks", task["id"])
+    events = [event async for event in repo.db.events.find({"taskId": task["id"]})]
+    assert "debugFailed" not in stored_run
+    assert stored_task["debugPhase"] == "RECOVERED"
+    assert stored_task["commandBlocked"] is False and stored_task["debugError"] == failure
+    assert [(event["phase"], event["commandBlocked"]) for event in events] == [("FAILED", True), ("RECOVERED", False)]
+
+
+async def test_blocked_manual_command_persists_failed_reason(tmp_path):
+    """命令通道未确认恢复时，手动命令写为 FAILED 并保存不含密码的原因。"""
+    repo, task = await repository(tmp_path)
+    command = {"id": "blocked-manual", "taskId": task["id"], "sessionId": "debug-session", "command": "show status", "status": "QUEUED"}
+    await repo.db.commands.insert_one(command)
+    runtime = object.__new__(SessionRuntime)
+    runtime.repo, runtime.task, runtime.stopping = repo, task, False
+    runtime.collector = SimpleNamespace(
+        session_id="debug-session",
+        enqueue_manual=AsyncMock(side_effect=CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")),
+    )
+
+    await runtime.manual(command)
+
+    stored = await repo.get("commands", command["id"])
+    assert stored["status"] == "FAILED"
+    assert stored["error"] == "PSH 调试恢复未确认，当前会话暂不可发送命令"
+
+
+@pytest.mark.parametrize(
+    ("exception_name", "expected_error"),
+    [
+        ("PermissionDenied", "SSH账号认证失败"),
+        ("HostKeyNotVerifiable", "SSH主机指纹未登记或不匹配"),
+    ],
+)
+async def test_ssh_authentication_and_host_key_failures_do_not_retry_and_release(
+    tmp_path, monkeypatch, exception_name, expected_error,
+):
+    """认证和主机指纹错误只尝试一次；失败采集器收尾后 Worker 才能释放端点锁。"""
+    repo, task = await repository(tmp_path)
+
+    class PermissionDenied(Exception):
+        pass
+
+    class HostKeyNotVerifiable(Exception):
+        pass
+
+    monkeypatch.setitem(sys.modules, "asyncssh", SimpleNamespace(
+        PermissionDenied=PermissionDenied, HostKeyNotVerifiable=HostKeyNotVerifiable,
+    ))
+
+    class SshFailureCollector:
+        instances = 0
+        stops = 0
+
+        def __init__(self, _config, _root, *, connection_factory, **_kwargs):
+            type(self).instances += 1
+            self.connection_factory = connection_factory
+            self.session_id = "failed-ssh-session"
+
+        async def start(self):
+            await self.connection_factory({})
+
+        async def stop(self):
+            type(self).stops += 1
+
+    failure = getattr(sys.modules["asyncssh"], exception_name)("synthetic SSH failure")
+    factory = AsyncMock(side_effect=failure)
+    monkeypatch.setattr("camera_logs.collection.runtime.Collector", SshFailureCollector)
+    runtime = SessionRuntime(repo, task, connection_factory=factory)
+    await runtime.background
+
+    factory.assert_awaited_once()
+    assert SshFailureCollector.instances == 1
+    assert SshFailureCollector.stops == 1
+    assert runtime.error == expected_error
+
     worker = Worker(repo)
     worker.active[task["id"]] = runtime
     await worker.release(runtime)
+
+    assert task["id"] not in worker.active
     stored = await repo.get("tasks", task["id"])
     assert stored["status"] == "ERROR" and stored["desiredState"] == "STOPPED"
+    assert await repo.db.endpoint_locks.count_documents({"taskId": task["id"]}) == 0

@@ -8,6 +8,7 @@ const open = defineModel<boolean>({ default: false });
 const phases: Record<string, string> = {
   STARTED: "开始切换", CHALLENGE_RECEIVED: "已获取密文",
   ASH_READY: "ASH 已就绪", ALREADY_ASH: "已处于 ASH", FAILED: "切换失败",
+  RECOVERED: "调试失败，普通命令已恢复", BLOCKED: "调试失败，命令通道待恢复",
 };
 
 function timestamp(value?: string) {
@@ -31,11 +32,12 @@ function timestamp(value?: string) {
         <dt>会话 ID</dt><dd>{{ task.sessionId || "未建立" }}</dd>
         <dt>设备模式</dt><dd>{{ task.shellMode && task.shellMode !== "UNKNOWN" ? task.shellMode : "尚未确认" }}</dd>
         <dt>调试阶段</dt><dd>{{ phases[task.debugPhase ?? ""] ?? task.debugPhase ?? "未执行" }}</dd>
+        <dt>命令通道</dt><dd>{{ task.commandBlocked ? '暂不可发送，日志采集继续' : '未阻断' }}</dd>
         <dt>状态更新时间</dt><dd>{{ timestamp(task.updatedAt) }}</dd>
       </dl>
       <section class="diagnostic-error" :class="{ 'has-error': Boolean(task.error) }">
         <h3>最近错误记录</h3>
-        <p>{{ task.error || "无错误记录" }}</p>
+        <p>{{ task.error || task.debugError || "无错误记录" }}</p>
       </section>
     </div>
     <p v-else>当前列表中已无此任务</p>

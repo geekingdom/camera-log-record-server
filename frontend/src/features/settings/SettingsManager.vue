@@ -106,7 +106,7 @@ onMounted(() => void load());
       </section>
       <section class="settings-band node-heading"><div><h3>节点登记与准入</h3><p>已登记节点使用平台准入配置；未登记节点沿用部署配置。登记不会启动节点进程。</p></div><el-button type="primary" :icon="Plus" @click="openRegister">登记节点</el-button></section>
       <el-alert type="info" :closable="false" show-icon><template #title>在线状态由 worker 心跳计算。离线登记项需要使用相同节点 ID 部署并启动 worker。</template></el-alert>
-      <el-table v-loading="loading" :data="nodes" class="data-table settings-table" empty-text="暂无已发现节点">
+      <el-table scrollbar-always-on v-loading="loading" :data="nodes" class="data-table settings-table" empty-text="暂无已发现节点">
         <el-table-column label="节点" min-width="190"><template #default="{ row }"><strong>{{ row.id }}</strong><span class="node-url">{{ row.url }}</span></template></el-table-column>
         <el-table-column label="配置" width="110"><template #default="{ row }"><el-tag :type="row.registered ? 'success' : 'warning'">{{ row.registered ? "已登记" : "未登记配置" }}</el-tag></template></el-table-column>
         <el-table-column label="运行状态" width="112"><template #default="{ row }"><el-tag :type="row.online ? 'success' : 'info'">{{ row.online ? "在线" : "离线" }}</el-tag></template></el-table-column>

@@ -33,7 +33,7 @@ onBeforeUnmount(() => { generation++; });
   <section class="form-section">
     <div class="section-heading"><h2>命令执行记录</h2><el-tooltip content="刷新命令记录"><el-button :icon="RefreshCw" aria-label="刷新命令记录" @click="load" /></el-tooltip></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
-    <el-table v-loading="loading" :data="items" class="data-table" empty-text="暂无命令执行记录">
+    <el-table scrollbar-always-on v-loading="loading" :data="items" class="data-table" empty-text="暂无命令执行记录">
       <el-table-column label="命令 / 配置 ID" min-width="240" show-overflow-tooltip><template #default="{ row }">{{ row.command || row.commandId || row.id }}</template></el-table-column>
       <el-table-column label="来源" width="100"><template #default="{ row }">{{ row.kind === 'MANUAL' ? '手动' : row.kind === 'SCHEDULED' ? '定时' : row.kind || '-' }}</template></el-table-column>
       <el-table-column label="状态" width="120"><template #default="{ row }">{{ labels[row.status] || row.status || '-' }}</template></el-table-column>

@@ -27,7 +27,7 @@ _LS_ECHO = re.compile(rb"(?:^|[\r\n])(?:[^\r\n]{0,80}[#$][ \t]*)?ls\r?(?:\n|$)")
 
 
 class PshSwitchError(ConnectionError):
-    """模式切换未被确认，必须终止会话，避免后续命令被设备当作口令。"""
+    """PSH 调试命令未完成；采集可继续，命令通道是否可用由恢复探测决定。"""
 
 
 def extract_challenge(data: bytes) -> str | None:
@@ -79,6 +79,7 @@ class PshDialogue:
         self._active = False
         self._closed = False
         self._changed = asyncio.Event()
+        self.command_safe = True
 
     def feed(self, data: bytes) -> None:
         """由唯一接收协程调用；只观察，不消费、不修改传给日志写入器的数据。"""
@@ -171,8 +172,43 @@ class PshDialogue:
             except TimeoutError:
                 pass
 
+    async def _recover_command_channel(self, write: Callable, newline: str, timeout: float) -> bool:
+        """取消口令输入后先确认新 shell 提示符，再无密码探测；未确认时绝不发送 ls。"""
+        self._active, self._buffer = True, b""
+        self._response, self._source = PshResponse(), None
+        try:
+            async with asyncio.timeout(min(timeout, 2)):
+                await write(b"\x03")
+                while True:
+                    self._changed.clear()
+                    if self._closed:
+                        return False
+                    clean = _ANSI.sub(b"", self._buffer)
+                    # Ctrl-C 后必须观察到新的普通提示符；Password 仍出现时不能把 ls 当作业务命令发送。
+                    if _PROMPT.search(clean) and not _PASSWORD.search(clean):
+                        break
+                    await self._changed.wait()
+                await self._probe_ls(write, newline)
+            return True
+        except Exception:  # noqa: BLE001 - 恢复探测失败时宁可封锁命令，也不能猜测设备已退出口令输入。
+            return False
+        finally:
+            self._active, self._buffer = False, b""
+            self._response, self._source = PshResponse(), None
+
+    async def recover_command_channel(self, write: Callable, newline: str, timeout: float) -> bool:
+        """在已阻断时显式恢复命令通道；每次 debug 只重试本次握手，不复用旧口令。"""
+        self.command_safe = await self._recover_command_channel(write, newline, timeout)
+        failure = "PSH 调试失败，本次命令未自动重试"
+        await _notify(self.on_event, "RECOVERED" if self.command_safe else "BLOCKED", {
+            "mode": self.mode,
+            "commandBlocked": not self.command_safe,
+            "debugError": failure,
+        })
+        return self.command_safe
+
     async def ensure_ash(self, write: Callable, newline: str, timeout: float) -> None:
-        """串行完成 debug、解密、口令发送及 ASH 确认；失败不自动再次尝试口令。"""
+        """串行完成一次 debug、解密、口令发送及 ASH 确认；失败不会在本次握手内重试。"""
         if self.mode == "ASH":
             await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})
             return
@@ -220,11 +256,15 @@ class PshDialogue:
             raise
         except Exception:  # noqa: BLE001 - 第三方错误统一转换为不含密文口令的领域异常。
             # 隔离第三方异常文本，防止请求参数、响应正文或解密口令进入日志。
-            await _notify(self.on_event, "FAILED", {"mode": self.mode})
+            failure = "PSH 调试失败，本次命令未自动重试"
+            await _notify(self.on_event, "FAILED", {
+                "mode": self.mode, "commandBlocked": True, "debugError": failure,
+            })
+            await self.recover_command_channel(write, newline, timeout)
             if awaiting_challenge:
                 # 锁定设备可能只返回普通打印；没有完整密文不能调用解密或试探性发送口令。
-                raise PshSwitchError("未收到完整调试密文，疑似锁定或响应超时；已停止任务，不自动重试") from None
-            raise PshSwitchError("PSH 到 ASH 切换失败或超时，已终止本次会话") from None
+                raise PshSwitchError("未收到完整调试密文，疑似锁定或响应超时；本次命令未自动重试") from None
+            raise PshSwitchError("PSH 到 ASH 切换失败或超时；本次命令未自动重试") from None
         finally:
             self._active, self._buffer = False, b""
             self._response, self._source = PshResponse(), None
