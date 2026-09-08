@@ -98,7 +98,8 @@ try {
     await page.locator(selector).waitFor();
   }
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
-  await page.getByRole("button", { name: "编辑任务" }).first().waitFor();
+  // 历史资源的任务仍可查询日志，但不允许编辑；第一页不保证存在可编辑任务。
+  await page.locator(".task-filters").waitFor();
   await page.screenshot({
     path: `${screenshots}/tasks-desktop.png`,
     fullPage: true,

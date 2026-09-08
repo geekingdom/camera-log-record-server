@@ -26,6 +26,7 @@ from camera_logs.logs.hour_download import (
     reusable_hour_archive,
     write_hour_archive,
 )
+from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.naming import safe_filename_component
 from camera_logs.logs.search_stream import StreamSearch, index_entries
 
@@ -142,8 +143,12 @@ async def _reserve_temp(repo: Any, job_id: str, estimate: int) -> None:
 
 
 async def _release_temp(job_id: str) -> None:
-    async with _temp_reservation_lock:
-        _temp_reservations.pop(job_id, None)
+    """文件线程和清理均结束后，在事件循环内无等待地释放配额。
+
+    准入锁用于串行化扫描和新增预留；删除只降低用量，不会造成超额准入，
+    因此不能再等待该锁，让第二次取消绕过已完成作业的配额释放。
+    """
+    _temp_reservations.pop(job_id, None)
 
 
 async def _archive(
@@ -167,7 +172,7 @@ async def _archive(
     if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"] and not include_index:
         return path, False
     index = _contained(repo, file["indexPath"]) if file.get("indexPath") else None
-    await asyncio.to_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index)
+    await job_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index)
     return target, True
 
 
@@ -228,7 +233,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     progress: JobProgress | None = job.get("_progress")
     await _reserve_temp(repo, job["id"], _estimated_temp_bytes(job["files"]))
     try:
-        await asyncio.to_thread(scratch.mkdir, parents=True, exist_ok=True)
+        await job_thread(scratch.mkdir, parents=True, exist_ok=True)
         scratch_names: set[str] = set()
         for frozen in job["files"]:
             if await _cancelled(repo, job["id"]):
@@ -251,7 +256,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             raise FileNotFoundError("no selected archives are available")
         if missing and not job.get("allowPartial", False):
             raise FileNotFoundError("selected archive is unavailable")
-        sources = await asyncio.to_thread(pin_hour_sources, sources, scratch / "pinned")
+        sources = await job_thread(pin_hour_sources, sources, scratch / "pinned")
         if sum(path.stat().st_size for path in {item[2] for item in sources}) > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
         by_hour: dict[str, list[Source]] = {}
@@ -261,26 +266,26 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
         for hour, members in sorted(by_hour.items()):
             if await _cancelled(repo, job["id"]):
                 raise asyncio.CancelledError()
-            reusable = await asyncio.to_thread(reusable_hour_archive, members)
+            reusable = await job_thread(reusable_hour_archive, members)
             if reusable is not None:
                 hourly.append(reusable)
                 continue
             hourly_path = scratch / hour_export_name(job, hour)
-            await asyncio.to_thread(write_hour_archive, hourly_path, members)
+            await job_thread(write_hour_archive, hourly_path, members)
             hourly.append(hourly_path)
-        await asyncio.to_thread(output.mkdir, parents=True, exist_ok=True)
+        await job_thread(output.mkdir, parents=True, exist_ok=True)
         result_path: Path
         if len(hourly) == 1:
             filename = hourly[0].name
             if hourly[0] in {path for _frozen, _file, path, _temporary in sources}:
                 result_path = output / filename
                 try:
-                    await asyncio.to_thread(os.link, hourly[0], result_path)
+                    await job_thread(os.link, hourly[0], result_path)
                     size = result_path.stat().st_size
                 except OSError:
-                    size = await asyncio.to_thread(copy_limited, hourly[0], result_path)
+                    size = await job_thread(copy_limited, hourly[0], result_path)
             else:
-                size = await asyncio.to_thread(copy_limited, hourly[0], output / filename)
+                size = await job_thread(copy_limited, hourly[0], output / filename)
                 result_path = output / filename
         else:
             task_component = safe_filename_component(str(job.get("taskName") or job.get("taskId") or job["id"]), fallback=job["id"])
@@ -293,17 +298,19 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                             while data := source.read(1024 * 1024):
                                 read_limiter.consume(len(data)); entry.write(data)
                 return destination.stat().st_size
-            size = await asyncio.to_thread(make_zip)
+            size = await job_thread(make_zip)
             result_path = destination
         if size > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
         return {"resultPath": str(result_path), "filename": filename, "missing": missing, "bytes": size}
     except BaseException:
-        await asyncio.to_thread(shutil.rmtree, output, True)
+        await job_thread(shutil.rmtree, output, True)
         raise
     finally:
-        await asyncio.to_thread(shutil.rmtree, scratch, True)
-        await _release_temp(job["id"])
+        try:
+            await job_thread(shutil.rmtree, scratch, True)
+        finally:
+            await _release_temp(job["id"])
 
 
 def _scan_archive(path: Path, scanner: StreamSearch, file: dict, cancelled, archive_member: str | None = None):
@@ -354,15 +361,18 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     results, truncated = [], False
     progress: JobProgress | None = job.get("_progress")
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()
-    await asyncio.to_thread(scratch.mkdir, parents=True, exist_ok=True)
     try:
+        await job_thread(scratch.mkdir, parents=True, exist_ok=True)
         for frozen in job["files"]:
             if await _cancelled(repo, job["id"]):
                 stopped.set()
                 raise asyncio.CancelledError()
             file = await _file_doc(repo, frozen)
-            path, _temporary = await _archive(repo, frozen, scratch, include_index=True)
-            matches = await asyncio.to_thread(_search_limited, path, scanner, frozen, 1000 - len(results), stopped.is_set, file.get("archiveMember"))
+            path, temporary = await _archive(repo, frozen, scratch, include_index=True)
+            matches = await job_thread(_search_limited, path, scanner, frozen,
+                1000 - len(results), stopped.is_set, file.get("archiveMember"), stop=stopped)
+            if temporary:
+                await job_thread(path.unlink, missing_ok=True)
             if progress is not None:
                 await progress.advance()
             for match in matches:
@@ -373,7 +383,7 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
         return {"results": results, "truncated": truncated}
     finally:
         stopped.set()
-        await asyncio.to_thread(shutil.rmtree, scratch, True)
+        await job_thread(shutil.rmtree, scratch, True)
 
 
 async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
@@ -390,7 +400,7 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             update = result | {"status": "SUCCEEDED", "progress": 100, "completedAt": datetime.now(UTC)}
             changed = await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": update})
             if not changed.modified_count:
-                await asyncio.to_thread(shutil.rmtree, _root(repo) / "exports" / job["id"], True)
+                await job_thread(shutil.rmtree, _root(repo) / "exports" / job["id"], True)
                 return {"status": "CANCELLED"}
             await repo.audit(job.get("actor", "system"), "job_succeeded", job["id"])
             return update
