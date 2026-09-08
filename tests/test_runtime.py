@@ -7,7 +7,6 @@ import time
 from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from camera_logs.collection.collector import LogChunk
@@ -50,8 +49,22 @@ class InsertCollection:
     def __init__(self) -> None:
         self.values = []
 
-    async def insert_one(self, value):
+    async def insert_one(self, value, **_kwargs):
         self.values.append(value)
+
+
+class ReservationTaskCollection:
+    """最小任务 CAS 替身，供定时预算测试覆盖事务入口而不依赖 MongoMock。"""
+    def __init__(self, task):
+        self.task = task
+
+    async def find_one(self, *_args, **_kwargs):
+        return dict(self.task)
+
+    async def find_one_and_update(self, _query, update, **_kwargs):
+        for key, value in update.get("$inc", {}).items():
+            self.task[key] = self.task.get(key, 0) + value
+        return dict(self.task)
 
 
 def runtime_for_callbacks(tmp_path):
@@ -289,7 +302,7 @@ def test_transport_error_states_are_exposed_as_reconnecting(tmp_path):
     assert [call[1]["$set"]["status"] for call in calls] == ["RECONNECTING", "RECONNECTING"]
 
 
-def test_scheduled_budget_is_cumulative_across_reconnected_sessions(tmp_path):
+def test_scheduled_budget_is_cumulative_across_reconnected_sessions(tmp_path, mock_reservation_transaction):
     async def scenario():
         runtime = runtime_for_callbacks(tmp_path)
         runtime.task["scheduledCommands"] = [{"id": "repeat", "totalExecutions": 2}]
@@ -297,7 +310,7 @@ def test_scheduled_budget_is_cumulative_across_reconnected_sessions(tmp_path):
         runtime.pending_executions = {}
         runtime.repo.db.budgets = BudgetCollection()
         runtime.repo.db.commands = InsertCollection()
-        runtime.repo.db.tasks.find_one = AsyncMock(return_value=runtime.task)
+        runtime.repo.db.tasks = ReservationTaskCollection(runtime.task)
         detail = {"taskId": "task-a", "runId": "run-a"}
         first = await runtime.reserve("repeat", detail | {"sessionId": "session-one", "execution": 1})
         runtime.collector = SimpleNamespace(session_id="session-two")

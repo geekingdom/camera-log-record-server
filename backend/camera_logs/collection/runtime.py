@@ -19,8 +19,8 @@ from pymongo import ReturnDocument
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
+from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
-from camera_logs.common.models import new_id
 from camera_logs.common.ownership import OwnershipLost, owner_filter
 
 logger = logging.getLogger(__name__)
@@ -227,21 +227,16 @@ class SessionRuntime:
                 or session_id != collector.session_id or details.get("taskId") != self.task["id"]
                 or details.get("runId") != self.task["runId"]):
             return False
-        current = await self.repo.db.tasks.find_one({**owner_filter(self.task), "sessionId": session_id,
-                                                    "status": "COLLECTING", "desiredState": "RUNNING"})
-        if current is None or self.collector is not collector or self.stopping or getattr(self, "retired", False):
+        # 多数确认完成前禁止发送；取消或提交未知不退回预算，也不补建执行记录。
+        try:
+            execution = await reserve_scheduled(self.repo, self.task, command_id, session_id)
+        except ReservationUncertain as error:
+            # 发送器捕获连接类异常并按固定 ID 写 UNKNOWN，实际未提交时更新为空操作。
+            self.pending_executions[(session_id, command_id)] = error.execution_id
+            logger.exception("定时命令预留未确认 task=%s command=%s", self.task["id"], command_id)
+            raise
+        if execution is None:
             return False
-        command = next(c for c in self.task["scheduledCommands"] if c["id"] == command_id)
-        budget_id = f'{self.task["runId"]}:{command_id}'
-        await self.repo.db.budgets.update_one({"_id": budget_id}, {"$setOnInsert": {"attempts": 0}}, upsert=True)
-        budget = await self.repo.db.budgets.find_one_and_update({"_id": budget_id, "attempts": {"$lt": command["totalExecutions"]}},
-            {"$inc": {"attempts": 1}}, return_document=ReturnDocument.AFTER)
-        if not budget:
-            return False
-        execution = {"id": new_id(), "taskId": self.task["id"], "runId": self.task["runId"],
-            "sessionId": session_id, "commandId": command_id, "kind": "SCHEDULED",
-            "attempt": budget["attempts"], "status": "SENDING", "createdAt": now()}
-        await self.repo.db.commands.insert_one(execution)
         self.pending_executions[(session_id, command_id)] = execution["id"]
         return True
 
@@ -250,12 +245,15 @@ class SessionRuntime:
         if details.get("taskId") != self.task["id"] or details.get("runId") != self.task["runId"]:
             return
         session_id = details.get("sessionId")
-        identifier = self.pending_executions.pop((session_id, command_id), None)
+        key = (session_id, command_id)
+        identifier = self.pending_executions.get(key)
         if identifier:
             await self.repo.db.commands.update_one({"id": identifier, "taskId": self.task["id"],
                 "runId": self.task["runId"], "sessionId": session_id, "commandId": command_id,
                 "kind": "SCHEDULED", "status": "SENDING"},
                 {"$set": {"status": status, "completedAt": now()}})
+            if self.pending_executions.get(key) == identifier:
+                self.pending_executions.pop(key, None)
 
     async def manual(self, document):
         """只在命令绑定的会话发送；已过期会话取消，进入发送后异常记为未知。"""

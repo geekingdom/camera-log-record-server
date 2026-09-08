@@ -70,6 +70,8 @@ jobs:
         run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_isolation_transaction.py
       - name: 验证调度取消和租约接管的事务一致性
         run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_scheduler_transaction.py
+      - name: 验证定时预算与执行记录事务一致性
+        run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_command_reservation.py
       - name: 验证真实数据库日志目录尾部水位
         run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_catalog_watermarks.py
       - name: 验证多路真实协议分卷与归档完整性

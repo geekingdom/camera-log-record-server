@@ -8,13 +8,17 @@ from camera_logs.collection.collector import Collector
 from test_collector import FakeConnection
 from test_manual_command_ownership import runtime_and_command
 
+pytestmark = pytest.mark.usefixtures("mock_reservation_transaction")
+
 DETAIL = {"taskId": "task", "runId": "run", "sessionId": "session"}
 
 
 async def scheduled_runtime(tmp_path):
     """复用隔离数据库，配置两次定时预算且不建立设备连接。"""
     runtime, _ = await runtime_and_command(tmp_path)
-    runtime.task["scheduledCommands"] = [{"id": "periodic", "totalExecutions": 2}]
+    commands = [{"id": "periodic", "totalExecutions": 2}]
+    runtime.task["scheduledCommands"] = commands
+    await runtime.repo.db.tasks.update_one({"id": "task"}, {"$set": {"scheduledCommands": commands}})
     runtime.pending_executions = {}
     return runtime
 
@@ -59,6 +63,18 @@ async def test_old_session_callback_cannot_reserve_new_session_budget(tmp_path):
     runtime = await scheduled_runtime(tmp_path)
     assert await runtime.reserve("periodic", DETAIL | {"sessionId": "old"}) is False
     assert await runtime.repo.db.budgets.count_documents({}) == 0
+
+
+async def test_scheduled_budget_stops_at_configured_execution_limit(tmp_path):
+    """同一会话反复预留只能创建配置次数内的执行记录，预算不会越界。"""
+    runtime = await scheduled_runtime(tmp_path)
+
+    results = [await runtime.reserve("periodic", DETAIL) for _ in range(3)]
+
+    budget = await runtime.repo.db.budgets.find_one({"_id": "run:periodic"})
+    assert results == [True, True, False]
+    assert budget["attempts"] == 2
+    assert await runtime.repo.db.commands.count_documents({"kind": "SCHEDULED"}) == 2
 
 
 @pytest.mark.parametrize("change", [{"taskId": "other"}, {"runId": "other"}])

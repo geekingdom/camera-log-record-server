@@ -11,3 +11,13 @@ def mock_claim_transaction(monkeypatch):
         return await callback(None)
 
     monkeypatch.setattr("camera_logs.tasks.claim.claim_transaction", run_callback)
+
+
+@pytest.fixture
+def mock_reservation_transaction(monkeypatch):
+    """以空会话执行定时预留回调，仅供 MongoMock 验证预算和执行记录语义。"""
+    async def run_callback(_repo, callback):
+        """真实 Mongo 的预算扣减和执行记录回滚由独立验证脚本覆盖。"""
+        return await callback(None)
+
+    monkeypatch.setattr("camera_logs.commands.reservation.reservation_transaction", run_callback)
