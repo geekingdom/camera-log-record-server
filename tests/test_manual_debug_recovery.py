@@ -1,11 +1,10 @@
-"""手动调试恢复回归：阻断后只允许新的 debug 请求主动恢复命令通道。"""
+"""手动调试恢复回归：普通命令恢复通道后，新的 debug 仍可独立执行。"""
 
 import asyncio
 import base64
 import re
 
-import pytest
-from camera_logs.collection.collector import Collector, CommandChannelBlocked
+from camera_logs.collection.collector import Collector
 
 CHALLENGE = base64.b64encode(b"x" * 261).decode()
 PASSWORD = "synthetic-debug-password"
@@ -79,8 +78,8 @@ def test_blocked_manual_debug_recovers_channel_without_replaying_password_or_los
             on_log=lambda chunk: logs.append(chunk.data),
         )
         await collector.start()
-        with pytest.raises(CommandChannelBlocked):
-            await collector.enqueue_manual("show status")
+        ordinary = await collector.enqueue_manual("show status")
+        assert collector.command_status(ordinary) == "SENT"
         await connection.received.put(b"continuous raw log\r\n")
         await asyncio.sleep(0.12)
         command_id = await collector.enqueue_manual("debug", timeout_seconds=0.2)
@@ -92,7 +91,7 @@ def test_blocked_manual_debug_recovers_channel_without_replaying_password_or_los
 
     assert sent == [
         b"ls\n", b"debug\n", (PASSWORD + "\n").encode(), b"\x03",
-        b"\x03", b"ls\n", b"debug\n", (PASSWORD + "\n").encode(),
+        b"\x03", b"ls\n", b"show status\n", b"debug\n", (PASSWORD + "\n").encode(),
     ]
     assert password_calls == 2
     assert status == "SENT"

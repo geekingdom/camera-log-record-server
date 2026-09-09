@@ -7,40 +7,20 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from camera_logs.common.write_metrics import WriteLatency
 from camera_logs.logs.storage import HourlyWriter
 
+from .contracts import AsyncConnection, Callback, LogChunk
+from .contracts import call_callback as _call
 from .line_prefix import LinePrefixer
 from .psh_dialogue import PshDialogue, PshSwitchError
 from .scheduled_supervision import supervise_scheduled
-
-
-class AsyncConnection(Protocol):
-    async def read(self, size: int = 65536) -> bytes: ...
-    async def write(self, data: bytes) -> None: ...
-    async def close(self) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class LogChunk:
-    task_id: str
-    run_id: str
-    session_id: str
-    sequence: int
-    data: bytes
-    offset: int
-    path: str
-
-
-Callback = Callable[..., Awaitable[Any] | Any]
 
 
 class BudgetExhausted(RuntimeError):
@@ -49,13 +29,6 @@ class BudgetExhausted(RuntimeError):
 
 class CommandChannelBlocked(RuntimeError):
     """PSH 失败后的恢复未确认，禁止把普通命令写入可能仍等待口令的设备。"""
-
-
-async def _call(callback: Callback | None, *args: Any) -> Any:
-    if callback is None:
-        return None
-    value = callback(*args)
-    return await value if inspect.isawaitable(value) else value
 
 
 class Collector:
@@ -173,10 +146,8 @@ class Collector:
         """将人工命令加入唯一发送队列；提示符和发送后延时都在本会话内串行完成。"""
         if not command or not command.strip() or self._initializing or not self._accepting_commands or self._connection is None:
             raise RuntimeError("collector is not accepting manual commands")
-        # 通道阻断时只允许精确的后续 debug 进入同一发送队列，由 sender 先无密码
-        # 恢复并确认 shell，再执行这一次新握手；普通命令仍不得绕过阻断。
-        if self._command_blocked and command.strip() != "debug":
-            raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
+        # 普通命令也进入唯一发送队列，由 sender 在需要时重新确认 shell；
+        # 首次 debug 恢复失败不能在入队处永久锁住后续命令。
         command_id = str(uuid.uuid4())
         self._command_status[command_id] = "QUEUED"
         await self._enqueue(
@@ -231,12 +202,11 @@ class Collector:
                     continue
                 if self._connection is None or self._connection_closed or not self._accepting_commands:
                     raise ConnectionError("connection closed")
-                if self._command_blocked and command.strip() != "debug":
-                    raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
                 if self._command_blocked:
-                    # 后续 debug 先走无密码恢复入口，成功后才允许本次握手与预算占用。
+                    # 每个后续命令都可重新确认通道，不重试前次 debug 或口令。
+                    # 未回到 shell 时本次仍未进入发送阶段，定时预算必须保留。
                     if not await self._debug.recover_command_channel(self._write_debug, newline, timeout_seconds):
-                        raise PshSwitchError("PSH 调试恢复未确认，本次 debug 未执行")
+                        raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
                     self._command_blocked = False
                 # 预算在真正写 socket 前才占用，恢复未确认的命令不能虚耗执行次数。
                 if before_send and not await _call(before_send):
@@ -283,7 +253,8 @@ class Collector:
     async def _scheduled_loop(self, position: int, item: Mapping[str, Any]) -> None:
         total, interval = int(item["totalExecutions"]), float(item["intervalSeconds"])
         command_id = str(item.get("id") or f"scheduled-{position}")
-        for execution in range(total):
+        execution = 0
+        while execution < total:
             await asyncio.sleep(interval)
             if self._closed.is_set():
                 return
@@ -302,13 +273,15 @@ class Collector:
                     timeout_seconds=float(item.get("timeoutSeconds", 30)),
                     before_send=before_send,
                 )
+                execution += 1
                 await _call(self._update, command_id, "SENT", detail)
             except BudgetExhausted:
                 return
             except CommandChannelBlocked:
-                # 通道阻断发生在预算占用前，本次没有设备写入或持久化执行记录。
-                return
+                # 未进入业务发送阶段，不消耗次数；等待完整间隔后重新确认通道。
+                continue
             except PshSwitchError as error:
+                execution += 1
                 await _call(
                     self._update,
                     command_id,

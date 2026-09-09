@@ -7,11 +7,16 @@ import time
 from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from camera_logs.collection.collector import LogChunk
 from camera_logs.collection.runtime import SessionRuntime
+from camera_logs.common.config import Settings
+from camera_logs.common.database import Repository
 from camera_logs.logs.storage import HourArchive
+from cryptography.fernet import Fernet
+from mongomock_motor import AsyncMongoMockClient
 
 
 class FakeCollection:
@@ -322,6 +327,87 @@ def test_scheduled_budget_is_cumulative_across_reconnected_sessions(tmp_path, mo
     assert (first, second, third) == (True, True, False)
     assert [record["attempt"] for record in executions] == [1, 2]
     assert [record["sessionId"] for record in executions] == ["session-one", "session-two"]
+
+
+async def test_default_idle_timeout_closes_before_reconnect_and_replays_initial_commands(tmp_path, monkeypatch):
+    """默认十秒无设备输出时，旧会话关闭完成后才创建新会话并重放初始化命令。"""
+    class Connection:
+        def __init__(self, number, order):
+            self.number, self.order = number, order
+            self.created_at = time.monotonic()
+            self.received = asyncio.Queue()
+            self.sent = []
+            self.close_count = 0
+            self.closed_at = None
+            self.initial_sent = asyncio.Event()
+
+        async def read(self, _size=65536):
+            value = await self.received.get()
+            return value or b""
+
+        async def write(self, data):
+            self.sent.append(data)
+            if data == b"initialise\n":
+                self.initial_sent.set()
+
+        async def close(self):
+            self.close_count += 1
+            self.closed_at = time.monotonic()
+            self.order.append(f"close-{self.number}")
+            self.received.put_nowait(None)
+
+    settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                        node_id="idle-node", start_background=False)
+    repo = Repository(AsyncMongoMockClient().camera_logs, settings)
+    await repo.initialize()
+    task = {
+        "id": "idle-task", "runId": "idle-run", "nodeId": "idle-node", "generation": 1,
+        "status": "PENDING", "desiredState": "RUNNING", "protocol": "SSH", "ip": "192.0.2.44",
+        "port": 22, "passwordEncrypted": repo.encrypt(""), "storageIdentity": "idledevice",
+        "initialCommands": [{"command": "initialise"}], "scheduledCommands": [],
+    }
+    await repo.db.tasks.insert_one(task.copy())
+    order, connections, reconnected = [], [], asyncio.Event()
+
+    async def factory(_task):
+        number = len(connections) + 1
+        order.append(f"factory-{number}")
+        connection = Connection(number, order)
+        connections.append(connection)
+        if number == 2:
+            reconnected.set()
+        return connection
+
+    # 保留生产默认 10 秒空闲阈值，仅消除重连抖动使测试时间上界稳定。
+    monkeypatch.setattr("random.random", lambda: 0)
+    runtime = SessionRuntime(repo, task, connection_factory=AsyncMock(side_effect=factory))
+    observed, collecting_twice = [], asyncio.Event()
+    original_on_state = runtime.on_state
+
+    async def on_state(state, details):
+        observed.append((state, details.get("sessionId")))
+        await original_on_state(state, details)
+        if state == "COLLECTING" and len([item for item in observed if item[0] == "COLLECTING"]) == 2:
+            collecting_twice.set()
+
+    runtime.on_state = on_state
+    try:
+        await asyncio.wait_for(reconnected.wait(), timeout=13)
+        await asyncio.wait_for(connections[1].initial_sent.wait(), timeout=1)
+        await asyncio.wait_for(collecting_twice.wait(), timeout=1)
+        collecting_sessions = [session_id for state, session_id in observed if state == "COLLECTING"]
+        events = [item async for item in repo.db.events.find({"taskId": task["id"]})]
+        assert order[:3] == ["factory-1", "close-1", "factory-2"]
+        assert connections[0].close_count == 1
+        assert connections[0].closed_at - connections[0].created_at >= 10
+        assert [connection.sent for connection in connections] == [[b"initialise\n"], [b"initialise\n"]]
+        assert len(collecting_sessions) == 2 and len(set(collecting_sessions)) == 2
+        assert "IDLE_TIMEOUT" in [state for state, _session_id in observed]
+        assert "CONNECTION_GAP" in [event["type"] for event in events]
+    finally:
+        await runtime.stop()
+    assert connections[1].close_count == 1
+    assert len(connections) == 2
 
 
 def test_cancelled_runtime_task_does_not_raise_while_worker_releases_it(tmp_path):

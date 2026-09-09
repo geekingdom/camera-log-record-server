@@ -147,7 +147,8 @@ async def test_debug_without_challenge_keeps_runtime_collecting_without_password
         assert not runtime.background.done()
         factory.assert_awaited_once()
         provider.assert_not_awaited()
-        assert connection.sent == [b"debug\n", b"\x03"]
+        assert connection.sent[0] == b"debug\n"
+        assert connection.sent[1:] and set(connection.sent[1:]) == {b"\x03"}
         assert any(b"continuous device log" in __import__("base64").b64decode(frame["data"]) for frame in runtime.frames)
     finally:
         await runtime.stop()

@@ -2,32 +2,29 @@
 // 根协调层只保存会话、页签和列表数据；具体编辑器与业务动作下沉到 feature 目录。
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import {
-  KeyRound,
   RefreshCw,
   Terminal,
   Plus,
   Radio,
   FileCode2,
   Server,
-  LogOut,
   Search,
-  ChevronRight,
-  BookOpen,
   ShieldCheck,
   ScrollText,
   Settings2,
-  PanelLeftClose,
-  PanelLeftOpen,
   HardDrive,
 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
-import { confirmAction } from "../shared/confirm";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
-import { api, authApi, clearToken, type SessionUser } from "../shared/api";
+import { api } from "../shared/api";
 import type { Node, Resource, Task, Template } from "../shared/types";
 import { taskStatusLabels } from "../features/tasks/taskStatus";
 import AsyncView from "../shared/AsyncView.vue";
 import { permissionKey } from "../shared/permissions";
+import LoginPanel from "../features/auth/LoginPanel.vue";
+import PasswordChangeDialog from "../features/auth/PasswordChangeDialog.vue";
+import { usePlatformSession } from "../features/auth/usePlatformSession";
+import AppNavigation from "./AppNavigation.vue";
 
 const loadTaskOverview = () => import("../features/tasks/TaskOverview.vue");
 const loadTaskList = () => import("../features/tasks/TaskList.vue");
@@ -78,13 +75,43 @@ const templatePage = ref(1);
 const selectedWorkspace = ref("config");
 const selectedLogTask = ref("");
 const activeTab = ref("resources"),
-  authenticated = ref(false),
-  busy = ref(false);
-const user = ref<SessionUser>();
-const loginForm = ref({ username: "", password: "" });
-const passwordForm = ref({ current: "", next: "" });
-const passwordOpen = ref(false);
-const passwordSaving = ref(false);
+  taskEditorOpen = ref(false),
+  templateEditorOpen = ref(false);
+const {
+  authenticated,
+  busy,
+  user,
+  passwordOpen,
+  passwordSaving,
+  generation: sessionGeneration,
+  login,
+  logout,
+  changePassword,
+  start: startSession,
+  stop: stopSession,
+} = usePlatformSession({
+  loadInitial: async (sessionUser) => {
+    await Promise.all([
+      hasScope("tasks:read") && loadTasks(),
+      hasScope("templates:read") && loadTemplates(),
+      sessionUser.isAdmin && loadNodes(),
+    ]);
+  },
+  clearWorkspace: () => {
+    ++taskGeneration;
+    tasks.value = [];
+    templates.value = [];
+    nodes.value = [];
+    taskEditorOpen.value = false;
+    templateEditorOpen.value = false;
+    selectedTemplate.value = undefined;
+    selectedResource.value = undefined;
+    selectedTask.value = undefined;
+    selectedLogTask.value = "";
+    activeTab.value = "resources";
+  },
+  refreshWorkspace: () => refresh(),
+});
 const hasScope = (scope?: string) =>
   !scope ||
   Boolean(
@@ -119,12 +146,9 @@ const taskSearch = ref(""),
   taskStatus = ref("");
 const selectedTask = ref<Task>(),
   selectedResource = ref<Resource>(),
-  selectedTemplate = ref<Template>(),
-  taskEditorOpen = ref(false),
-  templateEditorOpen = ref(false);
+  selectedTemplate = ref<Template>();
 const resourceWorkspace = ref<InstanceType<typeof AsyncView>>();
 let taskGeneration = 0;
-let sessionGeneration = 0;
 const error = (value: unknown) =>
   ElMessage.error(value instanceof Error ? value.message : "请求失败");
 async function loadTasks() {
@@ -142,12 +166,12 @@ async function loadTasks() {
 }
 async function loadTemplates() {
   if (!hasScope("templates:read")) return;
-  const currentSession = sessionGeneration;
+  const currentSession = sessionGeneration.value;
   const requestedPage = templatePage.value;
   const data = await api.templates(requestedPage, 100);
   if (
     requestedPage !== templatePage.value ||
-    currentSession !== sessionGeneration
+    currentSession !== sessionGeneration.value
   )
     return;
   templates.value = data.items;
@@ -155,9 +179,9 @@ async function loadTemplates() {
 }
 async function loadNodes() {
   if (!user.value?.isAdmin) return;
-  const currentSession = sessionGeneration;
+  const currentSession = sessionGeneration.value;
   const data = await api.nodes();
-  if (currentSession !== sessionGeneration) return;
+  if (currentSession !== sessionGeneration.value) return;
   nodes.value = data.items;
   totals.value.nodes = data.total;
 }
@@ -176,92 +200,6 @@ async function refresh(quiet = false) {
     if (!quiet) error(value);
   } finally {
     if (!quiet) busy.value = false;
-  }
-}
-async function login() {
-  if (!loginForm.value.username.trim() || !loginForm.value.password)
-    return ElMessage.warning("请输入用户名和密码");
-  busy.value = true;
-  const current = ++sessionGeneration;
-  try {
-    const loggedIn = await authApi.login(
-      loginForm.value.username.trim(),
-      loginForm.value.password,
-    );
-    if (current !== sessionGeneration) return;
-    user.value = loggedIn.user;
-    loginForm.value.password = "";
-    passwordOpen.value = user.value.mustChangePassword;
-    if (!user.value.mustChangePassword)
-      await Promise.all([
-        hasScope("tasks:read") && loadTasks(),
-        hasScope("templates:read") && loadTemplates(),
-        user.value.isAdmin && loadNodes(),
-      ]);
-    if (current === sessionGeneration) authenticated.value = true;
-  } catch (value) {
-    authenticated.value = false;
-    error(value);
-  } finally {
-    busy.value = false;
-  }
-}
-async function logout() {
-  ++sessionGeneration;
-  ++taskGeneration;
-  authenticated.value = false;
-  user.value = undefined;
-  passwordOpen.value = false;
-  passwordForm.value = { current: "", next: "" };
-  taskEditorOpen.value = false;
-  templateEditorOpen.value = false;
-  selectedTemplate.value = undefined;
-  clearToken();
-  try {
-    await authApi.logout();
-  } catch {
-    /* 会话已失效时仍完成本地退出。 */
-  }
-  clearToken();
-  tasks.value = [];
-  templates.value = [];
-  nodes.value = [];
-  taskEditorOpen.value = false;
-  templateEditorOpen.value = false;
-  selectedResource.value = undefined;
-  selectedTask.value = undefined;
-  selectedLogTask.value = "";
-  activeTab.value = "resources";
-}
-async function changePassword() {
-  if (passwordSaving.value) return;
-  if (
-    passwordForm.value.next.length < 12 ||
-    passwordForm.value.next.length > 128
-  )
-    return ElMessage.warning("新密码长度须为 12 至 128 位");
-  if (
-    !(await confirmAction(
-      "确认修改当前账号密码并使其他登录会话失效？",
-      "确认修改密码",
-    ))
-  )
-    return;
-  passwordSaving.value = true;
-  try {
-    user.value = (
-      await authApi.password(
-        passwordForm.value.current,
-        passwordForm.value.next,
-      )
-    ).user;
-    passwordForm.value = { current: "", next: "" };
-    passwordOpen.value = false;
-    await refresh();
-  } catch (value) {
-    error(value);
-  } finally {
-    passwordSaving.value = false;
   }
 }
 function createTask() {
@@ -315,31 +253,12 @@ watch([page, pageSize], () => void refresh());
 watch(templatePage, () => void loadTemplates().catch(error));
 let timer: ReturnType<typeof setInterval>;
 onMounted(() => {
-  const current = ++sessionGeneration;
-  const restore = async () => {
-    try {
-      const restored = await authApi.me();
-      if (current !== sessionGeneration) return;
-      user.value = restored.user;
-      authenticated.value = true;
-      passwordOpen.value = user.value.mustChangePassword;
-      if (!user.value.mustChangePassword)
-        await Promise.all([
-          hasScope("tasks:read") && loadTasks(),
-          hasScope("templates:read") && loadTemplates(),
-          user.value.isAdmin && loadNodes(),
-        ]);
-    } catch {
-      clearToken();
-    }
-  };
-  void restore();
-  window.addEventListener("auth-required", logout);
+  startSession();
   timer = setInterval(() => void refresh(true), 5000);
 });
 onBeforeUnmount(() => {
   clearInterval(timer);
-  window.removeEventListener("auth-required", logout);
+  stopSession();
 });
 </script>
 <template>
@@ -351,94 +270,19 @@ onBeforeUnmount(() => {
         'sidebar-collapsed': sidebarCollapsed,
       }"
     >
-      <aside v-if="authenticated" class="sidebar">
-        <div class="sidebar-brand">
-          <span class="brand-mark"><Terminal :size="23" /></span>
-          <div><strong>设备日志服务</strong><small>LOG RECORD</small></div>
-        </div>
-        <div class="nav-caption">工作空间</div>
-        <nav role="tablist" aria-label="工作空间导航" class="side-nav">
-          <button
-            v-for="item in visibleNavigation"
-            :key="item.key"
-            role="tab"
-            :aria-label="item.label"
-            :title="sidebarCollapsed ? item.label : undefined"
-            :aria-selected="activeTab === item.key"
-            :class="{ active: activeTab === item.key }"
-            @click="navigate(item.key)"
-          >
-            <component :is="item.icon" :size="18" /><span>{{ item.label }}</span
-            ><ChevronRight v-if="activeTab === item.key" :size="14" />
-          </button>
-        </nav>
-        <div class="sidebar-footer">
-          <a
-            href="https://github.com/geekingdom/camera-log-record-server/blob/main/docs/api.md"
-            target="_blank"
-            rel="noopener"
-            ><BookOpen :size="16" /> API 文档</a
-          ><span><i /> 已连接控制台</span>
-        </div>
-      </aside>
-      <div class="main-column">
-        <header class="topbar">
-          <div v-if="authenticated" class="breadcrumb">
-            <el-tooltip
-              :content="sidebarCollapsed ? '展开导航栏' : '折叠导航栏'"
-              ><el-button
-                text
-                :icon="sidebarCollapsed ? PanelLeftOpen : PanelLeftClose"
-                :aria-label="sidebarCollapsed ? '展开导航栏' : '折叠导航栏'"
-                :aria-expanded="!sidebarCollapsed"
-                @click="toggleSidebar" /></el-tooltip
-            ><span>工作空间</span><ChevronRight :size="14" /><strong>{{
-              navigation.find((item) => item.key === activeTab)?.label
-            }}</strong>
-          </div>
-          <div v-else class="brand">
-            <Terminal :size="22" /><span>设备日志服务</span>
-          </div>
-          <div v-if="authenticated" class="topbar-actions">
-            <span class="refresh-time">{{ user?.displayName }}</span
-            ><span class="refresh-time" v-if="lastUpdated"
-              >任务更新 {{ lastUpdated }}</span
-            ><el-tooltip content="修改密码"
-              ><el-button
-                text
-                :icon="KeyRound"
-                aria-label="修改密码"
-                @click="passwordOpen = true" /></el-tooltip
-            ><el-tooltip content="退出控制台"
-              ><el-button text :icon="LogOut" aria-label="退出" @click="logout"
-            /></el-tooltip>
-          </div>
-        </header>
-        <section v-if="!authenticated" class="login-state">
-          <div class="login-symbol"><Terminal :size="30" /></div>
-          <h1>设备日志服务</h1>
-          <form class="auth" @submit.prevent="login">
-            <el-input
-              v-model="loginForm.username"
-              placeholder="用户名"
-              aria-label="用户名"
-              autocomplete="username"
-            /><el-input
-              v-model="loginForm.password"
-              type="password"
-              placeholder="密码"
-              aria-label="密码"
-              autocomplete="current-password"
-              show-password
-            /><el-button
-              native-type="submit"
-              type="primary"
-              :icon="KeyRound"
-              :loading="busy"
-              >登录</el-button
-            >
-          </form>
-        </section>
+      <AppNavigation
+        :authenticated="authenticated"
+        :items="visibleNavigation"
+        :active-tab="activeTab"
+        :sidebar-collapsed="sidebarCollapsed"
+        :display-name="user?.displayName"
+        :last-updated="lastUpdated"
+        @navigate="navigate"
+        @toggle-sidebar="toggleSidebar"
+        @open-password="passwordOpen = true"
+        @logout="logout"
+      >
+        <LoginPanel v-if="!authenticated" :busy="busy" :login="login" />
         <section v-else-if="!user?.mustChangePassword" class="workspace">
           <el-empty
             v-if="activeTab === 'empty'"
@@ -607,7 +451,7 @@ onBeforeUnmount(() => {
         <footer v-if="authenticated" class="workspace-footer">
           <span>设备日志记录平台</span><span>SSH / Telnet</span>
         </footer>
-      </div>
+      </AppNavigation>
     </main>
     <AsyncView
       v-if="taskEditorOpen"
@@ -639,42 +483,12 @@ onBeforeUnmount(() => {
       }"
     />
   </el-config-provider>
-  <el-dialog
-    v-model="passwordOpen"
-    title="修改密码"
-    width="min(440px,94vw)"
-    :close-on-click-modal="false"
-    :close-on-press-escape="false"
-    :show-close="false"
-    ><el-form label-position="top"
-      ><el-form-item label="当前密码"
-        ><el-input
-          v-model="passwordForm.current"
-          type="password"
-          show-password
-          autocomplete="current-password" /></el-form-item
-      ><el-form-item label="新密码"
-        ><el-input
-          v-model="passwordForm.next"
-          type="password"
-          show-password
-          autocomplete="new-password" /></el-form-item></el-form
-    ><template #footer
-      ><el-button v-if="user?.mustChangePassword" @click="logout"
-        >退出登录</el-button
-      ><el-button
-        v-else
-        @click="
-          passwordOpen = false;
-          passwordForm = { current: '', next: '' };
-        "
-        >取消</el-button
-      ><el-button
-        type="primary"
-        :loading="passwordSaving"
-        @click="changePassword"
-        >保存新密码</el-button
-      ></template
-    ></el-dialog
-  >
+  <PasswordChangeDialog
+    :open="passwordOpen"
+    :required="Boolean(user?.mustChangePassword)"
+    :saving="passwordSaving"
+    :change-password="changePassword"
+    @update:open="passwordOpen = $event"
+    @logout="logout"
+  />
 </template>
