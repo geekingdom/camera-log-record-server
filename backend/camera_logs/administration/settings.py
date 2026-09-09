@@ -9,11 +9,12 @@ from ipaddress import ip_address
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from camera_logs.administration.node_lifecycle import delete_node
 from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now
 from camera_logs.common.security import actor, authorize
@@ -56,10 +57,12 @@ class NodeRegistration(SettingsModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, value: str) -> str:
-        """仅允许无附加路径的 HTTPS 地址或环回开发 HTTP 地址。"""
+        """支持容器服务名和内网 HTTP(S) 公布地址，不把客户端白名单用于节点目标。"""
+        if any(character.isspace() or ord(character) < 32 for character in value):
+            raise ValueError("节点地址不能包含空白或控制字符")
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("节点地址必须是 HTTPS 或开发环境 HTTP 地址")
+            raise ValueError("节点地址必须是 HTTP 或 HTTPS 地址")
         try:
             port = parsed.port
         except ValueError as exc:
@@ -68,10 +71,14 @@ class NodeRegistration(SettingsModel):
             raise ValueError("节点地址端口必须在 1 到 65535 之间")
         if any(character.isspace() for character in parsed.hostname):
             raise ValueError("节点地址主机名不能包含空白字符")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
             raise ValueError("节点地址不得包含用户信息、查询参数、片段或路径")
-        if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
-            raise ValueError("HTTP 节点地址仅允许 localhost 或环回 IP 的开发环境")
+        try:
+            address = ip_address(parsed.hostname)
+        except ValueError:
+            address = None  # Docker 服务名与 DNS 名由实际部署网络解析。
+        if address is not None and address.is_unspecified:
+            raise ValueError("节点地址不能使用 0.0.0.0 或 :: 通配监听地址")
         return value.rstrip("/")
 
 
@@ -81,16 +88,6 @@ class NodeConfigPatch(SettingsModel):
     version: int = Field(ge=1, strict=True)
     capacity: int | None = Field(default=None, ge=1, le=100, strict=True)
     accepting: bool | None = None
-
-
-def _is_loopback_host(hostname: str) -> bool:
-    """识别 localhost 与 IP 环回地址，限制明文 HTTP 的开发用途。"""
-    if hostname.lower() == "localhost":
-        return True
-    try:
-        return ip_address(hostname).is_loopback
-    except ValueError:
-        return False
 
 
 def _reported_at(node: dict | None) -> object | None:
@@ -202,10 +199,11 @@ def install_settings_routes(app):
         configs = [item async for item in repo.db.node_configs.find({}).sort("id", 1)]
         heartbeats = {item["id"]: item async for item in repo.db.nodes.find({})}
         configured = {item["id"]: item for item in configs}
+        deleted = {item["id"] for item in configs if item.get("deletedAt")}
         items = [
             _public_node_config(configured[identifier], heartbeats.get(identifier))
             if identifier in configured else _public_discovered_node(heartbeats[identifier])
-            for identifier in sorted(configured.keys() | heartbeats.keys())
+            for identifier in sorted((configured.keys() | heartbeats.keys()) - deleted)
         ]
         return {"items": items}
 
@@ -219,14 +217,21 @@ def install_settings_routes(app):
 
         async def commit(session):
             """节点配置插入和登记审计共享事务会话，唯一索引冲突由路由保持原语义。"""
-            await repo.db.node_configs.insert_one(document, session=session)
+            previous = await repo.db.node_configs.find_one({"id": body.id}, session=session)
+            if previous and previous.get("deletedAt"):
+                document["version"] = previous["version"] + 1
+                await repo.db.node_configs.replace_one({"id": body.id}, document, session=session)
+                await repo.db.nodes.update_one({"id": body.id}, {"$unset": {"deletedAt": ""}}, session=session)
+            else:
+                await repo.db.node_configs.insert_one(document, session=session)
             return document
 
         try:
             await audited_mutation(repo, user["id"], "register_node", body.id, commit)
         except DuplicateKeyError as exc:
             raise HTTPException(409, "节点 ID 已登记") from exc
-        return _public_node_config(document, None)
+        heartbeat = await repo.db.nodes.find_one({"id": body.id})
+        return _public_node_config(document, heartbeat)
 
     @app.patch("/api/v1/admin/nodes/{node_id}")
     async def update_node_config(node_id: str, body: NodeConfigPatch, request: Request, user: User):
@@ -238,17 +243,23 @@ def install_settings_routes(app):
         async def commit(session):
             """版本更新、未命中状态判断和审计均使用同一事务快照。"""
             document = await repo.db.node_configs.find_one_and_update(
-                {"id": node_id, "version": body.version},
+                {"id": node_id, "version": body.version, "deletedAt": None},
                 {"$set": changes, "$inc": {"version": 1}},
                 return_document=ReturnDocument.AFTER,
                 session=session,
             )
             if document:
                 return document
-            if await repo.db.node_configs.find_one({"id": node_id}, session=session):
+            if await repo.db.node_configs.find_one({"id": node_id, "deletedAt": None}, session=session):
                 raise HTTPException(409, "节点配置已被其他管理员修改，请刷新后重试")
             raise HTTPException(404, "节点尚未登记")
 
         document = await audited_mutation(repo, user["id"], "update_node_config", node_id, commit)
         heartbeat = await repo.db.nodes.find_one({"id": node_id})
         return _public_node_config(document, heartbeat)
+
+    @app.delete("/api/v1/admin/nodes/{node_id}", status_code=204)
+    async def remove_node(node_id: str, request: Request, user: User, version: int = Query(ge=0)):
+        """管理员删除空闲节点登记及发现项；保留节点地址和全部历史日志。"""
+        authorize(user, "admin")
+        await delete_node(request.app.state.repo, user["id"], node_id, version)

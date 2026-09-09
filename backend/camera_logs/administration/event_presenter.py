@@ -17,7 +17,7 @@ ACTION_SUMMARIES = {
     "confirm_node_isolation": "确认节点外部隔离",
     "login": "用户登录", "login_failed": "用户登录失败", "logout": "用户退出登录",
     "change_password": "修改账户密码", "create_user": "创建用户", "edit_user": "修改用户",
-    "delete_user": "删除用户", "register_node": "登记节点", "edit_node": "修改节点配置",
+    "delete_user": "删除用户", "register_node": "登记节点", "edit_node": "修改节点配置", "delete_node": "删除节点",
     "browser_download_authorization": "授权浏览器下载", "download_content": "下载日志内容",
     "live_subscribe": "订阅实时日志", "job_succeeded": "日志作业完成", "job_failed": "日志作业失败",
 }

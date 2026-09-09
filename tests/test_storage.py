@@ -9,6 +9,7 @@ import os
 import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from camera_logs.logs.compression import publish_hour_archive
@@ -22,6 +23,13 @@ def _metadata(path):
 def test_hourly_writer_requires_an_explicit_storage_identity(tmp_path):
     with pytest.raises(TypeError):
         HourlyWriter("task", "run", "session", tmp_path)
+
+
+def test_utc_server_evening_is_next_shanghai_archive_day():
+    """用户服务器 UTC 晚间时间应归入下一北京时间日期，不能按主机时区分桶。"""
+    instant = datetime(2026, 9, 9, 18, 30, 12, tzinfo=UTC)
+    hour = HourlyWriter._hour_of(instant, ZoneInfo("Asia/Shanghai"))
+    assert hour.isoformat() == "2026-09-10T02:00:00+08:00"
 
 
 async def test_shared_hour_directory_reuses_one_tar_and_keeps_indexes_outside(tmp_path):

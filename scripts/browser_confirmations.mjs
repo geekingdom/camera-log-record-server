@@ -49,7 +49,7 @@ await context.route("**/api/v1/**", async route => {
   if (method !== "GET") state.mutations.push({ method, path, payload });
   if (method === "GET" && path === "/api/v1/auth/me") return json(route, { user: administrator });
   if (method === "GET" && path === "/api/v1/tasks") return json(route, page(tasks));
-  if (method === "GET" && path.startsWith("/api/v1/tasks/") && path.endsWith("/log-hours")) return json(route, page([{ hourId: "hour-fixture", hour: timestamp, status: "READY", integrity: "VERIFIED", bytes: 10, archiveBytes: 5, files: [] }], 24));
+  if (method === "GET" && path.startsWith("/api/v1/tasks/") && path.endsWith("/log-hours")) return json(route, page([{ hourId: "hour-fixture", hour: "2026-09-09T18:00:00Z", status: "READY", integrity: "VERIFIED", bytes: 10, archiveBytes: 5, files: [] }], 24));
   if (method === "GET" && path.startsWith("/api/v1/tasks/")) return json(route, tasks.find(task => path.endsWith(task.id)) ?? tasks[0]);
   if (method === "POST" && /^\/api\/v1\/tasks\/[^/]+\/(start|stop|pause|resume)$/.test(path)) return json(route, {});
   if (method === "PATCH" && path.startsWith("/api/v1/tasks/")) return json(route, { ...tasks.find(task => path.endsWith(task.id)), ...payload });
@@ -63,6 +63,11 @@ await context.route("**/api/v1/**", async route => {
   if (method === "GET" && path === "/api/v1/admin/nodes") return json(route, { items: state.nodes });
   if (method === "POST" && path === "/api/v1/admin/nodes") return json(route, { ...payload, version: 1, registered: true, online: true, reportedAt: timestamp }, 201);
   if (method === "PATCH" && path.startsWith("/api/v1/admin/nodes/")) return json(route, { ...state.nodes[0], ...payload, version: state.nodes[0].version + 1 });
+  if (method === "DELETE" && path.startsWith("/api/v1/admin/nodes/")) {
+    assert.equal(new URL(request.url()).searchParams.get("version"), "1");
+    state.nodes = state.nodes.filter(node => !path.endsWith(node.id));
+    return route.fulfill({ status: 204 });
+  }
   if (method === "POST" && path === "/api/v1/downloads") return json(route, { id: "download-fixture" }, 201);
   if (method === "GET" && path === "/api/v1/downloads/download-fixture") return json(route, { id: "download-fixture", status: state.downloadCancelled ? "CANCELLED" : "RUNNING", progress: 30 });
   if (method === "DELETE" && path === "/api/v1/downloads/download-fixture") { state.downloadCancelled = true; return route.fulfill({ status: 204 }); }
@@ -156,6 +161,12 @@ try {
   await nodeEditor.waitFor();
   await cancelThenConfirm(() => ui.getByRole("button", { name: "保存配置", exact: true }).click(), "节点配置保存");
   await nodeEditor.waitFor({ state: "hidden" });
+  await ui.screenshot({ path: "output/playwright/node-settings-1440.png" });
+  await ui.setViewportSize({ width: 390, height: 844 });
+  await ui.screenshot({ path: "output/playwright/node-settings-390.png" });
+  await ui.setViewportSize({ width: 1440, height: 1000 });
+  await cancelThenConfirm(() => nodeRow.getByLabel("删除节点 edge-fixture").click(), "节点删除");
+  await nodeRow.waitFor({ state: "hidden" });
   await ui.getByRole("button", { name: "登记节点", exact: true }).click();
   const registration = ui.getByRole("dialog", { name: "登记节点" });
   await registration.getByLabel("节点 ID", { exact: true }).fill("new-edge");
@@ -167,6 +178,8 @@ try {
   await ui.getByRole("combobox", { name: "选择日志任务", exact: true }).click();
   await ui.getByRole("option", { name: /待启动任务/ }).click();
   await ui.getByRole("tab", { name: "小时归档与检索", exact: true }).click();
+  await ui.getByText("小时（北京时间 UTC+8）", { exact: true }).waitFor();
+  await ui.getByText("2026/9/10 02:00:00", { exact: true }).waitFor();
   await ui.getByText("hour-fixture", { exact: false }).waitFor().catch(() => ui.locator(".el-table__body tr").first().waitFor());
   await ui.locator(".el-table__body tr").first().locator(".el-checkbox").click();
   await ui.getByRole("button", { name: "下载选中小时", exact: true }).click();

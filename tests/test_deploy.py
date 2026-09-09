@@ -28,6 +28,8 @@ def test_deploy_environment_is_private_and_uses_distinct_random_credentials(tmp_
     assert values["ADMIN_USERNAME"] == "admin"
     assert values["ADMIN_PASSWORD"] == "asdf!234"
     assert values["SESSION_SECONDS"] == "28800" and values["SESSION_COOKIE_SECURE"] == "false"
+    assert values["COLLECTOR_NODE_ID"] == "compose-worker-1"
+    assert values["COLLECTOR_NODE_URL"] == "http://worker:8001"
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 

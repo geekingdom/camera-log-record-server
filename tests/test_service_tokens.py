@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 
+from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from test_api import client  # noqa: F401
 
@@ -52,3 +53,32 @@ def test_service_token_rejects_unknown_scope(client):  # noqa: F811
     })
 
     assert response.status_code == 422
+
+
+def test_token_creation_uses_audited_transaction(client, monkeypatch):  # noqa: F811
+    """创建令牌必须通过事务入口，不能先提交凭据后单独写审计。"""
+    original = audited_mutations.mutation_transaction
+    calls = []
+
+    async def tracked(repo, callback):
+        calls.append(True)
+        return await original(repo, callback)
+
+    monkeypatch.setattr(audited_mutations, "mutation_transaction", tracked)
+    response = client.post("/api/v1/service-tokens", json={
+        "name": "审计事务", "scopes": ["tasks:read"], "expiresInDays": 1,
+    })
+    assert response.status_code == 201
+    assert calls == [True]
+
+
+def test_repeated_revoke_has_one_transition_audit(client):  # noqa: F811
+    """撤销重试保持幂等，成功审计只表示实际发生的状态变化。"""
+    response = client.post("/api/v1/service-tokens", json={
+        "name": "撤销重试", "scopes": ["tasks:read"], "expiresInDays": 1,
+    })
+    identifier = response.json()["id"]
+    for _ in range(2):
+        assert client.delete(f"/api/v1/service-tokens/{identifier}").status_code == 204
+    assert client.portal.call(client.app.state.repo.db.audit.count_documents,
+                              {"action": "revoke_token", "targetId": identifier}) == 1

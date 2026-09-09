@@ -1,5 +1,7 @@
 # 历史记录入口
 
+- [节点管理与小时归档时区](2026-09-09-node-management-and-timezone.md)：HTTP节点登记、删除竞争、浏览器确认与时区证据。
+- [服务令牌审计事务](2026-09-09-service-token-audit.md)：创建撤销审计原子性与确认不明恢复。
 - [手动命令提交审计](2026-09-09-manual-submission-audit.md)：入队、幂等映射、审计事务与停止后重放。
 - [任务编辑与会话事务](2026-09-09-edit-and-session-transactions.md)：编辑、登录、退出、改密的数据库原子性与并发撤销验证。
 

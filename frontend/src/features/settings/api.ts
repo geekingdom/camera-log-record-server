@@ -38,6 +38,8 @@ export const settingsApi = {
       body: JSON.stringify(body),
     }),
   nodes: () => request<{ items: NodeConfig[] }>("/admin/nodes"),
+  deleteNode: (id: string, version: number) =>
+    request<void>(`/admin/nodes/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
   registerNode: (body: NodeRegistration) =>
     request<NodeConfig>("/admin/nodes", {
       method: "POST",

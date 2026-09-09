@@ -58,13 +58,16 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             if held is None:
                 raise SchedulerLeaseLost("调度租约在领取事务开始前已失效")
 
-        node = await db.nodes.find_one(
+        node = await db.nodes.find_one_and_update(
             {
                 "id": node_id,
                 "heartbeat": {"$gte": current_time - cutoff},
                 "diskPercent": {"$lt": 90},
                 "accepting": True,
+                "deletedAt": None,
             },
+            {"$inc": {"claimVersion": 1}},
+            return_document=ReturnDocument.AFTER,
             session=session,
         )
         if (

@@ -213,6 +213,8 @@ class Worker:
         accepting = (
             disk_percent < 90
             and config.get("accepting", True)
+            and not config.get("deletedAt")
+            and not reported.get("deletedAt")
             and not mismatch
             and not reported.get("isolated", False)
             and write_latency["writeLatencyMs"] <= WRITE_LATENCY_LIMIT_MS

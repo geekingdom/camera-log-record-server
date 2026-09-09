@@ -145,11 +145,13 @@ POST /api/v1/admin/nodes
 PATCH /api/v1/admin/nodes/{nodeId}
 ```
 
-登记请求包含 `id`、`url`、`capacity` 和可选的 `accepting`。`url` 仅允许 HTTPS，开发环境允许 `localhost` 或环回地址的 HTTP；不得包含用户信息、查询参数、片段或路径。更新节点仅接受 `version`、`capacity` 和 `accepting`，当前版本不提供已登记节点地址修改接口。节点列表会同时给出人工配置与 worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回，沿用原部署配置；登记后才由平台容量和准入设置约束。实际容量取平台配置、本机 `NODE_CAPACITY` 和 100 的最小值。
+登记请求包含 `id`、`url`、`capacity` 和可选的 `accepting`。`url` 支持 HTTP 和 HTTPS，包括 Docker 服务名、内网 IPv4/IPv6；不得包含用户信息、查询参数、片段、附加路径或通配监听地址。公布地址须从 API 所在容器或主机可达，且与同 ID worker 的上报地址一致。更新节点仅接受 `version`、`capacity` 和 `accepting`，当前版本不提供已登记节点地址修改接口。登记响应和节点列表会同时给出人工配置与 worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回，沿用原部署配置；登记后才由平台容量和准入设置约束。实际容量取平台配置、本机 `NODE_CAPACITY` 和 100 的最小值。登记不会启动 worker，也不能把不同 ID 的心跳合并。
 
 ## 服务账号与审计
 
-服务账号接口也要求 `admin`。创建响应中的 `token` 只返回这一次；后续列表只返回名称、作用域、任务范围、撤销状态和过期时间，不会返回明文或散列。撤销会立即使账号失效，但保留审计记录。
+`DELETE /api/v1/admin/nodes/{nodeId}?version={version}` 软删除节点；发现项版本为 0，已登记项携带当前版本。有采集归属、未结束运行或活动连接时返回 409。删除与调度领取在事务中串行化，配置删除、禁用准入和审计共同提交；不删除日志、文件目录和历史节点地址，也不停止操作系统中的 worker 服务。后续心跳不恢复该节点，管理员可用 POST 显式重新登记；旧版本删除请求不能删除恢复后的节点。
+
+服务账号接口也要求 `admin`。创建响应中的 `token` 只返回这一次；后续列表只返回名称、作用域、任务范围、撤销状态和过期时间，不会返回明文或散列。创建、撤销与操作审计共同提交，事务确认丢失时只读核对原凭据或撤销状态。重复撤销不追加成功状态审计，每次 HTTP 调用仍记录请求事件。明文响应完全丢失后无法从列表恢复，应核对并撤销该令牌后重新创建。
 
 ```http
 POST /api/v1/service-tokens

@@ -49,6 +49,7 @@ def create_environment(path: Path, component: str = "all") -> None:
         raise ValueError("未知部署组件")
     else:
         values.update(HOST_LOG_ROOT="worker-data", API_DATA_ROOT="api-data", FRONTEND_PORT="5173",
+                      COLLECTOR_NODE_ID="compose-worker-1", COLLECTOR_NODE_URL="http://worker:8001",
                       MONGO_DATA_1="mongo1-data", MONGO_DATA_2="mongo2-data", MONGO_DATA_3="mongo3-data")
     comments = {
         "HOST_LOG_ROOT": "可改为宿主机绝对路径：/srv/camera-logs/collector；设备日志在data/，运行日志在service-logs/。",
@@ -68,6 +69,8 @@ def create_environment(path: Path, component: str = "all") -> None:
         "API_PORT": "可修改：后端监听端口1-65535，与前端BACKEND_UPSTREAM端口一致。",
         "FRONTEND_PORT": "可修改：平台HTTP对外访问端口1-65535。",
         "NODE_ID": "必填：稳定唯一节点名，如collector-01；已有日志后不得随意改变。",
+        "COLLECTOR_NODE_ID": "完整部署内置采集节点的稳定ID；后台登记须使用此ID；.env.worker不会被完整部署读取。已有日志后勿改名。",
+        "COLLECTOR_NODE_URL": "完整部署保留http://worker:8001；API容器通过Docker服务名访问节点，不要改为127.0.0.1。",
         "NODE_URL": "必填：http://节点内网IP:8001，后端必须能访问，端口与NODE_PORT一致。",
         "NODE_PORT": "可修改：采集节点内部接口监听端口1-65535。",
         "RETENTION_DAYS": "可修改：默认保留天数；已保存后台配置时以后者为准。",
@@ -78,6 +81,10 @@ def create_environment(path: Path, component: str = "all") -> None:
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
         output.write("# 一键部署初始配置；含凭据，仅限本机管理员读取。\n")
         output.write(f"# 组件：{component}；各项含义和可修改示例见 deploy/config/{component}.env.example。\n")
+        if component == "all":
+            output.write("# 完整部署只读取本文件，已包含一个worker；独立.env.worker只供deploy-worker.sh使用。\n")
+        elif component == "worker":
+            output.write("# 仅用于额外独立节点；必须补齐下列原平台凭据和可达数据库地址，登记节点本身不会启动服务。\n")
         output.write("# 目录填绝对路径使用宿主机存储；保留默认名称使用 Docker 命名卷。\n")
         for key, value in values.items():
             if key in comments:

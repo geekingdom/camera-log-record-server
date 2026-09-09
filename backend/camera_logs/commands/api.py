@@ -1,16 +1,14 @@
 """提供手动命令、执行记录、节点视图和服务令牌的受权 API。"""
 
-import hashlib
-import secrets
-from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
 
 from camera_logs.commands.manual_submission import submit_manual
-from camera_logs.common.database import now, public
-from camera_logs.common.models import InitialCommand, TokenCreate, new_id
+from camera_logs.common.database import public
+from camera_logs.common.models import InitialCommand, TokenCreate
 from camera_logs.common.security import actor, authorize
+from camera_logs.users.service_tokens import create_service_token, revoke_service_token
 
 SERVICE_TOKEN_SCOPES = frozenset({
     "admin", "commands:send", "logs:download", "logs:read", "tasks:control",
@@ -47,7 +45,7 @@ def install_command_routes(app, repo, listing):
     async def nodes(user: User):
         """基础设施节点列表仅管理员可读取。"""
         authorize(user, "admin")
-        return await listing("nodes", {}, 1, 100, "heartbeat")
+        return await listing("nodes", {"deletedAt": None}, 1, 100, "heartbeat")
 
     @app.post("/api/v1/service-tokens", status_code=201)
     async def create_token(body: TokenCreate, user: User):
@@ -56,13 +54,7 @@ def install_command_routes(app, repo, listing):
         unknown_scopes = set(body.scopes) - SERVICE_TOKEN_SCOPES
         if unknown_scopes:
             raise HTTPException(422, f"存在不支持的权限：{', '.join(sorted(unknown_scopes))}")
-        token = secrets.token_urlsafe(32)
-        doc = {"id": new_id(), "name": body.name, "scopes": body.scopes, "taskIds": body.taskIds,
-               "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "revoked": False,
-               "expiresAt": now()+timedelta(days=body.expiresInDays), "createdAt": now()}
-        await repo().db.tokens.insert_one(doc)
-        await repo().audit(user["id"], "create_token", doc["id"])
-        return public(doc) | {"token": token}
+        return await create_service_token(repo(), user["id"], body)
 
     @app.get("/api/v1/service-tokens")
     async def service_tokens(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
@@ -74,8 +66,4 @@ def install_command_routes(app, repo, listing):
     async def revoke_token(identifier: str, user: User):
         """撤销服务令牌并追加审计，不删除历史令牌记录。"""
         authorize(user, "admin")
-        token = await repo().db.tokens.find_one({"id": identifier})
-        if token is None:
-            raise HTTPException(404, "服务令牌不存在")
-        await repo().db.tokens.update_one({"id": identifier}, {"$set": {"revoked": True}})
-        await repo().audit(user["id"], "revoke_token", identifier)
+        await revoke_service_token(repo(), user["id"], identifier)

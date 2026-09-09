@@ -106,4 +106,6 @@ docker compose --env-file .env --project-name camera-log-record-server --file de
 ```
 # HTTP/IP 访问更新
 
+节点保存报 HTTP 校验错误、`.env` 与 `.env.worker` 的使用区别、无心跳和目录共用排查，见 [节点部署排障](node-deployment-troubleshooting.md)。
+
 Docker与原生部署共用前端，均支持通过`http://服务器IP:端口`访问并操作。`crypto.randomUUID is not a function`已在前端统一幂等键生成器修复；已有Docker环境必须拉取代码后重新构建前端镜像，仅重启旧容器无效。完整部署使用原来的`deploy-all.sh`，独立前端使用`deploy-frontend.sh`，保留原配置文件参数。更新后强制刷新浏览器。

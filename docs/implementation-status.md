@@ -4,9 +4,11 @@
 
 ## 当前任务与恢复
 
-当前收尾：手动命令提交与审计事务已实现，本地后端全量 730 项、Ruff、真实副本集回滚/并发/未知提交验证通过，临时数据已删除。新增入口尚未加载本机 API，新增 CI 尚待运行；实现与限制见 R10/R26 和 [验证记录](history/2026-09-09-manual-submission-audit.md)。
+最新业务重点：修复服务器 Docker 节点 HTTP 登记失败，支持删除节点，并解释 UTC 服务器与上海小时归档的时差。已实现 HTTP(S) 登记、显式完整部署节点配置、空闲节点软删除/调度事务隔离/历史保留和北京时间标签；本地后端全量 736 项、前端 52 项/构建、真实 MongoDB 删除竞争/审计回滚及模拟浏览器 12 次确认操作通过。新增索引后定向 6 项通过。当前新增 Docker 登记实测 CI 待推送运行；未连接用户服务器，未更新本机 API/Worker。见 R29/R30 和 [本轮记录](history/2026-09-09-node-management-and-timezone.md)。
 
-最新业务重点：Docker和原生部署都须支持其他电脑通过普通HTTP服务器IP操作。`eb4e829`共用UUID修复已通过[Linux CI34338375626](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338375626)六个作业：后端729项、前端52项、Docker完整及独立部署、Ubuntu24.04原生首次/重跑/重启健康与清理均通过。`443c336`进一步将真实非loopback IPv4 Chrome验证纳入CI，[CI34338617932](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338617932)六个作业也全部成功。目标服务器仍需拉取并重新构建前端。以下请求记录404为先前已处理问题，不能替代当前任务。
+前一增量 `2607354` 的 [CI34339927183](https://github.com/geekingdom/camera-log-record-server/actions/runs/34339927183) 六个作业已全部成功，含真实手动命令审计事务验证。服务 Token 创建/撤销审计事务本轮已补齐，见 R26，不能继续列为未实现。
+
+已完成的访问兼容要求：Docker和原生部署均支持普通HTTP服务器IP操作。`eb4e829`共用UUID修复已通过[Linux CI34338375626](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338375626)六个作业。`443c336`将真实非loopback IPv4 Chrome验证纳入CI，[CI34338617932](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338617932)也全部成功。目标服务器仍需拉取并重新构建前端，不能以历史404问题替代最新节点需求。
 
 最新用户问题复核（2026-09-09 15:25 上海时间，工作区仍以 `59337d8` 为提交基线）：旧 API PID 49854 的 OpenAPI 中没有 `/api/v1/request-events`，访问日志在 `.local/service-logs/api/camera-logs.jsonl:2318` 记录请求 `6dd61839ad6b48f193c760193dbe5199` 于 15:25:30 返回 404、耗时 2.297ms。受控更新 API 至 PID 79958 后，审计、运行和请求三类事件接口均以管理员 Token 返回 200；Chrome 刷新请求记录后 404 消失并正常显示空列表。未导入旧文件访问日志，未改动真实业务数据。Worker PID 25871 未重启，34/35 的 `COLLECTING` 状态、run、session 和 generation=28 均保持不变。
 
@@ -51,11 +53,18 @@
 | R23 五类 Linux 部署、中文配置、自启动、重复执行保留配置与卷 | 根部署入口、`deploy/*.yml`、`mongo-host-user-init.sh`、`deploy_component.py`；组件后缀隔离项目；systemd 启用 Docker、常驻容器 `unless-stopped` | 本地部署回归 43 项；Linux CI 34324896916 实际完整部署两次及独立四组件部署/重跑/重启；返回 restartHealth、temporaryProjectsRemoved、temporaryDataRemoved 均 true | 未实际重启宿主机；裸机安装 Docker 和 systemd 启用分支为脚本检查；未验收其他发行版与多机部署 | 在目标服务器验收开机启动及真实多机网络；维护已有环境和数据 |
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
-| R26 平台访问记录、业务审计与凭据脱敏 | 任务编辑与用户会话事务已交付；新增手动命令入队与审计同事务，见 R10 | `175b938` 历史 Linux CI 通过；本轮 `verify_manual_submission.py` 真实副本集验证通过并已清理临时库/目录 | 通用`Repository.idem`、服务 Token 与其他作业审计仍需处理；socket与Cookie响应不属于数据库事务 | 继续其他作业审计及物理收尾，不重复实施已完成事务 |
+| R26 平台访问记录、业务审计与凭据脱敏 | 任务编辑/用户会话/手动命令事务已交付；`users/service_tokens.py` 新增令牌创建撤销审计事务与只读恢复 | 手动命令 CI34339927183通过；令牌真实副本集验证创建失败/取消回滚、撤销回滚/并发、确认丢失恢复及临时数据清理 | 通用`Repository.idem`与其他作业审计仍需处理；socket和HTTP明文响应不属于数据库事务；本机新增入口未部署 | 继续其他作业审计，不重复实施已完成事务 |
 | R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，已交付；Nginx权限和跨组件合同预检已修正 | `eb4e829` CI34338375626 Ubuntu24.04真实首次/重跑/重启通过，配置不变，临时安装已删除 | 未物理重启宿主机；Ubuntu22.04/Debian12自动依赖分支尚未实机验收 | 目标服务器按文档部署，验收实际依赖源和开机启动 |
 | R28 其他电脑通过HTTP服务器IP正常操作 | 共用`frontend/src/shared/api.ts`兼容UUIDv4；Docker/原生前端均重新编译该源码；CI加入`verify_http_browser.mjs` | 先复现相同异常，前端52项/构建通过；真实非安全IPv4 Chrome成功发出启动/命令/下载模拟请求；CI34338375626两类部署通过 | 目标服务器需拉取并重新构建前端；模拟浏览器不等于全部实体设备业务验收 | 更新目标服务器前端并强制刷新，继续产品全链路验收 |
 
 ## 验收口径
+
+新增需求对照：
+
+| ID / 最终需求 | 实现位置与状态 | 验证证据 | 未完成部分 | 下一步 |
+| --- | --- | --- | --- | --- |
+| R29 内网HTTP节点登记保存、节点删除、完整/独立部署配置一致 | `administration/settings.py`、`node_lifecycle.py`、`tasks/claim.py`、设置前端、`deploy_env.py`；已实现 | 复现原422后回归通过；真实删除/领取竞争、历史保留、迟到心跳不复活；浏览器删除二次确认及1440/390截图 | 用户服务器尚未更新；新增完整Docker登记CI待运行 | 推送并收取CI，按节点部署排障文档更新原服务 |
+| R30 明确服务器UTC与上海小时归档的时间关系 | `LogArchives.vue` 标注北京时间UTC+8；原后端归档时区保持上海 | 2026-09-09 18:30:12 UTC归入2026-09-10 02点单测；浏览器同日小时样例显示通过 | 不变更服务器系统时区；不是自动跟随主机时区 | 保持日志前缀、小时目录和显示一致 |
 
 | 指标 | 实际测量 | 与原要求关系 |
 | --- | --- | --- |

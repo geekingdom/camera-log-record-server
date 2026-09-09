@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 后台设置页只管理持久化配置；节点在线状态始终来自后端合并的 worker 心跳。
 import { onMounted, ref } from "vue";
-import { Edit3, Plus, RefreshCw, Save, ServerCog, Settings2 } from "lucide-vue-next";
+import { Edit3, Plus, RefreshCw, Save, ServerCog, Settings2, Trash2 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { ApiError } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
@@ -10,6 +10,7 @@ import { settingsApi, type NodeConfig, type NodeRegistration, type PlatformSetti
 const loading = ref(false);
 const savingRetention = ref(false);
 const savingNode = ref(false);
+const deletingNode = ref<string>();
 const forbidden = ref(false);
 const settings = ref<PlatformSettings>();
 const retentionDays = ref(7);
@@ -95,6 +96,23 @@ async function saveNode() {
   }
 }
 
+async function removeNode(node: NodeConfig) {
+  if (deletingNode.value) return;
+  // 确认弹窗期间固定目标和版本，后台刷新不能改变即将删除的对象。
+  const { id, version } = node;
+  deletingNode.value = id;
+  try {
+    if (!await confirmAction(`确认删除节点“${id}”吗？该节点将不再接收新采集任务，已有日志和历史任务会保留。`, "确认删除节点")) return;
+    await settingsApi.deleteNode(id, version);
+    ElMessage.success("节点已删除，历史日志已保留");
+    await load();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "删除节点失败");
+  } finally {
+    deletingNode.value = undefined;
+  }
+}
+
 onMounted(() => void load());
 </script>
 
@@ -116,11 +134,11 @@ onMounted(() => void load());
         <el-table-column label="准入" width="110"><template #default="{ row }"><el-tag v-if="row.registered" :type="row.accepting ? 'success' : 'warning'">{{ row.accepting ? "允许" : "暂停" }}</el-tag><span v-else class="settings-muted">未配置</span></template></el-table-column>
         <el-table-column label="容量" width="100"><template #default="{ row }">{{ row.capacity }}</template></el-table-column>
         <el-table-column label="心跳信息" min-width="180"><template #default="{ row }"><span v-if="row.reportedAt">{{ new Date(row.reportedAt).toLocaleString("zh-CN", { hour12: false }) }}</span><span v-else class="settings-muted">尚未收到心跳</span><span v-if="row.urlMismatch" class="settings-warning">地址与 Worker NODE_URL 不一致</span></template></el-table-column>
-        <el-table-column label="操作" width="104" fixed="right"><template #default="{ row }"><el-tooltip :content="row.registered ? '编辑节点准入与容量' : '使用此 Worker 心跳信息登记节点'"><el-button text :icon="row.registered ? Edit3 : Plus" :aria-label="row.registered ? '编辑节点配置' : '登记此节点'" @click="row.registered ? openEdit(row) : openRegister(row)">{{ row.registered ? "编辑" : "登记" }}</el-button></el-tooltip></template></el-table-column>
+        <el-table-column label="操作" width="148" fixed="right"><template #default="{ row }"><el-tooltip :content="row.registered ? '编辑节点准入与容量' : '使用此 Worker 心跳信息登记节点'"><el-button text :icon="row.registered ? Edit3 : Plus" :aria-label="row.registered ? '编辑节点配置' : '登记此节点'" @click="row.registered ? openEdit(row) : openRegister(row)">{{ row.registered ? "编辑" : "登记" }}</el-button></el-tooltip><el-tooltip :content="row.activeTasks ? '节点仍有活动采集任务' : '删除节点，保留历史日志'"><el-button text type="danger" :icon="Trash2" :loading="deletingNode === row.id" :disabled="Boolean(deletingNode) || Boolean(row.activeTasks)" :aria-label="`删除节点 ${row.id}`" @click="removeNode(row)" /></el-tooltip></template></el-table-column>
       </el-table>
     </template>
     <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" destroy-on-close>
-      <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="https://node.example:8001" /><p class="node-help">必须与部署 worker 的 NODE_URL 一致；仅 HTTPS，开发环境 HTTP 仅允许 localhost 或环回 IP。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="100" controls-position="right" /><p class="node-help">实际并发上限还受 worker 本机 NODE_CAPACITY 限制，系统采用两者较小值。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="100" controls-position="right" /><p class="node-help">实际并发上限还受 worker 本机 NODE_CAPACITY 限制，系统采用两者较小值。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
       <template #footer><el-button @click="nodeDialog = false">取消</el-button><el-button type="primary" :loading="savingNode" :disabled="savingNode" :icon="ServerCog" @click="saveNode">保存配置</el-button></template>
     </el-dialog>
   </section>

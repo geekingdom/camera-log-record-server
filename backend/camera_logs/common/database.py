@@ -43,6 +43,7 @@ class Repository:
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1)])
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1), ("status", 1)])
+        await self.db.runs.create_index([("nodeId", 1), ("endedAt", 1)])
         await self.db.operations.create_index([("desiredState", 1), ("status", 1)])
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")

@@ -218,11 +218,12 @@ onBeforeUnmount(() => {
       >
         <el-table-column type="expand" width="36"><template #default="{ row }"><HourFragments :files="row.files || []" @view="viewFile" /></template></el-table-column>
         <el-table-column type="selection" width="42" /><el-table-column
-          label="小时"
-          min-width="185"
+          label="小时（北京时间 UTC+8）"
+          min-width="225"
           ><template #default="{ row }">{{
             new Date(row.hour).toLocaleString("zh-CN", {
               timeZone: "Asia/Shanghai",
+              hour12: false,
             })
           }}</template></el-table-column
         >

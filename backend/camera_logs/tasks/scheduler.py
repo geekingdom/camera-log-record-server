@@ -68,7 +68,7 @@ async def schedule_once(repo, lease=None):
                                     "resourceDeleted": {"$ne": True},
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
-                                                "diskPercent": {"$lt": 90}, "accepting": True})]
+                                                "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
         candidates = []
         for node in nodes:
             count = occupancy.get(node["id"], 0)

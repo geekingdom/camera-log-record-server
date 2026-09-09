@@ -85,9 +85,11 @@ def test_unregistered_heartbeat_node_is_discoverable_without_creating_config(cli
     assert client.portal.call(repo.db.node_configs.count_documents, {}) == 0
 
 
-def test_node_registration_rejects_non_development_http_and_url_parts(client):  # noqa: F811
-    """节点地址只允许 HTTPS 或本机开发 HTTP，且不能携带用户信息和路径。"""
-    for url in ("http://node.example.test", "https://admin@node.example.test", "https://node.example.test/api"):
+def test_node_registration_rejects_invalid_url_parts(client):  # noqa: F811
+    """部署支持 HTTP(S)，但节点公布地址不能携带凭据、脚本或附加路径。"""
+    for url in ("ftp://node.example.test", "https://admin@node.example.test", "https://node.example.test/api",
+                "http://0.0.0.0:8001", "http://[::]:8001", "http://worker:8001?x=1", "http://worker:8001#x",
+                "http://worker:99999", "[http://worker:8001](http://worker:8001)"):
         response = client.post("/api/v1/admin/nodes", json={"id": url, "url": url, "capacity": 1})
         assert response.status_code == 422
 
@@ -95,3 +97,21 @@ def test_node_registration_rejects_non_development_http_and_url_parts(client):  
         "id": "local-node", "url": "http://127.0.0.1:8001", "capacity": 1,
     })
     assert local.status_code == 201, local.text
+
+
+def test_http_deployment_node_can_be_registered_without_losing_heartbeat(client):  # noqa: F811
+    """完整 Docker、内网独立部署及 IPv6 节点都允许按真实上报地址登记。"""
+    repo = client.app.state.repo
+    for identifier, url in (("compose-worker-1", "http://worker:8001"),
+                            ("collector-01", "http://10.41.203.43:8001"),
+                            ("ipv6-node", "http://[fd00::43]:8001")):
+        client.portal.call(repo.db.nodes.insert_one, {
+            "id": identifier, "url": url, "heartbeat": now(), "capacity": 100, "accepting": True,
+        })
+        response = client.post("/api/v1/admin/nodes", json={"id": identifier, "url": url, "capacity": 50})
+        assert response.status_code == 201, response.text
+        assert response.json()["online"] is True
+        assert response.json()["reportedUrl"] == url
+        assert response.json()["urlMismatch"] is False
+        edited = client.patch(f"/api/v1/admin/nodes/{identifier}", json={"version": 1, "capacity": 60})
+        assert edited.status_code == 200 and edited.json()["online"] is True
