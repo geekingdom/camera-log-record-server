@@ -12,6 +12,24 @@ from camera_logs.common.database import now
 pytest_plugins = ("test_api",)
 
 
+@pytest.mark.parametrize("action,summary", [("reveal_token", "查看服务账号口令"), ("rotate_token", "重新生成服务账号口令")])
+def test_service_credential_audit_names_target_without_secret(client, action, summary):
+    """口令操作可定位对应账号，但目标补充查询不能把摘要或加密口令带入审计页面。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.tokens.insert_one, {
+        "id": "credential-audit-target", "name": "集成服务账号", "tokenHash": "hidden-hash",
+        "tokenEncrypted": "hidden-ciphertext",
+    })
+    client.portal.call(repo.db.audit.insert_one, {
+        "actor": "bootstrap", "action": action, "targetId": "credential-audit-target", "createdAt": now(),
+    })
+    response = client.get("/api/v1/audit-events", params={"action": action})
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["summary"] == summary and item["targetName"] == "集成服务账号"
+    assert "hidden-" not in response.text
+
+
 async def test_runtime_event_page_awaits_production_aggregate_cursor():
     """生产驱动的 aggregate 是协程，分页必须等待它返回异步游标。"""
     async def cursor():
@@ -118,9 +136,13 @@ def test_admin_event_queries_reject_naive_or_excessive_time_ranges_and_non_admin
 
     repo = client.app.state.repo
     token = "read-only-token"
+    client.portal.call(repo.db.users.insert_one, {
+        "id": "read-only-user", "username": "read-only-user", "displayName": "只读用户",
+        "isAdmin": False, "scopes": [], "enabled": True, "deletedAt": None,
+    })
     client.portal.call(repo.db.tokens.insert_one, {
-        "id": "read-only", "tokenHash": hashlib.sha256(token.encode()).hexdigest(),
-        "scopes": ["tasks:read"], "taskIds": None, "revoked": False,
+        "id": "read-only", "userId": "read-only-user", "version": 1,
+        "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "revoked": False,
         "expiresAt": now() + timedelta(days=1), "createdAt": now(),
     })
     response = client.get("/api/v1/audit-events", headers={"Authorization": f"Bearer {token}"})

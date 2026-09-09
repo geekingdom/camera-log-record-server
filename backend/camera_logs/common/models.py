@@ -1,7 +1,7 @@
 """定义 API 输入模型，并在边界执行设备、命令和版本字段校验。"""
 
 from ipaddress import ip_address
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -51,6 +51,8 @@ class TemplateCreate(CommandConfig):
     """创建命令模板时提交的名称、说明和完整命令配置。"""
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", max_length=2000)
+    sharedWith: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(default_factory=list, max_length=100)
+    sharedWithAll: bool = False
 
     @field_validator("name")
     @classmethod
@@ -59,6 +61,15 @@ class TemplateCreate(CommandConfig):
         if not value.strip():
             raise ValueError("名称不能为空")
         return value.strip()
+
+    @field_validator("sharedWith")
+    @classmethod
+    def unique_shared_users(cls, value):
+        """共享对象按用户 ID 去重并拒绝空白值，避免同一权限在文档中重复保存。"""
+        normalized = [identifier.strip() for identifier in value]
+        if any(not identifier for identifier in normalized):
+            raise ValueError("共享用户 ID 不能为空")
+        return list(dict.fromkeys(normalized))
 
 
 class TaskCreate(TemplateCreate):
@@ -133,16 +144,28 @@ class DownloadCreate(Model):
 
 
 class SearchCreate(Model):
-    """定义任务日志检索关键词及可选的起止时间范围。"""
+    """关键词为空时按时间返回原始片段；非空时执行既有字面关键词检索。"""
     taskId: str
-    keyword: str = Field(min_length=1, max_length=1024)
+    keyword: str = Field(default="", max_length=1024)
     start: str | None = None
     end: str | None = None
 
 
 class TokenCreate(Model):
-    """定义服务令牌名称、授权作用域、可访问任务和有效期。"""
+    """定义绑定既有用户的服务令牌名称和有效期，权限始终实时来自该用户。"""
     name: str = Field(min_length=1, max_length=128)
-    scopes: list[str]
-    taskIds: list[str] | None = None
-    expiresInDays: int = Field(default=30, ge=1, le=365)
+    userId: str = Field(min_length=1, max_length=64)
+    expiresInDays: int | None = Field(default=30, ge=1, le=365)
+
+
+class TokenPatch(Model):
+    """管理员以版本锁更新服务令牌名称、绑定用户或有效期，权限在下次认证实时切换。"""
+    version: int = Field(ge=1)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    userId: str | None = Field(default=None, min_length=1, max_length=64)
+    expiresInDays: int | None = Field(default=None, ge=1, le=365)
+
+
+class TokenRotate(Model):
+    """管理员以当前版本轮换服务令牌凭据，不修改绑定关系或有效期。"""
+    version: int = Field(ge=1)

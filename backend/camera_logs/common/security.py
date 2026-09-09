@@ -7,22 +7,24 @@ from fastapi import HTTPException, Request
 
 from camera_logs.access_policy.policy import apply_ip_permissions
 from camera_logs.common.database import now
-from camera_logs.users.sessions import COOKIE, check_origin, required_login, session_identity
+from camera_logs.common.request_context import request_context
+from camera_logs.users.sessions import COOKIE, check_origin, required_login, session_identity, user_identity
 
 
 async def authenticate(repo, token):
-    """校验 bootstrap 或持久化令牌，过期和撤销令牌统一返回 401。"""
+    """认证系统令牌或绑定用户的服务令牌，实时读取用户权限和启用状态。"""
     if token and repo.settings.bootstrap_token and secrets.compare_digest(token, repo.settings.bootstrap_token):
-        return {"id": "bootstrap", "scopes": ["*"], "taskIds": None}
+        return {"id": "bootstrap", "scopes": ["*"], "isAdmin": True,
+                "resourceIds": None, "taskIds": None}
     digest = hashlib.sha256(token.encode()).hexdigest()
     record = await repo.db.tokens.find_one({"tokenHash": digest, "revoked": False})
-    if not record or record["expiresAt"].replace(tzinfo=now().tzinfo) <= now():
+    expires_at = record.get("expiresAt") if record else None
+    if not record or record.get("revoked") or (expires_at is not None and expires_at.replace(tzinfo=now().tzinfo) <= now()):
         raise required_login()
-    # 原有第三方 tasks:write 合同包含创建资源与任务；先展开再交由 IP 策略求交集。
-    if "tasks:write" in record["scopes"]:
-        record = record | {"scopes": list(set(record["scopes"]) | {
-            "resources:create", "resources:write", "tasks:create"})}
-    return record
+    user = await repo.db.users.find_one({"id": record.get("userId"), "enabled": True, "deletedAt": None})
+    if user is None:
+        raise required_login()
+    return await user_identity(repo, user) | {"kind": "service-token", "serviceTokenId": record["id"]}
 
 
 async def actor(request: Request):
@@ -40,21 +42,26 @@ async def actor(request: Request):
         }:
             raise HTTPException(403, "请先修改初始密码")
     identity = await apply_ip_permissions(request.app.state.repo, request, identity)
+    context = request_context.get()
+    if context is not None and identity.get("serviceTokenId"):
+        context["serviceTokenId"] = identity["serviceTokenId"]
     request.state.actor = identity
     return identity
 
 
 def authorize(identity, scope, task_id=None):
-    """同时验证作用域和可选任务白名单，权限不足统一返回 403。"""
+    """验证实时用户作用域；任务可见性不再由用户或令牌范围收窄。"""
     if "*" not in identity["scopes"] and scope not in identity["scopes"]:
         raise HTTPException(403, "权限不足")
-    allowed = identity.get("taskIds")
-    if task_id is not None and allowed is not None and task_id not in allowed:
-        raise HTTPException(403, "任务不在授权范围内")
 
 
 def authorize_resource(identity, resource_id):
-    """资源范围由服务端校验，创建或改绑任务不得绕过当前账号范围。"""
-    allowed = identity.get("resourceIds")
-    if allowed is not None and resource_id not in allowed:
-        raise HTTPException(403, "资源不在授权范围内")
+    """保留资源鉴权调用兼容性；资源范围已不再作为身份限制。"""
+
+
+def authorize_owner(identity, document):
+    """管理员可操作全部对象，普通用户只能操作自己创建的对象。"""
+    if identity.get("isAdmin") or "*" in identity.get("scopes", []):
+        return
+    if document.get("createdBy") != identity.get("id"):
+        raise HTTPException(403, "仅创建者可以执行此操作")

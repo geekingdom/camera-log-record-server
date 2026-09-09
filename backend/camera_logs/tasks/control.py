@@ -12,7 +12,7 @@ from pymongo.read_preferences import ReadPreference
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
-from camera_logs.common.security import authorize
+from camera_logs.common.security import authorize, authorize_owner
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,7 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
         )
         if task is None:
             raise HTTPException(404, "任务不存在")
+        authorize_owner(user, task)
         if desired != "STOPPED":
             await _guard_resources(db, task, session)
         previous = await _previous_operation(db, task, desired, session)

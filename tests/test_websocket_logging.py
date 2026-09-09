@@ -58,6 +58,15 @@ def test_bare_bearer_is_redacted():
     assert "sample-secret" not in observability.redact_text("upstream rejected Bearer sample-secret")
 
 
+@pytest.mark.parametrize("scheme", ["ws", "wss"])
+def test_live_endpoint_accepts_plain_and_tls_websocket_schemes(client, scheme):  # noqa: F811
+    """ASGI入口两种scheme均能首帧认证并推送；TLS终结由部署反向代理承担。"""
+    client.portal.call(client.app.state.repo.db.tasks.insert_one, {"id": "scheme-task", "status": "STOPPED"})
+    with client.websocket_connect(f"{scheme}://testserver/api/v1/tasks/scheme-task/logs") as socket:
+        socket.send_json({"token": "test-admin-token"})
+        assert socket.receive_json() == {"type": "status", "status": "STOPPED"}
+
+
 def test_real_endpoint_rejection_is_attributed_without_token(client, monkeypatch):  # noqa: F811
     """真实 FastAPI 首帧鉴权拒绝也须通过中间件产生可关联的失败记录。"""
     recorded = Mock()

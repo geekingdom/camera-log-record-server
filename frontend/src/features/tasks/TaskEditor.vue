@@ -11,11 +11,10 @@ import LiveLogs from "../logs/LiveLogs.vue";
 import LogArchives from "../logs/LogArchives.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource }>();
+const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource; canEdit?: boolean }>();
 const emit = defineEmits<{ saved: [] }>();
 const permissions = usePermissions();
-const canSave = computed(() => permissions.can(props.task ? "tasks:write" : "tasks:create") &&
-  ((!props.task && !props.initialResource) || permissions.resource(props.task?.resourceId ?? props.initialResource?.id)));
+const canSave = computed(() => (!props.task || props.canEdit === true) && permissions.can(props.task ? "tasks:write" : "tasks:create"));
 const blank = (): Task => ({
   id: "",
   name: "",
@@ -236,8 +235,6 @@ async function replaceTemplate() {
 // 仅提交与初始快照不同的字段，保留编辑密码为空时“不覆盖原密码”的后端语义。
 async function save() {
   if (!canSave.value) return;
-  if (!permissions.resource(form.value.resourceId) ||
-    (form.value.serialServerResourceId && !permissions.resource(form.value.serialServerResourceId))) return;
   if (autoStart.value && !permissions.can("tasks:control")) return;
   const current = generation;
   if (

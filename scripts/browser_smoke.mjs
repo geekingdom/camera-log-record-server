@@ -6,7 +6,10 @@ import { randomBytes } from "node:crypto";
 process.loadEnvFile(".env");
 const baseUrl = process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
 const bootstrapToken = process.env.BOOTSTRAP_TOKEN;
-const smokeTaskId = process.env.BROWSER_SMOKE_TASK_ID;
+let smokeTaskId = process.env.BROWSER_SMOKE_TASK_ID;
+const createSyntheticTask = process.env.BROWSER_SMOKE_CREATE_SYNTHETIC_TASK === "true";
+const syntheticHost = process.env.BROWSER_SMOKE_SYNTHETIC_HOST;
+const syntheticPort = Number(process.env.BROWSER_SMOKE_SYNTHETIC_PORT);
 const smokeMarker = /(?:协议压测|容器验收|浏览器验收|browser[-_ ]?smoke|synthetic|合成)/i;
 const operatorScopes = [
   "tasks:read", "tasks:write", "resources:create", "resources:write",
@@ -15,8 +18,10 @@ const operatorScopes = [
 ];
 if (!bootstrapToken)
   throw new Error("浏览器验收需要 BOOTSTRAP_TOKEN 来创建临时账号");
-if (!smokeTaskId)
+if (!smokeTaskId && !createSyntheticTask)
   throw new Error("浏览器验收需要显式设置 BROWSER_SMOKE_TASK_ID 为合成任务 ID");
+if (createSyntheticTask && (!syntheticHost || !Number.isInteger(syntheticPort) || syntheticPort < 1 || syntheticPort > 65535))
+  throw new Error("隔离浏览器验收必须设置有效的 BROWSER_SMOKE_SYNTHETIC_HOST 和 BROWSER_SMOKE_SYNTHETIC_PORT");
 const playwrightModule = await import(
   process.env.PLAYWRIGHT_MODULE || "playwright"
 );
@@ -35,6 +40,8 @@ const errors = [];
 const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const name = `浏览器验收-${Date.now()}`;
 let createdTemplateId;
+let createdResource;
+let createdTask;
 let temporaryUser;
 let loginComplete = false;
 let initialSessionChecks = 0;
@@ -72,7 +79,6 @@ async function createTemporaryUser() {
       displayName: "浏览器验收临时账号",
       password: initialPassword,
       scopes: operatorScopes,
-      resourceIds: null,
     },
   });
   assertResponse(response, "创建浏览器验收临时账号");
@@ -119,6 +125,36 @@ async function explicitSyntheticTask() {
   return task.id;
 }
 
+async function createOwnedSyntheticTask() {
+  // 使用当前 Cookie 会话创建资源和任务，确保新所有者规则下页面可以编辑。
+  const suffix = randomBytes(8).toString("hex");
+  const resourceResponse = await context.request.post(`${baseUrl}/api/v1/resources`, {
+    headers: { "X-Requested-With": "XMLHttpRequest", "Idempotency-Key": `browser-smoke-resource-${suffix}` },
+    data: { name: `浏览器验收合成资源-${suffix}`, kind: "SERIAL_SERVER", ip: syntheticHost },
+  });
+  assertResponse(resourceResponse, "创建浏览器验收合成资源");
+  createdResource = await resourceResponse.json();
+  const taskResponse = await context.request.post(`${baseUrl}/api/v1/tasks`, {
+    headers: { "X-Requested-With": "XMLHttpRequest", "Idempotency-Key": `browser-smoke-task-${suffix}` },
+    data: {
+      name: `浏览器验收合成任务-${suffix}`, description: "仅隔离浏览器验收使用",
+      resourceId: createdResource.id, protocol: "TELNET_SERIAL", ip: syntheticHost, port: syntheticPort,
+      initialCommands: [], scheduledCommands: [], autoStart: true,
+    },
+  });
+  assertResponse(taskResponse, "创建浏览器验收合成任务");
+  createdTask = await taskResponse.json();
+  smokeTaskId = createdTask.id;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const response = await context.request.get(`${baseUrl}/api/v1/tasks/${encodeURIComponent(smokeTaskId)}`);
+    assertResponse(response, "等待浏览器验收任务采集");
+    if ((await response.json()).status === "COLLECTING") return;
+    await page.waitForTimeout(250);
+  }
+  throw new Error("浏览器验收合成任务未进入采集状态");
+}
+
 // 截图前直接检查抽屉和当前工作区标题的几何边界，防止 overflow:hidden 掩盖内容被推到屏外。
 async function assertMobileDrawer(heading) {
   await page.waitForTimeout(250);
@@ -147,6 +183,7 @@ try {
   temporaryUser = await createTemporaryUser();
   await loginTemporaryUser(temporaryUser);
   loginComplete = true;
+  if (createSyntheticTask) await createOwnedSyntheticTask();
   await page.screenshot({ path: `${screenshots}/resources-desktop.png`, fullPage: true });
   // 临时操作员不具备管理员权限；管理员菜单由独立的 browser_user_auth.mjs 验收。
   for (const tab of ["服务节点", "服务账号", "审计与事件", "后台配置"])
@@ -300,6 +337,19 @@ try {
   console.log(JSON.stringify({ passed: true, screenshots, unexpectedConsoleErrors: 0, initialSessionChecks }));
 } finally {
   try {
+    if (createdTask) {
+      const response = await context.request.post(`${baseUrl}/api/v1/tasks/${createdTask.id}/stop`, {
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      });
+      if (!response.ok() && response.status() !== 409) assertResponse(response, "停止浏览器验收合成任务");
+    }
+    if (createdResource) {
+      const response = await context.request.delete(
+        `${baseUrl}/api/v1/resources/${createdResource.id}?version=${createdResource.version}`,
+        { headers: { "X-Requested-With": "XMLHttpRequest" } },
+      );
+      if (!response.ok() && response.status() !== 409) assertResponse(response, "删除浏览器验收合成资源");
+    }
     if (createdTemplateId) {
       const response = await context.request.delete(
         `${baseUrl}/api/v1/command-templates/${createdTemplateId}?version=1`,

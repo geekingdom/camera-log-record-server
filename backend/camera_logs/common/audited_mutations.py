@@ -44,7 +44,7 @@ async def audited_mutation(repo, actor, action, target, callback):
     return await _commit(repo, commit)
 
 
-async def audited_create(repo, actor, key, action, payload, collection, prepare):
+async def audited_create(repo, actor, key, action, payload, collection, prepare, *, before_insert=None):
     """创建资源和成功映射并原子审计，事务重试不重复运行 prepare。
 
     prepare 可能包含事务外的可控准备工作，因此固定资源标识并在进入事务前仅调用
@@ -74,6 +74,8 @@ async def audited_create(repo, actor, key, action, payload, collection, prepare)
         )
         if result is not None:
             return result
+        if before_insert is not None:
+            await before_insert(document, session)
         await repo.db.idempotency.insert_one(
             {
                 "actor": actor,

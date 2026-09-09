@@ -13,6 +13,7 @@ ACTION_SUMMARIES = {
     "delete_resource": "删除设备资源", "create_template": "创建命令模板",
     "edit_template": "修改命令模板", "delete_template": "删除命令模板",
     "create_token": "创建服务令牌", "revoke_token": "撤销服务令牌",
+    "update_token": "编辑服务账号", "reveal_token": "查看服务账号口令", "rotate_token": "重新生成服务账号口令",
     "DOWNLOAD": "创建日志下载作业", "SEARCH": "创建日志检索作业",
     "cancel_download": "取消日志下载作业", "cancel_search": "取消日志检索作业",
     "update_platform_settings": "修改平台设置", "update_ip_policy": "修改来源访问规则",
@@ -34,6 +35,7 @@ _TERMINAL_OUTCOMES = {"PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"}
 _TARGET_COLLECTIONS = {
     "tasks": {"id": 1, "name": 1, "ip": 1}, "resources": {"id": 1, "name": 1, "ip": 1},
     "templates": {"id": 1, "name": 1}, "users": {"id": 1, "username": 1, "displayName": 1},
+    "tokens": {"id": 1, "name": 1},
     "nodes": {"id": 1, "name": 1}, "node_configs": {"id": 1, "name": 1},
     "jobs": {"id": 1, "name": 1, "taskId": 1}, "commands": {"id": 1, "taskId": 1, "kind": 1},
 }

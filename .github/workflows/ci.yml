@@ -25,12 +25,17 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - name: 安装 API 文档目录生成依赖
+        run: cd .. && python -m pip install '.[test]'
       - run: npm test
       - name: 验证副本集初始化门槛
         run: node --test ../tests/deploy/test_mongo_init.mjs ../tests/deploy/test_mongo_standalone.mjs
@@ -44,7 +49,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/http-browser" playwright@1.58.2 --no-audit --no-fund
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node ../scripts/verify_http_browser.mjs
       - name: 验证生产页面布局与资源快捷创建
-        run: PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node scripts/verify-workspace.mjs
+        run: PYTHON_BIN=python PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node scripts/verify-workspace.mjs
       - name: 保存布局验收截图
         if: always()
         uses: actions/upload-artifact@v4
@@ -112,6 +117,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_job_completion.py
       - name: 验证资源模板账户审计事务与幂等恢复
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_audited_mutations.py
+      - name: 验证资源地址并发唯一与事务回滚
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_address.py
       - name: 验证管理配置正式接口审计回滚与来源权限
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_admin_audit_transactions.py
       - name: 验证任务控制并发幂等与审计事务

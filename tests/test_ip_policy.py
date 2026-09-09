@@ -31,9 +31,13 @@ def insert_admin_token(client, repo):
     import hashlib
 
     token = "ip-policy-admin-token"
+    client.portal.call(repo.db.users.insert_one, {
+        "id": "ip-policy-admin-user", "username": "ip-policy-admin", "displayName": "策略管理员",
+        "isAdmin": True, "scopes": [], "enabled": True, "deletedAt": None,
+    })
     client.portal.call(repo.db.tokens.insert_one, {
-        "id": "ip-policy-admin", "tokenHash": hashlib.sha256(token.encode()).hexdigest(),
-        "scopes": ["admin"], "taskIds": None, "revoked": False, "expiresAt": now() + timedelta(hours=1),
+        "id": "ip-policy-admin", "userId": "ip-policy-admin-user", "version": 1,
+        "tokenHash": hashlib.sha256(token.encode()).hexdigest(), "revoked": False, "expiresAt": now() + timedelta(hours=1),
     })
     return {"Authorization": f"Bearer {token}"}
 

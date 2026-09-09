@@ -2,7 +2,6 @@
 // 应用壳层只展示导航和会话入口；领域页签、权限过滤及数据加载仍由 App 装配。
 import type { Component } from "vue";
 import {
-  BookOpen,
   ChevronRight,
   KeyRound,
   LogOut,
@@ -50,12 +49,7 @@ const emit = defineEmits<{
       </button>
     </nav>
     <div class="sidebar-footer">
-      <a
-        href="https://github.com/geekingdom/camera-log-record-server/blob/main/docs/api.md"
-        target="_blank"
-        rel="noopener"
-        ><BookOpen :size="16" /> API 文档</a
-      ><span><i /> 已连接控制台</span>
+      <span><i /> 已连接控制台</span>
     </div>
   </aside>
   <div class="main-column">

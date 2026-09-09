@@ -16,8 +16,11 @@ export interface Resource extends ResourceAuthentication {
   authType?: ResourceAuthType;
   version?: number;
   deletedAt?: string | null;
+  createdAt?: string;
   taskCount?: number;
   activeTaskCount?: number;
+  createdBy?: string;
+  createdByName?: string;
 }
 export type TaskActualStatus =
   | "STOPPED"
@@ -59,16 +62,20 @@ export interface Task {
   runId?: string;
   sessionId?: string;
   updatedAt?: string;
+  createdAt?: string;
   version?: number;
   description?: string;
   sourceTemplateId?: string | null;
   sourceTemplateVersion?: number | null;
   resourceId: string;
   resourceDeleted?: boolean;
+  resourceDeletedAt?: string;
   serialServerResourceId?: string | null;
   encoding?: string;
   loginPrompt?: string;
   passwordPrompt?: string;
+  createdBy?: string;
+  createdByName?: string;
   initialCommands: InitialCommand[];
   scheduledCommands: ScheduledCommand[];
 }
@@ -79,6 +86,12 @@ export interface Template {
   version?: number;
   initialCommands: InitialCommand[];
   scheduledCommands: ScheduledCommand[];
+  createdBy?: string;
+  createdByName?: string;
+  sharedWith: string[];
+  sharedWithAll: boolean;
+  createdAt?: string;
+  deletedAt?: string | null;
 }
 export interface Node {
   id: string;

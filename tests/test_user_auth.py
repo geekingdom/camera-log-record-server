@@ -46,14 +46,13 @@ def change_initial_password(client, password="changed-admin-password"):
     return password
 
 
-def create_operator(client, *, username="operator", resources=None, scopes=None):
+def create_operator(client, *, username="operator", scopes=None):
     """创建一个可登录的普通账号，并返回公开用户视图。"""
     result = client.post("/api/v1/users", json={
         "username": username,
         "displayName": "操作员",
         "password": "operator-password",
-        "scopes": scopes or ["tasks:read"],
-        "resourceIds": resources,
+        "scopes": scopes or [],
     }, headers=CSRF)
     assert result.status_code == 201, result.text
     return result.json()
@@ -133,3 +132,57 @@ def test_csrf_duplicate_username_builtin_protection_and_password_policy(client):
     }, headers=CSRF).status_code == 403
     assert client.delete(f"/api/v1/users/{builtin_id}?version=1", headers=CSRF).status_code == 403
     assert "password" not in created and "passwordHash" not in created and "authVersion" not in created
+
+
+def test_login_and_password_change_return_current_effective_base_scopes(client):
+    """首次登录和改密响应须与后续 me 一致，直接呈现基础模板和日志权限。"""
+    change_initial_password(client)
+    create_operator(client, username="effective-scopes")
+    assert client.post("/api/v1/auth/logout", headers=CSRF).status_code == 204
+    logged_in = login(client, "effective-scopes", "operator-password")
+    assert logged_in.status_code == 200, logged_in.text
+    expected = {"tasks:read", "logs:read", "logs:download", "templates:read", "templates:write"}
+    assert expected <= set(logged_in.json()["user"]["scopes"])
+    changed = client.post("/api/v1/auth/password", json={
+        "currentPassword": "operator-password", "newPassword": "effective-scopes-password",
+    }, headers=CSRF)
+    assert changed.status_code == 200, changed.text
+    assert set(changed.json()["user"]["scopes"]) == set(client.get("/api/v1/auth/me").json()["user"]["scopes"])
+
+
+def test_share_targets_returns_only_active_users_for_cookie_and_service_token(client):
+    """模板共享目录允许有效调用者分页查询，且不泄露账号安全字段。"""
+    change_initial_password(client)
+    reader = create_operator(client, username="share-reader")
+    visible = create_operator(client, username="share-visible")
+    disabled = create_operator(client, username="share-disabled")
+    deleted = create_operator(client, username="share-deleted")
+    repo = client.app.state.repo
+    client.portal.call(repo.db.users.update_one, {"id": disabled["id"]}, {"$set": {"enabled": False}})
+    client.portal.call(repo.db.users.update_one, {"id": deleted["id"]}, {"$set": {"deletedAt": now()}})
+
+    client.headers["Authorization"] = "Bearer test-bootstrap"
+    token_response = client.post("/api/v1/service-tokens", json={"name": "共享目录", "userId": reader["id"]})
+    assert token_response.status_code == 201, token_response.text
+    del client.headers["Authorization"]
+
+    assert client.post("/api/v1/auth/logout", headers=CSRF).status_code == 204
+    assert login(client, "share-reader", "operator-password").status_code == 200
+    assert client.post("/api/v1/auth/password", json={
+        "currentPassword": "operator-password", "newPassword": "share-reader-password",
+    }, headers=CSRF).status_code == 200
+
+    cookie_page = client.get("/api/v1/users/share-targets?page=1&pageSize=1")
+    assert cookie_page.status_code == 200, cookie_page.text
+    assert cookie_page.json()["total"] == 3
+    assert len(cookie_page.json()["items"]) == 1
+    assert set(cookie_page.json()["items"][0]) == {"id", "username", "displayName"}
+
+    bearer_page = client.get("/api/v1/users/share-targets?page=2&pageSize=2", headers={
+        "Authorization": "Bearer " + token_response.json()["token"],
+    })
+    assert bearer_page.status_code == 200, bearer_page.text
+    assert bearer_page.json()["total"] == 3
+    returned_ids = {item["id"] for item in bearer_page.json()["items"]}
+    assert returned_ids <= {reader["id"], visible["id"]}
+    assert disabled["id"] not in returned_ids and deleted["id"] not in returned_ids

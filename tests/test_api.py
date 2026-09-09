@@ -71,6 +71,31 @@ def test_auth_and_invalid_commands(client):
         json={"name": "bad", "protocol": "SSH", "ip": "x", "port": 0}).status_code == 422
 
 
+def test_task_list_combines_creator_filters_and_resource_deletion_time(client):
+    """任务列表组合筛选创建者和既有条件，只把关联资源的删除时间投影给已删除资源任务。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.insert_one, {
+        "id": "deleted-device", "name": "已删除设备", "deletedAt": "2026-09-09T10:00:00Z",
+    })
+    client.portal.call(repo.db.tasks.insert_many, [
+        {"id": "owned-match", "name": "匹配任务", "ip": "192.0.2.10", "resourceId": "deleted-device",
+         "createdBy": "owner-a", "status": "STOPPED", "resourceDeleted": True},
+        {"id": "owned-other-status", "name": "匹配任务", "ip": "192.0.2.10", "resourceId": "deleted-device",
+         "createdBy": "owner-a", "status": "COLLECTING", "resourceDeleted": True},
+        {"id": "other-owner-same-filter", "name": "匹配任务", "ip": "192.0.2.10", "resourceId": "deleted-device",
+         "createdBy": "owner-b", "status": "STOPPED", "resourceDeleted": True},
+        {"id": "other-owner", "name": "匹配任务", "ip": "192.0.2.10", "resourceId": "fixture-device",
+         "createdBy": "owner-b", "status": "STOPPED"},
+    ])
+
+    response = client.get("/api/v1/tasks?createdBy=owner-a&status=STOPPED&search=%E5%8C%B9%E9%85%8D&resourceId=deleted-device")
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()["items"]] == ["owned-match"]
+    assert response.json()["items"][0]["resourceDeletedAt"] == "2026-09-09T10:00:00Z"
+    owner_b = client.get("/api/v1/tasks?createdBy=owner-b").json()["items"]
+    assert "resourceDeletedAt" not in next(item for item in owner_b if item["id"] == "other-owner")
+
+
 def test_stop_idempotence_and_start_endpoints(client):
     task = client.post("/api/v1/tasks", headers={"Idempotency-Key": "serial"},
         json={"name": "serial", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9900,

@@ -65,8 +65,12 @@ def test_cookie_download_is_scoped_revocable_and_expires(client):  # noqa: F811
     repo = client.app.state.repo
     client.portal.call(repo.db.jobs.insert_one, {
         "id": "export-a", "taskId": "task-a", "status": "SUCCEEDED"})
+    user = client.post("/api/v1/users", json={
+        "username": "download-token", "displayName": "下载令牌用户",
+        "password": "download-token-password", "scopes": [],
+    }).json()
     identity = client.post("/api/v1/service-tokens", json={
-        "name": "download-only", "scopes": ["logs:download"], "taskIds": ["task-a"]}).json()
+        "name": "download-only", "userId": user["id"]}).json()
     app = FastAPI()
     app.state.repo = repo
     install_download_sessions(app)

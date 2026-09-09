@@ -33,7 +33,7 @@ async def main():
                                          base_url="http://verify", headers={"Authorization": "Bearer " + token}) as client:
                 async def create(label):
                     return await client.post("/api/v1/service-tokens", json={
-                        "name": label, "scopes": ["tasks:read"], "expiresInDays": 1,
+                        "name": label, "userId": "builtin-admin", "expiresInDays": 1,
                     })
 
                 original = repo.audit
@@ -87,6 +87,88 @@ async def main():
                     audited_mutations.mutation_transaction = transaction
                 for action in ("create_token", "revoke_token"):
                     assert await db.audit.count_documents({"action": action, "targetId": payload["id"]}) == 1
+
+                updated = await create("update")
+                assert updated.status_code == 201
+                update_id = updated.json()["id"]
+                async def fail_update(*args, **kwargs):
+                    raise PyMongoError("injected")
+                repo.audit = fail_update
+                try:
+                    rejected = await client.patch("/api/v1/service-tokens/" + update_id, json={
+                        "version": 1, "name": "must-not-commit",
+                    })
+                    assert rejected.status_code == 503
+                finally:
+                    repo.audit = original
+                assert (await db.tokens.find_one({"id": update_id}))["name"] == "update"
+                assert await db.audit.count_documents({"action": "update_token", "targetId": update_id}) == 0
+
+                transaction = audited_mutations.mutation_transaction
+                async def lost_update_ack(repo, callback):
+                    await transaction(repo, callback)
+                    raise PyMongoError("lost acknowledgement")
+                audited_mutations.mutation_transaction = lost_update_ack
+                try:
+                    recovered = await client.patch("/api/v1/service-tokens/" + update_id, json={
+                        "version": 1, "name": "confirmed-after-lost-ack",
+                    })
+                    assert recovered.status_code == 200
+                    assert recovered.json()["name"] == "confirmed-after-lost-ack"
+                finally:
+                    audited_mutations.mutation_transaction = transaction
+                assert await db.audit.count_documents({"action": "update_token", "targetId": update_id}) == 1
+
+                rotating = await create("rotate")
+                assert rotating.status_code == 201
+                rotating_payload = rotating.json()
+                rotate_url = "/api/v1/service-tokens/" + rotating_payload["id"] + "/rotate"
+
+                async def fail_rotate(*args, **kwargs):
+                    raise PyMongoError("injected")
+                repo.audit = fail_rotate
+                try:
+                    rejected = await client.post(rotate_url, json={"version": rotating_payload["version"]})
+                    assert rejected.status_code == 503
+                    assert rotating_payload["token"] not in rejected.text
+                finally:
+                    repo.audit = original
+                unchanged = await db.tokens.find_one({"id": rotating_payload["id"]})
+                assert unchanged["tokenHash"] == hashlib.sha256(rotating_payload["token"].encode()).hexdigest()
+                assert await db.audit.count_documents({"action": "rotate_token", "targetId": rotating_payload["id"]}) == 0
+
+                transaction = audited_mutations.mutation_transaction
+                async def lost_rotate_ack(repo, callback):
+                    await transaction(repo, callback)
+                    raise PyMongoError("lost acknowledgement")
+                audited_mutations.mutation_transaction = lost_rotate_ack
+                try:
+                    recovered = await client.post(rotate_url, json={"version": rotating_payload["version"]})
+                    assert recovered.status_code == 200
+                    rotated_payload = recovered.json()
+                    assert rotated_payload["token"] != rotating_payload["token"]
+                    assert (await client.get("/api/v1/tasks", headers={
+                        "Authorization": "Bearer " + rotating_payload["token"],
+                    })).status_code == 401
+                    assert (await client.get("/api/v1/tasks", headers={
+                        "Authorization": "Bearer " + rotated_payload["token"],
+                    })).status_code == 200
+                finally:
+                    audited_mutations.mutation_transaction = transaction
+                stored = await db.tokens.find_one({"id": rotating_payload["id"]})
+                assert stored["tokenHash"] == hashlib.sha256(rotated_payload["token"].encode()).hexdigest()
+                assert stored["tokenEncrypted"] != rotated_payload["token"]
+                assert await db.audit.count_documents({"action": "rotate_token", "targetId": rotating_payload["id"]}) == 1
+
+                async def fail_reveal(*args, **kwargs):
+                    raise PyMongoError("injected")
+                repo.audit = fail_reveal
+                try:
+                    rejected = await client.post("/api/v1/service-tokens/" + rotating_payload["id"] + "/reveal")
+                    assert rejected.status_code == 503
+                    assert rotated_payload["token"] not in rejected.text
+                finally:
+                    repo.audit = original
     finally:
         await mongo.drop_database(name)
         assert name not in await mongo.list_database_names()
@@ -94,7 +176,9 @@ async def main():
         temporary.cleanup()
         assert not path.exists()
     print(json.dumps({"passed": True, "createRollback": True, "revokeRollback": True,
-                      "concurrentRevoke": True, "unknownCommitReadOnly": True, "temporaryDataRemoved": True}))
+                      "concurrentRevoke": True, "updateRollback": True, "updateUnknownCommitReadOnly": True,
+                      "rotateRollback": True, "rotateUnknownCommitReadOnly": True, "revealFailureNoSecret": True,
+                      "unknownCommitReadOnly": True, "temporaryDataRemoved": True}))
 
 
 if __name__ == "__main__":

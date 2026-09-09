@@ -27,3 +27,16 @@ export function availableTaskActions(task: Task): TaskAction[] {
   if (status === "ERROR" && desiredState === "STOPPED" && task.nodeId == null) return ["start"];
   return [];
 }
+
+/**
+ * 从当前页面的任务快照筛出可执行某生命周期操作的子集。
+ *
+ * 列表按钮和批量操作都必须复用同一状态矩阵；资源已删除的任务即使仍可查询，
+ * 也不能再提交新的控制意图。
+ */
+export function applicableTaskActions(tasks: Task[], action: TaskAction) {
+  const applicable = tasks.filter(task =>
+    !task.resourceDeleted && availableTaskActions(task).includes(action),
+  );
+  return { applicable, skipped: tasks.filter(task => !applicable.includes(task)) };
+}

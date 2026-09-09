@@ -5,10 +5,12 @@ import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { usePermissions } from "../../shared/permissions";
+import { canManageOwnedRecord } from "../../shared/ownership";
 import type { Template } from "../../shared/types";
 import CommandEditor from "../commands/CommandEditor.vue";
+import TemplateShareRecipients from "./TemplateShareRecipients.vue";
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ template?: Template }>();
+const props = defineProps<{ template?: Template; userId?: string; isAdmin?: boolean }>();
 const emit = defineEmits<{ saved: [] }>();
 const permissions = usePermissions();
 const editorRef = ref<InstanceType<typeof CommandEditor>>();
@@ -20,6 +22,8 @@ const blank = (): Template => ({
   description: "",
   initialCommands: [],
   scheduledCommands: [],
+  sharedWith: [],
+  sharedWithAll: false,
 });
 const form = ref<Template>(blank());
 let generation = 0;
@@ -29,7 +33,7 @@ watch(
   async ([visible, template]) => {
     const current = ++generation;
     if (!visible) return;
-    if (!permissions.can("templates:write") || (template && !permissions.can("templates:read"))) {
+    if (!permissions.can("templates:write") || (template && !canManageOwnedRecord(props.userId, props.isAdmin, template.createdBy))) {
       open.value = false; return;
     }
     loading.value = true;
@@ -45,7 +49,7 @@ watch(
   { immediate: true },
 );
 async function save() {
-  if (!permissions.can("templates:write")) return;
+  if (!permissions.can("templates:write") || (props.template && !canManageOwnedRecord(props.userId, props.isAdmin, props.template.createdBy))) return;
   if (saving.value || !editorRef.value?.validate()) return;
   if (!form.value.name.trim()) return ElMessage.warning("请输入模板名称");
   if (!await confirmAction(`确认保存命令模板“${form.value.name}”吗？`, "确认保存模板")) return;
@@ -90,6 +94,7 @@ async function save() {
             type="textarea"
             maxlength="2000"
         /></el-form-item>
+        <el-form-item label="共享用户"><TemplateShareRecipients v-model:shared-with="form.sharedWith" v-model:shared-with-all="form.sharedWithAll" :is-admin="props.isAdmin" :disabled="saving || loading" /></el-form-item>
       </section>
       <section class="form-section">
         <CommandEditor

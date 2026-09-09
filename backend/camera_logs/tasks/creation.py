@@ -79,7 +79,8 @@ async def create_task(repo, user, key, payload, prepare):
         timestamp = now()
         task = document.copy()
         task.update(desiredState="RUNNING" if auto_start else "STOPPED", status="STOPPED", nodeId=None,
-                    createdAt=timestamp, updatedAt=timestamp, generation=0)
+                    createdAt=timestamp, updatedAt=timestamp, generation=0,
+                    createdBy=user["id"], createdByName=user.get("displayName") or user.get("username") or user["id"])
         if auto_start:
             task["controlOperationId"] = operation_id
             # 后续控制会更新controlOperationId；创建重放仍应返回最初的自动启动操作。

@@ -9,7 +9,6 @@ from camera_logs.main import create_app
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
-from starlette.websockets import WebSocketDisconnect
 
 CSRF = {"X-Requested-With": "XMLHttpRequest"}
 
@@ -46,14 +45,13 @@ def seed_task(client, identifier, resource_id, *, serial_id=None, ip="192.0.2.10
     })
 
 
-def operator_session(client, resource_ids):
-    """用管理员 Bearer 创建子账户，再改密进入可操作的 cookie 会话。"""
+def operator_session(client):
+    """用管理员 Bearer 创建普通账户，再改密进入可操作的 cookie 会话。"""
     client.headers["Authorization"] = "Bearer permissions-bootstrap"
     created = client.post("/api/v1/users", json={
         "username": "operator", "displayName": "操作员", "password": "operator-password",
-        "scopes": ["tasks:read", "tasks:write", "tasks:create", "tasks:control", "resources:create",
-                   "resources:write", "commands:send", "logs:read", "logs:download"],
-        "resourceIds": resource_ids,
+        "scopes": ["tasks:write", "tasks:create", "tasks:control", "resources:create",
+                   "resources:write", "commands:send"],
     })
     assert created.status_code == 201, created.text
     del client.headers["Authorization"]
@@ -64,8 +62,8 @@ def operator_session(client, resource_ids):
     assert changed.status_code == 200, changed.text
 
 
-def test_resource_scope_blocks_all_task_derived_data_and_requires_all_serial_resources(client):
-    """主设备获权不足以读取引用未授权串口服务器的任务及其所有派生对象。"""
+def test_ordinary_user_reads_all_task_derived_data_but_cannot_manage_accounts(client):
+    """普通有效用户自动拥有全量读取和下载权限，用户管理仍只允许管理员。"""
     seed_resource(client, "allowed")
     seed_resource(client, "denied")
     seed_resource(client, "serial-denied", serial=True, ip="192.0.2.20")
@@ -77,44 +75,37 @@ def test_resource_scope_blocks_all_task_derived_data_and_requires_all_serial_res
     client.portal.call(repo.db.files.insert_one, {"id": "denied-file", "taskId": "denied-task", "nodeId": "node", "status": "READY", "hour": "2026-09-09T00:00:00+00:00"})
     client.portal.call(repo.db.jobs.insert_one, {"id": "denied-download", "taskId": "denied-task", "kind": "DOWNLOAD", "status": "SUCCEEDED", "actor": "other"})
     client.portal.call(repo.db.jobs.insert_one, {"id": "denied-search", "taskId": "denied-task", "kind": "SEARCH", "status": "SUCCEEDED", "actor": "other", "results": []})
-    operator_session(client, ["allowed"])
+    operator_session(client)
 
-    assert client.get("/api/v1/resources/denied").status_code == 403
+    assert client.get("/api/v1/resources/denied").status_code == 200
     assert client.get("/api/v1/resources/allowed").status_code == 200
     tasks = client.get("/api/v1/tasks")
-    assert tasks.status_code == 200 and tasks.json()["total"] == 0
+    assert tasks.status_code == 200 and tasks.json()["total"] == 2
     for path in (
         "/api/v1/tasks/denied-task", "/api/v1/tasks/mixed-task",
         "/api/v1/operations/denied-operation", "/api/v1/commands/denied-command",
         "/api/v1/tasks/denied-task/command-executions", "/api/v1/tasks/denied-task/log-hours",
-        "/api/v1/log-files/denied-file/content", "/api/v1/downloads/denied-download",
+        "/api/v1/downloads/denied-download",
         "/api/v1/log-searches/denied-search", "/api/v1/log-searches/denied-search/results",
-        "/api/v1/downloads/denied-download/content", "/api/v1/downloads/denied-download/browser-session",
     ):
-        assert client.get(path).status_code == 403 or client.post(path, headers=CSRF).status_code == 403
-    assert client.post("/api/v1/tasks/denied-task/commands", json={"command": "show status"}, headers=CSRF).status_code == 403
-    assert client.delete("/api/v1/downloads/denied-download", headers=CSRF).status_code == 403
-
-    with pytest.raises(WebSocketDisconnect) as closed, client.websocket_connect("/api/v1/tasks/denied-task/logs") as socket:
-        socket.send_json({})
-        socket.receive_json()
-    assert closed.value.code == 4403
+        assert client.get(path).status_code == 200
+    assert client.get("/api/v1/users").status_code == 403
+    assert client.post("/api/v1/users", json={
+        "username": "forbidden", "displayName": "禁止", "password": "forbidden-password",
+    }, headers=CSRF).status_code == 403
 
 
-def test_authorized_resource_can_create_task_but_cannot_rebind_to_unapproved_serial_server(client):
-    """创建和编辑都需检查目标资源，避免把已授权任务改绑到未授权串口服务器。"""
+def test_ordinary_user_keeps_configured_write_scopes_without_resource_range(client):
+    """资源范围已取消，普通用户仍必须具备对应写入 scope。"""
     seed_resource(client, "allowed")
-    seed_resource(client, "serial-ok", serial=True, ip="192.0.2.20")
-    seed_resource(client, "serial-denied", serial=True, ip="192.0.2.21")
-    seed_task(client, "editable", "allowed", serial_id="serial-ok", ip="192.0.2.20")
-    operator_session(client, ["allowed", "serial-ok"])
+    operator_session(client)
 
     created = client.post("/api/v1/tasks", json={
         "name": "new allowed task", "description": "", "protocol": "SSH", "ip": "192.0.2.10", "port": 22,
         "username": "root", "password": "device-password", "resourceId": "allowed",
     }, headers=CSRF | {"Idempotency-Key": uuid4().hex})
     assert created.status_code == 201, created.text
-    forbidden = client.patch("/api/v1/tasks/editable", json={
-        "version": 1, "serialServerResourceId": "serial-denied",
+    changed = client.patch(f"/api/v1/tasks/{created.json()['id']}", json={
+        "version": created.json()["version"], "name": "renamed own task",
     }, headers=CSRF)
-    assert forbidden.status_code == 403
+    assert changed.status_code == 200

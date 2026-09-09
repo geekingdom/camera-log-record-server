@@ -25,7 +25,6 @@ const account: SessionUser = {
   displayName: "测试账号",
   isAdmin: false,
   scopes: ["tasks:read"],
-  resourceIds: null,
   enabled: true,
   mustChangePassword: false,
 };

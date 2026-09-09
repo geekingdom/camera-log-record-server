@@ -77,6 +77,9 @@ p { color: #768288; margin: 0; font-size: 13px; }
 .data-table td.el-table__cell { padding: 18px 0; }
 .data-table .cell { padding: 0 18px; }
 .data-table .el-button + .el-button { margin-left: 4px; }
+.table-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; margin-bottom: 12px; }
+.table-actions .el-button + .el-button { margin-left: 0; }
+.bulk-operation-result { margin: 0 0 12px; color: #59676a; font-size: 12px; overflow-wrap: anywhere; }
 .data-table .el-tag { border-radius: 4px; font-size: 11px; }
 .task-name { display: block; max-width: 100%; padding: 0; border: 0; background: none; color: #293d40; font-weight: 600; font-size: 13px; text-align: left; cursor: pointer; overflow-wrap: anywhere; line-height: 1.6; }
 .task-name:hover { color: #087f72; }

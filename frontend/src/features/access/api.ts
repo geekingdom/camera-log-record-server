@@ -4,11 +4,13 @@ import { idempotencyKey, request } from "../../shared/api";
 export interface ServiceToken {
   id: string;
   name: string;
-  scopes: string[];
-  taskIds: string[] | null;
-  expiresAt: string;
+  userId: string;
+  user?: Pick<import("../../shared/api").SessionUser, "id" | "username" | "displayName" | "enabled" | "deletedAt">;
+  expiresAt: string | null;
   createdAt: string;
+  version: number;
   revoked: boolean;
+  effectiveStatus: "ACTIVE" | "REVOKED" | "EXPIRED" | "USER_DISABLED" | "USER_DELETED" | "USER_MISSING";
 }
 
 export interface ServiceTokenPage {
@@ -20,9 +22,15 @@ export interface ServiceTokenPage {
 
 export interface ServiceTokenCreate {
   name: string;
-  scopes: string[];
-  taskIds?: string[];
-  expiresInDays: number;
+  userId: string;
+  expiresInDays?: number | null;
+}
+
+export interface ServiceTokenUpdate {
+  version: number;
+  name?: string;
+  userId?: string;
+  expiresInDays?: number | null;
 }
 
 export const accessApi = {
@@ -34,5 +42,12 @@ export const accessApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(body),
     }),
+  update: (id: string, body: ServiceTokenUpdate) => request<ServiceToken>(`/service-tokens/${encodeURIComponent(id)}`, {
+    method: "PATCH", body: JSON.stringify(body),
+  }),
+  reveal: (id: string) => request<{ token: string }>(`/service-tokens/${encodeURIComponent(id)}/reveal`, { method: "POST" }),
+  rotate: (id: string, version: number) => request<ServiceToken & { token: string }>(`/service-tokens/${encodeURIComponent(id)}/rotate`, {
+    method: "POST", body: JSON.stringify({ version }),
+  }),
   revoke: (id: string) => request<void>(`/service-tokens/${id}`, { method: "DELETE" }),
 };

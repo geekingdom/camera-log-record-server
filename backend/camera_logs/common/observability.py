@@ -28,13 +28,13 @@ MAX_LOG_BYTES = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 14
 _SECRET_KEYS = {
     "password", "token", "authorization", "passwordencrypted", "currentpassword", "newpassword",
-    "adminpassword", "passwordhash", "tokenhash", "bootstraptoken", "internaltoken",
+    "adminpassword", "passwordhash", "tokenhash", "tokenencrypted", "bootstraptoken", "internaltoken",
     "encryptionkey", "cookie", "setcookie",
 }
 _STANDARD_RECORD_FIELDS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 _SECRET_TEXT = re.compile(
     r"(?i)\b(password[_-]?(?:encrypted|hash)|(?:current|new|admin)[_-]?password|"
-    r"(?:bootstrap|internal)[_-]?token|token[_-]?hash|encryption[_-]?key|"
+    r"(?:bootstrap|internal)[_-]?token|token[_-]?(?:encrypted|hash)|encryption[_-]?key|"
     r"set[_-]?cookie|cookie|password|token|authorization)\b([\"']?\s*[:=]\s*)"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
 )

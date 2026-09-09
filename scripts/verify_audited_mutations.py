@@ -213,34 +213,41 @@ async def verify_create_audit_failure_retry(repo, database):
 
 
 async def verify_template_unique_conflict_rollback(repo, database):
-    """不同幂等键的同名模板冲突必须 409，失败事务不能留下第二映射或审计。"""
+    """同创建者同名模板必须冲突，不同创建者可同名，失败事务不能留下第二映射或审计。"""
     payload = {"name": "unique-template", "description": "first"}
 
-    async def prepare(identifier, description):
-        return {"id": identifier, "name": "unique-template", "description": description, "version": 1}
+    async def prepare(identifier, description, owner):
+        return {"id": identifier, "name": "unique-template", "description": description, "version": 1,
+                "createdBy": owner, "createdByName": owner}
 
     first = await audited_create(
         repo, ACTOR, "template-unique-first", "verify_template_create", payload, "templates",
-        lambda identifier: prepare(identifier, "first"),
+        lambda identifier: prepare(identifier, "first", ACTOR),
+    )
+    second = await audited_create(
+        repo, "other-template-owner", "template-unique-other-owner", "verify_template_create", payload, "templates",
+        lambda identifier: prepare(identifier, "other", "other-template-owner"),
     )
     try:
         await audited_create(
             repo, ACTOR, "template-unique-conflict", "verify_template_create",
             {"name": "unique-template", "description": "second"}, "templates",
-            lambda identifier: prepare(identifier, "second"),
+            lambda identifier: prepare(identifier, "second", ACTOR),
         )
     except HTTPException as error:
         check(error.status_code == 409, "不同幂等键同名模板没有返回 409")
     else:
         raise AssertionError("不同幂等键同名模板被错误创建")
-    check(await database.templates.count_documents({"name": "unique-template"}) == 1,
-          "同名模板冲突产生了第二个模板")
+    check(await database.templates.count_documents({"name": "unique-template"}) == 2,
+          "不同创建者同名模板未被保留，或同创建者冲突产生了第三个模板")
     check(await database.idempotency.count_documents({"actor": ACTOR, "key": "template-unique-conflict"}) == 0,
           "同名模板冲突后残留了第二把幂等映射")
-    check(await database.audit.count_documents({"action": "verify_template_create"}) == 1,
-          "同名模板冲突后新增了错误审计")
+    check(await database.audit.count_documents({"action": "verify_template_create"}) == 2,
+          "同创建者同名冲突后新增了错误审计，或不同创建者创建缺少审计")
     check(await database.audit.count_documents({"action": "verify_template_create", "targetId": first["id"]}) == 1,
           "同名模板首个创建没有保留唯一审计")
+    check(await database.audit.count_documents({"action": "verify_template_create", "targetId": second["id"]}) == 1,
+          "不同创建者同名模板没有保留唯一审计")
 
 
 async def verify_prepare_once_across_transaction_reentry(repo, database):

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 
 def now():
@@ -20,7 +20,7 @@ def public(document):
     if not document:
         return document
     return {k: v for k, v in document.items() if k not in {
-        "_id", "password", "passwordEncrypted", "passwordHash", "authVersion", "tokenHash", "path", "rawPath", "indexPath", "leaseUntil"
+        "_id", "password", "passwordEncrypted", "passwordHash", "authVersion", "tokenHash", "tokenEncrypted", "path", "rawPath", "indexPath", "leaseUntil"
     }}
 
 
@@ -35,7 +35,17 @@ class Repository:
         """创建唯一、查询和 TTL 索引；重复调用不会改变已有业务数据。"""
         for name in ("tasks", "templates", "operations", "commands", "nodes", "node_configs", "platform_settings", "files", "jobs", "tokens", "runs", "resources"):
             await self.db[name].create_index("id", unique=True)
-        await self.db.templates.create_index("name", unique=True)
+        # 旧版本以 name_1 全局唯一，迁移时只替换该精确旧索引，不删除模板数据或其它索引。
+        template_indexes = await self.db.templates.index_information()
+        legacy_name = template_indexes.get("name_1")
+        # 新索引先完成，避免迁移窗口失去唯一约束；多 API/Worker 并发初始化可安全复用它。
+        await self.db.templates.create_index([("createdBy", 1), ("name", 1)], unique=True)
+        if legacy_name and legacy_name.get("key") == [("name", 1)]:
+            try:
+                await self.db.templates.drop_index("name_1")
+            except OperationFailure as error:
+                if error.code != 27:
+                    raise
         await self.db.idempotency.create_index([("actor", 1), ("key", 1)], unique=True)
         await self.db.idempotency.create_index("expiresAt", expireAfterSeconds=0)
         # 每个任务只保留一个活动运行锁；不同任务可以使用同一设备端点。
@@ -86,6 +96,8 @@ class Repository:
         context = current_request_context()
         document = {"actor": actor, "action": action, "targetId": target,
                     "requestId": context.get("requestId"), "clientIp": context.get("clientIp"), "createdAt": now()}
+        if context.get("serviceTokenId"):
+            document["serviceTokenId"] = context["serviceTokenId"]
         # 固定事件标识仅由事务调用方提供，用于确认本次提交，不能使用客户端请求 ID 代替。
         if event_id is not None:
             document["_id"] = event_id

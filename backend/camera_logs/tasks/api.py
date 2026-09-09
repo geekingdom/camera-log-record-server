@@ -5,11 +5,11 @@
 """
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Depends, Query, Request
 
 from camera_logs.common.database import public
 from camera_logs.common.models import TaskCreate, TaskPatch, new_id
-from camera_logs.common.security import actor, authorize, authorize_resource
+from camera_logs.common.security import actor, authorize
 from camera_logs.tasks.control import request_control
 from camera_logs.tasks.creation import create_task as create_task_atomic
 from camera_logs.tasks.editing import edit_task as edit_task_atomic
@@ -23,19 +23,35 @@ def install_task_routes(app, repo, listing):
     @app.get("/api/v1/tasks")
     async def tasks(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
                     status: str | None = None, search: str | None = None,
-                    resourceId: str | None = None):
+                    resourceId: str | None = None, createdBy: str | None = None):
         authorize(user, "tasks:read")
-        query = {}
-        if user.get("taskIds") is not None:
-            query["id"] = {"$in": user["taskIds"]}
+        conditions = []
         if status:
-            query["status"] = status
+            conditions.append({"status": status})
         if resourceId:
-            query["$and"] = [{"$or": [{"resourceId": resourceId}, {"serialServerResourceId": resourceId}]}]
+            conditions.append({"$or": [{"resourceId": resourceId}, {"serialServerResourceId": resourceId}]})
+        if createdBy:
+            conditions.append({"createdBy": createdBy})
         if search:
             import re
-            query["$or"] = [{key: {"$regex": re.escape(search), "$options": "i"}} for key in ("name", "ip")]
-        return await listing("tasks", query, page, pageSize)
+            conditions.append({"$or": [{key: {"$regex": re.escape(search), "$options": "i"}} for key in ("name", "ip")]})
+        query = {} if not conditions else conditions[0] if len(conditions) == 1 else {"$and": conditions}
+        result = await listing("tasks", query, page, pageSize)
+        identifiers = {identifier for task in result["items"] for identifier in (
+            task.get("resourceId"), task.get("serialServerResourceId"),
+        ) if identifier}
+        resources = {
+            resource["id"]: resource.get("deletedAt")
+            async for resource in repo().db.resources.find({"id": {"$in": list(identifiers)}}, {"id": 1, "deletedAt": 1})
+        }
+        for task in result["items"]:
+            if task.get("resourceDeleted"):
+                deleted_at = next((resources.get(identifier) for identifier in (
+                    task.get("resourceId"), task.get("serialServerResourceId"),
+                ) if resources.get(identifier) is not None), None)
+                if deleted_at is not None:
+                    task["resourceDeletedAt"] = deleted_at
+        return result
 
     @app.post("/api/v1/tasks", status_code=201)
     async def create_task(body: TaskCreate, request: Request, user: User):
@@ -43,14 +59,17 @@ def install_task_routes(app, repo, listing):
         authorize(user, "tasks:create")
         if body.autoStart:
             authorize(user, "tasks:control")
-        if user.get("taskIds") is not None and user.get("kind") != "session":
-            raise HTTPException(403, "受限账号不能创建授权范围外的新任务")
-        for resource_id in filter(None, (body.resourceId, body.serialServerResourceId)):
-            authorize_resource(user, resource_id)
         async def build(identifier):
-            """在事务外完成可能读取资源和加密的准备，返回固定任务文档。"""
+            """在确认非同键重放后校验模板来源，保留用户调整后的独立命令快照。"""
+            source_version = body.sourceTemplateVersion
+            if body.sourceTemplateId:
+                from camera_logs.commands.templates import readable_template
+                template = await readable_template(repo(), user, body.sourceTemplateId)
+                if source_version is None:
+                    source_version = template["version"]
             binding = await bind_resource(repo(), body)
             doc = body.model_dump()
+            doc["sourceTemplateVersion"] = source_version
             password = doc.pop("password")
             auto_start = doc.pop("autoStart")
             for cmd in doc["scheduledCommands"]:

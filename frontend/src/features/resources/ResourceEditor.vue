@@ -9,12 +9,12 @@ import { usePermissions } from "../../shared/permissions";
 import type { Resource, ResourceAuthentication, ResourceAuthType, ResourceKind } from "../../shared/types";
 
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ resource?: Resource }>();
+const props = defineProps<{ resource?: Resource; canEdit?: boolean }>();
 const emit = defineEmits<{ saved: [] }>();
 const permissions = usePermissions();
 const canSave = computed(() => props.resource
-  ? permissions.can("resources:write") && permissions.resource(props.resource.id)
-  : permissions.can("resources:create") && permissions.allResources());
+  ? Boolean(props.canEdit) && permissions.can("resources:write")
+  : permissions.can("resources:create"));
 const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType });
 const form = ref(blank());
 const authenticated = ref<ResourceAuthentication>();

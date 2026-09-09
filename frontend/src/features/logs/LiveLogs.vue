@@ -11,6 +11,7 @@ import {
   type LiveLogRange,
 } from "../../shared/composables/liveLogBuffer";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
+import { websocketUrl } from "../../shared/websocketUrl";
 import LiveLogRanges from "./LiveLogRanges.vue";
 
 const props = defineProps<{ taskId: string; canSend?: boolean }>();
@@ -108,15 +109,7 @@ function resetForTask() {
   follow.value = true;
 }
 function socketUrl() {
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return (
-    protocol +
-    "//" +
-    location.host +
-    "/api/v1/tasks/" +
-    encodeURIComponent(props.taskId) +
-    "/logs"
-  );
+  return websocketUrl(`/api/v1/tasks/${encodeURIComponent(props.taskId)}/logs`, location);
 }
 // generation 防止旧任务的延迟 socket 回调污染新任务视图；cursor 用于断线恢复。
 function openSocket(current: number) {

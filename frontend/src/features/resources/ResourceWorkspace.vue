@@ -1,21 +1,31 @@
 <script setup lang="ts">
 // 资源是设备身份入口；软删除后仍可进入所属任务查询和下载历史日志。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { Activity, Archive, Edit3, Eye, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { Resource, ResourceKind } from "../../shared/types";
 import AsyncView from "../../shared/AsyncView.vue";
+import { canManageOwnedRecord } from "../../shared/ownership";
+import type { BulkOperationEntry } from "../../shared/bulkOperations";
+import CreatorFilter from "../../shared/CreatorFilter.vue";
+import ResourceBatchDelete from "./ResourceBatchDelete.vue";
 
 const loadResourceEditor = () => import("./ResourceEditor.vue");
 
 const emit = defineEmits<{ tasks: [Resource]; createTask: [Resource] }>();
-const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; resourceIds?: string[] | null }>();
+const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
+const showAll = ref(Boolean(props.isAdmin));
+const createdBy = ref("");
 const deleting = ref(new Set<string>());
+const selected = ref<Resource[]>([]);
+const batchDeleting = ref(false);
+const selectionGeneration = ref(0);
+const table = ref<{ clearSelection: () => void; toggleRowSelection: (row: Resource, selected?: boolean) => void }>();
 const labels: Record<ResourceKind, string> = { HIKVISION_NETWORK: "海康网络设备", SERIAL_SERVER: "串口服务器" };
 function kindLabel(value: ResourceKind) { return labels[value]; }
 function kindIcon(value: ResourceKind) { return value === "HIKVISION_NETWORK" ? Network : Server; }
@@ -24,17 +34,37 @@ const serialServerCount = computed(() => resources.value.filter(resource => reso
 const deletedOnPage = computed(() => resources.value.filter(resource => resource.deletedAt).length);
 async function load() {
   const current = ++generation; loading.value = true;
-  try { const data = await api.resources(page.value, 20, { search: search.value.trim() || undefined, kind: kind.value,
-    includeDeleted: includeDeleted.value ? "true" : undefined }); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
+  try { const data = await api.resources(page.value, 20, {
+    search: search.value.trim() || undefined,
+    kind: kind.value,
+    includeDeleted: includeDeleted.value ? "true" : undefined,
+    createdBy: showAll.value ? createdBy.value || undefined : props.userId,
+  }); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
   catch (error) { if (current === generation) ElMessage.error(error instanceof Error ? error.message : "读取资源失败"); }
   finally { if (current === generation) loading.value = false; }
 }
-function filter() { if (page.value === 1) void load(); else page.value = 1; }
-function permitted(resource?: Resource) { return Boolean(props.canWrite && resource && (props.resourceIds === null || props.resourceIds?.includes(resource.id))); }
-function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt && (props.resourceIds === null || props.resourceIds?.includes(resource.id))); }
+function clearSelection(invalidate = false) {
+  if (invalidate) selectionGeneration.value += 1;
+  selected.value = []; table.value?.clearSelection();
+}
+function filter() { clearSelection(true); if (page.value === 1) void load(); else page.value = 1; }
+function changeScope(value: boolean | string | number) {
+  showAll.value = Boolean(value);
+  createdBy.value = "";
+  filter();
+}
+function formatDate(value?: string | null) {
+  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) : "-";
+}
+function owns(resource?: Resource) { return Boolean(resource && canManageOwnedRecord(props.userId, props.isAdmin, resource.createdBy)); }
+function permitted(resource?: Resource) { return Boolean(props.canWrite && owns(resource)); }
+function canBulkDelete(resource?: Resource) { return Boolean(!batchDeleting.value && resource && !resource.deletedAt && permitted(resource) && props.canControl); }
+function updateSelection(items: Resource[]) { selected.value = items.filter(canBulkDelete); }
+function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt); }
 function edit(resource?: Resource) { if (resource && !permitted(resource)) return; selectedResource.value = resource; editorOpen.value = true; }
 async function remove(resource: Resource) {
-  if (deleting.value.has(resource.id)) return;
+  if (!permitted(resource)) return;
+  if (batchDeleting.value || deleting.value.has(resource.id)) return;
   deleting.value = new Set(deleting.value).add(resource.id);
   try {
     const latest = await api.resource(resource.id);
@@ -43,15 +73,32 @@ async function remove(resource: Resource) {
     const message = count
       ? `资源“${latest.name}”关联 ${count} 个采集任务，其中 ${active} 个尚未停止。删除后将停止关联采集，已有日志文件保留，可继续查询和下载。确认删除？`
       : `确认删除资源“${latest.name}”？资源将标记为已删除，已有日志文件保留。`;
-    if (!(await confirmAction(message, "确认删除设备资源"))) return;
+    const ownerNotice = !props.isAdmin && count ? "关联任务若由其他用户创建，服务端将拒绝本次删除。" : "";
+    if (!(await confirmAction(`${message}${ownerNotice}`, "确认删除设备资源"))) return;
     await api.deleteResource(latest.id, latest.version ?? 1);
     ElMessage.success("资源已标记删除，已有日志保留");
     await load();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : "删除资源失败"); }
   finally { const next = new Set(deleting.value); next.delete(resource.id); deleting.value = next; }
 }
-watch(page, () => void load()); onMounted(load);
-onBeforeUnmount(() => ++generation);
+async function completeBatch(entries: BulkOperationEntry[]) {
+  const failed = new Set(entries.filter(entry => entry.status !== "success").map(entry => entry.id));
+  await load();
+  selected.value = resources.value.filter(resource => failed.has(resource.id) && canBulkDelete(resource));
+  await nextTick();
+  table.value?.clearSelection();
+  selected.value.forEach(resource => table.value?.toggleRowSelection(resource, true));
+}
+watch(page, () => { clearSelection(true); void load(); });
+watch(() => [props.userId, props.isAdmin], ([userId, isAdmin], previous) => {
+  if (previous && (userId !== previous[0] || isAdmin !== previous[1])) {
+    showAll.value = Boolean(isAdmin);
+    createdBy.value = "";
+    filter();
+  }
+});
+onMounted(load);
+onBeforeUnmount(() => { generation += 1; clearSelection(true); });
 defineExpose({ reload: load });
 </script>
 <template>
@@ -64,19 +111,25 @@ defineExpose({ reload: load });
   <div class="resource-toolbar" role="search">
     <el-input v-model="search" aria-label="搜索资源" placeholder="搜索名称或 IP" :prefix-icon="Search" clearable @keyup.enter="filter" />
     <el-select v-model="kind" aria-label="按资源类型筛选" clearable placeholder="全部资源" @change="filter"><el-option label="海康网络设备" value="HIKVISION_NETWORK" /><el-option label="串口服务器" value="SERIAL_SERVER" /></el-select>
+    <el-checkbox :model-value="showAll" @change="changeScope">查看全部</el-checkbox>
+    <CreatorFilter v-if="showAll" v-model="createdBy" @change="filter" />
     <el-checkbox v-model="includeDeleted" @change="filter">包含已删除资源</el-checkbox>
-    <el-button @click="filter">筛选</el-button><el-button v-if="props.canCreate && props.resourceIds === null" type="primary" :icon="Plus" @click="edit()">新建资源</el-button>
+    <el-button @click="filter">筛选</el-button><ResourceBatchDelete :items="selected" :disabled="batchDeleting" :selection-generation="selectionGeneration" @processing="batchDeleting = $event" @completed="completeBatch" /><el-button v-if="props.canCreate" type="primary" :icon="Plus" @click="edit()">新建资源</el-button>
   </div>
-  <el-table :data="resources" v-loading="loading" scrollbar-always-on class="data-table resource-table" empty-text="暂无设备资源">
+  <el-table ref="table" row-key="id" reserve-selection :data="resources" v-loading="loading" scrollbar-always-on class="data-table resource-table" empty-text="暂无设备资源" @selection-change="updateSelection">
+    <el-table-column type="selection" width="48" :selectable="canBulkDelete" />
     <el-table-column label="资源身份" min-width="250"><template #default="{ row }"><div class="resource-identity"><span class="resource-kind-icon" :class="row.kind === 'HIKVISION_NETWORK' ? 'network' : 'serial'"><component :is="kindIcon(row.kind)" :size="17" /></span><div><strong>{{ row.name }}</strong><div class="resource-type-line"><span>{{ kindLabel(row.kind) }}</span><el-tag v-if="row.deletedAt" type="info" size="small">已删除 · 日志保留</el-tag></div></div></div></template></el-table-column>
     <el-table-column label="网络地址" min-width="165"><template #default="{ row }"><span class="resource-ip">{{ row.ip }}</span><small class="resource-subtle">{{ row.kind === 'HIKVISION_NETWORK' ? 'HTTP 设备入口' : 'Telnet 串口入口' }}</small></template></el-table-column>
     <el-table-column label="设备身份" min-width="270"><template #default="{ row }"><div class="resource-device-meta"><strong>{{ row.model || (row.kind === 'SERIAL_SERVER' ? '串口服务器' : '-') }}</strong><span>序列号 {{ row.subSerialNumber || '-' }}</span><span>软件 {{ row.softwareVersion || '-' }}</span></div></template></el-table-column>
+    <el-table-column label="创建用户" min-width="130"><template #default="{ row }">{{ row.createdByName || row.createdBy || "未知" }}</template></el-table-column>
+    <el-table-column label="创建时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
+    <el-table-column label="删除时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.deletedAt) }}</template></el-table-column>
     <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 活跃</span></div></template></el-table-column>
     <el-table-column label="操作" width="252" fixed="right"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
       <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
-      <el-tooltip v-if="!row.deletedAt && permitted(row) && props.canControl" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
+      <el-tooltip v-if="!row.deletedAt && permitted(row) && props.canControl" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="batchDeleting || deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
     </div></template></el-table-column>
   </el-table>
   <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" />
@@ -84,7 +137,7 @@ defineExpose({ reload: load });
     v-if="editorOpen"
     overlay
     :loader="loadResourceEditor"
-    :component-props="{ modelValue: editorOpen, resource: selectedResource }"
+    :component-props="{ modelValue: editorOpen, resource: selectedResource, canEdit: !selectedResource || permitted(selectedResource) }"
     :listeners="{ 'update:modelValue': (value: boolean) => editorOpen = value, saved: () => load() }"
   />
 </template>

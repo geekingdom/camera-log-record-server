@@ -28,7 +28,7 @@ export const idempotencyKey = (): string => {
   const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
-export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; resourceIds: string[] | null; enabled: boolean; mustChangePassword: boolean; version?: number; builtin?: boolean; }
+export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; enabled: boolean; mustChangePassword: boolean; version?: number; builtin?: boolean; deletedAt?: string | null; }
 export interface UserPage { items: SessionUser[]; total: number; page: number; pageSize: number; }
 export interface IpPolicy { version: number; enabled: boolean; clientIp: string; rules: { label: string; network: string; scopes: string[] }[]; }
 
@@ -37,6 +37,7 @@ export class ApiError extends Error {
     public status: number,
     message: string,
     public requestId?: string,
+    public code?: string,
   ) {
     super(requestId ? `${message}（请求 ID: ${requestId}）` : message);
   }
@@ -53,6 +54,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   if (!response.ok) {
     if (response.status === 401 && response.headers.get("x-auth-required") === "true") window.dispatchEvent(new Event("auth-required"));
     let message = response.statusText;
+    let code: string | undefined;
     try {
       const body = await response.json();
       message =
@@ -60,6 +62,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
         body.error?.message ??
         body.error ??
         JSON.stringify(body);
+      code = typeof body.code === "string" ? body.code : typeof body.error?.code === "string" ? body.error.code : undefined;
     } catch {
       /* text response */
     }
@@ -67,8 +70,9 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       response.status,
       message || `请求失败 (${response.status})`,
       response.headers.get("x-request-id") ??
-        response.headers.get("request-id") ??
+      response.headers.get("request-id") ??
         undefined,
+      code,
     );
   }
   if (response.status === 204) return undefined as T;
@@ -83,8 +87,9 @@ export const authApi = {
 export const usersApi = {
   list: (page = 1, pageSize = 20) => request<UserPage>(`/users?page=${page}&pageSize=${pageSize}`),
   permissions: () => request<{ scopes: { value: string; label: string }[] }>("/users/permissions"),
-  create: (body: Pick<SessionUser, "username" | "displayName" | "isAdmin" | "scopes" | "resourceIds" | "enabled"> & { password: string }) => request<SessionUser>("/users", { method: "POST", body: JSON.stringify(body) }),
-  update: (id: string, body: Partial<Pick<SessionUser, "displayName" | "scopes" | "resourceIds" | "enabled">> & { version: number }) => request<SessionUser>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  shareTargets: (page = 1, pageSize = 100) => request<Page<Pick<SessionUser, "id" | "username" | "displayName">>>(`/users/share-targets${query(page, pageSize)}`),
+  create: (body: Pick<SessionUser, "username" | "displayName" | "isAdmin" | "scopes" | "enabled"> & { password: string }) => request<SessionUser>("/users", { method: "POST", body: JSON.stringify(body) }),
+  update: (id: string, body: Partial<Pick<SessionUser, "displayName" | "scopes" | "enabled">> & { version: number }) => request<SessionUser>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
   resetPassword: (id: string, password: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}/reset-password`, { method: "POST", body: JSON.stringify({ password, version }) }),
   disable: (id: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
 };
@@ -128,6 +133,8 @@ const templateFields = [
   "description",
   "initialCommands",
   "scheduledCommands",
+  "sharedWith",
+  "sharedWithAll",
 ];
 function pick(source: object, fields: string[]) {
   return Object.fromEntries(
@@ -140,7 +147,7 @@ export const api = {
   resources: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; kind?: ResourceKind; includeDeleted?: string },
+    filters?: { search?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string },
   ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
   resource: (id: string) => request<Resource>(`/resources/${id}`),
   updateResource: (id: string, resource: object) => request<Resource>(`/resources/${id}`, {
@@ -179,7 +186,7 @@ export const api = {
   tasks: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; status?: string; resourceId?: string },
+    filters?: { search?: string; status?: string; resourceId?: string; createdBy?: string },
   ) => request<Page<Task>>(`/tasks${query(page, pageSize, filters)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (
@@ -213,8 +220,8 @@ export const api = {
     }),
   executions: (id: string, page = 1) =>
     request<Page<CommandExecution>>(`/tasks/${id}/command-executions${query(page, 50)}`),
-  templates: (page?: number, pageSize?: number) =>
-    request<Page<Template>>(`/command-templates${query(page, pageSize)}`),
+  templates: (page?: number, pageSize?: number, filters: Record<string, string | undefined> = {}) =>
+    request<Page<Template>>(`/command-templates${query(page, pageSize, filters)}`),
   template: (id: string) => request<Template>(`/command-templates/${id}`),
   createTemplate: (template: Omit<Template, "id" | "version">) =>
     request<Template>("/command-templates", {

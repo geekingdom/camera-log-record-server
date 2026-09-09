@@ -9,7 +9,9 @@ from camera_logs.common.database import now
 from camera_logs.users.passwords import hash_password, password_work
 
 COOKIE = "camera_session"
-PUBLIC_FIELDS = ("id", "username", "displayName", "isAdmin", "builtin", "scopes", "resourceIds",
+BASE_READ_SCOPES = frozenset({"tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"})
+
+PUBLIC_FIELDS = ("id", "username", "displayName", "isAdmin", "builtin", "scopes",
                  "enabled", "mustChangePassword", "version", "createdAt", "updatedAt", "deletedAt")
 
 
@@ -57,16 +59,10 @@ async def initialize_admin(repo):
 
 
 async def user_identity(repo, user):
-    """资源授权投影到当前任务 ID，复用所有现有逐任务授权入口。"""
-    task_ids = None
-    if user.get("resourceIds") is not None:
-        task_ids = await repo.db.tasks.distinct("id", {
-            "resourceId": {"$in": user["resourceIds"]}, "$or": [
-                {"serialServerResourceId": None},
-                {"serialServerResourceId": {"$in": user["resourceIds"]}},
-            ]})
-    return {**public_user(user), "kind": "session", "taskIds": task_ids,
-            "scopes": ["*"] if user["isAdmin"] else user["scopes"]}
+    """构造实时用户身份；全部有效普通用户均有基础读取和下载权限。"""
+    scopes = ["*"] if user["isAdmin"] else sorted(set(user.get("scopes", [])) | BASE_READ_SCOPES)
+    return {**public_user(user), "kind": "session", "scopes": scopes,
+            "resourceIds": None, "taskIds": None}
 
 
 async def session_identity(repo, token):

@@ -4,11 +4,13 @@ import re
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
+from pydantic import IPvAnyAddress
 from pymongo import ReturnDocument
 
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
-from camera_logs.common.security import actor, authorize, authorize_resource
+from camera_logs.common.security import actor, authorize, authorize_owner
+from camera_logs.resources.address_claim import claim_address, release_address
 from camera_logs.resources.authentication import authenticate_network_resource
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.models import ResourceInput, ResourcePatch
@@ -19,29 +21,19 @@ def _resource_public(document):
     return public(document)
 
 
-async def _accessible_resource_ids(repo, user: dict) -> list[str] | None:
-    """将受限令牌的任务白名单投影为已关联的资源 ID，避免越权读取资源。"""
-    if user.get("kind") == "session":
-        return user.get("resourceIds")
-    task_ids = user.get("taskIds")
-    if task_ids is None:
-        return None
-    query = {"id": {"$in": task_ids}}
-    primary = await repo().db.tasks.distinct("resourceId", query)
-    serial = await repo().db.tasks.distinct("serialServerResourceId", query)
-    return [identifier for identifier in set(primary) | set(serial) if identifier is not None]
-
-
-async def _resource_view(repo, document, user: dict | None = None):
-    """补齐资源关联任务总数与活动数，便于删除前确认影响范围。"""
+async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100):
+    """共享读取任务摘要；摘要有界，剩余任务通过正式分页接口读取。"""
     item = _resource_public(document)
     task_query = task_resource_query(item["id"])
-    if user and user.get("taskIds") is not None:
-        task_query = {"$and": [task_query, {"id": {"$in": user["taskIds"]}}]}
     item["taskCount"] = await repo().db.tasks.count_documents(task_query)
     item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {"$or": [
         {"nodeId": {"$exists": True, "$ne": None}}, {"desiredState": {"$in": ["RUNNING", "PAUSED"]}},
     ]}]})
+    fields = {key: 1 for key in ("id", "name", "protocol", "ip", "port", "status", "desiredState",
+                                 "resourceId", "serialServerResourceId", "createdBy", "createdByName")}
+    item["tasks"] = [public(task) async for task in repo().db.tasks.find(task_query, fields).sort("id", 1).limit(task_limit)]
+    item["tasksTruncated"] = item["taskCount"] > len(item["tasks"])
+    item["tasksUrl"] = f"/api/v1/tasks?resourceId={item['id']}"
     return item
 
 
@@ -75,36 +67,48 @@ def install_resource_routes(app, repo, listing):
 
     @app.get("/api/v1/resources")
     async def resources(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
-                        kind: str | None = None, search: str | None = None, includeDeleted: bool = False):
-        """按资源类型和名称或地址搜索，并在受限令牌下收窄到授权资源 ID。"""
+                        kind: str | None = None, search: str | None = Query(None, max_length=256),
+                        createdBy: str | None = Query(None, max_length=128),
+                        includeDeleted: bool = False, taskLimit: int = Query(100, ge=1, le=500),
+                        name: str | None = Query(None, max_length=128), ip: IPvAnyAddress | None = None,
+                        model: str | None = Query(None, max_length=256),
+                        subSerialNumber: str | None = Query(None, max_length=256),
+                        softwareVersion: str | None = Query(None, max_length=256)):
+        """资源发现：search跨名称/IP/型号/序列号/软件版本搜索；独立字段取交集，IP精确匹配。
+
+        返回授权范围内任务摘要，默认最多100条；tasksTruncated为true时使用tasksUrl分页读取。
+        createdBy 是创建用户 ID 的精确筛选，用于工作台“仅看自己”和创建用户目录筛选。
+        除IP外均按不区分大小写的字面子串匹配，不解释正则表达式。
+        """
         authorize(user, "tasks:read")
         query = {} if includeDeleted else {"deletedAt": None}
-        resource_ids = await _accessible_resource_ids(repo, user)
-        if resource_ids is not None:
-            query["id"] = {"$in": resource_ids}
         if kind:
             query["kind"] = kind
+        if createdBy:
+            query["createdBy"] = createdBy
         if search:
-            query["$or"] = [{field: {"$regex": re.escape(search), "$options": "i"}} for field in ("name", "ip")]
+            query["$or"] = [{field: {"$regex": re.escape(search), "$options": "i"}}
+                            for field in ("name", "ip", "model", "subSerialNumber", "softwareVersion")]
+        for field, value in (("name", name), ("model", model), ("subSerialNumber", subSerialNumber),
+                             ("softwareVersion", softwareVersion)):
+            if value:
+                query[field] = {"$regex": re.escape(value), "$options": "i"}
+        if ip is not None:
+            query["ip"] = str(ip)
         result = await listing("resources", query, page, pageSize)
-        result["items"] = [await _resource_view(repo, item, user) for item in result["items"]]
+        result["items"] = [await _resource_view(repo, item, user, taskLimit) for item in result["items"]]
         return result
 
     @app.get("/api/v1/resources/{identifier}")
-    async def get_resource(identifier: str, user: User):
-        """读取单个资源前按受限令牌的资源 ID 白名单授权。"""
+    async def get_resource(identifier: str, user: User, taskLimit: int = Query(100, ge=1, le=500)):
+        """所有有效用户共享资源详情，写权限单独按创建者判断。"""
         authorize(user, "tasks:read")
-        resource_ids = await _accessible_resource_ids(repo, user)
-        if resource_ids is not None and identifier not in resource_ids:
-            raise HTTPException(403, "资源不在授权范围内")
-        return await _resource_view(repo, await repo().get("resources", identifier), user)
+        return await _resource_view(repo, await repo().get("resources", identifier), user, taskLimit)
 
     @app.post("/api/v1/resources/authenticate")
     async def authenticate_resource(body: ResourceInput, user: User):
         """返回网络设备认证预览，结果只来自本次服务端设备请求。"""
         authorize(user, "resources:create")
-        if user.get("taskIds") is not None:
-            raise HTTPException(403, "受限账号不能探测授权范围外的新资源")
         if body.kind == "SERIAL_SERVER":
             return {}
         metadata = await authenticated_preview_metadata(body, user, f"ip:{body.ip}")
@@ -115,30 +119,32 @@ def install_resource_routes(app, repo, listing):
     async def create_resource(body: ResourceInput, request: Request, user: User):
         """重新认证网络设备后保存密文凭据，客户端不能提交设备元数据。"""
         authorize(user, "resources:create")
-        if user.get("taskIds") is not None:
-            raise HTTPException(403, "受限账号不能创建授权范围外的新资源")
         async def prepare(identifier):
             """认证和加密只执行在事务外，Mongo 驱动重试不会重新请求设备。"""
+            if await repo().db.resources.find_one({"ip": body.ip, "deletedAt": None}):
+                raise HTTPException(409, "该网络地址已存在设备资源，请使用已有资源")
             metadata = await _verified_metadata(body)
             document = {"id": identifier, "name": body.name, "kind": body.kind, "ip": body.ip,
-                        "version": 1, "createdAt": now(), "updatedAt": now()}
+                        "version": 1, "createdAt": now(), "updatedAt": now(),
+                        "createdBy": user["id"], "createdByName": user.get("displayName") or user.get("username") or user["id"]}
             if body.kind == "HIKVISION_NETWORK":
                 document.update(username=body.username, authType=body.authType,
                                 passwordEncrypted=repo().encrypt(body.password), authenticatedAt=now(), **metadata)
             return document
 
+        async def reserve(document, session):
+            await claim_address(repo(), document, session)
+
         result = await audited_create(repo(), user["id"], request.headers.get("Idempotency-Key"), "create_resource",
-                                      body.model_dump(), "resources", prepare)
+                                      body.model_dump(), "resources", prepare, before_insert=reserve)
         return await _resource_view(repo, result, user)
 
     @app.post("/api/v1/resources/{identifier}/authenticate")
     async def authenticate_existing_resource(identifier: str, body: ResourceInput, user: User):
         """编辑资源的认证预览只能访问该已授权资源的固定地址。"""
         authorize(user, "resources:write")
-        authorize_resource(user, identifier)
-        if user.get("taskIds") is not None and user.get("kind") != "session":
-            raise HTTPException(403, "受限令牌不能编辑共享资源")
         old = await repo().get("resources", identifier)
+        authorize_owner(user, old)
         if old.get("deletedAt") or body.ip != old["ip"] or body.kind != old["kind"]:
             raise HTTPException(409, "资源地址、类型已变化或资源已删除")
         if old["kind"] == "SERIAL_SERVER":
@@ -156,10 +162,8 @@ def install_resource_routes(app, repo, listing):
     async def edit_resource(identifier: str, body: ResourcePatch, user: User):
         """以版本条件更新名称或 HTTP 凭据；物理 IP、类型和设备身份始终固定。"""
         authorize(user, "resources:write")
-        if user.get("taskIds") is not None and user.get("kind") != "session":
-            raise HTTPException(403, "受限账号不能编辑共享资源")
-        authorize_resource(user, identifier)
         old = await repo().get("resources", identifier)
+        authorize_owner(user, old)
         if old.get("deletedAt") is not None:
             raise HTTPException(409, "资源已删除，不能编辑")
         if old.get("version") != body.version:
@@ -200,15 +204,8 @@ def install_resource_routes(app, repo, listing):
         """软删除资源并请求所有关联任务受控停止，保留任务、文件和历史目录。"""
         authorize(user, "resources:write")
         authorize(user, "tasks:control")
-        if user.get("taskIds") is not None and user.get("kind") != "session":
-            raise HTTPException(403, "受限账号不能删除共享资源")
-        authorize_resource(user, identifier)
-        if user.get("taskIds") is not None:
-            # 删除串口服务器也会停止关联网络设备任务，禁止波及范围外设备。
-            outside = {"$and": [task_resource_query(identifier), {"id": {"$nin": user["taskIds"]}}]}
-            if await repo().db.tasks.find_one(outside):
-                raise HTTPException(403, "资源关联了授权范围外的任务，不能删除")
         old = await repo().get("resources", identifier)
+        authorize_owner(user, old)
         if old.get("deletedAt") is not None:
             result = await reconcile_resource_deletion(repo(), identifier)
             return await _resource_view(repo, result or old, user)
@@ -216,6 +213,10 @@ def install_resource_routes(app, repo, listing):
 
         async def commit(session):
             """先提交删除意图及审计，停止任务的可重试扫尾不能扩大事务时长。"""
+            if not user.get("isAdmin") and "*" not in user["scopes"]:
+                foreign = {"$and": [task_resource_query(identifier), {"createdBy": {"$ne": user["id"]}}]}
+                if await repo().db.tasks.find_one(foreign, session=session):
+                    raise HTTPException(403, "资源关联其他用户创建的任务，仅管理员可删除")
             changed = await repo().db.resources.find_one_and_update(
                 {"id": identifier, "version": version, "deletedAt": None},
                 {"$set": {"deletedAt": deleted_at, "deletionState": "PENDING", "updatedAt": deleted_at},
@@ -224,6 +225,7 @@ def install_resource_routes(app, repo, listing):
             )
             if not changed:
                 raise HTTPException(409, "资源版本已变化，请刷新")
+            await release_address(repo(), changed, session)
             return changed
 
         changed = await audited_mutation(repo(), user["id"], "delete_resource", identifier, commit)

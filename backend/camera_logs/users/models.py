@@ -11,6 +11,7 @@ PERMISSIONS = {
     "tasks:control": "启停采集任务", "logs:read": "查看实时与历史日志",
     "logs:download": "下载日志", "commands:send": "发送设备命令",
     "templates:read": "查看命令模板", "templates:write": "管理命令模板",
+    "service-tokens:read": "查看本人服务账号",
 }
 
 
@@ -30,7 +31,6 @@ class UserCreate(Input):
     password: str = Field(min_length=12, max_length=128)
     isAdmin: Literal[False] = False
     scopes: list[str] = Field(default_factory=list, max_length=32)
-    resourceIds: list[str] | None = Field(default=None, max_length=1000)
     enabled: bool = True
 
     @field_validator("username")
@@ -60,7 +60,6 @@ class UserPatch(Input):
     version: int = Field(ge=1)
     displayName: str | None = Field(default=None, min_length=1, max_length=128)
     scopes: list[str] | None = Field(default=None, max_length=32)
-    resourceIds: list[str] | None = Field(default=None, max_length=1000)
     enabled: bool | None = None
 
 

@@ -14,20 +14,21 @@ from pymongo.errors import PyMongoError
 from camera_logs.access_policy.policy import apply_ip_permissions
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
+from camera_logs.common.request_context import request_context
 from camera_logs.common.security import actor, authorize
-from camera_logs.users.sessions import COOKIE
+from camera_logs.users.sessions import COOKIE, user_identity
 
 
-async def issue_download_ticket(repo, actor_id, identifier):
+async def issue_download_ticket(repo, identity, identifier):
     """固定票据与审计原子提交；确认丢失只读恢复，确认前不得发送 Cookie。"""
     token = secrets.token_urlsafe(32)
     document = {"tokenHash": hashlib.sha256(token.encode()).hexdigest(),
-                "jobId": identifier, "actor": actor_id,
+                "jobId": identifier, "actor": identity["id"], "serviceTokenId": identity.get("serviceTokenId"),
                 "expiresAt": now() + timedelta(minutes=5)}
 
     async def commit(session):
         await repo.db.download_sessions.insert_one(document, session=session)
-        await repo.audit(actor_id, "browser_download_authorization", identifier, session=session)
+        await repo.audit(identity["id"], "browser_download_authorization", identifier, session=session)
 
     try:
         await audited_mutations.mutation_transaction(repo, commit)
@@ -36,7 +37,7 @@ async def issue_download_ticket(repo, actor_id, identifier):
             database = audited_mutations._majority_primary_database(repo)
             confirmed = await database.download_sessions.find_one({
                 "tokenHash": document["tokenHash"], "jobId": identifier,
-                "actor": actor_id, "expiresAt": {"$gt": now()},
+                "actor": identity["id"], "expiresAt": {"$gt": now()},
             })
         except PyMongoError:
             confirmed = None
@@ -57,13 +58,24 @@ async def download_actor(request: Request):
     if document is None:
         raise HTTPException(401, "下载授权不存在或已过期")
     if document["actor"] != "bootstrap":
-        identity = await repo.db.tokens.find_one({"id": document["actor"], "revoked": False, "expiresAt": {"$gt": now()}})
-        if not identity:
+        user = await repo.db.users.find_one({"id": document["actor"], "enabled": True, "deletedAt": None})
+        if user is None:
             raise HTTPException(401, "访问令牌已失效")
+        if document.get("serviceTokenId") and not await repo.db.tokens.find_one({
+            "id": document["serviceTokenId"], "revoked": False, "userId": user["id"],
+            "$or": [{"expiresAt": None}, {"expiresAt": {"$gt": now()}}],
+        }):
+            raise HTTPException(401, "访问令牌已失效")
+        identity = await user_identity(repo, user)
+        if document.get("serviceTokenId"):
+            identity |= {"kind": "service-token", "serviceTokenId": document["serviceTokenId"]}
     else:
         identity = {"id": "bootstrap", "scopes": ["*"], "taskIds": None}
     # 无平台会话的第三方下载票据也必须受当前客户端 IP 权限限制。
     identity = await apply_ip_permissions(repo, request, identity)
+    context = request_context.get()
+    if context is not None and identity.get("serviceTokenId"):
+        context["serviceTokenId"] = identity["serviceTokenId"]
     request.state.actor = identity
     return identity
 
@@ -77,7 +89,7 @@ def install_download_sessions(app):
         authorize(user, "logs:download", job["taskId"])
         if job["status"] != "SUCCEEDED":
             raise HTTPException(409, "导出尚未完成")
-        token = await issue_download_ticket(repo, user["id"], identifier)
+        token = await issue_download_ticket(repo, user, identifier)
         path = f"/api/v1/downloads/{identifier}/content"
         response.set_cookie("download_access", token, httponly=True, samesite="strict", secure=request.url.scheme == "https",
                             path=path, max_age=300)

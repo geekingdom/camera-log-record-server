@@ -1,25 +1,28 @@
 <script setup lang="ts">
-// 用户账号管理：维护功能权限、可访问资源范围及用户密码，不在界面保留密码值。
+// 用户账号管理：基础查看、下载和模板权限固定有效，仅维护额外功能权限及用户密码。
 import { onMounted, ref } from "vue";
 import { Edit3, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
-import { ElMessage, ElMessageBox, ElTag } from "element-plus";
-import { ApiError, api, usersApi, type SessionUser } from "../../shared/api";
-import type { Resource } from "../../shared/types";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { ApiError, usersApi, type SessionUser } from "../../shared/api";
 
-type ResourceMode = "all" | "selected";
+const baseScopes = ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"];
+const baseScopeLabels: Record<string, string> = {
+  "tasks:read": "查看设备与任务",
+  "logs:read": "查看实时与历史日志",
+  "logs:download": "下载日志",
+  "templates:read": "查看命令模板",
+  "templates:write": "创建命令模板",
+  "service-tokens:read": "查看我的服务账号",
+};
 const users = ref<SessionUser[]>([]);
 const scopes = ref<{ value: string; label: string }[]>([]);
-const resourceOptions = ref<Resource[]>([]);
 const loading = ref(false);
-const resourceLoading = ref(false);
 const saving = ref(false);
 const resetting = ref(false);
 const loadError = ref("");
 const open = ref(false);
 const resetOpen = ref(false);
 const editing = ref<SessionUser>();
-const resourceMode = ref<ResourceMode>("all");
-const selectedResourceIds = ref<string[]>([]);
 const form = ref({
   username: "",
   displayName: "",
@@ -31,27 +34,6 @@ const resetPassword = ref("");
 const pageNumber = ref(1);
 const total = ref(0);
 
-// 资源接口采用分页返回；逐页读取确保指定资源模式可检索全部已添加资源。
-async function loadResources() {
-  resourceLoading.value = true;
-  try {
-    const items: Resource[] = [];
-    const pageSize = 100;
-    let page = 1;
-    let total = 0;
-    do {
-      const response = await api.resources(page, pageSize);
-      items.push(...response.items);
-      if (!response.items.length) break;
-      total = response.total;
-      page += 1;
-    } while (items.length < total);
-    resourceOptions.value = items;
-  } finally {
-    resourceLoading.value = false;
-  }
-}
-
 // 加载列表及可授权项，失败时保留重试入口，避免将空列表误展示为无用户。
 async function load() {
   loading.value = true;
@@ -60,11 +42,10 @@ async function load() {
     const [page, permissions] = await Promise.all([
       usersApi.list(pageNumber.value, 20),
       usersApi.permissions(),
-      loadResources(),
     ]);
     users.value = page.items;
     total.value = page.total;
-    scopes.value = permissions.scopes;
+    scopes.value = permissions.scopes.filter(scope => !baseScopes.includes(scope.value));
   } catch (error) {
     loadError.value =
       error instanceof Error ? error.message : "读取用户账号失败";
@@ -81,8 +62,6 @@ function resetForm() {
     scopes: [],
     enabled: true,
   };
-  resourceMode.value = "all";
-  selectedResourceIds.value = [];
 }
 function openCreate() {
   editing.value = undefined;
@@ -98,8 +77,6 @@ function openEdit(user: SessionUser) {
     scopes: [...user.scopes],
     enabled: user.enabled,
   };
-  resourceMode.value = user.resourceIds === null ? "all" : "selected";
-  selectedResourceIds.value = [...(user.resourceIds ?? [])];
   open.value = true;
 }
 function closeEditor() {
@@ -110,8 +87,8 @@ function closeReset() {
   resetOpen.value = false;
   resetPassword.value = "";
 }
-function resourceIds() {
-  return resourceMode.value === "all" ? null : [...selectedResourceIds.value];
+function displayScopes(user: SessionUser) {
+  return user.isAdmin ? ["*"] : [...baseScopes, ...user.scopes];
 }
 async function reloadAfterConflict(message: string) {
   await load();
@@ -135,7 +112,6 @@ async function save() {
       await usersApi.update(editing.value.id, {
         displayName: form.value.displayName.trim(),
         scopes: form.value.scopes,
-        resourceIds: resourceIds(),
         enabled: form.value.enabled,
         version: editing.value.version ?? 1,
       });
@@ -146,7 +122,6 @@ async function save() {
         password: form.value.password,
         isAdmin: false,
         scopes: form.value.scopes,
-        resourceIds: resourceIds(),
         enabled: true,
       });
     closeEditor();
@@ -255,8 +230,8 @@ onMounted(() => void load());
       >
       <el-table-column label="权限" min-width="210"
         ><template #default="{ row }"
-          ><el-tag v-for="scope in row.scopes" :key="scope">{{
-            scope === '*' ? '全部权限' : scopes.find(item => item.value === scope)?.label ?? scope
+          ><el-tag v-for="scope in displayScopes(row)" :key="scope">{{
+            scope === '*' ? '全部权限' : baseScopeLabels[scope] ?? scopes.find(item => item.value === scope)?.label ?? scope
           }}</el-tag></template
         ></el-table-column
       >
@@ -313,7 +288,11 @@ onMounted(() => void load());
             show-password
             :disabled="saving"
         /></el-form-item>
-        <el-form-item label="功能权限"
+        <el-form-item label="固定基础权限"
+          ><el-tag v-for="scope in baseScopes" :key="scope" type="info" effect="plain">{{ baseScopeLabels[scope] }}</el-tag
+          ><p class="access-muted">所有有效用户均拥有基础查看、下载和模板权限，不能移除。</p>
+        </el-form-item>
+        <el-form-item label="额外功能权限"
           ><el-select
             v-model="form.scopes"
             multiple
@@ -325,24 +304,6 @@ onMounted(() => void load());
               :key="scope.value"
               :label="scope.label"
               :value="scope.value" /></el-select
-        ></el-form-item>
-        <el-form-item label="资源范围"
-          ><el-radio-group v-model="resourceMode" :disabled="saving"
-            ><el-radio value="all">全部资源</el-radio
-            ><el-radio value="selected">指定资源</el-radio></el-radio-group
-          ><el-select
-            v-model="selectedResourceIds"
-            multiple
-            filterable
-            placeholder="选择已添加的资源"
-            :loading="resourceLoading"
-            :disabled="resourceMode === 'all' || saving"
-            class="resource-select"
-            ><el-option
-              v-for="resource in resourceOptions"
-              :key="resource.id"
-              :label="`${resource.name} · ${resource.ip}`"
-              :value="resource.id" /></el-select
         ></el-form-item>
         <el-form-item v-if="editing" label="启用"
           ><el-switch

@@ -30,6 +30,7 @@ from camera_logs.logs.job_completion import complete_job
 from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.naming import safe_filename_component
 from camera_logs.logs.search_stream import StreamSearch, index_entries
+from camera_logs.logs.time_range import TimeRangeScan
 
 OUTPUT_LIMIT = 20_000_000_000
 TEMP_LIMIT = 100_000_000_000
@@ -352,11 +353,9 @@ def _search_limited(path: Path, scanner: StreamSearch, file: dict, limit: int, c
 async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     """搜索最多返回一千项，记录截断标识并始终清理本作业临时目录。"""
     needle = job.get("keyword", "").encode()
-    if not needle:
-        raise ValueError("search keyword is required")
     start = datetime.fromisoformat(job["start"])
     end = datetime.fromisoformat(job["end"])
-    scanner = StreamSearch(needle, start, end)
+    scanner = StreamSearch(needle, start, end) if needle else TimeRangeScan(start, end)
     results, truncated = [], False
     progress: JobProgress | None = job.get("_progress")
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()

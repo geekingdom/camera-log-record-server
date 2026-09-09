@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import re
 from datetime import timedelta
 from typing import Annotated
 
@@ -17,7 +18,7 @@ from camera_logs.common.security import actor, authorize
 from camera_logs.users.models import PERMISSIONS, Login, PasswordChange, PasswordReset, UserCreate, UserPatch
 from camera_logs.users.passwords import hash_password, password_work, verify_password
 from camera_logs.users.session_mutations import revoke_session, rotate_session
-from camera_logs.users.sessions import COOKIE, check_origin, public_user, set_session_cookie
+from camera_logs.users.sessions import COOKIE, check_origin, public_user, set_session_cookie, user_identity
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,6 @@ async def _login_budget(repo, username, address):
         )
         if record["attempts"] > limit:
             raise HTTPException(429, "登录尝试过于频繁，请稍后再试")
-
-
-async def _resources_exist(repo, resource_ids):
-    """管理员只能分配已存在资源，删除资源仍可分配以便历史日志查询。"""
-    if resource_ids is not None:
-        identifiers = list(dict.fromkeys(resource_ids))
-        if await repo.db.resources.count_documents({"id": {"$in": identifiers}}) != len(identifiers):
-            raise HTTPException(422, "授权资源不存在")
 
 
 def install_user_routes(app):
@@ -70,7 +63,7 @@ def install_user_routes(app):
         request.state.actor = {"id": user["id"]}
         policy_scopes = await enforce_ip(repo(), request)
         token, current = await rotate_session(repo(), user, request.cookies.get(COOKIE, ""))
-        identity = public_user(restrict_identity(current, policy_scopes))
+        identity = public_user(restrict_identity(await user_identity(repo(), current), policy_scopes))
         set_session_cookie(repo(), token, request, response)
         return {"user": identity}
 
@@ -104,7 +97,7 @@ def install_user_routes(app):
         policy_scopes = await enforce_ip(repo(), request)
         token, changed = await rotate_session(repo(), current, request.cookies.get(COOKIE, ""),
                                                password_hash=password_hash)
-        identity = public_user(restrict_identity(changed, policy_scopes))
+        identity = public_user(restrict_identity(await user_identity(repo(), changed), policy_scopes))
         set_session_cookie(repo(), token, request, response)
         return {"user": identity}
 
@@ -112,6 +105,29 @@ def install_user_routes(app):
     async def permissions(user: User):
         authorize(user, "admin")
         return {"scopes": [{"value": value, "label": label} for value, label in PERMISSIONS.items()]}
+
+    @app.get("/api/v1/users/creators")
+    async def creators(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
+                       search: str = Query("", max_length=128)):
+        """提供历史创建人筛选所需最小目录，保留停用及删除用户但不暴露权限和凭据。"""
+        if "*" not in user["scopes"] and not {"tasks:read", "templates:read"}.intersection(user["scopes"]):
+            raise HTTPException(403, "无创建用户目录读取权限")
+        query = {"$or": [{field: {"$regex": re.escape(search.strip()), "$options": "i"}}
+                          for field in ("username", "displayName")]} if search.strip() else {}
+        cursor = repo().db.users.find(query, {"id": 1, "username": 1, "displayName": 1}).sort([("username", 1), ("id", 1)])
+        return {"items": [{key: item.get(key) for key in ("id", "username", "displayName")} async for item in
+                          cursor.skip((page-1)*pageSize).limit(pageSize)],
+                "page": page, "pageSize": pageSize, "total": await repo().db.users.count_documents(query)}
+
+    @app.get("/api/v1/users/share-targets")
+    async def share_targets(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+        """分页返回可被模板共享的有效用户最小目录，不暴露权限或会话安全字段。"""
+        authorize(user, "templates:read")
+        query = {"enabled": True, "deletedAt": None}
+        items = repo().db.users.find(query, {"id": 1, "username": 1, "displayName": 1}).sort("username", 1)
+        items = items.skip((page-1)*pageSize).limit(pageSize)
+        return {"items": [{key: item.get(key) for key in ("id", "username", "displayName")} async for item in items],
+                "page": page, "pageSize": pageSize, "total": await repo().db.users.count_documents(query)}
 
     @app.get("/api/v1/users")
     async def users(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
@@ -124,7 +140,6 @@ def install_user_routes(app):
     @app.post("/api/v1/users", status_code=201)
     async def create(body: UserCreate, user: User):
         authorize(user, "admin")
-        await _resources_exist(repo(), body.resourceIds)
         doc = body.model_dump(exclude={"password"}) | {
             "id": new_id(), "builtin": False, "version": 1, "authVersion": 1,
             "passwordHash": await password_work(repo(), hash_password, body.password),
@@ -177,7 +192,6 @@ def install_user_routes(app):
             values["displayName"] = values["displayName"].strip()
         if "enabled" in values and values["enabled"] is None:
             raise HTTPException(422, "启用状态不能为空")
-        await _resources_exist(repo(), values.get("resourceIds"))
         return await update(identifier, body.version, values, user, "edit_user")
 
     @app.post("/api/v1/users/{identifier}/reset-password")

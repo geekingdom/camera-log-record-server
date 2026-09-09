@@ -9,7 +9,7 @@ from pymongo.errors import PyMongoError
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import TaskCreate, new_id
-from camera_logs.common.security import authorize, authorize_resource
+from camera_logs.common.security import authorize, authorize_owner, authorize_resource
 from camera_logs.tasks.resource_binding import bind_resource
 
 
@@ -29,8 +29,15 @@ class _ResourceSnapshots:
 async def _prepared(repo, user, task_id, body):
     """在事务外固定密码、命令 ID 和资源绑定，驱动重试不得重复此准备。"""
     old = await repo.get("tasks", task_id)
+    authorize_owner(user, old)
     if old["version"] != body.version:
         raise HTTPException(409, "配置版本已变化，请刷新")
+    if body.sourceTemplateId and body.sourceTemplateId != old.get("sourceTemplateId"):
+        # 只在来源实际改绑时校验读取权限；编辑器重提同一来源和既有独立快照均不受撤销共享影响。
+        from camera_logs.commands.templates import readable_template
+        template = await readable_template(repo, user, body.sourceTemplateId)
+        if body.sourceTemplateVersion is None:
+            body = body.model_copy(update={"sourceTemplateVersion": template["version"]})
     updates = body.model_dump(exclude_unset=True)
     updates.pop("version")
     clear = updates.pop("clearPassword", False)
@@ -107,6 +114,7 @@ async def edit_task(repo, user, task_id, body):
         )
         if current is None:
             raise HTTPException(409, "配置版本已变化或设备资源已删除，请刷新")
+        authorize_owner(user, current)
         if (current["desiredState"] == "PAUSED" or current["status"] in {"PAUSED", "PAUSING"}) and behavioral | ({"clearPassword"} if clear else set()):
             raise HTTPException(409, "暂停期间只能修改名称和说明；修改连接或命令前请停止任务")
         await _guard_resources(repo.db, resource_snapshots, session)

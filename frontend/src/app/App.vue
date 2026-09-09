@@ -13,6 +13,7 @@ import {
   ScrollText,
   Settings2,
   HardDrive,
+  BookOpen,
 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
@@ -21,6 +22,7 @@ import type { Node, Resource, Task, Template } from "../shared/types";
 import { taskStatusLabels } from "../features/tasks/taskStatus";
 import AsyncView from "../shared/AsyncView.vue";
 import { permissionKey } from "../shared/permissions";
+import { canManageOwnedRecord } from "../shared/ownership";
 import LoginPanel from "../features/auth/LoginPanel.vue";
 import PasswordChangeDialog from "../features/auth/PasswordChangeDialog.vue";
 import { usePlatformSession } from "../features/auth/usePlatformSession";
@@ -41,6 +43,8 @@ const loadSettingsManager = () =>
   import("../features/settings/SettingsManager.vue");
 const loadResourceWorkspace = () =>
   import("../features/resources/ResourceWorkspace.vue");
+const loadApiReferenceWorkspace = () =>
+  import("../features/api/ApiReferenceWorkspace.vue");
 const navigation = [
   { key: "resources", label: "设备资源", icon: HardDrive, scope: "tasks:read" },
   { key: "tasks", label: "采集任务", icon: Radio, scope: "tasks:read" },
@@ -52,9 +56,10 @@ const navigation = [
     scope: "templates:read",
   },
   { key: "nodes", label: "服务节点", icon: Server, admin: true },
-  { key: "access", label: "账号管理", icon: ShieldCheck, admin: true },
+  { key: "access", label: "账号管理", icon: ShieldCheck, scope: "service-tokens:read" },
   { key: "audit", label: "审计与事件", icon: ScrollText, admin: true },
   { key: "settings", label: "后台配置", icon: Settings2, admin: true },
+  { key: "api-reference", label: "API 文档", icon: BookOpen },
 ];
 const lastUpdated = ref("");
 const sidebarCollapsed = ref(
@@ -91,6 +96,8 @@ const {
   stop: stopSession,
 } = usePlatformSession({
   loadInitial: async (sessionUser) => {
+    taskShowAll.value = sessionUser.isAdmin;
+    taskCreatedBy.value = "";
     await Promise.all([
       hasScope("tasks:read") && loadTasks(),
       hasScope("templates:read") && loadTemplates(),
@@ -119,18 +126,16 @@ const hasScope = (scope?: string) =>
   );
 provide(permissionKey, {
   can: (scope: string) => Boolean(user.value && hasScope(scope)),
-  resource: (id?: string) =>
-    Boolean(
-      user.value &&
-        (!user.value.resourceIds ||
-          (id && user.value.resourceIds.includes(id))),
-    ),
-  allResources: () => user.value?.resourceIds === null,
+  resource: () => Boolean(user.value),
+  allResources: () => Boolean(user.value),
 });
 const visibleNavigation = computed(() =>
   navigation.filter(
     (item) => (!item.admin || user.value?.isAdmin) && hasScope(item.scope),
-  ),
+  ).map(item => item.key === "access" && !user.value?.isAdmin ? { ...item, label: "我的服务账号" } : item),
+);
+const activeNavigationLabel = computed(() =>
+  visibleNavigation.value.find((item) => item.key === activeTab.value)?.label,
 );
 watch(visibleNavigation, (items) => {
   if (!items.some((item) => item.key === activeTab.value))
@@ -144,6 +149,24 @@ const totals = ref({ tasks: 0, templates: 0, nodes: 0 }),
   pageSize = ref(20);
 const taskSearch = ref(""),
   taskStatus = ref("");
+const taskCreatedBy = ref(""), taskShowAll = ref(false);
+const taskSelectionKey = computed(() => [
+  page.value,
+  taskSearch.value,
+  taskStatus.value,
+  selectedResource.value?.id ?? "",
+  taskShowAll.value,
+  taskCreatedBy.value,
+  user.value?.id ?? "",
+].join("\u0000"));
+const templateCreatedBy = ref(""), templateShowAll = ref(false), templateIncludeDeleted = ref(false);
+const templateSelectionKey = computed(() => [
+  templatePage.value,
+  templateShowAll.value,
+  templateCreatedBy.value,
+  templateIncludeDeleted.value,
+  user.value?.id ?? "",
+].join("\u0000"));
 const selectedTask = ref<Task>(),
   selectedResource = ref<Resource>(),
   selectedTemplate = ref<Template>();
@@ -158,6 +181,7 @@ async function loadTasks() {
     search: taskSearch.value.trim() || undefined,
     status: taskStatus.value || undefined,
     resourceId: selectedResource.value?.id,
+    createdBy: taskShowAll.value ? taskCreatedBy.value || undefined : user.value?.id,
   });
   if (current !== taskGeneration) return;
   tasks.value = data.items;
@@ -168,9 +192,14 @@ async function loadTemplates() {
   if (!hasScope("templates:read")) return;
   const currentSession = sessionGeneration.value;
   const requestedPage = templatePage.value;
-  const data = await api.templates(requestedPage, 100);
+  const requestedSelection = templateSelectionKey.value;
+  const data = await api.templates(requestedPage, 100, {
+    createdBy: templateShowAll.value ? templateCreatedBy.value || undefined : user.value?.id,
+    includeDeleted: templateIncludeDeleted.value ? "true" : undefined,
+  });
   if (
     requestedPage !== templatePage.value ||
+    requestedSelection !== templateSelectionKey.value ||
     currentSession !== sessionGeneration.value
   )
     return;
@@ -205,7 +234,7 @@ async function refresh(quiet = false) {
 function createTask(resource?: Resource) {
   if (!hasScope("tasks:create")) return;
   if (resource) {
-    if (resource.deletedAt || (user.value?.resourceIds && !user.value.resourceIds.includes(resource.id))) return;
+    if (resource.deletedAt) return;
     selectedResource.value = resource;
   }
   selectedWorkspace.value = "config";
@@ -227,11 +256,14 @@ function navigate(key: string) {
   activeTab.value = key;
 }
 function editTask(task: Task) {
-  if (!hasScope("tasks:write")) return;
+  if (!hasScope("tasks:write") || !owns(task)) return;
   selectedWorkspace.value = "config";
   selectedTask.value = task;
   taskEditorOpen.value = true;
   if (hasScope("templates:read")) void loadTemplates().catch(error);
+}
+function owns(item: { createdBy?: string }) {
+  return canManageOwnedRecord(user.value?.id, user.value?.isAdmin, item.createdBy);
 }
 function viewTask(task: Task) {
   selectedLogTask.value = task.id;
@@ -249,12 +281,35 @@ function applyTaskFilters() {
   page.value = 1;
   void refresh();
 }
+function applyTaskOwnershipFilters(filters: { createdBy: string; showAll: boolean }) {
+  taskCreatedBy.value = filters.createdBy;
+  taskShowAll.value = filters.showAll;
+  page.value = 1;
+  void loadTasks().catch(error);
+}
+function applyTemplateFilters(filters: {
+  createdBy: string;
+  showAll: boolean;
+  includeDeleted: boolean;
+}) {
+  templateCreatedBy.value = filters.createdBy;
+  templateShowAll.value = filters.showAll;
+  templateIncludeDeleted.value = filters.includeDeleted;
+  templatePage.value = 1;
+  void loadTemplates().catch(error);
+}
 watch(activeTab, () => {
   page.value = 1;
   void refresh();
 });
 watch([page, pageSize], () => void refresh());
 watch(templatePage, () => void loadTemplates().catch(error));
+watch(() => [user.value?.id, user.value?.isAdmin], () => {
+  templateShowAll.value = Boolean(user.value?.isAdmin);
+  templateCreatedBy.value = "";
+  templateIncludeDeleted.value = false;
+  templatePage.value = 1;
+}, { immediate: true });
 let timer: ReturnType<typeof setInterval>;
 onMounted(() => {
   startSession();
@@ -294,7 +349,7 @@ onBeforeUnmount(() => {
           />
           <div class="page-head">
             <h1>
-              {{ navigation.find((item) => item.key === activeTab)?.label }}
+              {{ activeNavigationLabel }}
             </h1>
             <div>
               <el-tooltip
@@ -378,11 +433,17 @@ onBeforeUnmount(() => {
                 loading: busy,
                 canWrite: hasScope('tasks:write'),
                 canControl: hasScope('tasks:control'),
+                userId: user?.id,
+                isAdmin: user?.isAdmin,
+                createdBy: taskCreatedBy,
+                showAll: taskShowAll,
+                selectionKey: taskSelectionKey,
               }"
               :listeners="{
                 edit: editTask,
                 view: viewTask,
                 changed: () => refresh(),
+                filters: applyTaskOwnershipFilters,
               }"
             />
           </template>
@@ -395,7 +456,8 @@ onBeforeUnmount(() => {
               canCreate: hasScope('resources:create'),
               canCreateTask: hasScope('tasks:create'),
               canControl: hasScope('tasks:control'),
-              resourceIds: user?.resourceIds,
+              userId: user?.id,
+              isAdmin: user?.isAdmin,
             }"
             :listeners="{ tasks: viewResourceTasks, createTask }"
           />
@@ -405,8 +467,14 @@ onBeforeUnmount(() => {
             :component-props="{
               items: templates,
               canWrite: hasScope('templates:write'),
+              userId: user?.id,
+              isAdmin: user?.isAdmin,
+              createdBy: templateCreatedBy,
+              showAll: templateShowAll,
+              includeDeleted: templateIncludeDeleted,
+              selectionKey: templateSelectionKey,
             }"
-            :listeners="{ edit: editTemplate, changed: () => refresh() }"
+            :listeners="{ edit: editTemplate, changed: () => refresh(), filters: applyTemplateFilters }"
           />
           <AsyncView
             v-else-if="activeTab === 'nodes'"
@@ -420,14 +488,21 @@ onBeforeUnmount(() => {
               modelValue: selectedLogTask,
               canDownload: hasScope('logs:download'),
               canSend: hasScope('commands:send'),
+              userId: user?.id,
+              isAdmin: user?.isAdmin,
             }"
             :listeners="{
               'update:modelValue': (value: string) => (selectedLogTask = value),
             }"
           />
           <AsyncView
-            v-else-if="activeTab === 'access' && user?.isAdmin"
+            v-else-if="activeTab === 'api-reference'"
+            :loader="loadApiReferenceWorkspace"
+          />
+          <AsyncView
+            v-else-if="activeTab === 'access'"
             :loader="loadAccessManager"
+            :component-props="{ isAdmin: Boolean(user?.isAdmin) }"
           />
           <AsyncView
             v-else-if="activeTab === 'audit'"
@@ -468,6 +543,7 @@ onBeforeUnmount(() => {
         initialWorkspace: selectedWorkspace,
         initialResource: selectedResource,
         templates,
+        canEdit: !selectedTask || owns(selectedTask),
       }"
       :listeners="{
         'update:modelValue': (value: boolean) => (taskEditorOpen = value),
@@ -481,6 +557,8 @@ onBeforeUnmount(() => {
       :component-props="{
         modelValue: templateEditorOpen,
         template: selectedTemplate,
+        userId: user?.id,
+        isAdmin: user?.isAdmin,
       }"
       :listeners="{
         'update:modelValue': (value: boolean) => (templateEditorOpen = value),

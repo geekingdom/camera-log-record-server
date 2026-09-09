@@ -106,9 +106,13 @@ def test_bearer_and_cookie_scopes_are_intersected_and_policy_changes_block_exist
     with TestClient(app, client=(SOURCE_V4, 42000)) as client:
         configure_policy(client)
         repo = client.app.state.repo
+        client.portal.call(repo.db.users.insert_one, {
+            "id": "limited-bearer-user", "username": "limited-bearer", "displayName": "受限令牌用户",
+            "isAdmin": False, "scopes": ["tasks:create"], "enabled": True, "deletedAt": None,
+        })
         client.portal.call(repo.db.tokens.insert_one, {
-            "id": "limited-bearer", "tokenHash": hashlib.sha256(b"limited-bearer-token").hexdigest(),
-            "scopes": ["tasks:read", "tasks:create"], "taskIds": None, "revoked": False,
+            "id": "limited-bearer", "userId": "limited-bearer-user", "version": 1,
+            "tokenHash": hashlib.sha256(b"limited-bearer-token").hexdigest(), "revoked": False,
             "expiresAt": now() + timedelta(hours=1),
         })
         assert client.get("/api/v1/tasks", headers={"Authorization": "Bearer limited-bearer-token"}).status_code == 200
@@ -121,6 +125,20 @@ def test_bearer_and_cookie_scopes_are_intersected_and_policy_changes_block_exist
         assert client.get("/api/v1/tasks").status_code == 403
         assert client.get("/api/v1/tasks", headers={"Authorization": "Bearer limited-bearer-token"}).status_code == 403
         assert reader["username"] == "reader"
+
+
+def test_service_token_reading_is_denied_when_source_policy_omits_its_scope(app):
+    """基础的本人令牌读取权限也必须与来源 IP 策略取交集。"""
+    with TestClient(app, client=(SOURCE_V4, 42500)) as client:
+        configure_policy(client)
+        user = create_user(client, "policy-token-reader", [])
+        created = client.post("/api/v1/service-tokens", json={
+            "name": "来源限制", "userId": user["id"], "expiresInDays": 1,
+        }, headers={"Authorization": "Bearer ip-integration-bootstrap"})
+        assert created.status_code == 201, created.text
+        headers = {"Authorization": "Bearer " + created.json()["token"]}
+        assert client.get("/api/v1/service-tokens", headers=headers).status_code == 403
+        assert client.post(f"/api/v1/service-tokens/{created.json()['id']}/reveal", headers=headers).status_code == 403
 
 
 def test_resource_and_task_creation_scopes_are_independent_and_ignore_device_target_ip(app, monkeypatch):

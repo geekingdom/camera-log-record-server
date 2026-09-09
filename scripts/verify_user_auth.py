@@ -71,7 +71,6 @@ async def verify(url: str, env_file: Path) -> dict:
                 "displayName": "部署验收只读账号",
                 "password": operator_password,
                 "scopes": ["tasks:read"],
-                "resourceIds": None,
             })
             operator = created.json()
             if operator.get("isAdmin") or operator.get("mustChangePassword") is not True:

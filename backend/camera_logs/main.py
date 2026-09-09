@@ -74,7 +74,8 @@ def create_app(settings=None, db=None):
         """将业务 HTTP 异常包装为包含 requestId 的稳定 API 错误结构。"""
         request.state.safe_error = redact_text(str(exc.detail))
         return JSONResponse(status_code=exc.status_code, headers=exc.headers, content={"error": {
-            "code": str(exc.status_code), "message": request.state.safe_error, "requestId": request.state.request_id}})
+            "code": getattr(exc, "code", str(exc.status_code)), "message": request.state.safe_error,
+            "requestId": request.state.request_id}})
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
@@ -130,6 +131,8 @@ def create_app(settings=None, db=None):
     install_settings_routes(app)
     from camera_logs.logs.download_sessions import install_download_sessions
     install_download_sessions(app)
+    from camera_logs.reference.api import install_reference_routes
+    install_reference_routes(app)
     # 最后注册的 ASGI 中间件最先执行，必须覆盖来源策略提前返回的拒绝响应。
     from camera_logs.common.observability import add_request_logging
     add_request_logging(app)

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Task } from "../../shared/types";
-import { availableTaskActions } from "./taskActions";
+import { applicableTaskActions, availableTaskActions } from "./taskActions";
 
 function task(overrides: Partial<Task>): Task {
   return {
@@ -68,5 +68,19 @@ describe("availableTaskActions", () => {
 
   it("隔离等待任务不显示无法完成的控制操作", () => {
     expect(availableTaskActions(task({ status: "BLOCKED", desiredState: "RUNNING" }))).toEqual([]);
+  });
+});
+
+describe("applicableTaskActions", () => {
+  it("仅保留当前生命周期可操作且资源未删除的任务，并报告跳过数量", () => {
+    const result = applicableTaskActions([
+      task({ id: "start", status: "STOPPED", desiredState: "STOPPED" }),
+      task({ id: "pause", status: "COLLECTING", desiredState: "RUNNING" }),
+      task({ id: "deleted", status: "STOPPED", desiredState: "STOPPED", resourceDeleted: true }),
+      task({ id: "transition", status: "PAUSING", desiredState: "PAUSED" }),
+    ], "start");
+
+    expect(result.applicable.map(item => item.id)).toEqual(["start"]);
+    expect(result.skipped.map(item => item.id)).toEqual(["pause", "deleted", "transition"]);
   });
 });

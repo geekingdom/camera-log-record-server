@@ -5,6 +5,7 @@ from camera_logs.common.database import Repository
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from mongomock_motor import AsyncMongoMockClient
+from pymongo.errors import DuplicateKeyError
 
 
 async def test_failed_create_retry_preserves_resource_identity(tmp_path):
@@ -40,3 +41,20 @@ async def test_initialize_does_not_change_existing_task_state(tmp_path):
     task = await repo.get("tasks", "blocked-task")
     assert task["status"] == "BLOCKED"
     assert task["error"] == "采集端点已被活动任务占用"
+
+
+async def test_initialize_replaces_legacy_template_name_index_with_owner_name_index(tmp_path):
+    """模板索引迁移不删除文档，允许不同创建者同名并拒绝同创建者重复名称。"""
+    database = AsyncMongoMockClient().db
+    await database.templates.create_index("name", unique=True)
+    await database.templates.insert_one({"id": "legacy-template", "name": "同名", "createdBy": "owner-a"})
+    repo = Repository(database, Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+
+    await repo.initialize()
+
+    indexes = await database.templates.index_information()
+    assert "name_1" not in indexes
+    assert indexes["createdBy_1_name_1"]["unique"] is True
+    await database.templates.insert_one({"id": "other-owner-template", "name": "同名", "createdBy": "owner-b"})
+    with pytest.raises(DuplicateKeyError):
+        await database.templates.insert_one({"id": "duplicate-owner-template", "name": "同名", "createdBy": "owner-a"})

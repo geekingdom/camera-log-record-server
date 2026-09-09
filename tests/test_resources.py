@@ -241,8 +241,8 @@ def test_failed_authentication_does_not_save_resource(resource_client, monkeypat
     assert resource_client.portal.call(resource_client.app.state.repo.db.resources.count_documents, {}) == 0
 
 
-def test_restricted_token_only_reads_resources_linked_to_allowed_tasks(resource_client):
-    """受限令牌按获准任务投影资源，而不是把任务 ID 当作资源 ID。"""
+def test_user_bound_token_shares_resource_reads_but_cannot_modify_other_owners(resource_client):
+    """基础共享读取不授予他人对象的修改权限。"""
     repo = resource_client.app.state.repo
     resource_client.portal.call(repo.db.resources.insert_many, [
         {"id": "resource-allowed", "name": "允许", "kind": "SERIAL_SERVER", "ip": "192.0.2.20"},
@@ -253,16 +253,17 @@ def test_restricted_token_only_reads_resources_linked_to_allowed_tasks(resource_
         {"id": "task-hidden", "resourceId": "resource-allowed"},
         {"id": "task-denied", "resourceId": "resource-denied"},
     ])
-    token = resource_client.post("/api/v1/service-tokens", json={
-        "name": "资源只读", "scopes": ["tasks:read", "tasks:write", "tasks:control"], "taskIds": ["task-allowed"],
-    }).json()["token"]
+    user = resource_client.post("/api/v1/users", json={
+        "username": "resource-reader", "displayName": "资源查询用户", "password": "example-password-123", "scopes": [],
+    }).json()
+    token = resource_client.post("/api/v1/service-tokens", json={"name": "资源只读", "userId": user["id"]}).json()["token"]
     headers = {"Authorization": f"Bearer {token}"}
 
     listed = resource_client.get("/api/v1/resources", headers=headers)
-    assert [item["id"] for item in listed.json()["items"]] == ["resource-allowed"]
-    assert listed.json()["items"][0]["taskCount"] == 1
+    assert {item["id"] for item in listed.json()["items"]} == {"resource-allowed", "resource-denied"}
+    assert next(item for item in listed.json()["items"] if item["id"] == "resource-allowed")["taskCount"] == 2
     assert resource_client.get("/api/v1/resources/resource-allowed", headers=headers).status_code == 200
-    assert resource_client.get("/api/v1/resources/resource-denied", headers=headers).status_code == 403
+    assert resource_client.get("/api/v1/resources/resource-denied", headers=headers).status_code == 200
     assert resource_client.post("/api/v1/resources/authenticate", headers=headers, json={
         "name": "探测", "kind": "SERIAL_SERVER", "ip": "192.0.2.22"}).status_code == 403
     patch = {"version": 1, "name": "改名", "kind": "SERIAL_SERVER", "ip": "192.0.2.20"}

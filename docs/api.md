@@ -18,6 +18,46 @@ Authorization: Bearer <access-token>
 
 提交确认异常时仅通过本次固定审计标识及会话状态作多数主库只读恢复，不重新发起写入；不能确认返回 503 且不发送新的 Cookie。客户端可重新登录确认密码，或重试退出。数据库提交后发生网络断开或 Cookie 响应失败不代表事务回滚。账号停用、删除、权限/密码版本变更在后续鉴权时即时生效，多浏览器会话仍被允许。
 
+## 站内接口目录
+
+平台导航中的“API 文档”展示当前部署版本的公共接口，提供分类、搜索、权限、参数、请求与响应示例以及接入指南。目录来自 `GET /api/v1/api-reference`，有效服务 Token 或登录会话均可访问；查阅目录不会授予调用权限。目录只展示虚拟示例，不执行设备操作，不依赖 GitHub 或外部 CDN。
+
+## 资源发现与任务摘要
+
+资源、任务、模板列表支持 `createdBy=<用户ID>` 按创建人精确筛选。控制台普通用户默认携带自己的ID，打开“查看全部”后可不限制创建人或指定其他创建人；管理员默认全部。API本身维持共享读取合同，不自动将无筛选参数请求缩窄为本人，模板始终额外应用本人/共享可见范围。
+
+`GET /api/v1/users/creators?page=1&pageSize=20&search=名称` 提供创建用户筛选目录，包含历史已禁用和已删除用户，仅返回 `id`、`username`、`displayName`；要求 `tasks:read` 或 `templates:read`，不授予用户管理权限。
+
+`GET /api/v1/resources` 支持 `search` 跨资源名称、IP、型号、短序列号和软件版本做字面子串搜索；可分别传入 `name`、`model`、`subSerialNumber`、`softwareVersion` 做不区分大小写的字面匹配，`ip` 则为规范化 IPv4/IPv6 精确匹配。多个条件取交集。
+
+```http
+GET /api/v1/resources?ip=192.0.2.10&subSerialNumber=SN-EXAMPLE&page=1&pageSize=20&taskLimit=100
+Authorization: Bearer <SERVICE_TOKEN>
+```
+
+每项资源及单资源详情均包含 `tasks` 摘要（任务 ID、名称、协议、目标、当前与期望状态、资源关联）、`taskCount`、`activeTaskCount`、`tasksTruncated` 和 `tasksUrl`。摘要默认最多 100 条，`taskLimit` 可设 1 至 500；截断时通过 `tasksUrl` 继续分页。具备 `tasks:read` 的有效用户可读取全部资源与任务，不含设备密码；不再使用资源或任务 ID 白名单限制可见性。
+
+按任务 ID 的启动、停止、暂停、恢复、实时订阅、命令与下载接口见下文。暂停/恢复保留原有 SSH 专属语义，Telnet 不支持暂停。
+
+## 无关键词时间查询
+
+```http
+POST /api/v1/log-searches
+Authorization: Bearer <SERVICE_TOKEN>
+Idempotency-Key: range-query-example-001
+Content-Type: application/json
+
+{"taskId":"task-example","start":"2026-09-09T10:00:00+08:00","end":"2026-09-09T11:00:00+08:00"}
+```
+
+省略 `keyword` 或传空字符串时，按接收块索引的 `[start,end)` 查询，最多 24 小时；时间不从设备正文推断。查询为异步作业，先获取状态，再调用 `/log-searches/{id}/results?page=1&pageSize=100`。结果示例：
+
+```json
+{"items":[{"fileId":"file-example","offset":0,"length":4,"receivedAt":"2026-09-09T02:00:00+00:00","data":"bG9nCg==","text":"log\n"}],"total":1,"page":1,"pageSize":100,"status":"SUCCEEDED","truncated":false}
+```
+
+每片最多 4096 字节，`data` 是原始字节的 Base64；按 `fileId` 和 `offset` 顺序拼接后解码。`text` 仅供预览，片段可跨中文字符或日志行，不应把替换字符当作原文。缺少时间索引时作业失败，不猜测时间。结果上限 1000 片，`truncated=true` 时缩小区间或读取原始文件；非空关键词继续使用原有字面检索规则。
+
 ## 设备资源
 
 新任务必须先有设备资源。`POST /api/v1/resources/authenticate` 预览认证，`POST /api/v1/resources` 保存时重新执行服务端认证；后者需要幂等键。海康请求示例：
@@ -32,11 +72,11 @@ Authorization: Bearer <access-token>
 {"name":"机房串口服务器","kind":"SERIAL_SERVER","ip":"192.0.2.8"}
 ```
 
-`GET /api/v1/resources?page=1&pageSize=20&kind=HIKVISION_NETWORK&search=机房` 分页查询，`GET /api/v1/resources/{id}` 查询详情。读写沿用 `tasks:read`、`tasks:write` 权限，受任务白名单限制的账号不能创建资源或执行认证探测。完整连接与目录约束见 [设备资源说明](device-resources.md)。
+`GET /api/v1/resources?page=1&pageSize=20&kind=HIKVISION_NETWORK&search=机房` 分页查询，`GET /api/v1/resources/{id}` 查询详情。读取要求 `tasks:read`；创建和认证探测要求 `resources:create`。资源由服务端写入 `createdBy` 与 `createdByName`，普通用户只可编辑或删除自己创建的资源，管理员可操作全部资源。完整连接与目录约束见 [设备资源说明](device-resources.md)。
 
-`PATCH /api/v1/resources/{id}` 提交上述完整资源字段及 `version` 修改名称或 HTTP 凭据；空密码表示保留原值，IP、类型和物理设备身份不允许改变。`DELETE /api/v1/resources/{id}?version=1` 返回 202 并软删除资源，需要 `tasks:write` 和 `tasks:control`；受任务白名单限制的令牌不能编辑或删除共享资源。关联任务受控停止，任务记录和已有日志不删除。重复 DELETE 可重试未完成的停止请求，调度器也会补偿。
+`PATCH /api/v1/resources/{id}` 提交上述完整资源字段及 `version` 修改名称或 HTTP 凭据；空密码表示保留原值，IP、类型和物理设备身份不允许改变。编辑要求 `resources:write` 且调用者为创建者或管理员。`DELETE /api/v1/resources/{id}?version=1` 返回 202 并软删除资源，需要 `resources:write`、`tasks:control` 且调用者为创建者或管理员；非管理员删除关联其他用户创建任务的资源会被拒绝。关联任务受控停止，任务记录和已有日志不删除。重复 DELETE 可重试未完成的停止请求，调度器也会补偿。
 
-列表及详情包含 `taskCount`、`activeTaskCount`，受限令牌只看到其授权任务计数。列表默认排除已删除资源，增加 `includeDeleted=true` 可查询；已删除资源详情保留 `deletedAt`，`deletionState=PENDING` 表示关联任务仍在停止或等待回收，所有任务停止且运行锁释放后才标记 `DONE`。文件查询和下载接口保持可用。
+列表及详情包含 `taskCount`、`activeTaskCount`。列表默认排除已删除资源，增加 `includeDeleted=true` 可查询；已删除资源详情保留 `deletedAt`，`deletionState=PENDING` 表示关联任务仍在停止或等待回收，所有任务停止且运行锁释放后才标记 `DONE`。文件查询和下载接口保持可用。
 
 ## 任务
 
@@ -60,7 +100,7 @@ Content-Type: application/json
 }
 ```
 
-响应包含服务端生成的 `id`、`version`、`status` 和 `desiredState`，不会返回 `password` 或 `passwordEncrypted`。列表接口为 `GET /api/v1/tasks?page=1&pageSize=20`；单项读取与更新分别为 `GET`、`PATCH /api/v1/tasks/{taskId}`。更新 body 必须带当前 `version`，版本过期返回 `409`。
+响应包含服务端生成的 `id`、`version`、`status`、`desiredState`、`createdBy` 和 `createdByName`，不会返回 `password` 或 `passwordEncrypted`。创建任务要求 `tasks:create`，可使用其他用户创建的资源；新任务独立归属创建者。列表接口为 `GET /api/v1/tasks?page=1&pageSize=20`；单项读取与更新分别为 `GET`、`PATCH /api/v1/tasks/{taskId}`。读取要求 `tasks:read`；编辑要求 `tasks:write` 且调用者为任务创建者或管理员。更新 body 必须带当前 `version`，版本过期返回 `409`。
 
 任务编辑把配置、关联资源声明、必要的停止操作和审计放入同一事务。暂停意图已接受时，即使实际状态尚未变成暂停，也只允许修改名称和说明。已分配节点的运行任务修改连接或命令时，需要 `tasks:control`，返回任务包含 `controlOperationId`，可查询对应停止操作；旧运行正常结束后才按新配置重启。旧运行有故障则操作失败、任务保持 `ERROR/STOPPED`，需排查后显式启动。无节点的排队任务在确认不存在遗留运行锁及未结束运行后，直接更新配置并保留启动意图。事务确认未知返回 503，客户端先重新查询版本与配置，不盲目使用旧版本重试。
 
@@ -88,7 +128,7 @@ POST /api/v1/tasks/{taskId}/resume
 
 ### 控制操作与事务边界
 
-控制请求要求 `tasks:control`，返回的操作对象包含 `id`、`taskId`、`desiredState`、`action`（start/stop/pause/resume）、`actor`、`status`、`createdAt`，实际达到目标时另有 `completedAt`。审计动作分别为 `control:RUNNING`、`control:STOPPED` 和 `control:PAUSED`，审计动作不包含设备地址、口令或命令正文。
+控制请求要求 `tasks:control`，且调用者须为任务创建者或管理员。返回的操作对象包含 `id`、`taskId`、`desiredState`、`action`（start/stop/pause/resume）、`actor`、`status`、`createdAt`，实际达到目标时另有 `completedAt`。审计动作分别为 `control:RUNNING`、`control:STOPPED` 和 `control:PAUSED`，审计动作不包含设备地址、口令或命令正文。
 
 创建任务（包括 `autoStart=true`）将任务、幂等成功映射、可选自动启动操作和审计一起原子提交。提交确认未知时使用同一 `Idempotency-Key` 重试，返回原任务；自动启动响应的 `operationId` 始终关联最初创建的启动操作，不会因后续停止/继续而改变。
 
@@ -104,6 +144,10 @@ POST /api/v1/tasks/{taskId}/resume
 
 `POST /api/v1/command-templates` 创建命令模板，`GET/PATCH/DELETE /api/v1/command-templates/{templateId}` 管理模板。向正在采集的任务发送手动命令：
 
+模板创建者由服务端写入，客户端不能提交 `createdBy` 或 `createdByName`。创建者、`sharedWith` 中存在且启用、未删除的用户，以及 `sharedWithAll=true` 时的全部有效用户可读取模板；管理员可读取所有模板。只有创建者或管理员可编辑、删除模板。`sharedWithAll` 仅管理员可设置，模板名称在同一创建者范围内唯一。可通过 `GET /api/v1/users/share-targets?page=1&pageSize=20` 查询共享对象，该接口要求 `templates:read`，每项仅返回 `id`、`username` 和 `displayName`。
+
+任务在创建或实际切换 `sourceTemplateId` 时校验模板可读，并保存命令快照。选择模板后允许手动修改命令；已保存任务不会因共享撤销或模板删除失效。
+
 ```http
 POST /api/v1/tasks/{taskId}/commands
 Idempotency-Key: 5141e0ef-e2be-4a7d-8475-8137eb58c784
@@ -112,7 +156,7 @@ Content-Type: application/json
 {"command":"show status","newline":"\n","timeoutSeconds":30}
 ```
 
-新手动命令必须绑定有效的运行与会话，初始化未完成、断连、暂停或缺少会话身份时返回 409。排队配额按当前运行、当前会话的手动命令统计，达到 100 条时返回 429；旧会话积压不占新会话配额。节点按当前会话 FIFO 分发，每周期最多取消 100 条已取得身份快照的旧排队记录；不会把旧命令迁移至重连后的连接。任务归属检查、并发配额准入、命令入队、幂等成功映射及操作审计在同一 MongoDB 事务内提交。
+新手动命令要求 `commands:send`，且调用者须为任务创建者或管理员；命令必须绑定有效的运行与会话，初始化未完成、断连、暂停或缺少会话身份时返回 409。排队配额按当前运行、当前会话的手动命令统计，达到 100 条时返回 429；旧会话积压不占新会话配额。节点按当前会话 FIFO 分发，每周期最多取消 100 条已取得身份快照的旧排队记录；不会把旧命令迁移至重连后的连接。任务归属检查、并发配额准入、命令入队、幂等成功映射及操作审计在同一 MongoDB 事务内提交。
 
 相同操作者、幂等键和请求内容重试时返回原命令，即使任务已经停止也不重新入队；重放仍需通过当前权限检查。同键不同内容返回 409。事务提交确认丢失时仅查询原命令，无法确认则返回 503，调用方须使用相同幂等键重试。设备 socket 发送不属于数据库事务；历史 PENDING 映射若已有原命令仅重放原记录，不补发或补造历史审计。
 
@@ -151,19 +195,24 @@ PATCH /api/v1/admin/nodes/{nodeId}
 
 `DELETE /api/v1/admin/nodes/{nodeId}?version={version}` 软删除节点；发现项版本为 0，已登记项携带当前版本。有采集归属、未结束运行或活动连接时返回 409。删除与调度领取在事务中串行化，配置删除、禁用准入和审计共同提交；不删除日志、文件目录和历史节点地址，也不停止操作系统中的 worker 服务。后续心跳不恢复该节点，管理员可用 POST 显式重新登记；旧版本删除请求不能删除恢复后的节点。
 
-服务账号接口也要求 `admin`。创建响应中的 `token` 只返回这一次；后续列表只返回名称、作用域、任务范围、撤销状态和过期时间，不会返回明文或散列。创建、撤销与操作审计共同提交，事务确认丢失时只读核对原凭据或撤销状态。重复撤销不追加成功状态审计，每次 HTTP 调用仍记录请求事件。明文响应完全丢失后无法从列表恢复，应核对并撤销该令牌后重新创建。
+服务账号的新增、编辑、撤销和重新生成要求 `admin`。管理员可查看全部服务账号，普通用户只可查看分配给本人的账号。令牌必须绑定既有用户，Bearer请求实时使用该用户当前权限和管理员身份；用户禁用或删除后立即失效，恢复启用后可恢复，除非令牌本身已撤销或过期。每项包含 `userId`、最小用户摘要、`expiresAt` 和实时 `effectiveStatus`（`ACTIVE`、`REVOKED`、`EXPIRED`、`USER_DISABLED`、`USER_DELETED` 或 `USER_MISSING`）。列表不会返回明文、密文或散列。
+
+新口令加密保存，可通过 `POST /api/v1/service-tokens/{id}/reveal` 随时查看，响应为 `{"token":"<SERVICE_TOKEN>"}`。列表和查看接口要求 `service-tokens:read`，普通用户只允许读取当前绑定自己的账号；改绑后原用户的查看权限立即失效。查看操作记录审计，但不记录口令内容。来源IP策略依然生效。
+
+旧版本只保存摘要的口令无法还原，查看返回409。仅管理员可以通过 `POST /api/v1/service-tokens/{id}/rotate` 携带 `{"version":1}` 重新生成口令。重新生成立即使旧口令失效，必须在控制台二次确认；不会改变绑定用户、有效期或撤销状态。过期令牌不能通过延长有效期或重新生成恢复认证。创建、撤销、轮换与操作审计共同提交，事务确认丢失时只读核对本次提交，不能盲目反复轮换。
 
 ```http
 POST /api/v1/service-tokens
 Content-Type: application/json
 
-{"name":"reporting","scopes":["logs:read"],"taskIds":["task-example"],"expiresInDays":30}
+{"name":"reporting","userId":"user-example","expiresInDays":30}
 
 GET    /api/v1/service-tokens?page=1&pageSize=20
+PATCH  /api/v1/service-tokens/{tokenId}
 DELETE /api/v1/service-tokens/{tokenId}
 ```
 
-可用作用域为 `admin`、`tasks:read`、`tasks:write`、`tasks:control`、`commands:send`、`templates:read`、`templates:write`、`logs:read` 与 `logs:download`。`taskIds` 省略时不按任务白名单限制；提供后，任务级接口只允许访问列出的任务。
+`expiresInDays` 省略时为 30 天，传 `null` 创建永久令牌。编辑请求须携带当前 `version`，可任选 `name`、`userId` 和 `expiresInDays`；编辑中的 `expiresInDays: null` 将已有令牌改为永久，未提供该字段则保持有效期。有效普通用户自动拥有 `tasks:read`、`logs:read`、`logs:download`、`templates:read`、`templates:write` 和 `service-tokens:read`；用户配置的 `scopes` 仅增加写入、控制、命令或管理能力。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态，平台来源 IP 策略仍会收窄本次请求的有效权限；用户或令牌不再用资源/任务 ID 白名单收窄可见范围。
 
 管理员可查询操作审计、运行事件和请求排障事件。三个接口均支持 `page`（从 1 开始）和 `pageSize`（最多 100）：
 
@@ -256,7 +305,7 @@ Content-Type: application/json
 
 ## 错误格式
 
-实时接口为 `WS /api/v1/tasks/{taskId}/logs`。连接后十秒内发送首帧 `{"token":"<access-token>","cursor":null}`，后续消息包含 `fileId`、`sessionId`、`offset`、`endOffset`、Base64 `data` 及 `cursor`。重连传回最后游标；收到 `gap` 表示实时缓冲过期，需要从文件接口补读，原始文件并未因此丢失。服务端会持续检查令牌有效性。
+实时接口路径为 `/api/v1/tasks/{taskId}/logs`：HTTP 部署使用 `ws://<host>/api/v1/tasks/{taskId}/logs`，HTTPS 部署使用 `wss://<host>/api/v1/tasks/{taskId}/logs`。连接后十秒内发送首帧 `{"token":"<access-token>","cursor":null}`，后续消息包含 `fileId`、`sessionId`、`offset`、`endOffset`、Base64 `data` 及 `cursor`。重连传回最后游标；收到 `gap` 表示实时缓冲过期，需要从文件接口补读，原始文件并未因此丢失。服务端会持续检查令牌有效性。
 
 错误响应使用统一结构：
 
