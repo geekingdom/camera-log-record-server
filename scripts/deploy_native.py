@@ -19,6 +19,14 @@ from native_units import render
 
 COMPONENTS = ("database", "backend", "worker", "frontend")
 SERVICES = {"database": "mongo", "backend": "api", "worker": "worker", "frontend": "frontend"}
+CONTRACT_KEYS = ("ENCRYPTION_KEY", "INTERNAL_TOKEN", "BOOTSTRAP_TOKEN", "MONGO_URI", "MONGO_PORT",
+                 "MONGO_BIND_IP", "MONGO_ADVERTISED_HOST", "API_PORT", "API_BIND_IP", "BACKEND_UPSTREAM",
+                 "NODE_PORT", "NODE_URL", "NODE_BIND_IP", "NODE_ID", "DATABASE_NAME")
+
+
+def contract_hash(values):
+    """记录跨组件合同摘要，防止单独更新使仍运行的另一组件失联。"""
+    return hashlib.sha256(json.dumps({key: values[key] for key in CONTRACT_KEYS}, sort_keys=True).encode()).hexdigest()
 
 
 def atomic_write(path, content, mode=0o600):
@@ -51,6 +59,8 @@ def preflight(values, components):
                 raise ValueError(f"{key}已改变，请先按文档停止服务和迁移数据，不自动搬迁")
         if known.get("encryptionKeyHash") != hashlib.sha256(values["ENCRYPTION_KEY"].encode()).hexdigest():
             raise ValueError("ENCRYPTION_KEY与受管安装不一致，拒绝覆盖已有设备密码加密密钥")
+        if known.get("contractHash") != contract_hash(values):
+            raise ValueError("跨组件连接或凭据配置已变化，请按协调迁移流程处理，拒绝先停止现有服务")
     for component in components:
         service = f"camera-logs-{SERVICES[component]}.service"
         unit = Path("/etc/systemd/system") / service
@@ -96,6 +106,7 @@ def prepare_directories(values):
         manifest = {key: values[key] for key in (
             "SERVICE_USER", "DATA_ROOT", "MONGO_DATA_ROOT", "LOG_ROOT", "API_LOG_ROOT")}
         manifest["encryptionKeyHash"] = hashlib.sha256(values["ENCRYPTION_KEY"].encode()).hexdigest()
+        manifest["contractHash"] = contract_hash(values)
         atomic_write(marker, json.dumps(manifest), 0o600)
     return account
 
@@ -114,7 +125,11 @@ def publish(values, component, files, account):
             atomic_write(path, content, 0o400 if name == "mongo.key" else 0o600)
             os.chown(path, account.pw_uid, account.pw_gid)
     if component == "frontend":
-        run(["/usr/sbin/nginx", "-t", "-c", root / "etc/nginx.conf"])
+        # nginx -t也会创建PID文件，必须与实际服务使用同一账号，否则首次启动Permission denied。
+        pid = Path(values["DATA_ROOT"]) / "nginx/nginx.pid"
+        if pid.exists() and not pid.is_symlink():
+            os.chown(pid, account.pw_uid, account.pw_gid)
+        run(["runuser", "-u", values["SERVICE_USER"], "--", "/usr/sbin/nginx", "-t", "-c", root / "etc/nginx.conf"])
     run(["systemctl", "daemon-reload"])
     service = f"camera-logs-{SERVICES[component]}"
     run(["systemctl", "enable", service])

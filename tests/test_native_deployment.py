@@ -1,5 +1,7 @@
 """验证原生部署编排只发布请求组件，且不需要真实 systemd 主机。"""
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +9,19 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import deploy_native
+import pytest
 from native_config import defaults
+
+
+@pytest.mark.parametrize("key", ["INTERNAL_TOKEN", "MONGO_PORT", "API_PORT", "NODE_URL"])
+def test_shared_contract_change_rejected_before_stopping(key, tmp_path):
+    values = defaults() | {"INSTALL_ROOT": str(tmp_path)}
+    known = {name: values[name] for name in ("SERVICE_USER", "DATA_ROOT", "MONGO_DATA_ROOT", "LOG_ROOT", "API_LOG_ROOT")}
+    known.update(encryptionKeyHash=hashlib.sha256(values["ENCRYPTION_KEY"].encode()).hexdigest(),
+                 contractHash=deploy_native.contract_hash(values))
+    (tmp_path / ".native-managed.json").write_text(json.dumps(known))
+    with pytest.raises(ValueError, match="跨组件"):
+        deploy_native.preflight(values | {key: "changed"}, ("backend",))
 
 
 def test_single_component_deploy_keeps_other_services_untouched(monkeypatch, tmp_path):

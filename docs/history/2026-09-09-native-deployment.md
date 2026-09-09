@@ -7,3 +7,7 @@
 原生配置、数据库初始化和编排21项测试通过，Ruff及shell语法通过。首次全量724项通过、1项夹具未模拟目录失败，修复后原生21项定向通过；不能把该次全量写成全部通过。隔离缓存Mongo7验证证明副本集初始化前listDatabases返回13436，成为PRIMARY后localhost exception允许查询空库并建立账号；据此修改初始化器，实验容器和卷已删除。
 
 新增`native-smoke`在Ubuntu24.04主机实际运行安装脚本、systemd、认证副本集、HTTP代理、worker心跳，重复部署检查配置摘要，重启后重查健康并清理受限临时安装根。Linux运行结果完成后补充，不以Mac静态结果替代。
+
+首轮`d049f15`的CI34330399318其余五个作业通过，原生部署失败于Nginx PID文件权限：root执行nginx -t创建的文件使服务账号报Permission denied。改为同一服务账号检测；同时增加跨组件连接与共享令牌摘要预检，避免单组件更新先停止服务再破坏其他服务连通性。
+
+用户进一步要求HTTP服务器IP访问正常操作。前端原来直接调用安全上下文限定的crypto.randomUUID，已用回归复现相同异常，改为无原生方法时用getRandomValues生成UUIDv4；前端52项与生产构建通过，新增verify_http_browser.mjs验证真实非安全Chrome环境中的启动、命令及下载模拟请求，临时HTTP进程与浏览器结束即清理。

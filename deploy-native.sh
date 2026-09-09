@@ -6,7 +6,12 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "请先执行 sudo apt-get update && sudo apt-get install -y python3" >&2
-  exit 1
+  if [[ "$EUID" -eq 0 ]] && command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y python3
+  else
+    echo "请使用sudo在Ubuntu/Debian上运行以安装python3" >&2
+    exit 1
+  fi
 fi
 exec python3 "$root/scripts/deploy_native.py" "$@"

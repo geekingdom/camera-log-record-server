@@ -19,7 +19,15 @@ export const getToken = () => sessionStorage.getItem(tokenKey) ?? "";
 export const setToken = (token: string) =>
   sessionStorage.setItem(tokenKey, token.trim());
 export const clearToken = () => sessionStorage.removeItem(tokenKey);
-export const idempotencyKey = () => crypto.randomUUID();
+export const idempotencyKey = (): string => {
+  if (typeof globalThis.crypto.randomUUID === "function") return globalThis.crypto.randomUUID();
+  // 内网HTTP不提供randomUUID，但getRandomValues可用；保留UUIDv4随机性及格式。
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
 export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; resourceIds: string[] | null; enabled: boolean; mustChangePassword: boolean; version?: number; builtin?: boolean; }
 export interface UserPage { items: SessionUser[]; total: number; page: number; pageSize: number; }
 export interface IpPolicy { version: number; enabled: boolean; clientIp: string; rules: { label: string; network: string; scopes: string[] }[]; }

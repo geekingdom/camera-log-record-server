@@ -48,7 +48,8 @@
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
 | R26 平台访问记录、业务审计与凭据脱敏 | 任务编辑与用户登录/退出/改密事务已交付，固定事件/会话并仅只读恢复未知提交；登录失败显示/筛选FAILED | `175b938` Linux CI 34328314712通过；本机API98392三事件200；浏览器请求记录页正常；真实副本集验证已清理临时库与日志 | 通用`Repository.idem`、手动命令外层及其他作业审计仍需处理；socket与Cookie响应不属于数据库事务 | 继续命令/作业审计及物理收尾，不重复实施已完成事务 |
-| R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，待Linux验收 | 原生配置/数据库/组件编排21项、Ruff及shell语法通过；全量724通过1夹具失败，夹具修复后定向通过；隔离真实Mongo验证首次认证顺序并清理 | 尚未真实Linux systemd部署验收；Mac静态测试不等于交付 | 新增native-smoke CI验证首次/重跑/重启及清理 |
+| R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，正在修正Linux验收发现的Nginx PID权限 | `d049f15` CI34330399318后端/前端/两类Docker部署通过，原生Nginx启动权限失败；已改同账号配置检测并保护跨组件合同；定向25项通过 | 原生Linux最终复验未完成 | 再跑native-smoke首次/重跑/重启及清理 |
+| R28 其他电脑通过HTTP服务器IP正常操作 | `frontend/src/shared/api.ts` 缺少randomUUID时使用getRandomValues生成UUIDv4；覆盖所有共用幂等键的操作 | 回归先复现相同异常；修复后前端52项与构建通过，非安全HTTP真实Chrome成功发送启动/命令/下载三个模拟API请求 | 用户实际服务器需拉取并重新构建前端；不以模拟接口替代整机业务验收 | 推送修复及验证IP访问，更新部署前端 |
 
 ## 验收口径
 
