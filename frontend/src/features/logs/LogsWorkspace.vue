@@ -54,6 +54,7 @@ onBeforeUnmount(() => generation++);
 .log-workspace-selector .el-select { width: min(560px, 100%); }
 .log-workspace-selector > span { flex-shrink: 0; }
 .log-workspace-empty { display: grid; justify-items: center; gap: 20px; padding: 100px 20px; color: #8b9c9c; border-top: 1px solid #e4e9ea; }
-.logs-workspace-tabs { min-width: 0; }
+.logs-workspace-tabs { min-width: 0; width: 100%; }
+.logs-workspace-tabs :deep(.el-tabs__content), .logs-workspace-tabs :deep(.el-tab-pane) { min-width: 0; max-width: 100%; }
 @media(max-width: 700px) { .log-workspace-selector { align-items: stretch; flex-direction: column; gap: 10px; } }
 </style>

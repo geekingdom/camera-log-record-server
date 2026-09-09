@@ -26,6 +26,7 @@ from camera_logs.logs.hour_download import (
     reusable_hour_archive,
     write_hour_archive,
 )
+from camera_logs.logs.job_completion import complete_job
 from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.naming import safe_filename_component
 from camera_logs.logs.search_stream import StreamSearch, index_entries
@@ -390,34 +391,27 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
 
 
 async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
-    """在节点并发上限内执行冻结作业，条件更新避免覆盖已经取消的状态。"""
+    """执行与数据库收尾分阶段；仅在确认取消后清理本作业产物。"""
     async with _jobs:
         job["_progress"] = JobProgress(repo, job)
         try:
-            if await _cancelled(repo, job["id"]):
-                return {"status": "CANCELLED"}
-            if _expired(job):
-                await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": {"status": "EXPIRED"}})
-                return {"status": "EXPIRED"}
-            result = await (_download(repo, job) if job["kind"] == "DOWNLOAD" else _search(repo, job))
-            update = result | {"status": "SUCCEEDED", "progress": 100, "completedAt": datetime.now(UTC)}
-            changed = await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": update})
-            if not changed.modified_count:
-                await job_thread(shutil.rmtree, _root(repo) / "exports" / job["id"], True)
-                return {"status": "CANCELLED"}
-            await repo.audit(job.get("actor", "system"), "job_succeeded", job["id"])
-            return update
-        except asyncio.CancelledError:
-            await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": {"status": "CANCELLED"}})
-            return {"status": "CANCELLED"}
-        except Exception as error:  # noqa: BLE001 - job failures are persisted for every operational exception
-            _log.exception("job failed id=%s kind=%s", job.get("id"), job.get("kind"))
-            update = {"status": "FAILED", "error": type(error).__name__, "completedAt": datetime.now(UTC)}
-            await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"}, {"$set": update})
             try:
-                await repo.audit(job.get("actor", "system"), "job_failed", job["id"])
-            except Exception:  # noqa: BLE001 - audit failure must not hide the original job failure
-                _log.exception("failed to audit job failure id=%s", job.get("id"))
-            return update
+                if await _cancelled(repo, job["id"]):
+                    return {"status": "CANCELLED"}
+                if _expired(job):
+                    update = {"status": "EXPIRED"}
+                else:
+                    result = await (_download(repo, job) if job["kind"] == "DOWNLOAD" else _search(repo, job))
+                    update = result | {"status": "SUCCEEDED", "progress": 100}
+            except asyncio.CancelledError:
+                update = {"status": "CANCELLED"}
+            except Exception as error:  # noqa: BLE001 - 所有执行异常记录原因并尝试原子收尾
+                _log.exception("job failed id=%s kind=%s", job.get("id"), job.get("kind"))
+                update = {"status": "FAILED", "error": type(error).__name__}
+            update["completedAt"] = datetime.now(UTC)
+            confirmed = await complete_job(repo, job, update)
+            if confirmed["status"] in ("CANCELLED", "EXPIRED"):
+                await job_thread(shutil.rmtree, _root(repo) / "exports" / job["id"], True)
+            return confirmed
         finally:
             job.pop("_progress", None)

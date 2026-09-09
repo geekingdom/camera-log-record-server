@@ -20,7 +20,7 @@ async def _repository(tmp_path):
     )
     await repo.initialize()
 
-    async def audit(*_):
+    async def audit(*_, **_kwargs):
         return None
 
     repo.audit = audit

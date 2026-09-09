@@ -31,7 +31,7 @@ async def search(tmp_path, chunks, keyword, *, start=NOW - timedelta(minutes=1),
     settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
     repo = Repository(AsyncMongoMockClient().db, settings)
 
-    async def audit(*_args):
+    async def audit(*_args, **_kwargs):
         return None
 
     repo.audit = audit

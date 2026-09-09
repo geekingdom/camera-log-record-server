@@ -93,7 +93,7 @@ def test_download_snapshots_open_file_and_searches_literal(tmp_path):
         source.write_bytes(b"before\nneedle value\nafter\n")
         file = {"id": "f1", "taskId": "task", "runId": "run", "sessionId": "session", "hour": "2026-09-08T00:00:00+00:00", "path": str(source), "status": "OPEN", "bytes": source.stat().st_size, "nodeId": "node"}
         await repo.db.files.insert_one(file)
-        async def audit(*_): pass
+        async def audit(*_, **_kwargs): pass
         repo.audit = audit
         download = {"id": "download", "kind": "DOWNLOAD", "status": "RUNNING", "actor": "u", "files": [{"id": "f1", "nodeId": "node", "status": "OPEN", "bytes": source.stat().st_size}]}
         await repo.db.jobs.insert_one(download)
@@ -179,7 +179,7 @@ def test_single_archive_download_rebuilds_user_hour_filename(tmp_path):
         with tarfile.open(archive, "w:gz") as bundle:
             info = tarfile.TarInfo("part-000001.log"); info.size = 7; bundle.addfile(info, io.BytesIO(b"archive"))
         await repo.db.files.insert_one({"id": "f1", "path": str(archive), "status": "READY", "bytes": 7, "nodeId": "node", "hour": "2026-09-08T00:00:00+00:00"})
-        async def audit(*_):
+        async def audit(*_, **_kwargs):
             return None
 
         repo.audit = audit
@@ -203,7 +203,7 @@ def test_zip_export_keeps_readable_names_and_disambiguates_duplicates(tmp_path):
                 info = tarfile.TarInfo("part-000001.log"); info.size = len(data); bundle.addfile(info, io.BytesIO(data))
         for identifier, path in (("f1", first), ("f2", second)):
             await repo.db.files.insert_one({"id": identifier, "path": str(path), "status": "READY", "bytes": 3, "nodeId": "node", "hour": f"2026-09-08T0{1 if identifier == 'f1' else 2}:00:00+00:00"})
-        async def audit(*_):
+        async def audit(*_, **_kwargs):
             return None
 
         repo.audit = audit
@@ -245,7 +245,7 @@ def test_download_reuses_complete_shared_hour_archive_without_member_leakage(tmp
                 "nodeId": "node", "hour": hour, "archiveGroupId": "group", "archiveMember": member,
                 "firstSequence": sequence,
             })
-        async def audit(*_):
+        async def audit(*_, **_kwargs):
             return None
         repo.audit = audit
         job = {"id": "download", "kind": "DOWNLOAD", "status": "RUNNING", "files": [
@@ -348,7 +348,7 @@ def test_search_caps_results_at_one_thousand(tmp_path):
         source = tmp_path / "many.log"
         source.write_bytes(b"needle\n" * 1100)
         await repo.db.files.insert_one({"id": "many", "path": str(source), "status": "OPEN", "bytes": source.stat().st_size, "nodeId": "node"})
-        async def audit(*_): pass
+        async def audit(*_, **_kwargs): pass
         repo.audit = audit
         job = {"id": "many-search", "kind": "SEARCH", "status": "RUNNING", "files": [{"id": "many", "nodeId": "node", "status": "OPEN", "bytes": source.stat().st_size}], "keyword": "needle", "start": "2026-09-07T00:00:00+00:00", "end": "2026-09-09T00:00:00+00:00"}
         await repo.db.jobs.insert_one(job)
@@ -376,7 +376,7 @@ def test_partial_export_fails_when_partial_results_are_not_allowed(tmp_path):
         repo = Repository(AsyncMongoMockClient().db, settings)
         path = tmp_path / "ok.log"; path.write_bytes(b"ok")
         await repo.db.files.insert_one({"id": "ok", "path": str(path), "status": "OPEN", "bytes": 2, "nodeId": "node"})
-        async def audit(*_): pass
+        async def audit(*_, **_kwargs): pass
         repo.audit = audit
         job = {"id": "partial", "kind": "DOWNLOAD", "status": "RUNNING", "allowPartial": False, "files": [{"id": "ok", "status": "OPEN", "bytes": 2}, {"id": "missing", "status": "OPEN", "bytes": 1}]}
         await repo.db.jobs.insert_one(job)

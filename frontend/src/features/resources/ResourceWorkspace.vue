@@ -10,8 +10,8 @@ import AsyncView from "../../shared/AsyncView.vue";
 
 const loadResourceEditor = () => import("./ResourceEditor.vue");
 
-const emit = defineEmits<{ tasks: [Resource] }>();
-const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canControl?: boolean; resourceIds?: string[] | null }>();
+const emit = defineEmits<{ tasks: [Resource]; createTask: [Resource] }>();
+const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; resourceIds?: string[] | null }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
@@ -31,6 +31,7 @@ async function load() {
 }
 function filter() { if (page.value === 1) void load(); else page.value = 1; }
 function permitted(resource?: Resource) { return Boolean(props.canWrite && resource && (props.resourceIds === null || props.resourceIds?.includes(resource.id))); }
+function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt && (props.resourceIds === null || props.resourceIds?.includes(resource.id))); }
 function edit(resource?: Resource) { if (resource && !permitted(resource)) return; selectedResource.value = resource; editorOpen.value = true; }
 async function remove(resource: Resource) {
   if (deleting.value.has(resource.id)) return;
@@ -71,8 +72,9 @@ defineExpose({ reload: load });
     <el-table-column label="网络地址" min-width="165"><template #default="{ row }"><span class="resource-ip">{{ row.ip }}</span><small class="resource-subtle">{{ row.kind === 'HIKVISION_NETWORK' ? 'HTTP 设备入口' : 'Telnet 串口入口' }}</small></template></el-table-column>
     <el-table-column label="设备身份" min-width="270"><template #default="{ row }"><div class="resource-device-meta"><strong>{{ row.model || (row.kind === 'SERIAL_SERVER' ? '串口服务器' : '-') }}</strong><span>序列号 {{ row.subSerialNumber || '-' }}</span><span>软件 {{ row.softwareVersion || '-' }}</span></div></template></el-table-column>
     <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 活跃</span></div></template></el-table-column>
-    <el-table-column label="操作" width="220" fixed="right"><template #default="{ row }"><div class="resource-actions">
+    <el-table-column label="操作" width="252" fixed="right"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
+      <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row) && props.canControl" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
     </div></template></el-table-column>

@@ -11,6 +11,8 @@
 ::-webkit-scrollbar-thumb:hover { background: #668b83; }
 ::-webkit-scrollbar-corner { background: #edf2f0; }
 body { margin: 0; min-width: 320px; }
+/* 各页高度不同也保留同一纵向滚动槽，避免切换日志页签时主体横移。 */
+html { scrollbar-gutter: stable; }
 button, input { font: inherit; }
 button:focus-visible, a:focus-visible { outline: 2px solid #087f72; outline-offset: 3px; }
 .shell { min-height: 100vh; }

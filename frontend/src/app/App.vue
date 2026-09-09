@@ -202,8 +202,12 @@ async function refresh(quiet = false) {
     if (!quiet) busy.value = false;
   }
 }
-function createTask() {
+function createTask(resource?: Resource) {
   if (!hasScope("tasks:create")) return;
+  if (resource) {
+    if (resource.deletedAt || (user.value?.resourceIds && !user.value.resourceIds.includes(resource.id))) return;
+    selectedResource.value = resource;
+  }
   selectedWorkspace.value = "config";
   selectedTask.value = undefined;
   taskEditorOpen.value = true;
@@ -389,10 +393,11 @@ onBeforeUnmount(() => {
             :component-props="{
               canWrite: hasScope('resources:write'),
               canCreate: hasScope('resources:create'),
+              canCreateTask: hasScope('tasks:create'),
               canControl: hasScope('tasks:control'),
               resourceIds: user?.resourceIds,
             }"
-            :listeners="{ tasks: viewResourceTasks }"
+            :listeners="{ tasks: viewResourceTasks, createTask }"
           />
           <AsyncView
             v-else-if="activeTab === 'templates'"
