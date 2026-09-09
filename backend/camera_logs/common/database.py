@@ -79,13 +79,16 @@ class Repository:
             raise HTTPException(404, "记录不存在")
         return doc
 
-    async def audit(self, actor, action, target, *, session=None):
+    async def audit(self, actor, action, target, *, session=None, event_id=None):
         """追加用户操作审计事件，不在事件中保存敏感请求内容。"""
         from camera_logs.common.request_context import current_request_context
         context = current_request_context()
-        await self.db.audit.insert_one({"actor": actor, "action": action, "targetId": target,
-                                        "requestId": context.get("requestId"), "clientIp": context.get("clientIp"),
-                                        "createdAt": now()}, session=session)
+        document = {"actor": actor, "action": action, "targetId": target,
+                    "requestId": context.get("requestId"), "clientIp": context.get("clientIp"), "createdAt": now()}
+        # 固定事件标识仅由事务调用方提供，用于确认本次提交，不能使用客户端请求 ID 代替。
+        if event_id is not None:
+            document["_id"] = event_id
+        await self.db.audit.insert_one(document, session=session)
 
     async def idem(self, actor, key, route, payload, collection, build):
         """以 actor 和幂等键串行化创建，并识别同键不同载荷冲突。"""

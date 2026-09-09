@@ -155,7 +155,8 @@ class Worker:
         failed = runtime.error or runtime.background_failure()
         update = {"nodeId": None, "status": "ERROR" if failed else "STOPPED", "error": str(failed) if failed else None, "updatedAt": now()}
         if failed:
-            update["desiredState"] = "STOPPED"
+            # 已知运行故障不能兑现编辑重启；清除标记并保持停止，等待明确的新启动操作。
+            update.update(desiredState="STOPPED", restartRequested=False)
         # 数据库收尾期间保留归属，防止中途失败后无法凭原领取身份继续完成清理。
         closing = {key: value for key, value in update.items() if key != "nodeId"}
         closing["status"] = "STOPPING"

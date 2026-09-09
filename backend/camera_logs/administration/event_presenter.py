@@ -41,6 +41,8 @@ def event_outcome(item: dict) -> str:
     """按事件本身的语义推导结果，兼容未持久化展示字段的历史记录。"""
     if item.get("outcome") in _TERMINAL_OUTCOMES:
         return item["outcome"]
+    if item.get("action") == "login_failed":
+        return "FAILED"
     if item.get("responseComplete") is False:
         return "UNKNOWN"
     if item.get("status") in _TERMINAL_OUTCOMES:

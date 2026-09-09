@@ -1,8 +1,6 @@
 """可撤销的服务端登录会话；每次授权读取当前账号与资源范围。"""
 
 import hashlib
-import secrets
-from datetime import timedelta
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
@@ -86,13 +84,9 @@ async def session_identity(repo, token):
     return await user_identity(repo, user)
 
 
-async def issue_session(repo, user, request, response):
-    """只把随机凭证交给 HttpOnly cookie，数据库仅保存其 SHA-256 摘要。"""
-    token = secrets.token_urlsafe(48)
+def set_session_cookie(repo, token, request, response):
+    """仅在数据库事务确认后将凭证放入 HttpOnly Cookie，不在此函数写数据库。"""
     seconds = repo.settings.session_seconds
-    await repo.db.user_sessions.insert_one({"tokenHash": hashlib.sha256(token.encode()).hexdigest(),
-        "userId": user["id"], "authVersion": user["authVersion"], "createdAt": now(),
-        "expiresAt": now()+timedelta(seconds=seconds)})
     response.set_cookie(COOKIE, token, max_age=seconds, httponly=True, samesite="strict",
                         secure=repo.settings.session_cookie_secure or request.url.scheme == "https", path="/api/v1")
     response.headers["Cache-Control"] = "no-store"

@@ -1,4 +1,4 @@
-"""验证账户变更与审计同一提交边界，且会话签发失败不伪装为密码回滚。"""
+"""验证账户变更与审计同一提交边界，且响应 Cookie 故障不伪装为密码回滚。"""
 # ruff: noqa: F811
 
 from camera_logs.users.passwords import verify_password
@@ -53,20 +53,17 @@ def test_account_mutations_write_expected_audit_and_cas_miss_writes_none(client)
     assert _audit_count(client, "delete_user", identifier) == 1
 
 
-def test_password_commit_and_audit_precede_session_issuance(client, monkeypatch):
-    """Cookie 会话失败发生在提交后，密码和审计事实仍必须可由新登录使用。"""
+def test_password_commit_and_audit_precede_cookie_response(client, monkeypatch):
+    """Cookie 响应故障发生在提交后，密码、会话和审计仍是已确认事实。"""
     logged_in = login(client)
     assert logged_in.status_code == 200, logged_in.text
     repo = client.app.state.repo
     user_id = logged_in.json()["user"]["id"]
 
-    async def session_failure(_repo, _user, _request, _response):
-        assert await _repo.db.audit.count_documents(
-            {"action": "change_password", "targetId": user_id},
-        ) == 1
-        raise HTTPException(503, "会话签发暂时失败")
+    def cookie_failure(_repo, _token, _request, _response):
+        raise HTTPException(503, "Cookie 响应暂时失败")
 
-    monkeypatch.setattr("camera_logs.users.api.issue_session", session_failure)
+    monkeypatch.setattr("camera_logs.users.api.set_session_cookie", cookie_failure)
     changed = client.post(
         "/api/v1/auth/password",
         json={"currentPassword": "initial-admin-password", "newPassword": "committed-password-next"},
@@ -78,3 +75,5 @@ def test_password_commit_and_audit_precede_session_issuance(client, monkeypatch)
     assert verify_password("committed-password-next", stored["passwordHash"])
     assert not verify_password("initial-admin-password", stored["passwordHash"])
     assert _audit_count(client, "change_password", user_id) == 1
+    assert client.portal.call(repo.db.user_sessions.count_documents,
+                              {"userId": user_id, "authVersion": stored["authVersion"]}) == 1

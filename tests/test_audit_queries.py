@@ -50,6 +50,23 @@ def test_audit_events_filter_action_actor_task_and_utc_range(client):
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+def test_login_failed_audit_derives_failed_error_and_supports_filters(client):
+    """认证失败审计必须展示为失败错误，并与 Mongo 派生筛选保持一致。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.audit.insert_one, {
+        "actor": "anonymous", "action": "login_failed", "targetId": None, "createdAt": now(),
+    })
+
+    response = client.get("/api/v1/audit-events", params={"level": "ERROR", "outcome": "FAILED"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    item = response.json()["items"][0]
+    assert item["action"] == "login_failed"
+    assert item["outcome"] == "FAILED" and item["level"] == "ERROR"
+
+
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_runtime_events_filter_task_node_type_and_utc_range(client):
     """运行事件按任务、节点、类别和 UTC 区间独立筛选，不读取日志正文。"""
     repo = client.app.state.repo

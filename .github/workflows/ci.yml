@@ -85,6 +85,10 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_admin_audit_transactions.py
       - name: 验证任务控制并发幂等与审计事务
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_task_control_transactions.py
+      - name: 验证任务编辑暂停竞争与审计事务
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_task_edit_transactions.py
+      - name: 验证登录退出改密会话与审计事务
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_session_transactions.py
       - name: 验证审计事件派生筛选与分页
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_event_queries.py
       - name: 验证真实数据库日志目录尾部水位

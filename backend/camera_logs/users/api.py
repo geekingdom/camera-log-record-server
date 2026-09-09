@@ -9,14 +9,15 @@ from fastapi import Depends, HTTPException, Query, Request, Response
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from camera_logs.access_policy.policy import apply_ip_permissions
+from camera_logs.access_policy.policy import enforce_ip, restrict_identity
 from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.common.security import actor, authorize
 from camera_logs.users.models import PERMISSIONS, Login, PasswordChange, PasswordReset, UserCreate, UserPatch
 from camera_logs.users.passwords import hash_password, password_work, verify_password
-from camera_logs.users.sessions import COOKIE, check_origin, issue_session, public_user
+from camera_logs.users.session_mutations import revoke_session, rotate_session
+from camera_logs.users.sessions import COOKIE, check_origin, public_user, set_session_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +68,11 @@ def install_user_routes(app):
             raise HTTPException(401, "用户名或密码错误，或账号不可用")
         # 登录入口没有 actor 依赖，只在凭据校验成功后绑定访问日志主体。
         request.state.actor = {"id": user["id"]}
-        # 已有浏览器会话在登录时轮换，旧凭证不得继续使用。
-        old = request.cookies.get(COOKIE, "")
-        if old:
-            await repo().db.user_sessions.delete_one({"tokenHash": hashlib.sha256(old.encode()).hexdigest()})
-        await issue_session(repo(), user, request, response)
-        await repo().audit(user["id"], "login", user["id"])
-        return {"user": public_user(await apply_ip_permissions(repo(), request, user))}
+        policy_scopes = await enforce_ip(repo(), request)
+        token, current = await rotate_session(repo(), user, request.cookies.get(COOKIE, ""))
+        identity = public_user(restrict_identity(current, policy_scopes))
+        set_session_cookie(repo(), token, request, response)
+        return {"user": identity}
 
     @app.get("/api/v1/auth/me")
     async def me(user: User, response: Response):
@@ -86,12 +85,10 @@ def install_user_routes(app):
     async def logout(request: Request, response: Response):
         check_origin(request, write=True)
         token = request.cookies.get(COOKIE, "")
-        session = await repo().db.user_sessions.find_one_and_delete({
-            "tokenHash": hashlib.sha256(token.encode()).hexdigest()})
+        user_id = await revoke_session(repo(), token)
         response.delete_cookie(COOKIE, path="/api/v1", httponly=True, samesite="strict")
-        if session:
-            request.state.actor = {"id": session["userId"]}
-            await repo().audit(session["userId"], "logout", session["userId"])
+        if user_id:
+            request.state.actor = {"id": user_id}
 
     @app.post("/api/v1/auth/password")
     async def password(body: PasswordChange, request: Request, response: Response, user: User):
@@ -104,27 +101,12 @@ def install_user_routes(app):
             raise HTTPException(422, "新密码不能与当前密码相同")
         password_hash = await password_work(repo(), hash_password, body.newPassword)
 
-        async def commit(session):
-            """密码 CAS 与审计同事务提交；哈希计算不占用可重试的 Mongo 回调。"""
-            changed = await repo().db.users.find_one_and_update(
-                {"id": user["id"], "authVersion": current["authVersion"], "enabled": True},
-                {"$set": {"passwordHash": password_hash, "mustChangePassword": False, "updatedAt": now()},
-                 "$inc": {"version": 1, "authVersion": 1}},
-                return_document=ReturnDocument.AFTER,
-                session=session,
-            )
-            if not changed:
-                raise HTTPException(409, "账号已变化，请重新登录")
-            return changed
-
-        changed = await audited_mutation(repo(), user["id"], "change_password", user["id"], commit)
-        try:
-            # Cookie 不能在可重试事务内写入；此处失败不回滚已确认的密码和审计事实。
-            await issue_session(repo(), changed, request, response)
-        except Exception:
-            logger.warning("密码已提交但会话签发失败 user=%s", user["id"], exc_info=True)
-            raise
-        return {"user": public_user(await apply_ip_permissions(repo(), request, changed))}
+        policy_scopes = await enforce_ip(repo(), request)
+        token, changed = await rotate_session(repo(), current, request.cookies.get(COOKIE, ""),
+                                               password_hash=password_hash)
+        identity = public_user(restrict_identity(changed, policy_scopes))
+        set_session_cookie(repo(), token, request, response)
+        return {"user": identity}
 
     @app.get("/api/v1/users/permissions")
     async def permissions(user: User):

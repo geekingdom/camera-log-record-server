@@ -1,5 +1,7 @@
 # 历史记录入口
 
+- [任务编辑与会话事务](2026-09-09-edit-and-session-transactions.md)：编辑、登录、退出、改密的数据库原子性与并发撤销验证。
+
 历史报告只代表当时样本与条件。当前状态统一见 [当前状态总表](../implementation-status.md)。
 
 - [旧状态快照](implementation-status-before-2026-09-09.md)：包含已过时描述，仅用于追溯。
