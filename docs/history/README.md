@@ -7,6 +7,7 @@
 - [2026-09-09 账户与部署核对](2026-09-09-access-and-deployment.md)：来源 IP 边界、账户权限、一键部署与验收证据。
 - [2026-09-09 命令恢复与模块化](2026-09-09-command-recovery-and-modularity.md)：普通命令恢复、连接生命周期、会话模块拆分和开发产物来源核验。
 - [2026-09-09 来源访问、认证审计与命令确认](2026-09-09-access-audit-and-confirmations.md)：来源拒绝记录、凭据脱敏、设备目标边界和草稿删除确认。
+- [2026-09-09 开发服务端归档受限清理](2026-09-09-development-archive-cleanup.md)：报告来源、实际正文核验、有限范围清理及下载保护边界。
 - [历轮验证记录](../validation.md)：保留既有路径，避免破坏引用。
 - [HTTP 延迟诊断](../http-latency-diagnostics.md)：连接池与阶段延迟实验。
 - [服务压测](../service-benchmark.md) 和 [调度压测](../scheduler-benchmark.md)：操作说明和历史样本，不代替集群验收。

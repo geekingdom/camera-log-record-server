@@ -226,16 +226,24 @@ async def recover_orphan_archives(repo: Any) -> int:
     return registered
 
 
-async def apply_retention(repo: Any) -> dict[str, int]:
-    """按物理归档路径领取全部成员后删除，避免共享小时包留下悬空目录记录。"""
-    cutoff = now() - timedelta(days=await get_retention_days(repo)) - timedelta(hours=1)
+async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | None = None) -> dict[str, int]:
+    """领取整组归档后删除；开发入口仅传入已通过报告/内容校验的有限 ID 集合。
+
+    开发清理只绕过自然保留天数，仍受下载保护、作业、节点和成员组约束，且任务
+    必须已随资源删除而永久停用。正常维护不传集合，继续使用平台保留天数。
+    """
+    cutoff = (now() if development_file_ids is not None else
+              now() - timedelta(days=await get_retention_days(repo)) - timedelta(hours=1))
     removed = skipped = failures = 0
-    cursor = repo.db.files.find({
+    query = {
         "nodeId": repo.settings.node_id, "$or": [
             {"status": "READY", "hour": {"$lt": cutoff.isoformat()}},
             {"status": "DELETING"},
         ],
-    })
+    }
+    if development_file_ids is not None:
+        query["id"] = {"$in": sorted(development_file_ids)}
+    cursor = repo.db.files.find(query)
     async for document in cursor:
         # 一个共享小时 tar 可被多个 files 成员引用。先读取完整成员组，任一
         # 受保护、未过期、非本节点或未进入可删除状态都阻止物理删除。
@@ -245,6 +253,12 @@ async def apply_retention(repo: Any) -> dict[str, int]:
         group = [item async for item in repo.db.files.find({"path": document["path"]})]
         eligible = bool(group)
         for member in group:
+            if development_file_ids is not None:
+                task = await repo.db.tasks.find_one({"id": member.get("taskId"),
+                    "resourceDeleted": True, "status": "STOPPED", "desiredState": "STOPPED", "nodeId": None})
+                if member["id"] not in development_file_ids or task is None:
+                    eligible = False
+                    break
             if member.get("nodeId") != repo.settings.node_id or member.get("status") not in {"READY", "DELETING"}:
                 eligible = False
                 break
