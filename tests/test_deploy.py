@@ -270,4 +270,7 @@ def test_container_smoke_reuses_deploy_environment_for_follow_up_compose_command
     workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "prepare_container_env.py" not in workflow
     assert "run: |\n          ./deploy.sh" in workflow
-    assert workflow.count("docker compose --env-file .env --project-name") == 6
+    commands = [line.split("docker compose ", 1)[1] for line in workflow.splitlines() if "docker compose " in line]
+    assert commands
+    assert all(command.startswith('--env-file .env --project-name "$COMPOSE_PROJECT_NAME" '
+                                  '--file deploy/docker-compose.yml ') for command in commands)

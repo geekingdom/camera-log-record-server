@@ -31,7 +31,7 @@ async def test_current_session_dispatched_without_draining_old_queue(tmp_path, m
     assert await repo.db.commands.count_documents({"sessionId": "old", "status": "QUEUED"}) == 50
 
 
-def test_previous_session_queue_does_not_consume_current_session_quota(client):
+def test_previous_session_queue_does_not_consume_current_session_quota(client, mock_reservation_transaction):
     """满额旧队列不拒绝新会话；当前会话达到上限仍明确拒绝。"""
     task = {"id": "task", "status": "COLLECTING", "desiredState": "RUNNING",
             "runId": "run", "sessionId": "current"}
@@ -56,6 +56,27 @@ def test_missing_session_rejects_command(client):
     })
     assert client.post("/api/v1/tasks/task/commands", json={"command": "ls"},
                        headers={"Idempotency-Key": "no-session"}).status_code == 409
+
+
+def test_reconnect_between_api_check_and_admission_rejects_old_snapshot(client, monkeypatch, mock_reservation_transaction):
+    """正式路由首次读取后发生重连时，事务必须拒绝把命令写入旧会话。"""
+    from camera_logs.commands import api
+
+    original = api.admit_manual
+
+    async def reconnect(repo, task, *args):
+        await repo.db.tasks.update_one({"id": task["id"]}, {"$set": {"sessionId": "successor"}})
+        return await original(repo, task, *args)
+
+    monkeypatch.setattr(api, "admit_manual", reconnect)
+    client.portal.call(client.app.state.repo.db.tasks.insert_one, {
+        "id": "task", "status": "COLLECTING", "desiredState": "RUNNING",
+        "runId": "run", "sessionId": "old",
+    })
+    response = client.post("/api/v1/tasks/task/commands", json={"command": "ls"},
+                           headers={"Idempotency-Key": "racing-reconnect"})
+    assert response.status_code == 409
+    assert client.portal.call(client.app.state.repo.db.commands.count_documents, {}) == 0
 
 
 @pytest.mark.parametrize("change", [{"generation": 2}, {"sessionId": "new"}, {"desiredState": "STOPPED"}])

@@ -7,6 +7,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
 
+from camera_logs.commands.manual_admission import admit_manual
 from camera_logs.common.database import now, public
 from camera_logs.common.models import InitialCommand, TokenCreate, new_id
 from camera_logs.common.security import actor, authorize
@@ -31,14 +32,7 @@ def install_command_routes(app, repo, listing):
                 or not task.get("sessionId") or not task.get("runId")):
             raise HTTPException(409, "任务未处于可交互采集状态")
         async def build(identifier):
-            if await repo().db.commands.count_documents({"taskId": task_id, "kind": "MANUAL",
-                "runId": task["runId"], "sessionId": task.get("sessionId"), "status": "QUEUED"}) >= 100:
-                raise HTTPException(429, "命令队列已满")
-            doc = body.model_dump() | {"id": identifier, "taskId": task_id, "runId": task["runId"],
-                "sessionId": task.get("sessionId"), "actor": user["id"], "status": "QUEUED",
-                "kind": "MANUAL", "createdAt": now()}
-            await repo().db.commands.insert_one(doc)
-            return doc
+            return await admit_manual(repo(), task, identifier, body.model_dump(), user["id"])
         return public(await repo().idem(user["id"], request.headers.get("Idempotency-Key"), "command:"+task_id,
                                         body.model_dump(), "commands", build))
 

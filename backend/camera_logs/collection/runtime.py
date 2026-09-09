@@ -14,12 +14,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pymongo import ReturnDocument
-from pymongo.errors import ConnectionFailure, ExecutionTimeout
+from pymongo.errors import ConnectionFailure, ExecutionTimeout, PyMongoError
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
+from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
 from camera_logs.common.ownership import OwnershipLost, owner_filter
@@ -284,35 +284,53 @@ class SessionRuntime:
                                                      "kind": "MANUAL", "status": "QUEUED"})
         if record is None:
             return
-        current = await self.repo.db.tasks.find_one({**owner_filter(self.task), "sessionId": collector.session_id,
-                                                   "status": "COLLECTING", "desiredState": "RUNNING"})
-        if current is None:
-            return
         scope = {"id": record["id"], "taskId": self.task["id"], "kind": "MANUAL",
                  "runId": record.get("runId"), "sessionId": record.get("sessionId")}
-        if record.get("runId") != self.task["runId"] or record.get("sessionId") != collector.session_id:
-            await self.repo.db.commands.update_one({**scope, "status": "QUEUED"},
-                {"$set": {"status": "CANCELLED", "completedAt": now()}})
+        try:
+            claimed = await claim_manual(self.repo, self.task, collector.session_id, record)
+        except ManualClaimUncertain:
+            # 事务可能已经把记录改为 SENDING，但未曾调用 socket；只向前推进到 UNKNOWN。
+            logger.exception("手动命令领取结果未知 task=%s command=%s", self.task["id"], record["id"])
+            try:
+                await self.repo.db.commands.update_one({**scope, "status": "SENDING"},
+                    {"$set": {"status": "UNKNOWN", "error": "命令领取状态未知，未发送", "completedAt": now()}})
+            except PyMongoError:
+                logger.exception("手动命令未知领取状态无法回写 task=%s command=%s", self.task["id"], record["id"])
             return
-        claimed = await self.repo.db.commands.find_one_and_update({**scope, "status": "QUEUED"},
-            {"$set": {"status": "SENDING", "startedAt": now()}}, return_document=ReturnDocument.AFTER)
         if not claimed:
             return
+        async def session_guard():
+            """在 collector 真正轮到写入前复核本地实例和数据库归属。"""
+            if (self.stopping or getattr(self, "retired", False) or self.collector is not collector
+                    or collector.session_id != claimed["sessionId"]):
+                raise OwnershipLost("手动命令发送前会话已失属")
+            current = await self.repo.db.tasks.find_one({**owner_filter(self.task), "sessionId": collector.session_id,
+                "status": "COLLECTING", "desiredState": "RUNNING", "resourceDeleted": {"$ne": True}})
+            # 查询 await 期间本地运行可能已停止或 collector 已被替换，返回后必须再核对。
+            if (current is None or self.stopping or getattr(self, "retired", False)
+                    or self.collector is not collector or collector.session_id != claimed["sessionId"]):
+                raise OwnershipLost("手动命令发送前任务归属已变化")
         status = "UNKNOWN"
         error = None
         try:
-            if self.stopping or getattr(self, "retired", False) or self.collector is not collector:
-                status = "CANCELLED"
-            else:
-                # collector 内部负责提示符等待及发送后延时，外层不能提前取消其串行收尾。
-                await collector.enqueue_manual(
-                    claimed["command"],
-                    newline=claimed.get("newline", "\n"),
-                    prompt=claimed.get("prompt"),
-                    timeout_seconds=float(claimed.get("timeoutSeconds", 30)),
-                    delay_seconds=float(claimed.get("delaySeconds", 0)),
-                )
-                status = "SENT"
+            # 快检缩短已失属命令在内存队列中的停留；collector 在实际写入前仍会再调用守卫。
+            await session_guard()
+            # collector 内部负责提示符等待及发送后延时，外层不能提前取消其串行收尾。
+            await collector.enqueue_manual(
+                claimed["command"],
+                newline=claimed.get("newline", "\n"),
+                prompt=claimed.get("prompt"),
+                timeout_seconds=float(claimed.get("timeoutSeconds", 30)),
+                delay_seconds=float(claimed.get("delaySeconds", 0)),
+                session_guard=session_guard,
+            )
+            status = "SENT"
+        except OwnershipLost:
+            # session_guard 在真正写 socket 前抛出，明确知道业务命令尚未开始发送。
+            status = "CANCELLED"
+        except PyMongoError:
+            logger.exception("手动命令归属复核失败 task=%s command=%s", self.task["id"], record["id"])
+            error = "命令归属复核失败，未发送"
         except CommandChannelBlocked as exc:
             status = "FAILED"
             error = str(exc)

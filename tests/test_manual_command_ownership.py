@@ -1,14 +1,21 @@
 """手动命令领取回归：核对数据库会话身份，发送正文只取已领取的记录。"""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from camera_logs.collection.collector import Collector
 from camera_logs.collection.runtime import SessionRuntime
+from camera_logs.commands.manual_claim import ManualClaimUncertain
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
+from camera_logs.common.ownership import OwnershipLost
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+from pymongo.errors import ConnectionFailure
+
+pytestmark = pytest.mark.usefixtures("mock_reservation_transaction")
 
 
 async def runtime_and_command(tmp_path):
@@ -76,6 +83,129 @@ async def test_late_sender_result_does_not_overwrite_cleanup_unknown(tmp_path):
     runtime.collector.enqueue_manual.side_effect = cleanup_before_return
     await runtime.manual(record)
     assert (await runtime.repo.db.commands.find_one({"id": "command"}))["status"] == "UNKNOWN"
+
+
+async def test_claimed_command_is_cancelled_when_owner_changes_before_enqueue(tmp_path, monkeypatch):
+    """领取后、实际入队前发生接管时，旧会话不得向仍存活的旧连接写入命令。"""
+    runtime, record = await runtime_and_command(tmp_path)
+
+    async def claimed_then_handoff(repo, task, _session_id, document):
+        claimed = await repo.db.commands.find_one_and_update(
+            {"id": document["id"], "status": "QUEUED"}, {"$set": {"status": "SENDING"}},
+        )
+        await repo.db.tasks.update_one({"id": task["id"]}, {"$set": {"sessionId": "successor"}})
+        return claimed
+
+    monkeypatch.setattr("camera_logs.collection.runtime.claim_manual", claimed_then_handoff)
+    await runtime.manual(record)
+
+    runtime.collector.enqueue_manual.assert_not_awaited()
+    assert (await runtime.repo.db.commands.find_one({"id": "command"}))["status"] == "CANCELLED"
+
+
+async def test_claimed_command_stays_unknown_when_owner_recheck_database_fails(tmp_path, monkeypatch):
+    """领取提交后的归属查询异常不能冒险发送，也不能把结果伪造为明确取消。"""
+    runtime, record = await runtime_and_command(tmp_path)
+    collection_type = type(runtime.repo.db.tasks)
+    original = collection_type.find_one
+
+    async def fail_task_recheck(self, query, *args, **kwargs):
+        if self.name == "tasks":
+            raise ConnectionFailure("database unavailable")
+        return await original(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(collection_type, "find_one", fail_task_recheck)
+
+    await runtime.manual(record)
+
+    runtime.collector.enqueue_manual.assert_not_awaited()
+    assert (await runtime.repo.db.commands.find_one({"id": "command"}))["status"] == "UNKNOWN"
+
+
+async def test_owner_recheck_cancels_when_runtime_stops_while_database_query_waits(tmp_path, monkeypatch):
+    """归属查询返回前本地停止时，返回后的第二次本地复核必须阻止命令进入发送队列。"""
+    runtime, record = await runtime_and_command(tmp_path)
+    collection_type = type(runtime.repo.db.tasks)
+    original = collection_type.find_one
+
+    async def stop_before_result(self, query, *args, **kwargs):
+        result = await original(self, query, *args, **kwargs)
+        if self.name == "tasks":
+            runtime.stopping = True
+        return result
+
+    monkeypatch.setattr(collection_type, "find_one", stop_before_result)
+    await runtime.manual(record)
+
+    runtime.collector.enqueue_manual.assert_not_awaited()
+    assert (await runtime.repo.db.commands.find_one({"id": "command"}))["status"] == "CANCELLED"
+
+
+async def test_unknown_claim_commit_never_enqueues_and_is_recorded_as_unknown(tmp_path, monkeypatch, caplog):
+    """提交确认丢失时，固定命令 ID 绝不补发，已可能领取的记录只保守标为 UNKNOWN。"""
+    runtime, record = await runtime_and_command(tmp_path)
+
+    async def committed_then_unknown(repo, _task, _session_id, document):
+        await repo.db.commands.update_one({"id": document["id"]}, {"$set": {"status": "SENDING"}})
+        raise ManualClaimUncertain("commit acknowledgement unavailable")
+
+    monkeypatch.setattr("camera_logs.collection.runtime.claim_manual", committed_then_unknown)
+    caplog.set_level("ERROR", logger="camera_logs.collection.runtime")
+    await runtime.manual(record)
+
+    runtime.collector.enqueue_manual.assert_not_awaited()
+    stored = await runtime.repo.db.commands.find_one({"id": "command"})
+    assert stored["status"] == "UNKNOWN"
+    assert stored["error"] == "命令领取状态未知，未发送"
+    assert "task=task command=command" in caplog.text
+
+
+async def test_collector_queue_rechecks_owner_before_business_write(tmp_path):
+    """排队期间发生接管时，发送器最后关口拒绝业务命令，也不需要真实设备连接。"""
+    runtime, _ = await runtime_and_command(tmp_path)
+    release, entered = asyncio.Event(), asyncio.Event()
+
+    class Connection:
+        def __init__(self):
+            self.received, self.writes = asyncio.Queue(), []
+
+        async def read(self):
+            return await self.received.get()
+
+        async def write(self, data):
+            self.writes.append(data)
+
+        async def close(self):
+            self.received.put_nowait(b"")
+
+    connection = Connection()
+    collector = Collector(runtime.task | {"storageIdentity": "manual-guard"}, tmp_path,
+                          connection_factory=AsyncMock(return_value=connection))
+    await collector.start()
+
+    async def hold_then_reject():
+        entered.set()
+        await release.wait()
+        raise OwnershipLost("barrier command must not send")
+
+    async def owner_guard():
+        current = await runtime.repo.db.tasks.find_one({"id": "task", "sessionId": "session"})
+        if current is None:
+            raise OwnershipLost("successor owns task")
+
+    try:
+        held = asyncio.create_task(collector.enqueue_manual("barrier", session_guard=hold_then_reject))
+        await entered.wait()
+        business = asyncio.create_task(collector.enqueue_manual("business", session_guard=owner_guard))
+        await runtime.repo.db.tasks.update_one({"id": "task"}, {"$set": {"sessionId": "successor"}})
+        release.set()
+        with pytest.raises(OwnershipLost):
+            await held
+        with pytest.raises(OwnershipLost):
+            await business
+        assert b"business\n" not in connection.writes
+    finally:
+        await collector.stop()
 
 
 async def test_scheduled_record_cannot_be_consumed_as_manual(tmp_path):

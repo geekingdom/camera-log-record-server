@@ -77,6 +77,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_scheduler_transaction.py
       - name: 验证定时预算与执行记录事务一致性
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_command_reservation.py
+      - name: 验证手动命令并发准入事务
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_manual_admission.py
       - name: 验证真实数据库日志目录尾部水位
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_catalog_watermarks.py
       - name: 验证多路真实协议分卷与归档完整性

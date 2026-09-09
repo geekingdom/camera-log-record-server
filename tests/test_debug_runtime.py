@@ -174,6 +174,7 @@ async def test_debug_events_persist_task_recovery_state_without_run_latch(tmp_pa
     assert [(event["phase"], event["commandBlocked"]) for event in events] == [("FAILED", True), ("RECOVERED", False)]
 
 
+@pytest.mark.usefixtures("mock_reservation_transaction")
 async def test_blocked_manual_command_persists_failed_reason(tmp_path):
     """命令通道未确认恢复时，手动命令写为 FAILED 并保存不含密码的原因。"""
     repo, task = await repository(tmp_path)

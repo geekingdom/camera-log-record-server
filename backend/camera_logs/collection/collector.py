@@ -67,7 +67,7 @@ class Collector:
         )
         self.write_latency = WriteLatency()
         self._queue: asyncio.PriorityQueue[
-            tuple[int, int, str, str, str | None, float, Callback | None, asyncio.Future[None]]
+            tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, asyncio.Future[None]]
         ] = (
             asyncio.PriorityQueue()
         )
@@ -142,6 +142,7 @@ class Collector:
         prompt: str | None = None,
         timeout_seconds: float = 30,
         delay_seconds: float = 0,
+        session_guard: Callback | None = None,
     ) -> str:
         """将人工命令加入唯一发送队列；提示符和发送后延时都在本会话内串行完成。"""
         if not command or not command.strip() or self._initializing or not self._accepting_commands or self._connection is None:
@@ -157,6 +158,7 @@ class Collector:
             command_id=command_id,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
+            session_guard=session_guard,
         )
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
@@ -179,10 +181,12 @@ class Collector:
         prompt: str | None = None,
         timeout_seconds: float = 30,
         before_send: Callback | None = None,
+        session_guard: Callback | None = None,
     ) -> None:
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._counter += 1
-        await self._queue.put((priority, self._counter, command, newline, prompt, timeout_seconds, before_send, future))
+        await self._queue.put((priority, self._counter, command, newline, prompt, timeout_seconds,
+                               before_send, session_guard, future))
         try:
             await future
         except Exception:
@@ -195,19 +199,26 @@ class Collector:
 
     async def _sender_loop(self) -> None:
         while True:
-            _, _, command, newline, prompt, timeout_seconds, before_send, future = await self._queue.get()
+            _, _, command, newline, prompt, timeout_seconds, before_send, session_guard, future = await self._queue.get()
             self._sending_future = future
             try:
                 if future.cancelled():
                     continue
                 if self._connection is None or self._connection_closed or not self._accepting_commands:
                     raise ConnectionError("connection closed")
+                # 手动命令在排队期间可能已失属。先于 PSH 恢复探测复核，避免旧会话
+                # 写入 Ctrl-C、ls 或口令；定时预算回调不在此处执行，防止重复扣减。
+                if session_guard:
+                    await _call(session_guard)
                 if self._command_blocked:
                     # 每个后续命令都可重新确认通道，不重试前次 debug 或口令。
                     # 未回到 shell 时本次仍未进入发送阶段，定时预算必须保留。
                     if not await self._debug.recover_command_channel(self._write_debug, newline, timeout_seconds):
                         raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
                     self._command_blocked = False
+                # 恢复过程和前一条命令都可能耗时，业务命令写 socket 前再次核对归属。
+                if session_guard:
+                    await _call(session_guard)
                 # 预算在真正写 socket 前才占用，恢复未确认的命令不能虚耗执行次数。
                 if before_send and not await _call(before_send):
                     raise BudgetExhausted("scheduled command budget is exhausted")
