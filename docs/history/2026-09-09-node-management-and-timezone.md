@@ -16,6 +16,6 @@
 
 本地后端全量736项、前端52项和构建、Ruff通过；新增运行索引后定向6项通过。真实 MongoDB 验证审计失败/取消回滚、六组领取竞争、删除重试、旧心跳不恢复、历史文件保留，临时库及目录删除。`browser_confirmations.mjs` 12次模拟写操作、零控制台错误，删除取消/确认以及小时样例通过；人工检查1440/390截图，表格横向滚动及固定操作列正常。全部浏览器 API 已拦截，未修改实体任务。
 
-新增 `verify_node_registration.py` 已纳入 Linux 完整部署CI，将在真实默认worker上验证发现、登记、保存和下一次心跳，随后运行既有采集归档链路。当前尚未收取新提交CI。之前 `2607354` 的CI34339927183六作业全部通过，不能代替本次验证。
+功能提交 `dfe70a4` 的 [CI34341798389](https://github.com/geekingdom/camera-log-record-server/actions/runs/34341798389) 六个作业全部成功。新增 `verify_node_registration.py` 在真实默认worker上验证发现、HTTP登记、保存和下一次心跳，随后采集归档链路通过；节点删除与服务令牌事务、Docker完整/独立组件、Ubuntu原生部署也全部通过。此证据覆盖本次改动，不能代替用户服务器实际升级或集群全天验收。
 
 本机API/Worker未重启，用户服务器未直接访问。完整升级方式和目录边界见 `docs/node-deployment-troubleshooting.md`；不要为修复登记错误改节点身份、删除日志或重建数据库。
