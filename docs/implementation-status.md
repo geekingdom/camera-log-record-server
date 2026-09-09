@@ -45,7 +45,7 @@
 | R23 Linux 一键部署、重复执行保留配置与卷 | 根 `deploy.sh`、`scripts/deploy_*`、Compose，已实现并通过 Linux 单机 CI | CI 34304331562 实际执行脚本两次，健康检查与保留密钥/卷通过 | 裸机自动安装 Docker 的分支为脚本检查；未验收其他发行版与多机部署 | 目标生产主机按部署文档运行 |
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
-| R26 平台访问记录、业务审计与凭据脱敏 | `common/observability.py`、`main.py`、`users/api.py`、`resources/api.py`；403 来源拒绝也记录 requestId/clientIp，登录退出关联账号，认证预览记录结果 | `test_access_log_boundary.py`、资源审计测试；来源/IP 集成 10 项通过 | 资源/模板/账号部分变更与审计 insert 非原子；限流、CSRF 等拒绝主要由 HTTP 访问日志覆盖，不等同 Mongo 业务事件 | 审查变更与审计事务边界，补故障注入；不宣称完整业务审计已验收 |
+| R26 平台访问记录、业务审计与凭据脱敏 | `common/observability.py`、`main.py`、用户/资源/模板等 API；已有访问和业务审计 | 访问与来源测试；本轮重读 `Repository._build_idempotent` 和各 API，确认两步写入边界 | 多处业务修改与审计非原子，idem 创建首次审计失败后重试会直接返回对象而不补审计；登录/退出、任务、配置、IP 规则同样待审查 | 首先为资源/模板/账户接入显式 Mongo 变更与审计事务；设备认证、哈希和 Cookie 操作保持事务外；其余模块继续迁移，不缩小全局要求 |
 
 ## 验收口径
 
@@ -77,4 +77,4 @@ R21 本轮后端全量 592 项通过，随后新增脚本集成 6 项通过；�
 
 R10 手动命令实现阶段后端全量 610 项、前端 32 项及构建、Ruff 通过；真实副本集并发准入、停止冲突、取消回滚和未知提交验证通过。新增模块分别为 39/77 行，runtime 469 行、collector 492 行。历史测试见 [手动命令事务记录](history/2026-09-09-manual-command-transactions.md)。当前真实 Worker 已更新至代码基线 `7b4964e`，两路恢复与手动发送及 R25 本轮 10 项回归证据见 [本机部署核对](history/2026-09-09-local-rollout-and-ip-boundary.md)。
 
-R17 本轮后端 610 项、前端 42 项、生产构建与 Ruff 通过，独立复核未发现阻塞问题。详细边界、浏览器与真实 API 证据及临时数据清理见 [实时范围补读记录](history/2026-09-09-live-range-recovery.md)。
+R17 功能提交 `17747f9` 本地后端 610 项、前端 42 项、生产构建与 Ruff 通过，独立复核未发现阻塞问题；[Linux CI 34314414779](https://github.com/geekingdom/camera-log-record-server/actions/runs/34314414779) 四个作业全部成功。详细边界、浏览器与真实 API 证据及临时数据清理见 [实时范围补读记录](history/2026-09-09-live-range-recovery.md)。

@@ -30,4 +30,10 @@
 
 前端开发服务继续使用 `http://127.0.0.1:5173/`。后台源码未改变，无需更新已运行的实体采集 Worker。提交后由 CI 验证 Linux 构建与既有容器链路；在取得本次结果前不把历史 CI 当成本次通过。
 
+功能提交 `17747f96c29369549cc4cea9e9c7f8f461f8b810` 的 [CI 34314414779](https://github.com/geekingdom/camera-log-record-server/actions/runs/34314414779) 已查询确认为 completed/success：frontend、backend、commit-messages、container-smoke 四项通过，包括一键部署、真实代理账户、事务及多路归档链路。
+
+## 后续审计切入点
+
+只读复核 R26 确认资源、模板和账户修改后再调用 audit，二者仍是独立提交。`Repository._build_idempotent` 创建对象后若审计失败，同幂等键重试可能直接返回对象，缺失事件不会被补写。下一步采用显式选择的 Mongo 变更与审计事务，创建固定 ID、CAS 与审计使用同一 session；资源认证 HTTP、密码哈希、Cookie 签发留在事务外，不重复修改已经完成的手动/定时命令预算事务。任务、登录退出、后台配置、IP 规则等其它业务审计仍须后续逐项迁移，不能把最初范围当成全项目完成。
+
 仍待完成：无边界事件的目录定位、跨节点物理隔离、控制操作与业务审计一致性，以及与设计同规模的全天容量验收。
