@@ -35,6 +35,10 @@ jobs:
       - name: 验证副本集初始化门槛
         run: node --test ../tests/deploy/test_mongo_init.mjs ../tests/deploy/test_mongo_standalone.mjs
       - run: npm run build
+      - name: 验证普通HTTP服务器IP浏览器写操作
+        run: |
+          npm install --prefix "$RUNNER_TEMP/http-browser" playwright@1.58.2 --no-audit --no-fund
+          PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node ../scripts/verify_http_browser.mjs
   commit-messages:
     runs-on: ubuntu-latest
     steps:

@@ -4,6 +4,8 @@
 
 ## 当前任务与恢复
 
+最新业务重点：Docker和原生部署都须支持其他电脑通过普通HTTP服务器IP操作。`eb4e829`已推送共用UUID兼容修复；本机真实非loopback IPv4 Chrome验证通过，52项前端测试和构建通过。Linux CI34338375626正在复验原生部署及完整回归，尚未全部结束；新增CI浏览器守护验证待下一提交执行。以下请求记录404为先前已处理问题，不能替代当前任务。
+
 最新用户问题复核（2026-09-09 15:25 上海时间，工作区仍以 `59337d8` 为提交基线）：旧 API PID 49854 的 OpenAPI 中没有 `/api/v1/request-events`，访问日志在 `.local/service-logs/api/camera-logs.jsonl:2318` 记录请求 `6dd61839ad6b48f193c760193dbe5199` 于 15:25:30 返回 404、耗时 2.297ms。受控更新 API 至 PID 79958 后，审计、运行和请求三类事件接口均以管理员 Token 返回 200；Chrome 刷新请求记录后 404 消失并正常显示空列表。未导入旧文件访问日志，未改动真实业务数据。Worker PID 25871 未重启，34/35 的 `COLLECTING` 状态、run、session 和 generation=28 均保持不变。
 
 当前重点：最新用户增加 Ubuntu/Debian 原生主机部署，能访问依赖源但不能拉取Docker镜像；正在新增 `deploy-native*.sh`、原生配置/安装/初始化模块及systemd验证。原生部署尚未完成Linux验收，不冒充已交付。上一增量任务编辑与登录/退出/改密事务已提交 `175b938` 并通过 [Linux CI 34328314712](https://github.com/geekingdom/camera-log-record-server/actions/runs/34328314712) 五个作业；真实副本集验证结束均清理临时库与日志。API 已更新为 PID 98392，三事件接口200；真实Worker PID 25871 未重启，34/35的运行、会话、generation=28不变，更新期间日志分别增加4530/14335字节。Worker错误收尾小修尚未加载本机。下一步完成原生部署及Linux验收，再继续全项目产品/容量验收；白名单只约束平台客户端，不约束设备目标；生成交接摘要不是业务目标。
