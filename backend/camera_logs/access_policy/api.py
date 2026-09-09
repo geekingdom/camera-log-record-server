@@ -7,17 +7,19 @@ from pymongo import ReturnDocument
 
 from camera_logs.access_policy.models import IpPolicyPatch
 from camera_logs.access_policy.policy import POLICY_ID, client_ip, matching_scopes, restrict_identity
+from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now
 
 
-async def _policy(repo):
-    """首次读取建立默认停用策略，版本字段支持后续乐观锁更新。"""
+async def _policy(repo, *, session=None):
+    """首次读取建立系统默认停用策略，用户规则变更另由审计事务提交。"""
     return await repo.db.ip_policy.find_one_and_update(
         {"id": POLICY_ID},
         {"$setOnInsert": {"id": POLICY_ID, "enabled": False, "rules": [], "version": 1,
                           "createdAt": now(), "updatedAt": now()}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
+        session=session,
     )
 
 
@@ -44,19 +46,23 @@ def install_ip_policy_routes(app):
         """原子替换规则；候选启用策略必须保留当前管理员的管理权限。"""
         authorize(user, "admin")
         repo = request.app.state.repo
-        await _policy(repo)
         candidate = {"enabled": body.enabled, "rules": [rule.model_dump() for rule in body.rules]}
         candidate_identity = restrict_identity(user, matching_scopes(candidate, client_ip(request)) if body.enabled else None)
         try:
             authorize(candidate_identity, "admin")
         except HTTPException as exc:
             raise HTTPException(422, "候选规则会使当前管理员失去管理权限") from exc
-        changed = await repo.db.ip_policy.find_one_and_update(
-            {"id": POLICY_ID, "version": body.version},
-            {"$set": candidate | {"updatedAt": now()}, "$inc": {"version": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not changed:
-            raise HTTPException(409, "IP 白名单版本已变化，请刷新")
-        await repo.audit(user["id"], "update_ip_policy", POLICY_ID)
+        async def commit(session):
+            """策略和审计一起发布；失败时不能改变后续平台请求的来源访问权限。"""
+            await _policy(repo, session=session)
+            changed = await repo.db.ip_policy.find_one_and_update(
+                {"id": POLICY_ID, "version": body.version},
+                {"$set": candidate | {"updatedAt": now()}, "$inc": {"version": 1}},
+                return_document=ReturnDocument.AFTER, session=session,
+            )
+            if not changed:
+                raise HTTPException(409, "IP 白名单版本已变化，请刷新")
+            return changed
+
+        changed = await audited_mutation(repo, user["id"], "update_ip_policy", POLICY_ID, commit)
         return _public(changed, request)

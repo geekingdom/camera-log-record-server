@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now
 from camera_logs.common.security import actor, authorize
 
@@ -142,8 +143,9 @@ def _public_discovered_node(node: dict) -> dict:
     }
 
 
-async def _platform_settings(repo) -> dict:
-    """读取或首次初始化默认配置，确保 PATCH 总能从版本 1 开始比较。"""
+async def _platform_settings(repo, *, session=None) -> dict:
+    """读取或首次初始化系统默认配置；用户 PATCH 传入事务会话。"""
+    # GET 可惰性建立系统默认值；用户变更必须传入 session，使初始化、更新和审计同提交。
     timestamp = now()
     configured_default = int(getattr(repo.settings, "retention_days", DEFAULT_RETENTION_DAYS))
     retention_days = configured_default if 1 <= configured_default <= MAX_RETENTION_DAYS else DEFAULT_RETENTION_DAYS
@@ -153,6 +155,7 @@ async def _platform_settings(repo) -> dict:
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
+        session=session,
     )
 
 
@@ -172,15 +175,23 @@ def install_settings_routes(app):
         """原子更新保留期，版本不一致时拒绝覆盖并提示客户端刷新。"""
         authorize(user, "admin")
         repo = request.app.state.repo
-        await _platform_settings(repo)
-        document = await repo.db.platform_settings.find_one_and_update(
-            {"id": PLATFORM_SETTINGS_ID, "version": body.version},
-            {"$set": {"retentionDays": body.retentionDays, "updatedAt": now()}, "$inc": {"version": 1}},
-            return_document=ReturnDocument.AFTER,
+
+        async def commit(session):
+            """默认记录、版本更新和审计必须在同一可重试事务中提交。"""
+            await _platform_settings(repo, session=session)
+            document = await repo.db.platform_settings.find_one_and_update(
+                {"id": PLATFORM_SETTINGS_ID, "version": body.version},
+                {"$set": {"retentionDays": body.retentionDays, "updatedAt": now()}, "$inc": {"version": 1}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not document:
+                raise HTTPException(409, "平台配置已被其他管理员修改，请刷新后重试")
+            return document
+
+        document = await audited_mutation(
+            repo, user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID, commit
         )
-        if not document:
-            raise HTTPException(409, "平台配置已被其他管理员修改，请刷新后重试")
-        await repo.audit(user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID)
         return {key: document[key] for key in ("retentionDays", "version", "updatedAt")}
 
     @app.get("/api/v1/admin/nodes")
@@ -205,11 +216,16 @@ def install_settings_routes(app):
         repo = request.app.state.repo
         timestamp = now()
         document = body.model_dump() | {"version": 1, "createdAt": timestamp, "updatedAt": timestamp}
+
+        async def commit(session):
+            """节点配置插入和登记审计共享事务会话，唯一索引冲突由路由保持原语义。"""
+            await repo.db.node_configs.insert_one(document, session=session)
+            return document
+
         try:
-            await repo.db.node_configs.insert_one(document)
+            await audited_mutation(repo, user["id"], "register_node", body.id, commit)
         except DuplicateKeyError as exc:
             raise HTTPException(409, "节点 ID 已登记") from exc
-        await repo.audit(user["id"], "register_node", body.id)
         return _public_node_config(document, None)
 
     @app.patch("/api/v1/admin/nodes/{node_id}")
@@ -218,15 +234,21 @@ def install_settings_routes(app):
         authorize(user, "admin")
         repo = request.app.state.repo
         changes = body.model_dump(exclude={"version"}, exclude_none=True) | {"updatedAt": now()}
-        document = await repo.db.node_configs.find_one_and_update(
-            {"id": node_id, "version": body.version},
-            {"$set": changes, "$inc": {"version": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not document:
-            if await repo.db.node_configs.find_one({"id": node_id}):
+
+        async def commit(session):
+            """版本更新、未命中状态判断和审计均使用同一事务快照。"""
+            document = await repo.db.node_configs.find_one_and_update(
+                {"id": node_id, "version": body.version},
+                {"$set": changes, "$inc": {"version": 1}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if document:
+                return document
+            if await repo.db.node_configs.find_one({"id": node_id}, session=session):
                 raise HTTPException(409, "节点配置已被其他管理员修改，请刷新后重试")
             raise HTTPException(404, "节点尚未登记")
-        await repo.audit(user["id"], "update_node_config", node_id)
+
+        document = await audited_mutation(repo, user["id"], "update_node_config", node_id, commit)
         heartbeat = await repo.db.nodes.find_one({"id": node_id})
         return _public_node_config(document, heartbeat)
