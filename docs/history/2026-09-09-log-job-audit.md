@@ -9,3 +9,5 @@
 本地后端全量740项通过；随后发现作业审计目标投影缺少taskId，新增回归复现并修复，显示中文操作、任务名和设备IP。前端源码未改，不重复UI构建。新增真实副本集脚本已纳入Docker集成CI，待推送后收取结果。本机API/Worker未更新，剩余集群全天容量和跨节点物理隔离验收保持未完成。
 
 最终作业/审计定向15项、Ruff及diff检查通过。全量740项是在新增关联回归之前的结果，不将新增用例计作已全量运行。剩余具体入口为 `logs/jobs.py` 的作业完成审计与 `logs/download_sessions.py` 的浏览器授权审计；旧 `Repository.idem` 已无业务路由调用。
+
+后续收取：功能提交 `1226e5a` 的 [Linux CI 34343287577](https://github.com/geekingdom/camera-log-record-server/actions/runs/34343287577) 已全部成功，六个作业为 backend、frontend、commit-messages、native-smoke、component-smoke、container-smoke。后端日志确认741项通过，Ruff通过，补充的任务关联用例已纳入此次全量结果。此验证不代表已更新用户服务器或本机常驻API/Worker。
