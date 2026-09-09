@@ -4,11 +4,11 @@
 
 ## 当前任务与恢复
 
-最新业务重点：Docker和原生部署都须支持其他电脑通过普通HTTP服务器IP操作。`eb4e829`已推送共用UUID兼容修复；本机真实非loopback IPv4 Chrome验证通过，52项前端测试和构建通过。Linux CI34338375626正在复验原生部署及完整回归，尚未全部结束；新增CI浏览器守护验证待下一提交执行。以下请求记录404为先前已处理问题，不能替代当前任务。
+最新业务重点：Docker和原生部署都须支持其他电脑通过普通HTTP服务器IP操作。`eb4e829`共用UUID修复已通过[Linux CI34338375626](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338375626)六个作业：后端729项、前端52项、Docker完整及独立部署、Ubuntu24.04原生首次/重跑/重启健康与清理均通过。`443c336`进一步将真实非loopback IPv4 Chrome验证纳入CI，[CI34338617932](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338617932)六个作业也全部成功。目标服务器仍需拉取并重新构建前端。以下请求记录404为先前已处理问题，不能替代当前任务。
 
 最新用户问题复核（2026-09-09 15:25 上海时间，工作区仍以 `59337d8` 为提交基线）：旧 API PID 49854 的 OpenAPI 中没有 `/api/v1/request-events`，访问日志在 `.local/service-logs/api/camera-logs.jsonl:2318` 记录请求 `6dd61839ad6b48f193c760193dbe5199` 于 15:25:30 返回 404、耗时 2.297ms。受控更新 API 至 PID 79958 后，审计、运行和请求三类事件接口均以管理员 Token 返回 200；Chrome 刷新请求记录后 404 消失并正常显示空列表。未导入旧文件访问日志，未改动真实业务数据。Worker PID 25871 未重启，34/35 的 `COLLECTING` 状态、run、session 和 generation=28 均保持不变。
 
-当前重点：最新用户增加 Ubuntu/Debian 原生主机部署，能访问依赖源但不能拉取Docker镜像；正在新增 `deploy-native*.sh`、原生配置/安装/初始化模块及systemd验证。原生部署尚未完成Linux验收，不冒充已交付。上一增量任务编辑与登录/退出/改密事务已提交 `175b938` 并通过 [Linux CI 34328314712](https://github.com/geekingdom/camera-log-record-server/actions/runs/34328314712) 五个作业；真实副本集验证结束均清理临时库与日志。API 已更新为 PID 98392，三事件接口200；真实Worker PID 25871 未重启，34/35的运行、会话、generation=28不变，更新期间日志分别增加4530/14335字节。Worker错误收尾小修尚未加载本机。下一步完成原生部署及Linux验收，再继续全项目产品/容量验收；白名单只约束平台客户端，不约束设备目标；生成交接摘要不是业务目标。
+部署状态：Ubuntu/Debian原生部署入口已实现并通过Ubuntu24.04验收，具体边界见R27。上一增量任务编辑与登录/退出/改密事务`175b938`已通过Linux CI34328314712；真实副本集验证结束均清理临时库与日志。本机API更新至PID98392，三事件接口200；Worker PID25871未重启，两路运行、会话及generation=28不变，更新窗口日志分别增加4530/14335字节。Worker错误收尾小修尚未加载本机。后续继续目标服务器产品验收、命令/作业审计一致性与集群容量验收；白名单只约束平台客户端，不约束设备目标；生成交接摘要不是业务目标。
 
 恢复时先读最新业务消息与总表，再核对工作区、提交和相关源码。摘要中的默认值、运行状态和结果必须重新验证。“源码/测试存在”不等于本轮重跑通过；继承的历史结果明确标为历史。
 
@@ -50,8 +50,8 @@
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
 | R26 平台访问记录、业务审计与凭据脱敏 | 任务编辑与用户登录/退出/改密事务已交付，固定事件/会话并仅只读恢复未知提交；登录失败显示/筛选FAILED | `175b938` Linux CI 34328314712通过；本机API98392三事件200；浏览器请求记录页正常；真实副本集验证已清理临时库与日志 | 通用`Repository.idem`、手动命令外层及其他作业审计仍需处理；socket与Cookie响应不属于数据库事务 | 继续命令/作业审计及物理收尾，不重复实施已完成事务 |
-| R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，正在修正Linux验收发现的Nginx PID权限 | `d049f15` CI34330399318后端/前端/两类Docker部署通过，原生Nginx启动权限失败；已改同账号配置检测并保护跨组件合同；定向25项通过 | 原生Linux最终复验未完成 | 再跑native-smoke首次/重跑/重启及清理 |
-| R28 其他电脑通过HTTP服务器IP正常操作 | `frontend/src/shared/api.ts` 缺少randomUUID时使用getRandomValues生成UUIDv4；覆盖所有共用幂等键的操作 | 回归先复现相同异常；修复后前端52项与构建通过，非安全HTTP真实Chrome成功发送启动/命令/下载三个模拟API请求 | 用户实际服务器需拉取并重新构建前端；不以模拟接口替代整机业务验收 | 推送修复及验证IP访问，更新部署前端 |
+| R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，已交付；Nginx权限和跨组件合同预检已修正 | `eb4e829` CI34338375626 Ubuntu24.04真实首次/重跑/重启通过，配置不变，临时安装已删除 | 未物理重启宿主机；Ubuntu22.04/Debian12自动依赖分支尚未实机验收 | 目标服务器按文档部署，验收实际依赖源和开机启动 |
+| R28 其他电脑通过HTTP服务器IP正常操作 | 共用`frontend/src/shared/api.ts`兼容UUIDv4；Docker/原生前端均重新编译该源码；CI加入`verify_http_browser.mjs` | 先复现相同异常，前端52项/构建通过；真实非安全IPv4 Chrome成功发出启动/命令/下载模拟请求；CI34338375626两类部署通过 | 目标服务器需拉取并重新构建前端；模拟浏览器不等于全部实体设备业务验收 | 更新目标服务器前端并强制刷新，继续产品全链路验收 |
 
 ## 验收口径
 

@@ -11,3 +11,7 @@
 首轮`d049f15`的CI34330399318其余五个作业通过，原生部署失败于Nginx PID文件权限：root执行nginx -t创建的文件使服务账号报Permission denied。改为同一服务账号检测；同时增加跨组件连接与共享令牌摘要预检，避免单组件更新先停止服务再破坏其他服务连通性。
 
 用户进一步要求HTTP服务器IP访问正常操作。前端原来直接调用安全上下文限定的crypto.randomUUID，已用回归复现相同异常，改为无原生方法时用getRandomValues生成UUIDv4；前端52项与生产构建通过，新增verify_http_browser.mjs验证真实非安全Chrome环境中的启动、命令及下载模拟请求，临时HTTP进程与浏览器结束即清理。
+
+修复提交`eb4e829`的[CI34338375626](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338375626)六作业全部成功，后端729项、前端52项。原生验证明确返回`singleMemberAuthenticatedReplicaSet`、`repeatPreservesConfiguration`、`restartHealth`、`temporaryInstallationRemoved`全部true；Docker独立部署也确认环境保留、重启健康、项目和数据清理。此证据覆盖Ubuntu24.04而非所有支持发行版，也未执行宿主机物理重启。`443c336`将HTTP/IP浏览器检查纳入持续CI。
+
+`443c336`的[CI34338617932](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338617932)六作业全部成功，包含新增普通HTTP服务器IP浏览器写操作；两类部署共享兼容修复，目标服务器必须重建前端产物后使用。
