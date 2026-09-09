@@ -1,6 +1,6 @@
 # 当前状态总表
 
-核对日期：2026-09-09。本轮父提交：`fc78034a1e15286c65be51e7513cbfc34f000b48`；本表同步记录部署、账户与来源 IP 权限改动。提交后用 `git log -1 -- docs/implementation-status.md` 定位总表版本，不把工作区改动冒充已发布。[历史记录](history/README.md) 不替代本表。
+核对日期：2026-09-09。本轮功能提交：`d157cc2166ca7cbf90c8ed213d93808e140cece3`；本表同步记录命令恢复、连接生命周期验证和模块化改动。提交后用 `git log -1 -- docs/implementation-status.md` 定位总表版本，不把工作区改动冒充已发布。[历史记录](history/README.md) 不替代本表。
 
 ## 当前任务与恢复
 
@@ -31,7 +31,7 @@
 | R09 初始化/定时队列、断线续计、重启归零、发送预算 | `commands/reservation.py`、`collection/runtime.py`，数据库原子性已实现 | 本轮重读事务源码；祖先提交 `92e01d6`；真实 Mongo 验证脚本 | socket 不属于数据库事务，设备执行结果仍可未知 | 保持 UNKNOWN、不补发；勿重复实现预算事务 |
 | R10 手动优先、不跨会话、断线拒绝与审计 | `commands/api.py`、`collection/runtime.py`，部分实现 | 手动命令与归属测试 | count 后 insert 配额非原子；归属检查与领取边界待审查 | 原子配额与故障测试 |
 | R11 幂等启停、受控重启、租约/代次隔离 | `tasks/claim.py`、调度模块、`administration/isolation.py`，部分实现 | 调度/隔离事务验证脚本，历史 Mongo 验证 | 物理隔离未证明；控制操作多写崩溃一致性待审查 | 操作一致性与旧实例接管审查 |
-| R12 PSH 密文、ls 探测、模拟口令、失败仅影响当次 | `collection/psh_*.py`、`collector.py`，已修复普通命令永久拒绝和定时提前结束，待本轮最终 CI | 新增初始/手动/定时恢复及预算回归先失败后通过；相关 27 项测试通过 | 设备仍处于 Password 时不能发送业务命令，当前初始化项跳过、手动失败、定时等待；真实接口与 10003 切换未验证 | 最终回归并保留设备侧确认边界 |
+| R12 PSH 密文、ls 探测、模拟口令、失败仅影响当次 | `collection/psh_*.py`、`collector.py`，已修复普通命令永久拒绝和定时提前结束，CI 通过 | 新增初始/手动/定时恢复及预算回归先失败后通过；相关 27 项及 CI 34306652015 通过 | 设备仍处于 Password 时不能发送业务命令，当前初始化项跳过、手动失败、定时等待；真实接口与 10003 切换未验证 | 受控部署后核对设备侧恢复；保留当前真实 worker |
 | R13 10 MiB 编号分卷、上海小时、仅日志 tar.gz、归档后删原卷 | `logs/storage.py`、`logs/compression.py`，已实现 | 本轮核对校验→发布→同步→unlink；存储测试 | 集群验收未完成；10M 当前按 10 MiB | 保持校验失败保留原卷 |
 | R14 小时查询、统一小时包、多选 ZIP、Range | `logs/hour_download.py`、`logs/export_output.py`、日志前端，已实现 | 下载/归档测试、历史浏览器下载 | 分布式缺片与规模限制待验收 | 多小时端到端校验 |
 | R15 流式搜索、并发/读预算、配额与到期清理 | `logs/jobs.py`、限制器、`logs/maintenance.py`，部分验收 | 导出限制测试、合成报告 | 混合持续负载未证明 | 与采集联合验收 |
@@ -61,7 +61,7 @@
 
 最终功能提交 `2c62fdb`：Linux CI 后端 567 项、前端 25 项测试通过，Ruff、前端构建、构建上下文检查及 4 项副本集初始化检查通过；一键部署、真实代理账户权限与多路归档链路通过。具体证据见 [账户与部署记录](history/2026-09-09-access-and-deployment.md)。清理历史见 [清理记录](history/2026-09-09-status-and-cleanup.md)。未重跑的实体设备/集群验证不计入本轮通过项。
 
-当前命令恢复与模块化改动：本地后端 573 项、前端 28 项测试、构建、Ruff 与模拟浏览器通过；默认十秒重连/实际暂停补强后再次 2 项通过。历史及设备部署边界见 [本轮记录](history/2026-09-09-command-recovery-and-modularity.md)，当前尚待本次提交 CI。
+当前命令恢复与模块化提交 `d157cc2`：本地后端 573 项、前端 28 项测试、构建、Ruff 与模拟浏览器通过；默认十秒重连/实际暂停补强后再次 2 项通过。[Linux CI 34306652015](https://github.com/geekingdom/camera-log-record-server/actions/runs/34306652015) 四个作业全部成功。历史及真实 worker 尚未重启的部署边界见 [本轮记录](history/2026-09-09-command-recovery-and-modularity.md)。
 
 1. R21：服务端合成数据按来源与作业锁核验后清理；已完成的 R23/R24/R25 不再列为待实现。
 2. R16/R17/R12：确认交互、实时缺口、debug 失败恢复，完成资源→采集→交互→停止→下载验收。

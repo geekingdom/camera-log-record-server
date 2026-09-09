@@ -30,4 +30,4 @@
 
 全量测试曾并发读到正在编辑的新测试中间态，该时序断言已改为等待真实初始化与 COLLECTING 事件，不将中间态失败误记为产品故障。当前记录以完整文件后的通过结果为准。未访问实体设备、未重启实际 worker、未调用真实解密接口；运行中的真实 worker 仍使用此前已加载代码，新采集器代码需后续受控部署生效。
 
-本轮功能尚待提交后的 Linux CI；前轮 CI 不能替代本轮证据。
+功能提交 `d157cc2166ca7cbf90c8ed213d93808e140cece3` 的 [Linux CI 34306652015](https://github.com/geekingdom/camera-log-record-server/actions/runs/34306652015) 全部成功：backend、frontend、commit-messages、container-smoke 均 success。容器步骤覆盖两次部署、代理采集命令与归档下载、账户与来源权限、真实副本集事务和日志水位、8 路 60 秒协议分卷归档；最后隔离容器和测试卷清理成功。不将其等同 500 路全天容量验收。
