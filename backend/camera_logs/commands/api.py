@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
 
-from camera_logs.commands.manual_admission import admit_manual
+from camera_logs.commands.manual_submission import submit_manual
 from camera_logs.common.database import now, public
 from camera_logs.common.models import InitialCommand, TokenCreate, new_id
 from camera_logs.common.security import actor, authorize
@@ -27,14 +27,8 @@ def install_command_routes(app, repo, listing):
     async def command(task_id: str, body: InitialCommand, request: Request, user: User):
         """将手动命令加入当前采集会话队列，并限制每任务待执行数量。"""
         authorize(user, "commands:send", task_id)
-        task = await repo().get("tasks", task_id)
-        if (task["status"] != "COLLECTING" or task["desiredState"] != "RUNNING"
-                or not task.get("sessionId") or not task.get("runId")):
-            raise HTTPException(409, "任务未处于可交互采集状态")
-        async def build(identifier):
-            return await admit_manual(repo(), task, identifier, body.model_dump(), user["id"])
-        return public(await repo().idem(user["id"], request.headers.get("Idempotency-Key"), "command:"+task_id,
-                                        body.model_dump(), "commands", build))
+        return public(await submit_manual(repo(), user["id"], task_id,
+                                          request.headers.get("Idempotency-Key"), body.model_dump()))
 
     @app.get("/api/v1/commands/{identifier}")
     async def get_command(identifier: str, user: User):

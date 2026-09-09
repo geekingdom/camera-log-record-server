@@ -60,15 +60,15 @@ def test_missing_session_rejects_command(client):
 
 def test_reconnect_between_api_check_and_admission_rejects_old_snapshot(client, monkeypatch, mock_reservation_transaction):
     """正式路由首次读取后发生重连时，事务必须拒绝把命令写入旧会话。"""
-    from camera_logs.commands import api
+    from camera_logs.commands import manual_submission
 
-    original = api.admit_manual
+    original = manual_submission.admit_manual
 
-    async def reconnect(repo, task, *args):
+    async def reconnect(repo, task, *args, **kwargs):
         await repo.db.tasks.update_one({"id": task["id"]}, {"$set": {"sessionId": "successor"}})
-        return await original(repo, task, *args)
+        return await original(repo, task, *args, **kwargs)
 
-    monkeypatch.setattr(api, "admit_manual", reconnect)
+    monkeypatch.setattr(manual_submission, "admit_manual", reconnect)
     client.portal.call(client.app.state.repo.db.tasks.insert_one, {
         "id": "task", "status": "COLLECTING", "desiredState": "RUNNING",
         "runId": "run", "sessionId": "old",

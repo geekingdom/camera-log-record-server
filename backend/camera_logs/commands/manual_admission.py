@@ -8,9 +8,10 @@ from camera_logs.common.database import now
 from camera_logs.common.ownership import owner_filter
 
 MANUAL_QUEUE_LIMIT = 100
+_NEW_TRANSACTION = object()
 
 
-async def admit_manual(repo, task, identifier, body, actor_id):
+async def admit_manual(repo, task, identifier, body, actor_id, *, session=_NEW_TRANSACTION):
     """原子提交一个固定 ID 的命令；并发准入通过写同一任务文档串行化。
 
     仅快照计数不能防止并发插入超额，因此必须先实际递增任务声明版本。
@@ -36,4 +37,6 @@ async def admit_manual(repo, task, identifier, body, actor_id):
         await repo.db.commands.insert_one(document, session=session)
         return document
 
+    if session is not _NEW_TRANSACTION:
+        return await commit(session)
     return await reservation.reservation_transaction(repo, commit)

@@ -4,6 +4,8 @@
 
 ## 当前任务与恢复
 
+当前收尾：手动命令提交与审计事务已实现，本地后端全量 730 项、Ruff、真实副本集回滚/并发/未知提交验证通过，临时数据已删除。新增入口尚未加载本机 API，新增 CI 尚待运行；实现与限制见 R10/R26 和 [验证记录](history/2026-09-09-manual-submission-audit.md)。
+
 最新业务重点：Docker和原生部署都须支持其他电脑通过普通HTTP服务器IP操作。`eb4e829`共用UUID修复已通过[Linux CI34338375626](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338375626)六个作业：后端729项、前端52项、Docker完整及独立部署、Ubuntu24.04原生首次/重跑/重启健康与清理均通过。`443c336`进一步将真实非loopback IPv4 Chrome验证纳入CI，[CI34338617932](https://github.com/geekingdom/camera-log-record-server/actions/runs/34338617932)六个作业也全部成功。目标服务器仍需拉取并重新构建前端。以下请求记录404为先前已处理问题，不能替代当前任务。
 
 最新用户问题复核（2026-09-09 15:25 上海时间，工作区仍以 `59337d8` 为提交基线）：旧 API PID 49854 的 OpenAPI 中没有 `/api/v1/request-events`，访问日志在 `.local/service-logs/api/camera-logs.jsonl:2318` 记录请求 `6dd61839ad6b48f193c760193dbe5199` 于 15:25:30 返回 404、耗时 2.297ms。受控更新 API 至 PID 79958 后，审计、运行和请求三类事件接口均以管理员 Token 返回 200；Chrome 刷新请求记录后 404 消失并正常显示空列表。未导入旧文件访问日志，未改动真实业务数据。Worker PID 25871 未重启，34/35 的 `COLLECTING` 状态、run、session 和 generation=28 均保持不变。
@@ -33,7 +35,7 @@
 | R07 逐路隔离、有序写入、重复正文保留 | `collection/collector.py`、`collection/runtime.py`、`logs/storage.py`，部分验收 | 存储/故障测试，短时摘要报告 | 500 路全天未证明；SSH PTY 不证明跨独立流时序 | 独立源序号验收 |
 | R08 SSH 按凭据连接、不以变化指纹拦截、保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`，已实现 | 既有连接测试；本轮 34/35 恢复后各一条新 Worker SSH 连接，日志继续增长 | 实体空闲故障与集群迁移未验收 | 继续故障与集群验收 |
 | R09 初始化/定时队列、断线续计、重启归零、发送预算 | `commands/reservation.py`、`collection/runtime.py`，数据库原子性已实现 | 本轮重读事务源码；祖先提交 `92e01d6`；真实 Mongo 验证脚本 | socket 不属于数据库事务，设备执行结果仍可未知 | 保持 UNKNOWN、不补发；勿重复实现预算事务 |
-| R10 手动优先、不跨会话、断线拒绝与审计 | `commands/manual_admission.py`、`manual_claim.py`、runtime/collector；已部署本机 | 既有副本集并发及故障测试；本轮 34/35 各一次手动命令 SENT、各有审计、commandClaimVersion 均为 2 | 通用审计不在入队事务内；最终 DB 检查至 socket 写入仍需物理隔离 | 审计一致性与跨节点隔离继续见 R11/R26 |
+| R10 手动优先、不跨会话、断线拒绝与审计 | `commands/manual_submission.py` 将入队、幂等映射和审计同事务提交；原准入/领取已部署，新增提交入口尚未加载本机 API | 本轮真实副本集证明审计失败/取消整体回滚、同键并发返回同一命令、提交确认丢失后只读恢复、停止后同键重放；临时数据已清理 | 最终 DB 检查至 socket 写入仍需物理隔离；历史 PENDING 仅重放，不补造审计 | 部署新增 API，继续 R11 接管隔离 |
 | R11 幂等启停、受控重启、租约/代次隔离 | `tasks/editing.py` 编辑、资源声明、停止操作、审计同事务，安全排队编辑保留RUNNING；Worker已知失败保持STOPPED | `175b938` Linux CI 34328314712通过；真实副本集回滚/竞争/确认丢失与排队调度验证；API已更新 | 跨节点物理隔离未证明；Worker错误收尾小修尚未加载本机 | 继续旧实例接管隔离，Worker部署需受控维护 |
 | R12 PSH 密文、ls 探测、模拟口令、失败仅影响当次 | `collection/psh_*.py`、`collector.py`，已部署本机 | 既有恢复及预算测试；本轮普通初始化和手动发送恢复成功，未发送 debug | 设备仍处于 Password 时不能发送业务命令；真实解密接口与 10003 切换未验证 | 在具备有效挑战码与接口条件后专门验证，不反复试错 |
 | R13 10 MiB 编号分卷、上海小时、仅日志 tar.gz、归档后删原卷 | `logs/storage.py`、`logs/compression.py`，已实现 | 本轮核对校验→发布→同步→unlink；存储测试 | 集群验收未完成；10M 当前按 10 MiB | 保持校验失败保留原卷 |
@@ -49,7 +51,7 @@
 | R23 五类 Linux 部署、中文配置、自启动、重复执行保留配置与卷 | 根部署入口、`deploy/*.yml`、`mongo-host-user-init.sh`、`deploy_component.py`；组件后缀隔离项目；systemd 启用 Docker、常驻容器 `unless-stopped` | 本地部署回归 43 项；Linux CI 34324896916 实际完整部署两次及独立四组件部署/重跑/重启；返回 restartHealth、temporaryProjectsRemoved、temporaryDataRemoved 均 true | 未实际重启宿主机；裸机安装 Docker 和 systemd 启用分支为脚本检查；未验收其他发行版与多机部署 | 在目标服务器验收开机启动及真实多机网络；维护已有环境和数据 |
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
-| R26 平台访问记录、业务审计与凭据脱敏 | 任务编辑与用户登录/退出/改密事务已交付，固定事件/会话并仅只读恢复未知提交；登录失败显示/筛选FAILED | `175b938` Linux CI 34328314712通过；本机API98392三事件200；浏览器请求记录页正常；真实副本集验证已清理临时库与日志 | 通用`Repository.idem`、手动命令外层及其他作业审计仍需处理；socket与Cookie响应不属于数据库事务 | 继续命令/作业审计及物理收尾，不重复实施已完成事务 |
+| R26 平台访问记录、业务审计与凭据脱敏 | 任务编辑与用户会话事务已交付；新增手动命令入队与审计同事务，见 R10 | `175b938` 历史 Linux CI 通过；本轮 `verify_manual_submission.py` 真实副本集验证通过并已清理临时库/目录 | 通用`Repository.idem`、服务 Token 与其他作业审计仍需处理；socket与Cookie响应不属于数据库事务 | 继续其他作业审计及物理收尾，不重复实施已完成事务 |
 | R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，已交付；Nginx权限和跨组件合同预检已修正 | `eb4e829` CI34338375626 Ubuntu24.04真实首次/重跑/重启通过，配置不变，临时安装已删除 | 未物理重启宿主机；Ubuntu22.04/Debian12自动依赖分支尚未实机验收 | 目标服务器按文档部署，验收实际依赖源和开机启动 |
 | R28 其他电脑通过HTTP服务器IP正常操作 | 共用`frontend/src/shared/api.ts`兼容UUIDv4；Docker/原生前端均重新编译该源码；CI加入`verify_http_browser.mjs` | 先复现相同异常，前端52项/构建通过；真实非安全IPv4 Chrome成功发出启动/命令/下载模拟请求；CI34338375626两类部署通过 | 目标服务器需拉取并重新构建前端；模拟浏览器不等于全部实体设备业务验收 | 更新目标服务器前端并强制刷新，继续产品全链路验收 |
 

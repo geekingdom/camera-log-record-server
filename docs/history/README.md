@@ -1,5 +1,6 @@
 # 历史记录入口
 
+- [手动命令提交审计](2026-09-09-manual-submission-audit.md)：入队、幂等映射、审计事务与停止后重放。
 - [任务编辑与会话事务](2026-09-09-edit-and-session-transactions.md)：编辑、登录、退出、改密的数据库原子性与并发撤销验证。
 
 历史报告只代表当时样本与条件。当前状态统一见 [当前状态总表](../implementation-status.md)。
