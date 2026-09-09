@@ -36,9 +36,19 @@ const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const name = `浏览器验收-${Date.now()}`;
 let createdTemplateId;
 let temporaryUser;
+let loginComplete = false;
+let initialSessionChecks = 0;
 page.on("pageerror", (error) => errors.push(error.message));
 page.on("console", (message) => {
-  if (message.type() === "error") errors.push(message.text());
+  if (message.type() !== "error") return;
+  // 全新浏览器首次探测会话返回一次 401 是登录入口的正常契约；登录后或其它接口仍严格报错。
+  if (!loginComplete && initialSessionChecks === 0 &&
+      message.location().url === `${baseUrl}/api/v1/auth/me` &&
+      message.text().includes("status of 401")) {
+    initialSessionChecks++;
+    return;
+  }
+  errors.push(`${message.text()} [${message.location().url}]`);
 });
 
 function password() {
@@ -136,6 +146,7 @@ try {
   await mkdir(screenshots, { recursive: true });
   temporaryUser = await createTemporaryUser();
   await loginTemporaryUser(temporaryUser);
+  loginComplete = true;
   await page.screenshot({ path: `${screenshots}/resources-desktop.png`, fullPage: true });
   // 临时操作员不具备管理员权限；管理员菜单由独立的 browser_user_auth.mjs 验收。
   for (const tab of ["服务节点", "服务账号", "审计与事件", "后台配置"])
@@ -217,6 +228,17 @@ try {
     path: `${screenshots}/live-desktop.png`,
     fullPage: true,
   });
+  // 高频合成源可以要求真实 API 补读验收；普通低速任务不强制制造本地省略。
+  if (process.env.BROWSER_EXPECT_LIVE_RANGES === "true") {
+    await page.getByRole("button", { name: "查看省略范围", exact: true }).click();
+    const ranges = page.getByRole("dialog", { name: "实时日志缺口", exact: true });
+    await ranges.getByRole("button", { name: /^读取缺口范围 / }).first().click();
+    await page.waitForFunction(() => /\[\d{4}-\d{2}-\d{2} /.test(
+      document.querySelector(".range-reader-content")?.textContent ?? ""));
+    if (await ranges.locator(".el-alert--error").count()) throw new Error("真实缺口范围补读失败");
+    await ranges.screenshot({ path: `${screenshots}/live-range-real-api.png` });
+    await ranges.getByRole("button", { name: "关闭", exact: true }).click();
+  }
   await page.getByRole("tab", { name: "小时归档", exact: true }).click();
   const archive = page.locator(".el-drawer .el-table").first();
   await archive.locator(".el-table__row").first().waitFor();
@@ -273,9 +295,9 @@ try {
   );
   if (overflow || errors.length)
     throw new Error(
-      `browser acceptance failed: overflow=${overflow}, consoleErrors=${errors.length}`,
+      `browser acceptance failed: overflow=${overflow}, consoleErrors=${errors.length}, details=${JSON.stringify(errors)}`,
     );
-  console.log(JSON.stringify({ passed: true, screenshots, consoleErrors: 0 }));
+  console.log(JSON.stringify({ passed: true, screenshots, unexpectedConsoleErrors: 0, initialSessionChecks }));
 } finally {
   try {
     if (createdTemplateId) {

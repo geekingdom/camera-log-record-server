@@ -10,6 +10,7 @@
 - [2026-09-09 开发服务端归档受限清理](2026-09-09-development-archive-cleanup.md)：报告来源、实际正文核验、有限范围清理及下载保护边界。
 - [2026-09-09 手动命令并发准入与领取](2026-09-09-manual-command-transactions.md)：有界队列事务、归属领取、排队守卫和真实副本集故障验证。
 - [2026-09-09 本机服务更新与来源 IP 边界](2026-09-09-local-rollout-and-ip-boundary.md)：34/35 恢复、手动发送、日志增长与来源 IP 回归。
+- [2026-09-09 实时省略范围与补读](2026-09-09-live-range-recovery.md)：字节范围状态机、分页阅读、并发隔离、浏览器及临时数据清理。
 - [历轮验证记录](../validation.md)：保留既有路径，避免破坏引用。
 - [HTTP 延迟诊断](../http-latency-diagnostics.md)：连接池与阶段延迟实验。
 - [服务压测](../service-benchmark.md) 和 [调度压测](../scheduler-benchmark.md)：操作说明和历史样本，不代替集群验收。

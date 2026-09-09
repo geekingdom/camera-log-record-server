@@ -8,8 +8,10 @@ import type { Task } from "../../shared/types";
 import {
   LiveLogBuffer,
   type LiveLogFrame,
+  type LiveLogRange,
 } from "../../shared/composables/liveLogBuffer";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
+import LiveLogRanges from "./LiveLogRanges.vue";
 
 const props = defineProps<{ taskId: string; canSend?: boolean }>();
 const emit = defineEmits<{ history: [] }>();
@@ -32,6 +34,9 @@ async function readTaskState(current: number) {
 const command = ref("");
 const gaps = ref(0);
 const omitted = ref(0);
+const missingRanges = ref<LiveLogRange[]>([]);
+const droppedRangeCount = ref(0);
+const rangesOpen = ref(false);
 const scrollTop = ref(0);
 const pausedView = ref(false);
 const follow = ref(true);
@@ -70,6 +75,9 @@ function scheduleSync() {
     syncTimer = undefined;
     gaps.value = buffer.gaps;
     omitted.value = buffer.omitted;
+    // 范围列表独立于暂停视图刷新；读取窗口自行冻结选中的范围终点。
+    missingRanges.value = buffer.missingRanges.map(range => ({ ...range }));
+    droppedRangeCount.value = buffer.droppedRangeCount;
     if (pausedView.value) return;
     lines.value = [...buffer.lines];
     await nextTick();
@@ -92,6 +100,9 @@ function resetForTask() {
   lines.value = [];
   gaps.value = 0;
   omitted.value = 0;
+  missingRanges.value = [];
+  droppedRangeCount.value = 0;
+  rangesOpen.value = false;
   scrollTop.value = 0;
   pausedView.value = false;
   follow.value = true;
@@ -148,6 +159,9 @@ function clearView() {
   lines.value = [];
   gaps.value = 0;
   omitted.value = 0;
+  missingRanges.value = [];
+  droppedRangeCount.value = 0;
+  rangesOpen.value = false;
   scrollTop.value = 0;
 }
 function followLatest() {
@@ -226,9 +240,11 @@ onBeforeUnmount(() => { stateGeneration++; clearTimeout(stateTimer); resize.disc
         /></el-tooltip>
       </div>
     </div>
-    <p v-if="gaps || omitted" class="log-gap">
-      <span v-if="gaps">服务端报告 {{ gaps }} 个日志缺口。</span>
+    <p v-if="gaps || omitted || missingRanges.length" class="log-gap">
+      <span v-if="gaps">检测到 {{ gaps }} 个传输缺口。</span>
       <span v-if="omitted">本地已省略 {{ omitted }} 行高频日志。</span>
+      <span v-if="!gaps && !omitted">有日志已移出本地视图。</span>
+      <el-button :icon="FileSearch" @click="rangesOpen = true">查看省略范围</el-button>
       <el-button :icon="FileSearch" @click="emit('history')">查看原始日志</el-button>
     </p>
     <div ref="consoleRef" class="log-console virtual-log" @scroll="onScroll">
@@ -250,5 +266,10 @@ onBeforeUnmount(() => { stateGeneration++; clearTimeout(stateTimer); resize.disc
       /><el-button v-if="props.canSend" type="primary" :icon="Send" :disabled="taskState?.commandBlocked && command.trim() !== 'debug'" @click="send">发送</el-button>
     </div>
     <el-alert v-if="taskState?.debugError || taskState?.commandBlocked" :title="taskState.commandBlocked ? '命令通道尚未恢复，日志采集继续' : '调试切换失败，普通命令与日志采集继续'" :description="taskState.debugError || undefined" type="warning" :closable="false" />
+    <LiveLogRanges v-model="rangesOpen" :task-id="props.taskId" :ranges="missingRanges" :dropped-count="droppedRangeCount" @history="emit('history')" />
   </section>
 </template>
+<style scoped>
+.log-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.log-gap .el-button + .el-button { margin-left: 0; }
+</style>

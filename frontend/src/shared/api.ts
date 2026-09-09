@@ -195,7 +195,8 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
     }),
   logHours: (id: string, date?: string, page = 1) => request<Page<LogHour>>(`/tasks/${id}/log-hours${query(page, 24, { date })}`),
-  fileContent: (id: string, offset = 0, limit = 65536) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`),
+  // 缺口阅读器关闭或切换任务时取消读取，避免失效查询继续占用连接。
+  fileContent: (id: string, offset = 0, limit = 65536, signal?: AbortSignal) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`, { signal }),
   command: (id: string, command: InitialCommand) =>
     request<CommandExecution>(`/tasks/${id}/commands`, {
       method: "POST",
