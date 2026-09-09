@@ -229,7 +229,8 @@ code { font-size: 11px; white-space: normal; word-break: break-all; }
   .task-filters .el-input { width: 100%; }
   .task-filters .el-select { flex: 1; }
   .workspace-footer { margin: 0 16px; }
-  .el-drawer { width: 100vw !important; max-width: 100vw; }
+  /* 使用遮罩可用宽度，100vw会包含Linux常驻滚动槽并导致抽屉向左越界。 */
+  .el-drawer { width: 100% !important; max-width: 100%; }
   .el-drawer__body, .el-drawer__body .el-tabs, .el-drawer__body .el-tabs__content, .el-drawer__body .el-tab-pane, .el-drawer__body .form-section { min-width: 0; }
   .el-drawer__body { overflow: auto; padding: 0 16px 20px; }
   .el-drawer__header, .el-drawer__footer { padding: 18px 16px; }

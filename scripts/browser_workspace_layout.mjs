@@ -82,7 +82,7 @@ try {
       await drawer.waitFor();
       await ui.waitForTimeout(400);
       const bounds = await drawer.boundingBox();
-      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1, "抽屉必须完整位于视口内");
+      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1, `抽屉必须完整位于视口内：${JSON.stringify({ width, bounds })}`);
       assert.ok(await ui.getByRole("tab", { name: "设备资源", exact: true }).getAttribute("aria-selected") === "true");
       assert.ok(await drawer.locator("input").evaluateAll((inputs, ip) => inputs.some(input => input.value === ip && input.disabled), resource.ip));
       await ui.screenshot({ path: `output/playwright/resource-task-${width}-${resource.id}.png`, fullPage: true });
