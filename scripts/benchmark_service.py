@@ -370,6 +370,13 @@ async def execute(args):
         "integrityVerified", "targetRateAchieved", "concurrentWindowVerified", "cleanupVerified",
         "realtimeVerified", "searchVerified", "readLatencyVerified"))
     (output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 先持久保存逐路摘要和最终结论，再删除可重新生成的下载副本。
+    # 正式日志由产品保留策略管理，不能把资源软删除解释为物理清理。
+    if report["integrityVerified"] and report["cleanupVerified"]:
+        for result in results:
+            for path in output.glob(f"route-{result['route']:04d}-hour-*.archive"):
+                if path.is_file() and not path.is_symlink():
+                    path.unlink()
     return report
 
 

@@ -2,6 +2,8 @@
 
 摄像机日志采集与检索服务。后端为 Python 3.12、FastAPI 和 MongoDB 副本集；前端为 Vue 3 与 Vite。
 
+开发与交接先查看 [当前状态总表](docs/implementation-status.md)，区分最终需求、实现位置、验证证据和未完成项。实验历史入口见 [历史记录](docs/history/README.md)。开发产物清理见 [清理说明](docs/development-cleanup.md)。
+
 控制台默认从设备资源开始：海康网络设备经 Digest（默认）或 Basic 的 ISAPI 认证后保存型号、短序列号与软件版本；串口服务器仅需名称和 IP。资源下可创建多路采集任务，海康设备支持三种采集协议，串口服务器支持 Telnet 串口。海康的串口任务既可选择已有服务器，也可自定义连接地址。同一端口允许多个任务；任务的采集凭据独立于资源的 HTTP 凭据。详见 [设备资源与目录说明](docs/device-resources.md)。
 
 服务采集 SSH、Telnet 设备与 Telnet 串口日志，按会话和小时保存原始内容及归档。每个逻辑日志行在接收时均以前缀 `[YYYY-MM-DD HH:MM:SS] ` 记录服务器的 Asia/Shanghai 首字节接收时间；存储文件和实时日志使用同一份加前缀内容。SSH 任务可暂停和恢复；Telnet 任务不提供暂停。默认连续 10 秒没有收到日志时，collector 关闭当前会话并进入重连流程。SSH 使用协议 keepalive，Telnet 使用 IAC NOP 与 TCP keepalive。
