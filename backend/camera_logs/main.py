@@ -3,7 +3,6 @@
 import asyncio
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -11,6 +10,7 @@ from pymongo import AsyncMongoClient
 
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, public
+from camera_logs.common.node_http import NodeHttpPool
 
 
 def create_app(settings=None, db=None):
@@ -35,10 +35,8 @@ def create_app(settings=None, db=None):
         try:
             await repo.initialize()
             app.state.repo = repo
-            # 高频文件读取及实时轮询共用连接池，TLS 上下文只在 API 启动时加载。
-            async with httpx.AsyncClient(timeout=30, limits=httpx.Limits(
-                max_connections=500, max_keepalive_connections=100,
-            )) as node_http:
+            # 固定分池降低高并发连接状态扫描成本，全部客户端归 API 生命周期管理。
+            async with NodeHttpPool() as node_http:
                 app.state.node_http = node_http
                 if settings.start_background:
                     from camera_logs.tasks.scheduler import scheduler_loop

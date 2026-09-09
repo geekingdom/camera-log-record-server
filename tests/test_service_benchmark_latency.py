@@ -36,6 +36,43 @@ def test_pending_overflow_fails_instead_of_dropping_samples(monkeypatch):
         tracker.record(0, 2, 3)
 
 
+async def test_catalog_discovery_rechecks_tail_written_after_empty_read(monkeypatch):
+    """目录查询期间旧卷补写尾部并发布后继卷，不能把暂时 EOF 当成最终 EOF。"""
+    tool = module(monkeypatch)
+    body = b"route=0001 seq=000000000 " + b"x" * 39 + b"\n"
+    stored = b"[2026-09-09 00:00:00] " + body
+    source = SimpleNamespace(route=1, line_bytes=len(body), finished=asyncio.Event(),
+                             source_sha256=hashlib.sha256(body).hexdigest())
+    source.finished.set()
+    tracker = tool.BatchLatency()
+    tracker.record(time.monotonic() - 1, 0, 1)
+    catalogs, published, old_tail_reads = 0, False, 0
+
+    async def get(path, params=None):
+        nonlocal catalogs, published, old_tail_reads
+        if path.endswith("log-hours"):
+            catalogs += 1
+            published = catalogs > 1
+            data = {"items": [{"hour": "2026-09-09T00:00:00+00:00", "files":
+                               [{"id": "a"}, *([{"id": "b"}] if published else [])]}]}
+        else:
+            identifier, offset = path.split("/")[-2], params["offset"]
+            if identifier == "a":
+                raw = stored[:50 if published else 31][offset:]
+                old_tail_reads += int(published and offset == 31 and bool(raw))
+            else:
+                raw = stored[50:][offset:]
+            data = {"fileId": identifier, "sessionId": "session", "nextOffset": offset + len(raw),
+                    "data": base64.b64encode(raw).decode()}
+        return httpx.Response(200, json=data, request=httpx.Request("GET", "http://test" + path))
+
+    result = await tool.observe_read_latency(SimpleNamespace(get=get), "task", source, 1, tracker, 2)
+    assert old_tail_reads == 1
+    assert result["sourceSha256"] == source.source_sha256
+    assert result["samples"] == 1 and result["fileCount"] == 2
+    assert result["p99Ms"] >= 1000
+
+
 @pytest.mark.parametrize("fault", [None, "offset", "session"])
 async def test_content_observer_preserves_half_line_across_files(monkeypatch, fault):
     tool = module(monkeypatch)

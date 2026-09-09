@@ -99,12 +99,18 @@ async def observe_read_latency(client, task_id, source, expected_lines, tracker,
         if not data and moment >= next_catalog:
             response = await client.get(f"/api/v1/tasks/{task_id}/log-hours")
             response.raise_for_status()
+            discovered = False
             for hour in sorted(response.json()["items"], key=lambda item: item["hour"]):
                 for file in hour["files"]:
                     if file["id"] not in seen:
                         seen.add(file["id"])
                         queued.append(file["id"])
+                        discovered = True
             next_catalog = moment + .1
+            if current is not None and discovered:
+                # 查询目录期间旧卷可能刚补完尾部并封存；发现新卷后必须再读旧卷，
+                # 不能依据查询之前的暂时 EOF 跳过这段字节。原延迟计时不重置。
+                continue
         if not data and queued:
             current, offset = queued.popleft(), 0
             file_count += 1
