@@ -15,7 +15,8 @@
 - 本地后端全量 577 项通过；随后日志测试的 Ruff 规范修正通过来源与访问边界 10 项回归。
 - 前端 32 项测试与构建通过；模拟浏览器 `browser_confirmations.mjs` 返回 `passed=true`、`mutations=11`、`consoleErrors=0`。
 - 桌面与移动截图：`output/playwright/command-confirmations-1440.png`、`command-confirmations-390.png`，已检查无横向溢出；截图为本地忽略产物。
-- 最终资源审计、来源/IP 与访问日志联合回归 22 项通过，Ruff、diff 检查通过。Linux CI 结果在后续核对后登记，不能沿用基线 CI 为本轮结果。
+- 最终资源审计、来源/IP 与访问日志联合回归 22 项通过，Ruff、diff 检查通过。
+- 功能提交 `7bd1fc0c67734682db5ade3c48f2e14b7d5bf6b0` 的 [Linux CI 34308408063](https://github.com/geekingdom/camera-log-record-server/actions/runs/34308408063) 四个作业全部成功，包含后端、前端、中文提交检查和容器部署/账户权限/事务/多路分卷归档链路。
 
 ## 未完成边界
 
