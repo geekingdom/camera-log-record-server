@@ -1,4 +1,5 @@
-// 审计工作区的局部只读 API 边界；复用控制台会话键但不扩展共享业务客户端。
+// 审计工作区保留独立类型与查询参数，通过统一请求入口复用 Cookie/Token 认证及失效处理。
+import { request } from "../../shared/api";
 export interface AuditEvent {
   actor?: string;
   action?: string;
@@ -33,27 +34,14 @@ export interface QueryFilters {
   end?: string;
 }
 
-export class AuditApiError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
-}
-
 function query(page: number, pageSize: number, filters: QueryFilters) {
   const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
   return params;
 }
 
-async function list<T>(path: string, page: number, pageSize: number, filters: QueryFilters) {
-  const response = await fetch(`/api/v1${path}?${query(page, pageSize, filters)}`, {
-    headers: { Authorization: `Bearer ${sessionStorage.getItem("camera-log-record-token") ?? ""}` },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new AuditApiError(response.status, body.error?.message ?? `请求失败 (${response.status})`);
-  }
-  return response.json() as Promise<EventPage<T>>;
+function list<T>(path: string, page: number, pageSize: number, filters: QueryFilters) {
+  return request<EventPage<T>>(`${path}?${query(page, pageSize, filters)}`);
 }
 
 export const auditApi = {

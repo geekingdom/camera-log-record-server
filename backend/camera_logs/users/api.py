@@ -1,6 +1,7 @@
 """登录、密码轮换和仅管理员可用的子账户配置接口。"""
 
 import hashlib
+import logging
 from datetime import timedelta
 from typing import Annotated
 
@@ -9,12 +10,15 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from camera_logs.access_policy.policy import apply_ip_permissions
+from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.common.security import actor, authorize
 from camera_logs.users.models import PERMISSIONS, Login, PasswordChange, PasswordReset, UserCreate, UserPatch
 from camera_logs.users.passwords import hash_password, password_work, verify_password
 from camera_logs.users.sessions import COOKIE, check_origin, issue_session, public_user
+
+logger = logging.getLogger(__name__)
 
 
 async def _login_budget(repo, username, address):
@@ -98,16 +102,28 @@ def install_user_routes(app):
             raise HTTPException(400, "当前密码错误")
         if body.currentPassword == body.newPassword:
             raise HTTPException(422, "新密码不能与当前密码相同")
-        changed = await repo().db.users.find_one_and_update(
-            {"id": user["id"], "authVersion": current["authVersion"], "enabled": True},
-            {"$set": {"passwordHash": await password_work(repo(), hash_password, body.newPassword),
-                      "mustChangePassword": False, "updatedAt": now()},
-             "$inc": {"version": 1, "authVersion": 1}}, return_document=ReturnDocument.AFTER,
-        )
-        if not changed:
-            raise HTTPException(409, "账号已变化，请重新登录")
-        await issue_session(repo(), changed, request, response)
-        await repo().audit(user["id"], "change_password", user["id"])
+        password_hash = await password_work(repo(), hash_password, body.newPassword)
+
+        async def commit(session):
+            """密码 CAS 与审计同事务提交；哈希计算不占用可重试的 Mongo 回调。"""
+            changed = await repo().db.users.find_one_and_update(
+                {"id": user["id"], "authVersion": current["authVersion"], "enabled": True},
+                {"$set": {"passwordHash": password_hash, "mustChangePassword": False, "updatedAt": now()},
+                 "$inc": {"version": 1, "authVersion": 1}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not changed:
+                raise HTTPException(409, "账号已变化，请重新登录")
+            return changed
+
+        changed = await audited_mutation(repo(), user["id"], "change_password", user["id"], commit)
+        try:
+            # Cookie 不能在可重试事务内写入；此处失败不回滚已确认的密码和审计事实。
+            await issue_session(repo(), changed, request, response)
+        except Exception:
+            logger.warning("密码已提交但会话签发失败 user=%s", user["id"], exc_info=True)
+            raise
         return {"user": public_user(await apply_ip_permissions(repo(), request, changed))}
 
     @app.get("/api/v1/users/permissions")
@@ -132,11 +148,16 @@ def install_user_routes(app):
             "passwordHash": await password_work(repo(), hash_password, body.password),
             "mustChangePassword": True, "createdAt": now(), "updatedAt": now(),
         }
+
+        async def commit(session):
+            """账户插入与创建审计使用同一会话，重名错误不会产生成功审计。"""
+            await repo().db.users.insert_one(doc, session=session)
+            return doc
+
         try:
-            await repo().db.users.insert_one(doc)
+            await audited_mutation(repo(), user["id"], "create_user", doc["id"], commit)
         except DuplicateKeyError:
             raise HTTPException(409, "用户名已存在") from None
-        await repo().audit(user["id"], "create_user", doc["id"])
         return public_user(doc)
 
     async def update(identifier, version, updates, user, action):
@@ -145,14 +166,19 @@ def install_user_routes(app):
         old = await repo().get("users", identifier)
         if old.get("builtin"):
             raise HTTPException(403, "内置管理员仅能自行修改密码")
-        changed = await repo().db.users.find_one_and_update(
-            {"id": identifier, "version": version, "deletedAt": None, "builtin": False},
-            {"$set": updates | {"updatedAt": now()}, "$inc": {"version": 1, "authVersion": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not changed:
-            raise HTTPException(409, "账号版本已变化或已删除")
-        await repo().audit(user["id"], action, identifier)
+        async def commit(session):
+            """账号 CAS 未命中时整体回滚，不能单独留下编辑或删除审计。"""
+            changed = await repo().db.users.find_one_and_update(
+                {"id": identifier, "version": version, "deletedAt": None, "builtin": False},
+                {"$set": updates | {"updatedAt": now()}, "$inc": {"version": 1, "authVersion": 1}},
+                return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not changed:
+                raise HTTPException(409, "账号版本已变化或已删除")
+            return changed
+
+        changed = await audited_mutation(repo(), user["id"], action, identifier, commit)
         return public_user(changed)
 
     @app.patch("/api/v1/users/{identifier}")

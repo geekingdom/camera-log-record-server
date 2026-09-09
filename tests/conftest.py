@@ -1,7 +1,27 @@
 """测试共享的事务接口替身，内存 Mongo 不支持会话事务。"""
 
 import pytest
-from mongomock_motor import AsyncMongoMockClient
+from mongomock_motor import AsyncMongoMockClient, AsyncMongoMockDatabase
+
+
+@pytest.fixture(autouse=True)
+def mock_audited_mutation_transaction(monkeypatch):
+    """只为内存 Mongo 运行路由回调；真实数据库依然使用生产事务执行器。
+
+    此替身不模拟回滚，不能作为原子性证据；副本集验证脚本负责故障与取消测试。
+    """
+    from camera_logs.common import audited_mutations
+
+    # MongoMock 的 with_options 会退回同步集合；只在测试中保留其异步包装。
+    monkeypatch.setattr(AsyncMongoMockDatabase, "with_options", lambda self, **_options: self, raising=False)
+    original = audited_mutations.mutation_transaction
+
+    async def run_callback(repo, callback):
+        if isinstance(repo.db, AsyncMongoMockDatabase):
+            return await callback(None)
+        return await original(repo, callback)
+
+    monkeypatch.setattr(audited_mutations, "mutation_transaction", run_callback)
 
 
 @pytest.fixture

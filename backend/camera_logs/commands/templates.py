@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Query, Request
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.models import TemplateCreate, TemplatePatch
 from camera_logs.common.security import actor, authorize
@@ -25,15 +26,12 @@ def install_template_routes(app, repo, listing):
     async def create_template(body: TemplateCreate, request: Request, user: User):
         """用幂等键创建唯一名称模板，重复名称转换为 409。"""
         authorize(user, "templates:write")
-        async def build(identifier):
-            doc = body.model_dump() | {"id": identifier, "version": 1, "createdAt": now(), "updatedAt": now()}
-            try:
-                await repo().db.templates.insert_one(doc)
-            except DuplicateKeyError as exc:
-                raise HTTPException(409, "模板名称已存在") from exc
-            return doc
-        return public(await repo().idem(user["id"], request.headers.get("Idempotency-Key"), "create_template",
-                                        body.model_dump(), "templates", build))
+        async def prepare(identifier):
+            """固定配置和标识后进入数据库事务，创建事实与审计不可分离。"""
+            return body.model_dump() | {"id": identifier, "version": 1, "createdAt": now(), "updatedAt": now()}
+
+        return public(await audited_create(repo(), user["id"], request.headers.get("Idempotency-Key"),
+                                           "create_template", body.model_dump(), "templates", prepare))
 
     @app.get("/api/v1/command-templates/{identifier}")
     async def get_template(identifier: str, user: User):
@@ -45,22 +43,29 @@ def install_template_routes(app, repo, listing):
     async def edit_template(identifier: str, body: TemplatePatch, user: User):
         """以 version 条件原子更新模板，陈旧版本拒绝覆盖新内容。"""
         authorize(user, "templates:write")
-        try:
+        async def commit(session):
+            """过期版本抛出异常回滚，不能为未发生的修改记录成功审计。"""
             result = await repo().db.templates.find_one_and_update({"id": identifier, "version": body.version},
                 {"$set": body.model_dump(exclude={"version"}) | {"updatedAt": now()}, "$inc": {"version": 1}},
-                return_document=ReturnDocument.AFTER)
+                return_document=ReturnDocument.AFTER, session=session)
+            if not result:
+                raise HTTPException(409, "模板版本已变化，请刷新")
+            return result
+
+        try:
+            result = await audited_mutation(repo(), user["id"], "edit_template", identifier, commit)
         except DuplicateKeyError as exc:
             raise HTTPException(409, "模板名称已存在") from exc
-        if not result:
-            raise HTTPException(409, "模板版本已变化，请刷新")
-        await repo().audit(user["id"], "edit_template", identifier)
         return public(result)
 
     @app.delete("/api/v1/command-templates/{identifier}", status_code=204)
     async def delete_template(identifier: str, user: User, version: int = Query(..., ge=1)):
         """仅删除指定版本的模板，防止并发编辑后误删。"""
         authorize(user, "templates:write")
-        result = await repo().db.templates.delete_one({"id": identifier, "version": version})
-        if not result.deleted_count:
-            raise HTTPException(409, "模板版本已变化，请刷新")
-        await repo().audit(user["id"], "delete_template", identifier)
+        async def commit(session):
+            """模板删除与审计一起提交，已复制到任务的命令快照不参与此事务。"""
+            result = await repo().db.templates.delete_one({"id": identifier, "version": version}, session=session)
+            if not result.deleted_count:
+                raise HTTPException(409, "模板版本已变化，请刷新")
+
+        await audited_mutation(repo(), user["id"], "delete_template", identifier, commit)

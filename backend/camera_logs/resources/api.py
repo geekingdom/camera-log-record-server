@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Query, Request
 from pymongo import ReturnDocument
 
+from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_resource
 from camera_logs.resources.authentication import authenticate_network_resource
@@ -116,18 +117,18 @@ def install_resource_routes(app, repo, listing):
         authorize(user, "resources:create")
         if user.get("taskIds") is not None:
             raise HTTPException(403, "受限账号不能创建授权范围外的新资源")
-        async def build(identifier):
+        async def prepare(identifier):
+            """认证和加密只执行在事务外，Mongo 驱动重试不会重新请求设备。"""
             metadata = await _verified_metadata(body)
             document = {"id": identifier, "name": body.name, "kind": body.kind, "ip": body.ip,
                         "version": 1, "createdAt": now(), "updatedAt": now()}
             if body.kind == "HIKVISION_NETWORK":
                 document.update(username=body.username, authType=body.authType,
                                 passwordEncrypted=repo().encrypt(body.password), authenticatedAt=now(), **metadata)
-            await repo().db.resources.insert_one(document)
             return document
 
-        result = await repo().idem(user["id"], request.headers.get("Idempotency-Key"), "create_resource",
-                                   body.model_dump(), "resources", build)
+        result = await audited_create(repo(), user["id"], request.headers.get("Idempotency-Key"), "create_resource",
+                                      body.model_dump(), "resources", prepare)
         return await _resource_view(repo, result, user)
 
     @app.post("/api/v1/resources/{identifier}/authenticate")
@@ -161,6 +162,8 @@ def install_resource_routes(app, repo, listing):
         old = await repo().get("resources", identifier)
         if old.get("deletedAt") is not None:
             raise HTTPException(409, "资源已删除，不能编辑")
+        if old.get("version") != body.version:
+            raise HTTPException(409, "资源版本已变化，请刷新")
         if body.ip != old["ip"] or body.kind != old["kind"]:
             raise HTTPException(422, "资源 IP 和类型不可编辑；请新建资源")
         password = body.password or repo().decrypt(old.get("passwordEncrypted", ""))
@@ -178,13 +181,18 @@ def install_resource_routes(app, repo, listing):
         if checked.kind == "HIKVISION_NETWORK":
             update.update(username=checked.username, authType=checked.authType,
                           passwordEncrypted=repo().encrypt(password), authenticatedAt=now(), **metadata)
-        changed = await repo().db.resources.find_one_and_update(
-            {"id": identifier, "version": body.version, "deletedAt": None},
-            {"$set": update, "$inc": {"version": 1}}, return_document=ReturnDocument.AFTER,
-        )
-        if not changed:
-            raise HTTPException(409, "资源版本已变化或已删除，请刷新")
-        await repo().audit(user["id"], "edit_resource", identifier)
+        async def commit(session):
+            """版本 CAS 与审计共享会话；凭据和设备元信息已在事务外准备。"""
+            changed = await repo().db.resources.find_one_and_update(
+                {"id": identifier, "version": body.version, "deletedAt": None},
+                {"$set": update, "$inc": {"version": 1}}, return_document=ReturnDocument.AFTER,
+                session=session,
+            )
+            if not changed:
+                raise HTTPException(409, "资源版本已变化或已删除，请刷新")
+            return changed
+
+        changed = await audited_mutation(repo(), user["id"], "edit_resource", identifier, commit)
         return await _resource_view(repo, changed, user)
 
     @app.delete("/api/v1/resources/{identifier}", status_code=202)
@@ -204,13 +212,20 @@ def install_resource_routes(app, repo, listing):
         if old.get("deletedAt") is not None:
             result = await reconcile_resource_deletion(repo(), identifier)
             return await _resource_view(repo, result or old, user)
-        changed = await repo().db.resources.find_one_and_update(
-            {"id": identifier, "version": version, "deletedAt": None},
-            {"$set": {"deletedAt": now(), "deletionState": "PENDING", "updatedAt": now()}, "$inc": {"version": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not changed:
-            raise HTTPException(409, "资源版本已变化，请刷新")
+        deleted_at = now()
+
+        async def commit(session):
+            """先提交删除意图及审计，停止任务的可重试扫尾不能扩大事务时长。"""
+            changed = await repo().db.resources.find_one_and_update(
+                {"id": identifier, "version": version, "deletedAt": None},
+                {"$set": {"deletedAt": deleted_at, "deletionState": "PENDING", "updatedAt": deleted_at},
+                 "$inc": {"version": 1}},
+                return_document=ReturnDocument.AFTER, session=session,
+            )
+            if not changed:
+                raise HTTPException(409, "资源版本已变化，请刷新")
+            return changed
+
+        changed = await audited_mutation(repo(), user["id"], "delete_resource", identifier, commit)
         completed = await reconcile_resource_deletion(repo(), identifier)
-        await repo().audit(user["id"], "delete_resource", identifier)
         return await _resource_view(repo, completed or changed, user)
