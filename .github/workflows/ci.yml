@@ -39,6 +39,15 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/http-browser" playwright@1.58.2 --no-audit --no-fund
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node ../scripts/verify_http_browser.mjs
+      - name: 验证生产页面布局与资源快捷创建
+        run: PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node scripts/verify-workspace.mjs
+      - name: 保存布局验收截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-browser-screenshots
+          path: output/playwright/
+          if-no-files-found: ignore
   commit-messages:
     runs-on: ubuntu-latest
     steps:

@@ -15,12 +15,13 @@ await mkdir("output/playwright", { recursive: true });
 try {
   for (const width of [1440, 390]) {
     let allowCreate = true;
+    let resourceScope = null;
     const created = [];
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.route("**/api/v1/**", async route => {
       const path = new URL(route.request().url()).pathname;
       let body = pageOf([]);
-      if (path === "/api/v1/auth/me") body = { user: { id: "admin", username: "fixture", displayName: "模拟管理员", scopes: allowCreate ? ["*"] : ["tasks:read", "logs:read"], resourceIds: null, isAdmin: allowCreate, mustChangePassword: false } };
+      if (path === "/api/v1/auth/me") body = { user: { id: "admin", username: "fixture", displayName: "模拟管理员", scopes: allowCreate ? ["*"] : ["tasks:read", "logs:read"], resourceIds: resourceScope, isAdmin: allowCreate, mustChangePassword: false } };
       else if (path === "/api/v1/tasks" && route.request().method() === "POST") { created.push(route.request().postDataJSON()); body = { ...task, ...created.at(-1) }; }
       else if (path === "/api/v1/resources") body = pageOf(resources);
       else if (path.startsWith("/api/v1/resources/")) body = resources.find(resource => path.endsWith(resource.id));
@@ -53,6 +54,14 @@ try {
       assert.ok(Math.abs(sample.width - samples[0].width) < 1, "切换页签不应改变工作区宽度");
       assert.ok(sample.scrollWidth <= sample.clientWidth + 1, "页面不应横向溢出");
     }
+    // Linux常驻滚动条出现/消失不能挤动布局；macOS叠加滚动条也走同一断言。
+    await ui.getByRole("tab", { name: "命令记录", exact: true }).click();
+    const beforeScroll = await ui.locator(".workspace").boundingBox();
+    await ui.evaluate(() => { document.body.style.minHeight = "200vh"; });
+    const withScroll = await ui.locator(".workspace").boundingBox();
+    assert.equal(withScroll.x, beforeScroll.x);
+    assert.equal(withScroll.width, beforeScroll.width, "纵向滚动条出现不应挤动主体");
+    await ui.evaluate(() => { document.body.style.minHeight = ""; });
     if (width > 700) {
       await ui.getByRole("button", { name: "折叠导航栏", exact: true }).click();
       const expanded = await ui.locator(".workspace").boundingBox();
@@ -93,6 +102,13 @@ try {
     await ui.reload();
     await ui.locator(".resource-table .el-table__row").first().waitFor();
     assert.equal(await ui.getByRole("button", { name: "新建采集任务", exact: true }).count(), 0);
+    allowCreate = true;
+    resourceScope = ["camera"];
+    await ui.reload();
+    await ui.locator(".resource-table .el-table__row").first().waitFor();
+    assert.equal(await ui.getByRole("button", { name: "新建采集任务", exact: true }).count(), 1);
+    assert.equal(await ui.locator(".resource-table .el-table__row").filter({ hasText: resources[1].name })
+      .getByRole("button", { name: "新建采集任务", exact: true }).count(), 0);
     assert.deepEqual(errors, []);
     await context.close();
   }
