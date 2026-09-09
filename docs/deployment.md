@@ -1,5 +1,7 @@
 # Linux 一键部署
 
+本文说明 Docker 部署入口。Ubuntu/Debian 主机如需直接安装依赖、不使用 Docker，请查看 [原生部署](native-deployment.md)。
+
 ## 五个部署入口
 
 | 脚本 | 实际部署内容 | 默认配置文件 | 可自定义示例 |

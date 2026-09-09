@@ -113,3 +113,13 @@ jobs:
           python-version: '3.12'
       - name: 验证 Linux 独立组件部署
         run: python scripts/verify_component_deployment.py --timeout 240
+  native-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 验证 Ubuntu 无 Docker 原生服务部署
+        run: sudo --preserve-env=PATH bash scripts/verify_native_deployment.sh --timeout 300
