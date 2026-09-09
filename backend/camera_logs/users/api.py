@@ -61,6 +61,8 @@ def install_user_routes(app):
         if not valid or not user or not user.get("enabled") or user.get("deletedAt"):
             await repo().audit("anonymous", "login_failed", None)
             raise HTTPException(401, "用户名或密码错误，或账号不可用")
+        # 登录入口没有 actor 依赖，只在凭据校验成功后绑定访问日志主体。
+        request.state.actor = {"id": user["id"]}
         # 已有浏览器会话在登录时轮换，旧凭证不得继续使用。
         old = request.cookies.get(COOKIE, "")
         if old:
@@ -84,6 +86,7 @@ def install_user_routes(app):
             "tokenHash": hashlib.sha256(token.encode()).hexdigest()})
         response.delete_cookie(COOKIE, path="/api/v1", httponly=True, samesite="strict")
         if session:
+            request.state.actor = {"id": session["userId"]}
             await repo().audit(session["userId"], "logout", session["userId"])
 
     @app.post("/api/v1/auth/password")

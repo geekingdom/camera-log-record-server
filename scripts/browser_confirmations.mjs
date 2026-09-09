@@ -1,9 +1,15 @@
 // 确认对话框浏览器验收：所有 API 在路由层模拟，逐项校验取消不写入、确认只写入一次。
 import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
 
 const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
 const timestamp = "2026-09-08T08:00:00.000Z";
+const administrator = {
+  id: "admin", username: "admin", displayName: "模拟管理员", isAdmin: true,
+  scopes: ["*"], resourceIds: null, enabled: true, mustChangePassword: false,
+  builtin: true, version: 1,
+};
 const tasks = [
   ["start-task", "待启动任务", "STOPPED", "STOPPED"],
   ["stop-task", "运行中任务", "COLLECTING", "RUNNING"],
@@ -16,7 +22,14 @@ const tasks = [
 const state = {
   platform: { retentionDays: 7, version: 1, updatedAt: timestamp },
   nodes: [{ id: "edge-fixture", url: "https://edge.example.test", reportedUrl: "https://edge.example.test", capacity: 8, accepting: true, version: 1, registered: true, online: true, reportedAt: timestamp }],
-  templates: [{ id: "template-fixture", name: "既有模板", description: "浏览器夹具", version: 1, initialCommands: [], scheduledCommands: [] }],
+  templates: [{
+    id: "template-fixture", name: "既有模板", description: "浏览器夹具", version: 1,
+    initialCommands: [
+      { command: "first", newline: "\n", delaySeconds: 0, prompt: null, timeoutSeconds: 30 },
+      { command: "second", newline: "\n", delaySeconds: 0, prompt: null, timeoutSeconds: 30 },
+    ],
+    scheduledCommands: [{ command: "logread", totalExecutions: 1, intervalSeconds: 60 }],
+  }],
   mutations: [],
   downloadCancelled: false,
 };
@@ -34,6 +47,7 @@ await context.route("**/api/v1/**", async route => {
   const path = new URL(request.url()).pathname;
   const payload = request.postDataJSON?.() ?? {};
   if (method !== "GET") state.mutations.push({ method, path, payload });
+  if (method === "GET" && path === "/api/v1/auth/me") return json(route, { user: administrator });
   if (method === "GET" && path === "/api/v1/tasks") return json(route, page(tasks));
   if (method === "GET" && path.startsWith("/api/v1/tasks/") && path.endsWith("/log-hours")) return json(route, page([{ hourId: "hour-fixture", hour: timestamp, status: "READY", integrity: "VERIFIED", bytes: 10, archiveBytes: 5, files: [] }], 24));
   if (method === "GET" && path.startsWith("/api/v1/tasks/")) return json(route, tasks.find(task => path.endsWith(task.id)) ?? tasks[0]);
@@ -72,6 +86,7 @@ async function acceptConfirmation() {
   const dialog = ui.locator(".el-message-box");
   await dialog.waitFor({ state: "visible" });
   await dialog.getByRole("button", { name: "确认", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
 }
 async function cancelThenConfirm(click, label) {
   const before = mutations();
@@ -79,6 +94,14 @@ async function cancelThenConfirm(click, label) {
   assert.equal(mutations(), before, `${label} 取消后不得发送修改请求`);
   await click(); await acceptConfirmation();
   changedOnce(before, label);
+}
+async function cancelThenRemove(click, remaining, label) {
+  const before = mutations();
+  await click(); await dismissConfirmation();
+  assert.equal(mutations(), before, `${label} 取消后不得发出保存请求`);
+  await click(); await acceptConfirmation();
+  await remaining();
+  assert.equal(mutations(), before, `${label} 删除草稿前不得发出保存请求`);
 }
 async function navigate(label) {
   await ui.getByRole("tab", { name: label, exact: true }).click();
@@ -104,6 +127,23 @@ try {
   await ui.getByRole("row").filter({ hasText: "既有模板" }).locator("button").first().click();
   const templateEditor = ui.getByRole("dialog", { name: "编辑命令模板" });
   await templateEditor.waitFor();
+  await cancelThenRemove(
+    () => templateEditor.getByLabel("删除初始化命令").nth(1).click(),
+    () => templateEditor.locator(".initial-row").count().then(count => assert.equal(count, 1, "确认后应只删除一条初始化命令")),
+    "初始化命令删除",
+  );
+  await cancelThenRemove(
+    () => templateEditor.getByLabel("删除定时命令").click(),
+    () => templateEditor.locator(".schedule-edit-row").count().then(count => assert.equal(count, 0, "确认后应删除定时命令")),
+    "定时命令删除",
+  );
+  await mkdir("output/playwright", { recursive: true });
+  await templateEditor.screenshot({ path: "output/playwright/command-confirmations-1440.png" });
+  await ui.setViewportSize({ width: 390, height: 844 });
+  await templateEditor.screenshot({ path: "output/playwright/command-confirmations-390.png" });
+  const widths = await templateEditor.locator("*").evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().right));
+  assert.ok(Math.max(...widths) <= 390, "移动端命令编辑器不应横向溢出");
+  await ui.setViewportSize({ width: 1440, height: 1000 });
   await cancelThenConfirm(() => ui.getByRole("button", { name: "保存模板", exact: true }).click(), "编辑模板保存");
   await templateEditor.waitFor({ state: "hidden" });
 

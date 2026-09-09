@@ -62,6 +62,16 @@ def install_resource_routes(app, repo, listing):
     """注册资源路由，复用统一令牌鉴权、分页和审计约定。"""
     User = Annotated[dict, Depends(actor)]
 
+    async def authenticated_preview_metadata(body: ResourceInput, user: dict, target: str) -> dict[str, str]:
+        """执行网络设备认证并记录失败类别，成功事件须待调用方批准身份后写入。"""
+        try:
+            return await _verified_metadata(body)
+        except HTTPException as exc:
+            action = "authenticate_resource_credentials_rejected" if exc.status_code == 401 else \
+                "authenticate_resource_device_error"
+            await repo().audit(user["id"], action, target)
+            raise
+
     @app.get("/api/v1/resources")
     async def resources(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
                         kind: str | None = None, search: str | None = None, includeDeleted: bool = False):
@@ -96,7 +106,9 @@ def install_resource_routes(app, repo, listing):
             raise HTTPException(403, "受限账号不能探测授权范围外的新资源")
         if body.kind == "SERIAL_SERVER":
             return {}
-        return await _verified_metadata(body)
+        metadata = await authenticated_preview_metadata(body, user, f"ip:{body.ip}")
+        await repo().audit(user["id"], "authenticate_resource_succeeded", f"ip:{body.ip}")
+        return metadata
 
     @app.post("/api/v1/resources", status_code=201)
     async def create_resource(body: ResourceInput, request: Request, user: User):
@@ -128,11 +140,15 @@ def install_resource_routes(app, repo, listing):
         old = await repo().get("resources", identifier)
         if old.get("deletedAt") or body.ip != old["ip"] or body.kind != old["kind"]:
             raise HTTPException(409, "资源地址、类型已变化或资源已删除")
-        metadata = await _verified_metadata(body)
+        if old["kind"] == "SERIAL_SERVER":
+            return {}
+        metadata = await authenticated_preview_metadata(body, user, identifier)
         if old["kind"] == "HIKVISION_NETWORK" and (
             metadata["model"] != old.get("model") or metadata["subSerialNumber"] != old.get("subSerialNumber")
         ):
+            await repo().audit(user["id"], "authenticate_resource_identity_changed", identifier)
             raise HTTPException(409, "认证设备身份已变化；请新建资源")
+        await repo().audit(user["id"], "authenticate_resource_succeeded", identifier)
         return metadata
 
     @app.patch("/api/v1/resources/{identifier}")

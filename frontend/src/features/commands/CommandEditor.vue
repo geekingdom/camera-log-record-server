@@ -4,6 +4,7 @@ import { ref } from "vue";
 import { ElMessage } from "element-plus";
 import { Plus, Trash2, ArrowUp, ArrowDown } from "lucide-vue-next";
 import type { InitialCommand, ScheduledCommand } from "../../shared/types";
+import { confirmAndRemoveItem } from "./removeCommand";
 const initial = defineModel<InitialCommand[]>("initialCommands", {
   required: true,
 });
@@ -37,6 +38,22 @@ function move(index: number, step: number) {
   if (target < 0 || target >= items.length) return;
   [items[index], items[target]] = [items[target], items[index]];
   initial.value = items;
+}
+function removeInitial(item: InitialCommand) {
+  return confirmAndRemoveItem(
+    initial,
+    item,
+    "确认删除这条初始化命令吗？",
+    "确认删除初始化命令",
+  );
+}
+function removeScheduled(item: ScheduledCommand) {
+  return confirmAndRemoveItem(
+    scheduled,
+    item,
+    "确认删除这条定时命令吗？",
+    "确认删除定时命令",
+  );
 }
 function validate() {
   if (draft.value.trim()) {
@@ -93,7 +110,7 @@ defineExpose({ validate });
       ><el-button
         :icon="Trash2"
         aria-label="删除初始化命令"
-        @click="initial = initial.filter((_, position) => position !== index)"
+        @click="removeInitial(item)"
     /></el-tooltip>
   </div>
   <div class="command-entry">
@@ -153,9 +170,7 @@ defineExpose({ validate });
       ><el-button
         :icon="Trash2"
         aria-label="删除定时命令"
-        @click="
-          scheduled = scheduled.filter((_, position) => position !== index)
-        "
+        @click="removeScheduled(item)"
     /></el-tooltip>
   </div>
   <el-button

@@ -55,8 +55,6 @@ def create_app(settings=None, db=None):
             listener.stop()
 
     app = FastAPI(title="设备日志记录服务", version="0.1.0", lifespan=lifespan)
-    from camera_logs.common.observability import add_request_logging
-    add_request_logging(app)
     @app.middleware("http")
     async def client_network_policy(request, call_next):
         """平台来源白名单在登录前生效；健康检查与独立采集节点不受此策略影响。"""
@@ -127,6 +125,9 @@ def create_app(settings=None, db=None):
     install_settings_routes(app)
     from camera_logs.logs.download_sessions import install_download_sessions
     install_download_sessions(app)
+    # 最后注册的 ASGI 中间件最先执行，必须覆盖来源策略提前返回的拒绝响应。
+    from camera_logs.common.observability import add_request_logging
+    add_request_logging(app)
     return app
 
 

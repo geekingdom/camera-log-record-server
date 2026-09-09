@@ -160,6 +160,64 @@ def test_resource_authenticate_create_list_and_hide_password(resource_client, mo
     assert listed["total"] == 1 and listed["items"][0]["id"] == resource["id"]
 
 
+def test_network_authentication_previews_write_sanitized_audit_events(resource_client, monkeypatch):
+    """认证预览审计只保留操作者、有限结果类别和安全目标，不保存认证输入或设备正文。"""
+    body = {"name": "审计摄像机", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.66",
+            "username": "audit-admin", "password": "audit-secret", "authType": "DIGEST"}
+    repo = resource_client.app.state.repo
+
+    async def verified(**kwargs):
+        return {"model": "DS-2CD", "subSerialNumber": "AUDIT-SN", "softwareVersion": "V5.8"}
+
+    monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", verified)
+    assert resource_client.post("/api/v1/resources/authenticate", json=body).status_code == 200
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "audit-resource", "name": "已保存设备", "kind": "HIKVISION_NETWORK", "ip": body["ip"],
+        "model": "DS-2CD", "subSerialNumber": "AUDIT-SN", "version": 1,
+    })
+    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 200
+
+    async def denied(**kwargs):
+        raise PermissionError("设备凭据错误")
+
+    monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", denied)
+    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 401
+
+    async def unavailable(**kwargs):
+        raise RuntimeError("设备异常")
+
+    monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", unavailable)
+    assert resource_client.post("/api/v1/resources/authenticate", json=body).status_code == 502
+
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "audit-serial", "name": "串口服务器", "kind": "SERIAL_SERVER", "ip": "192.0.2.67", "version": 1,
+    })
+    assert resource_client.post("/api/v1/resources/audit-serial/authenticate", json={
+        "name": "串口服务器", "kind": "SERIAL_SERVER", "ip": "192.0.2.67",
+    }).status_code == 200
+
+    async def identity_changed(**kwargs):
+        return {"model": "DS-2CD-CHANGED", "subSerialNumber": "REPLACED", "softwareVersion": "V5.8"}
+
+    monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", identity_changed)
+    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 409
+
+    async def audits():
+        return [item async for item in repo.db.audit.find({}).sort("createdAt", 1)]
+
+    events = resource_client.portal.call(audits)
+    assert [(item["actor"], item["action"], item["targetId"]) for item in events] == [
+        ("bootstrap", "authenticate_resource_succeeded", "ip:192.0.2.66"),
+        ("bootstrap", "authenticate_resource_succeeded", "audit-resource"),
+        ("bootstrap", "authenticate_resource_credentials_rejected", "audit-resource"),
+        ("bootstrap", "authenticate_resource_device_error", "ip:192.0.2.66"),
+        ("bootstrap", "authenticate_resource_identity_changed", "audit-resource"),
+    ]
+    assert "audit-secret" not in str(events)
+    assert "audit-admin" not in str(events)
+    assert "DS-2CD" not in str(events)
+
+
 def test_serial_resource_does_not_accept_network_credentials(resource_client):
     """串口服务器只保存名称和地址，避免把无效认证配置写入资源。"""
     response = resource_client.post("/api/v1/resources", headers={"Idempotency-Key": "serial-create"},

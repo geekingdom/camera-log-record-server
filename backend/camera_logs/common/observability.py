@@ -24,10 +24,16 @@ from camera_logs.common.websocket_logging import track_websocket
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 14
-_SECRET_KEYS = {"password", "token", "authorization", "passwordencrypted"}
+_SECRET_KEYS = {
+    "password", "token", "authorization", "passwordencrypted", "currentpassword", "newpassword",
+    "adminpassword", "passwordhash", "tokenhash", "bootstraptoken", "internaltoken",
+    "encryptionkey", "cookie", "setcookie",
+}
 _STANDARD_RECORD_FIELDS = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 _SECRET_TEXT = re.compile(
-    r"(?i)\b(passwordencrypted|password|token|authorization)\b(\s*[:=]\s*)"
+    r"(?i)\b(password[_-]?(?:encrypted|hash)|(?:current|new|admin)[_-]?password|"
+    r"(?:bootstrap|internal)[_-]?token|token[_-]?hash|encryption[_-]?key|"
+    r"set[_-]?cookie|cookie|password|token|authorization)\b([\"']?\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
 )
 _BEARER_TEXT = re.compile(r"(?i)(\bbearer\s+)[^\s,}\]\"']+")
@@ -145,6 +151,7 @@ def log_request(
     context: dict[str, Any] = {
         "requestId": getattr(request.state, "request_id", None),
         "actor": actor if actor is not None else request_actor(request),
+        "clientIp": getattr(getattr(request, "client", None), "host", None),
         "method": request.method,
         "route": path,
         "targets": dict(request.path_params) if hasattr(request, "path_params") else {},
