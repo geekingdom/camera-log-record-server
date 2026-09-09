@@ -1,0 +1,116 @@
+# Linux 单机三成员数据库。跨主机客户端须使用 DATABASE_HOST 公布的可达地址和三个端口。
+# MONGO_DATA_1/2/3 可分别改为绝对目录；三个目录绝不能相同。已有数据不得更换认证/副本集密钥。
+services:
+  key-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_REPLICA_KEY: ${MONGO_REPLICA_KEY:?请先生成数据库部署配置}
+    entrypoint: ["sh", "-ec", "umask 077; if [ ! -s /keys/replica.key ]; then printf '%s' \"$$MONGO_REPLICA_KEY\" > /keys/replica.key; fi; chown 999:999 /keys/replica.key; chmod 400 /keys/replica.key"]
+    volumes: ["mongo-key:/keys"]
+  # 官方镜像的空卷初始化固定在容器 localhost:27017；这些作业保持 bridge 网络，互不占用宿主机端口。
+  mongo1-user-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "/scripts/mongo-host-user-init.sh"]
+    volumes: ["${MONGO_DATA_1:-mongo1-data}:/data/db", "./mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro"]
+  mongo2-user-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "/scripts/mongo-host-user-init.sh"]
+    volumes: ["${MONGO_DATA_2:-mongo2-data}:/data/db", "./mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro"]
+  mongo3-user-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "/scripts/mongo-host-user-init.sh"]
+    volumes: ["${MONGO_DATA_3:-mongo3-data}:/data/db", "./mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro"]
+  mongo1:
+    image: mongo:7.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+      MONGO_PORT: ${MONGO_PORT_1:-27017}
+      DATABASE_HOST: ${DATABASE_HOST:-127.0.0.1}
+    command: ["mongod", "--port", "${MONGO_PORT_1:-27017}", "--replSet", "rs0", "--bind_ip", "${DATABASE_BIND_IP:-127.0.0.1}", "--keyFile", "/keys/replica.key"]
+    depends_on:
+      key-init: {condition: service_completed_successfully}
+      mongo1-user-init: {condition: service_completed_successfully}
+    volumes: ["${MONGO_DATA_1:-mongo1-data}:/data/db", "mongo-key:/keys:ro"]
+    logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --host \"$$DATABASE_HOST\" --port \"$$MONGO_PORT\" --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+  mongo2:
+    image: mongo:7.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+      MONGO_PORT: ${MONGO_PORT_2:-27018}
+      DATABASE_HOST: ${DATABASE_HOST:-127.0.0.1}
+    command: ["mongod", "--port", "${MONGO_PORT_2:-27018}", "--replSet", "rs0", "--bind_ip", "${DATABASE_BIND_IP:-127.0.0.1}", "--keyFile", "/keys/replica.key"]
+    depends_on:
+      key-init: {condition: service_completed_successfully}
+      mongo2-user-init: {condition: service_completed_successfully}
+    volumes: ["${MONGO_DATA_2:-mongo2-data}:/data/db", "mongo-key:/keys:ro"]
+    logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --host \"$$DATABASE_HOST\" --port \"$$MONGO_PORT\" --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+  mongo3:
+    image: mongo:7.0
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+      MONGO_PORT: ${MONGO_PORT_3:-27019}
+      DATABASE_HOST: ${DATABASE_HOST:-127.0.0.1}
+    command: ["mongod", "--port", "${MONGO_PORT_3:-27019}", "--replSet", "rs0", "--bind_ip", "${DATABASE_BIND_IP:-127.0.0.1}", "--keyFile", "/keys/replica.key"]
+    depends_on:
+      key-init: {condition: service_completed_successfully}
+      mongo3-user-init: {condition: service_completed_successfully}
+    volumes: ["${MONGO_DATA_3:-mongo3-data}:/data/db", "mongo-key:/keys:ro"]
+    logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --host \"$$DATABASE_HOST\" --port \"$$MONGO_PORT\" --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 1)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+  mongo-init:
+    image: mongo:7.0
+    restart: "no"
+    network_mode: host
+    env_file: ${DEPLOY_ENV_FILE:-../.env.database}
+    depends_on:
+      mongo1: {condition: service_healthy}
+      mongo2: {condition: service_healthy}
+      mongo3: {condition: service_healthy}
+    entrypoint: ["sh", "-ec", "exec mongosh --quiet --host \"$$DATABASE_HOST\" --port \"$$MONGO_PORT_1\" --username \"$$MONGO_ROOT_USERNAME\" --password \"$$MONGO_ROOT_PASSWORD\" --authenticationDatabase admin /scripts/init.js"]
+    volumes: ["./mongo-standalone-init.js:/scripts/init.js:ro"]
+    logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+volumes:
+  mongo-key:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:

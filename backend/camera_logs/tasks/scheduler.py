@@ -76,7 +76,13 @@ async def schedule_once(repo, lease=None):
                 candidates.append((count, node.get("inputBytesPerSecond", 0), node["id"]))
         if not candidates:
             if task["status"] != "PAUSED":
-                await db.tasks.update_one({"id": task["id"], "nodeId": None}, {"$set": {"status": "PENDING"}})
+                # 候选查询期间用户可能已暂停或停止；旧快照只能回写同一排队意图。
+                await db.tasks.update_one(
+                    {"id": task["id"], "nodeId": None, "desiredState": "RUNNING",
+                     "status": task["status"], "runId": task.get("runId"),
+                     "generation": task.get("generation"), "resourceDeleted": {"$ne": True}},
+                    {"$set": {"status": "PENDING"}},
+                )
             continue
         node_id = min(candidates)[2]
         # 占用仅在领取事务确认提交后推进；未知提交会中止周期，下周期重读持久归属。

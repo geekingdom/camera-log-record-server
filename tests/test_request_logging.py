@@ -1,12 +1,16 @@
 """请求日志覆盖流式响应结束、响应中断及异常前后的实际 HTTP 状态。"""
 
 import asyncio
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from camera_logs.common import observability
+from camera_logs.common.request_context import current_request_context
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+
+pytest_plugins = ("test_api",)
 
 
 def scope():
@@ -96,6 +100,41 @@ async def test_failed_send_does_not_count_unconfirmed_bytes(monkeypatch):
     assert recorded.call_args.kwargs["response_complete"] is False
 
 
+async def test_request_context_is_isolated_and_reset_after_each_request():
+    """请求关联字段只在当前 ASGI 调用可见，结束后不能污染后台或下一请求。"""
+    observed = []
+
+    async def app(request_scope, receive, send):
+        observed.append(current_request_context())
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    middleware = observability.RequestLoggingMiddleware(app)
+    first, second = scope(), scope()
+    first["headers"] = [(b"x-request-id", b"first")]
+    second["headers"] = [(b"x-request-id", b"second")]
+    await middleware(first, None, lambda message: asyncio.sleep(0))
+    await middleware(second, None, lambda message: asyncio.sleep(0))
+
+    assert observed == [{"requestId": "first", "clientIp": None}, {"requestId": "second", "clientIp": None}]
+    assert current_request_context() == {}
+
+
+async def test_request_event_persistence_failure_does_not_mask_business_failure():
+    """排障记录 Mongo 故障只能降级为日志，原始业务异常仍需完整传播。"""
+    insert = AsyncMock(side_effect=OSError("request event unavailable"))
+
+    async def app(request_scope, receive, send):
+        raise RuntimeError("business failure")
+
+    event_store = SimpleNamespace(insert_one=insert)
+    request_scope = scope() | {"path": "/api/v1/write", "raw_path": b"/api/v1/write",
+        "app": SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(db=SimpleNamespace(request_events=event_store))))}
+    with pytest.raises(RuntimeError, match="business failure"):
+        await observability.RequestLoggingMiddleware(app)(request_scope, None, None)
+    insert.assert_awaited_once()
+
+
 def test_rejected_requests_keep_http_status_and_request_id(monkeypatch):
     recorded = Mock()
     monkeypatch.setattr(observability, "log_request", recorded)
@@ -120,3 +159,14 @@ def test_rejected_requests_keep_http_status_and_request_id(monkeypatch):
             assert recorded.call_args.kwargs["status"] == expected
             assert recorded.call_args.kwargs["response_complete"] is True
             assert recorded.call_args.kwargs["response_bytes"] == len(response.content)
+
+
+def test_api_request_events_record_write_requests_and_safe_4xx_reason(client):
+    """写请求和校验失败均进入排障集合，原因来自异常处理器的安全文本。"""
+    assert client.post("/api/v1/no-such-route").status_code == 404
+    assert client.get("/api/v1/audit-events?page=0").status_code == 422
+    repo = client.app.state.repo
+    write = client.portal.call(repo.db.request_events.find_one, {"method": "POST", "route": "/api/v1/no-such-route"})
+    validation = client.portal.call(repo.db.request_events.find_one, {"httpStatus": 422})
+    assert write is not None
+    assert validation["reason"] == "输入校验失败"

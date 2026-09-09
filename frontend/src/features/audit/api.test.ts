@@ -14,13 +14,27 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("审计工作区认证", () => {
-  it.each(["auditEvents", "runtimeEvents"] as const)("%s 保留 Cookie 且不发送空 Bearer", async method => {
+  it.each(["auditEvents", "runtimeEvents", "requestEvents"] as const)("%s 保留 Cookie 且不发送空 Bearer", async method => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, page: 1, pageSize: 50 })));
     await auditApi[method](1, 50, { actor: "管理员 & 运维" });
     const [url, init] = fetchMock.mock.calls[0];
     expect(new Headers(init.headers).has("Authorization")).toBe(false);
     expect(init.credentials).toBe("same-origin");
     expect(new URL(url, "http://localhost").searchParams.get("actor")).toBe("管理员 & 运维");
+  });
+
+  it("请求记录准确传递来源、结果、任务和请求编号筛选", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, page: 2, pageSize: 20 })));
+    await auditApi.requestEvents(2, 20, {
+      level: "ERROR", requestId: "request-42", clientIp: "192.0.2.18", status: "503", taskId: "task-9",
+    });
+    const [url] = fetchMock.mock.calls[0];
+    const query = new URL(url, "http://localhost").searchParams;
+    expect(query.get("level")).toBe("ERROR");
+    expect(query.get("requestId")).toBe("request-42");
+    expect(query.get("clientIp")).toBe("192.0.2.18");
+    expect(query.get("status")).toBe("503");
+    expect(query.get("taskId")).toBe("task-9");
   });
 
   it("有效服务 Token 仍按原值发送", async () => {

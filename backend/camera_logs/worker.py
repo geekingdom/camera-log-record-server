@@ -2,7 +2,9 @@
 
 import uvicorn
 
+from camera_logs.common.config import Settings
 from camera_logs.node.worker import create_worker_app
 
 if __name__ == "__main__":
-    uvicorn.run(create_worker_app(), host="0.0.0.0", port=8001)
+    settings = Settings()
+    uvicorn.run(create_worker_app(), host=settings.node_bind_ip, port=settings.node_port)

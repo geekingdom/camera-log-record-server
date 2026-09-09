@@ -20,6 +20,8 @@ from typing import Any
 from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 
+from camera_logs.common.database import now
+from camera_logs.common.request_context import request_context
 from camera_logs.common.websocket_logging import track_websocket
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
@@ -34,7 +36,7 @@ _SECRET_TEXT = re.compile(
     r"(?i)\b(password[_-]?(?:encrypted|hash)|(?:current|new|admin)[_-]?password|"
     r"(?:bootstrap|internal)[_-]?token|token[_-]?hash|encryption[_-]?key|"
     r"set[_-]?cookie|cookie|password|token|authorization)\b([\"']?\s*[:=]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
+    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
 )
 _BEARER_TEXT = re.compile(r"(?i)(\bbearer\s+)[^\s,}\]\"']+")
 
@@ -64,7 +66,14 @@ def redact(value: Any) -> Any:
 def redact_text(value: str) -> str:
     """脱敏非结构化异常和消息中的 key=value、Bearer 文本。"""
     value = _BEARER_TEXT.sub(r"\1[REDACTED]", value)
-    return _SECRET_TEXT.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", value)
+    def replace_secret(match: re.Match[str]) -> str:
+        """保留 JSON 或 Python 字符串值的引号，确保已脱敏证据仍可被解析。"""
+        secret = match.group("value")
+        replacement = "[REDACTED]"
+        if secret[:1] in {"'", '\"'} and secret[-1:] == secret[:1]:
+            replacement = f"{secret[:1]}{replacement}{secret[:1]}"
+        return f"{match.group(1)}{match.group(2)}{replacement}"
+    return _SECRET_TEXT.sub(replace_secret, value)
 
 
 class JsonLineFormatter(logging.Formatter):
@@ -175,6 +184,10 @@ class RequestLoggingMiddleware:
     def __init__(self, app: Any):
         self.app = app
 
+    async def _persist_request_event(self, repo: Any, document: dict[str, Any]) -> None:
+        """在很短的独立等待窗口内写入排障事件，故障不得改变原请求结果。"""
+        await asyncio.wait_for(repo.db.request_events.insert_one(document), timeout=0.2)
+
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "websocket":
             await track_websocket(self.app, scope, receive, send, logging.getLogger("camera_logs.access"))
@@ -184,6 +197,8 @@ class RequestLoggingMiddleware:
             return
         request = Request(scope)
         request.state.request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+        context_token = request_context.set({"requestId": request.state.request_id,
+                                             "clientIp": getattr(request.client, "host", None)})
         started_at = time.perf_counter()
         status = None
         complete = False
@@ -209,9 +224,37 @@ class RequestLoggingMiddleware:
             raise
         finally:
             fallback = 499 if isinstance(failure, asyncio.CancelledError) else 500
-            log_request(request, status=status if status is not None else fallback,
-                started_at=started_at, error=failure, response_complete=complete,
-                response_bytes=sent_bytes)
+            final_status = status if status is not None else fallback
+            try:
+                log_request(request, status=final_status, started_at=started_at, error=failure,
+                            response_complete=complete, response_bytes=sent_bytes)
+                app = scope.get("app")
+                repo = getattr(getattr(app, "state", None), "repo", None)
+                path = request.url.path
+                recordable = (request.method not in {"GET", "HEAD"} or final_status >= 400)
+                # 取消中的协程不能再等待数据库 I/O，否则 finally 可能覆盖调用方的取消语义。
+                cancelled = failure is not None and isinstance(failure, asyncio.CancelledError)
+                if repo and not cancelled and path.startswith("/api/v1/") and recordable:
+                    outcome = "UNKNOWN" if not complete else "PENDING" if final_status == 202 else (
+                        "FAILED" if final_status >= 400 else "SUCCEEDED")
+                    level = "ERROR" if outcome == "FAILED" else "WARNING" if outcome == "UNKNOWN" else "INFO"
+                    safe_error = getattr(request.state, "safe_error", None)
+                    await self._persist_request_event(repo, {
+                        "createdAt": now(),
+                        "requestId": request.state.request_id, "actor": request_actor(request),
+                        "clientIp": getattr(request.client, "host", None), "method": request.method,
+                        "route": getattr(scope.get("route"), "path", None) or path, "httpStatus": final_status,
+                        "outcome": outcome, "level": level, "responseComplete": complete,
+                        "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
+                        "taskId": request.path_params.get("task_id") if hasattr(request, "path_params") else None,
+                        "reason": redact_text(str(safe_error or failure)) if (safe_error or failure) else None,
+                    })
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.getLogger("camera_logs.access").warning("请求事件持久化失败", exc_info=True)
+            finally:
+                request_context.reset(context_token)
 
 
 def add_request_logging(app: Any) -> None:

@@ -1,13 +1,14 @@
 """提供运行指标、受限审计查询和经人工确认的旧节点隔离接口。"""
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, generate_latest
 from pydantic import BaseModel, Field
 
+from camera_logs.administration.event_queries import event_page, runtime_event_page
 from camera_logs.administration.isolation import confirm_node_isolation
 from camera_logs.common.database import public
 from camera_logs.common.observability import redact
@@ -18,6 +19,10 @@ class FenceConfirmation(BaseModel):
     """要求管理员提交固定确认词和基础设施隔离证据。"""
     confirmation: str
     evidence: str = Field(min_length=10, max_length=2000)
+
+
+EventLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+EventOutcome = Literal["PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]
 
 
 def _utc_range(start: str | None, end: str | None) -> dict[str, datetime]:
@@ -60,14 +65,11 @@ async def _event_page(db, collection: str, query: dict, page: int, page_size: in
 
 async def _runtime_event_page(db, query: dict, page: int, page_size: int) -> dict:
     """兼容历史 detectedAt 事件，统一按实际发生时间排序并补出展示时间。"""
-    # PyMongo 异步聚合先发起命令并返回协程，获得游标后才可按响应顺序读取结果。
+    # 保留此低层兼容入口给驱动接口测试；路由使用下方含展示推导筛选的查询器。
     cursor = await db.events.aggregate([
-        {"$match": query},
-        {"$addFields": {"_eventTime": {"$ifNull": ["$createdAt", "$detectedAt"]}}},
-        {"$sort": {"_eventTime": -1}},
-        {"$skip": (page - 1) * page_size},
-        {"$limit": page_size},
-        {"$project": {"_eventTime": 0}},
+        {"$match": query}, {"$addFields": {"_eventTime": {"$ifNull": ["$createdAt", "$detectedAt"]}}},
+        {"$sort": {"_eventTime": -1}}, {"$skip": (page - 1) * page_size},
+        {"$limit": page_size}, {"$project": {"_eventTime": 0}},
     ])
     items = []
     async for item in cursor:
@@ -75,12 +77,7 @@ async def _runtime_event_page(db, query: dict, page: int, page_size: int) -> dic
         if item.get("createdAt") is None and item.get("detectedAt") is not None:
             item["createdAt"] = item["detectedAt"]
         items.append(item)
-    return {
-        "items": items,
-        "total": await db.events.count_documents(query),
-        "page": page,
-        "pageSize": page_size,
-    }
+    return {"items": items, "total": await db.events.count_documents(query), "page": page, "pageSize": page_size}
 
 
 def install_admin_routes(app):
@@ -93,7 +90,8 @@ def install_admin_routes(app):
         user: User,
         page: int = Query(1, ge=1),
         pageSize: int = Query(50, ge=1, le=100),
-        action: str | None = Query(default=None, max_length=128),
+        action: str | None = Query(default=None, max_length=128), level: Annotated[EventLevel | None, Query()] = None,
+        outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
         actor_id: str | None = Query(default=None, alias="actor", max_length=128),
         task_id: str | None = Query(default=None, alias="taskId", max_length=128),
         start: str | None = Query(default=None, max_length=64),
@@ -103,11 +101,11 @@ def install_admin_routes(app):
         authorize(user, "admin")
         db = request.app.state.repo.db
         query = {key: value for key, value in {
-            "action": action, "actor": actor_id, "targetId": task_id,
+            "action": action, "actor": actor_id, "targetId": task_id, "level": level, "outcome": outcome, "requestId": request_id,
         }.items() if value}
         if stamp := _utc_range(start, end):
             query["createdAt"] = stamp
-        return await _event_page(db, "audit", query, page, pageSize)
+        return await event_page(db, "audit", query, page, pageSize)
 
     @app.get("/api/v1/runtime-events")
     async def runtime_events(
@@ -117,7 +115,8 @@ def install_admin_routes(app):
         pageSize: int = Query(50, ge=1, le=100),
         task_id: str | None = Query(default=None, alias="taskId", max_length=128),
         node_id: str | None = Query(default=None, alias="nodeId", max_length=128),
-        event_type: str | None = Query(default=None, alias="type", max_length=128),
+        event_type: str | None = Query(default=None, alias="type", max_length=128), level: Annotated[EventLevel | None, Query()] = None,
+        outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
         start: str | None = Query(default=None, max_length=64),
         end: str | None = Query(default=None, max_length=64),
     ):
@@ -125,14 +124,28 @@ def install_admin_routes(app):
         authorize(user, "admin")
         db = request.app.state.repo.db
         query = {key: value for key, value in {
-            "taskId": task_id, "nodeId": node_id, "type": event_type,
+            "taskId": task_id, "nodeId": node_id, "type": event_type, "level": level, "outcome": outcome, "requestId": request_id,
         }.items() if value}
         if stamp := _utc_range(start, end):
             query["$or"] = [
                 {"createdAt": stamp},
                 {"createdAt": {"$exists": False}, "detectedAt": stamp},
             ]
-        return await _runtime_event_page(db, query, page, pageSize)
+        return await runtime_event_page(db, query, page, pageSize)
+
+    @app.get("/api/v1/request-events")
+    async def request_events(request: Request, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
+                             method: str | None = Query(default=None, max_length=16), route: str | None = Query(default=None, max_length=256),
+                             status: int | None = Query(default=None, ge=100, le=599), level: Annotated[EventLevel | None, Query()] = None,
+                             outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
+                             client_ip: str | None = Query(default=None, alias="clientIp", max_length=64), task_id: str | None = Query(default=None, alias="taskId", max_length=128),
+                             start: str | None = Query(default=None, max_length=64), end: str | None = Query(default=None, max_length=64)):
+        """查询失败或写请求的无正文访问事件，供管理员关联 API 排障信息。"""
+        authorize(user, "admin")
+        query = {key: value for key, value in {"method": method, "route": route, "httpStatus": status,
+                 "level": level, "outcome": outcome, "requestId": request_id, "clientIp": client_ip, "taskId": task_id}.items() if value is not None}
+        if stamp := _utc_range(start, end): query["createdAt"] = stamp
+        return await event_page(request.app.state.repo.db, "request_events", query, page, pageSize)
 
     @app.get("/metrics")
     async def metrics(request: Request, user: User):

@@ -12,6 +12,32 @@ from mongomock_motor import AsyncMongoMockClient
 pytestmark = pytest.mark.usefixtures("mock_claim_transaction")
 
 
+@pytest.mark.parametrize("desired,status", [("PAUSED", "PAUSED"), ("STOPPED", "STOPPED")])
+async def test_no_capacity_does_not_overwrite_new_control(tmp_path, monkeypatch, desired, status):
+    """容量不足的排队回写必须复核意图，不能覆盖并发暂停或停止的已完成状态。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+    await repo.initialize()
+    await repo.db.tasks.insert_one({"id": "queued", "nodeId": None, "status": "STOPPED",
+                                    "desiredState": "RUNNING", "generation": 0})
+    collection_type = type(repo.db.tasks)
+    original_update = collection_type.update_one
+    intercepted = False
+
+    async def control_before_queue_write(self, query, update, **kwargs):
+        nonlocal intercepted
+        if self.name == "tasks" and update.get("$set", {}).get("status") == "PENDING" and not intercepted:
+            intercepted = True
+            await original_update(self, {"id": "queued"},
+                                  {"$set": {"status": status, "desiredState": desired}})
+        return await original_update(self, query, update, **kwargs)
+
+    monkeypatch.setattr(collection_type, "update_one", control_before_queue_write)
+    await schedule_once(repo)
+    task = await repo.get("tasks", "queued")
+    assert intercepted and task["status"] == status and task["desiredState"] == desired
+
+
 async def _repo_with_paused_task(tmp_path):
     """建立已暂停且保留原运行端点锁的 SSH 任务。"""
     repo = Repository(

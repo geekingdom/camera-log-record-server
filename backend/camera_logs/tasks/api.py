@@ -11,6 +11,8 @@ from pymongo import ReturnDocument
 from camera_logs.common.database import now, public
 from camera_logs.common.models import TaskCreate, TaskPatch, new_id
 from camera_logs.common.security import actor, authorize, authorize_resource
+from camera_logs.tasks.control import request_control
+from camera_logs.tasks.creation import create_task as create_task_atomic
 from camera_logs.tasks.resource_binding import bind_resource
 
 
@@ -46,6 +48,7 @@ def install_task_routes(app, repo, listing):
         for resource_id in filter(None, (body.resourceId, body.serialServerResourceId)):
             authorize_resource(user, resource_id)
         async def build(identifier):
+            """在事务外完成可能读取资源和加密的准备，返回固定任务文档。"""
             binding = await bind_resource(repo(), body)
             doc = body.model_dump()
             password = doc.pop("password")
@@ -53,28 +56,10 @@ def install_task_routes(app, repo, listing):
             for cmd in doc["scheduledCommands"]:
                 cmd["id"] = new_id()
             doc.update(id=identifier, version=1,
-                       passwordEncrypted=repo().encrypt(password), hasPassword=bool(password),
-                       desiredState="STOPPED", status="STOPPED", nodeId=None,
-                       createdAt=now(), updatedAt=now(), generation=0)
+                       passwordEncrypted=repo().encrypt(password), hasPassword=bool(password))
             doc.update(binding)
-            await repo().db.tasks.insert_one(doc)
-            # 资源删除可能与创建交错；落库后再次检查，禁止删除完成后启动迟到任务。
-            for resource_id in filter(None, (body.resourceId, body.serialServerResourceId)):
-                resource = await repo().get("resources", resource_id)
-                if resource.get("deletedAt"):
-                    await repo().db.tasks.update_one({"id": identifier},
-                        {"$set": {"resourceDeleted": True, "desiredState": "STOPPED"}})
-                    raise HTTPException(409, "设备资源已删除，任务不会启动")
-            if auto_start:
-                creator = user
-                if user.get("taskIds") is not None:
-                    creator = user | {"taskIds": [*user["taskIds"], identifier]}
-                operation = await change_state(identifier, "RUNNING", creator)
-                doc = await repo().get("tasks", identifier)
-                doc["operationId"] = operation["id"]
-            return doc
-        result = await repo().idem(user["id"], request.headers.get("Idempotency-Key"), "create_task",
-                                   body.model_dump(), "tasks", build)
+            return doc, auto_start
+        result = await create_task_atomic(repo(), user, request.headers.get("Idempotency-Key"), body.model_dump(), build)
         return public(result)
 
     @app.get("/api/v1/tasks/{task_id}")
@@ -125,71 +110,25 @@ def install_task_routes(app, repo, listing):
         await repo().audit(user["id"], "edit_task", task_id)
         return public(changed)
 
-    async def change_state(task_id, desired, user):
-        """记录用户控制意图并返回可轮询操作；连接释放成功前不报告暂停或停止完成。"""
-        authorize(user, "tasks:control", task_id)
-        task = await repo().get("tasks", task_id)
-        if desired != "STOPPED":
-            for resource_id in filter(None, (task["resourceId"], task.get("serialServerResourceId"))):
-                resource = await repo().get("resources", resource_id)
-                if resource.get("deletedAt") or task.get("resourceDeleted"):
-                    raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
-        if desired == "PAUSED" and task["protocol"] != "SSH":
-            raise HTTPException(409, "只有SSH任务支持暂停")
-        if desired == "PAUSED" and task["desiredState"] not in ("RUNNING", "PAUSED"):
-            raise HTTPException(409, "仅运行中的任务可以暂停")
-        if desired == "RUNNING" and task["status"] == "ERROR" and task.get("nodeId") is None:
-            await repo().db.tasks.update_one({"id": task_id, "status": "ERROR", "nodeId": None},
-                {"$set": {"status": "STOPPED", "error": None}})
-        previous = await repo().db.operations.find_one({"taskId": task_id, "desiredState": desired,
-                                                       "status": "PENDING"})
-        if previous and task["desiredState"] == desired:
-            return previous
-        # 新控制意图取代尚未完成的相反意图，调用方不应永久轮询旧操作。
-        await repo().db.operations.update_many(
-            {"taskId": task_id, "desiredState": {"$ne": desired}, "status": "PENDING"},
-            {"$set": {"status": "CANCELLED", "completedAt": now()}})
-        done = (desired == "STOPPED" and task["status"] == "STOPPED") or (
-            desired == "RUNNING" and task["status"] == "COLLECTING") or (desired == "PAUSED" and task["status"] == "PAUSED")
-        operation = {"id": new_id(), "taskId": task_id, "desiredState": desired,
-                     "status": "SUCCEEDED" if done else "PENDING", "createdAt": now()}
-        await repo().db.operations.insert_one(operation)
-        state_update = {"desiredState": desired, "updatedAt": now()}
-        if desired == "STOPPED":
-            state_update["restartRequested"] = False
-            if task["status"] == "PAUSED" and task.get("nodeId") is None:
-                await repo().db.endpoint_locks.delete_one({"taskId": task_id, "runId": task.get("runId")})
-                await repo().db.runs.update_one({"id": task.get("runId")}, {"$set": {"endedAt": now()}})
-        state_query = {"id": task_id}
-        if desired != "STOPPED":
-            state_query["resourceDeleted"] = {"$ne": True}
-        changed = await repo().db.tasks.update_one(state_query, {"$set": state_update})
-        if not changed.matched_count:
-            await repo().db.operations.update_one({"id": operation["id"]},
-                {"$set": {"status": "CANCELLED", "completedAt": now()}})
-            raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
-        await repo().audit(user["id"], "control:"+desired, task_id)
-        return operation
-
     @app.post("/api/v1/tasks/{task_id}/start", status_code=202)
     async def start(task_id: str, user: User):
-        return public(await change_state(task_id, "RUNNING", user))
+        """提交启动意图，不在 API 内建立或重复建立设备连接。"""
+        return public(await request_control(repo(), task_id, "RUNNING", user))
 
     @app.post("/api/v1/tasks/{task_id}/stop", status_code=202)
     async def stop(task_id: str, user: User):
-        return public(await change_state(task_id, "STOPPED", user))
+        """提交停止意图，资源已删除仍允许停止和回收原运行。"""
+        return public(await request_control(repo(), task_id, "STOPPED", user))
 
     @app.post("/api/v1/tasks/{task_id}/pause", status_code=202)
     async def pause(task_id: str, user: User):
-        return public(await change_state(task_id, "PAUSED", user))
+        """请求 SSH 连接关闭并保留运行预算，连接关闭前返回待完成操作。"""
+        return public(await request_control(repo(), task_id, "PAUSED", user))
 
     @app.post("/api/v1/tasks/{task_id}/resume", status_code=202)
     async def resume(task_id: str, user: User):
-        authorize(user, "tasks:control", task_id)
-        task = await repo().get("tasks", task_id)
-        if task["protocol"] != "SSH" or task["status"] != "PAUSED":
-            raise HTTPException(409, "任务尚未完成SSH暂停")
-        return public(await change_state(task_id, "RUNNING", user))
+        """在同一控制事务内验证暂停已完成，继续原运行而非重置命令预算。"""
+        return public(await request_control(repo(), task_id, "RUNNING", user, require_paused=True))
 
     @app.get("/api/v1/operations/{identifier}")
     async def operation(identifier: str, user: User):

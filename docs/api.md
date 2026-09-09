@@ -76,6 +76,20 @@ POST /api/v1/tasks/{taskId}/resume
 
 暂停仅适用于正在运行的 SSH 任务。Telnet 设备和串口任务调用 pause 会返回 `409`。
 
+### 控制操作与事务边界
+
+控制请求要求 `tasks:control`，返回的操作对象包含 `id`、`taskId`、`desiredState`、`action`（start/stop/pause/resume）、`actor`、`status`、`createdAt`，实际达到目标时另有 `completedAt`。审计动作分别为 `control:RUNNING`、`control:STOPPED` 和 `control:PAUSED`，审计动作不包含设备地址、口令或命令正文。
+
+创建任务（包括 `autoStart=true`）将任务、幂等成功映射、可选自动启动操作和审计一起原子提交。提交确认未知时使用同一 `Idempotency-Key` 重试，返回原任务；自动启动响应的 `operationId` 始终关联最初创建的启动操作，不会因后续停止/继续而改变。
+
+服务会在同一 MongoDB 快照事务中写入任务控制声明、关联资源声明、相反 PENDING 操作取消、新操作、任务 `desiredState` 与成功审计。重复请求同一已接受状态会复用任务 `controlOperationId` 指向的 PENDING 操作；只有目标已经实际达到时才复用 SUCCEEDED 操作。重复 `resume` 也是此规则：它只复用已接受的 RUNNING 恢复操作，不会新建运行或重置原运行的命令预算。
+
+控制意图并不等于设备连接已经建立、暂停或关闭。Worker 仍负责实际连接和物理收尾；客户端应查询 `GET /api/v1/operations/{operationId}` 及任务状态。事务提交结果无法确认时接口返回 `503`，客户端应先查询任务和操作，不能把该响应当作可以无条件重发控制请求的承诺。
+
+无节点的排队任务暂停会先确认任务没有运行锁，随后直接进入 PAUSED 并清除陈旧 `runId`、`sessionId`。无节点且已暂停的任务停止会在同一事务中按 `taskId + runId` 释放匹配锁、结束该 run，并保留该 run 的既有命令预算。恢复要求 SSH 任务已完成暂停、`desiredState=PAUSED` 且不再归属节点；状态不满足时返回 `409`。
+
+资源删除与启动、暂停或恢复使用同一资源文档的控制声明写入来产生事务冲突。删除先提交时，后到控制请求返回 `409`；控制先提交时，删除扫尾会写入 STOPPED、标记 `resourceDeleted` 并取消不再适用的 PENDING 操作。资源删除不会删除既有日志。
+
 ## 命令与模板
 
 `POST /api/v1/command-templates` 创建命令模板，`GET/PATCH/DELETE /api/v1/command-templates/{templateId}` 管理模板。向正在采集的任务发送手动命令：
@@ -137,14 +151,21 @@ DELETE /api/v1/service-tokens/{tokenId}
 
 可用作用域为 `admin`、`tasks:read`、`tasks:write`、`tasks:control`、`commands:send`、`templates:read`、`templates:write`、`logs:read` 与 `logs:download`。`taskIds` 省略时不按任务白名单限制；提供后，任务级接口只允许访问列出的任务。
 
-管理员可查询操作审计和运行事件，两者均支持 `page`（从 1 开始）和 `pageSize`（最多 100）：
+管理员可查询操作审计、运行事件和请求排障事件。三个接口均支持 `page`（从 1 开始）和 `pageSize`（最多 100）：
 
 ```http
 GET /api/v1/audit-events?action=control%3ARUNNING&actor=admin&taskId=task-example&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
-GET /api/v1/runtime-events?taskId=task-example&nodeId=node-a&type=CONNECTION_GAP&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
+GET /api/v1/runtime-events?taskId=task-example&nodeId=node-a&type=CONNECTION_GAP&level=WARNING&outcome=UNKNOWN&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
+GET /api/v1/request-events?method=POST&route=%2Fapi%2Fv1%2Ftasks&status=202&requestId=request-example&taskId=task-example
 ```
 
-`audit-events` 可按 `action`、`actor` 和 `taskId`（审计目标）筛选；`runtime-events` 可按 `taskId`、`nodeId` 和 `type` 筛选。时间范围必须成对提供、带 UTC 时区或偏移、长度大于零且不超过 31 天。旧的连接缺口事件使用 `detectedAt`，接口会按其发生时间筛选和排序，并返回统一的 `createdAt` 供显示。上述事件接口不读取设备日志正文或口令。
+`audit-events` 可按 `action`、`actor`、`taskId`（审计目标）、`level`、`outcome`、`requestId` 和时间范围筛选；`runtime-events` 可按 `taskId`、`nodeId`、`type`、`level`、`outcome`、`requestId` 和时间范围筛选。`request-events` 可按 `method`、`route`、`status`（HTTP 状态）、`level`、`outcome`、`requestId`、`clientIp`、`taskId` 和时间范围筛选。
+
+`level` 只能是 `DEBUG`、`INFO`、`WARNING` 或 `ERROR`；`outcome` 只能是 `PENDING`、`SUCCEEDED`、`FAILED`、`CANCELLED` 或 `UNKNOWN`，其他值返回 422。旧事件没有持久化这些字段时，服务端按与页面相同的规则在数据库聚合中推导后筛选和计数；分页完成后才批量补齐操作者、任务、资源、模板、节点、作业和命令名称。返回条目可包含 `summary`、`level`、`outcome`、`actorName`、`targetName`、`taskName`、`deviceIp`、`requestId`、`clientIp`、`reason`、`runId`、`sessionId` 和 `nodeId`。摘要为中文；例如 `CONNECTION_GAP` 显示为“采集连接中断”，其结果为 `UNKNOWN`、级别为 `WARNING`。
+
+请求事件仅记录 `/api/v1/` 下的非 `GET`/`HEAD` 请求，或状态码不低于 400 的读取请求；健康检查和普通读取不会进入该集合。请求成功发送完毕时，HTTP 202 为 `PENDING`，其他 2xx 为 `SUCCEEDED`，4xx/5xx 为 `FAILED`；响应未完整发送时为 `UNKNOWN`。持久化有短暂超时且失败不会改变原请求结果；已取消请求不会在清理阶段等待写入。事件不保存 query、header、请求/响应 body 或设备日志正文，失败原因仅来自已脱敏的安全错误文本。`request_events` 以 `createdAt` 建立 30 天 TTL，另建 `requestId` 和 `(taskId, createdAt)` 索引；该 TTL 不作用于设备日志、下载或归档。
+
+时间范围必须成对提供、带 UTC 时区或偏移、长度大于零且不超过 31 天。旧的连接缺口事件使用 `detectedAt`，接口会按其发生时间稳定排序，并返回统一的 `createdAt` 供显示。上述事件接口不读取设备日志正文或口令。
 
 ## 日志与导出
 

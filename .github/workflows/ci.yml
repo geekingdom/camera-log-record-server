@@ -33,7 +33,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - name: 验证副本集初始化门槛
-        run: node --test ../tests/deploy/test_mongo_init.mjs
+        run: node --test ../tests/deploy/test_mongo_init.mjs ../tests/deploy/test_mongo_standalone.mjs
       - run: npm run build
   commit-messages:
     runs-on: ubuntu-latest
@@ -83,6 +83,10 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_audited_mutations.py
       - name: 验证管理配置正式接口审计回滚与来源权限
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_admin_audit_transactions.py
+      - name: 验证任务控制并发幂等与审计事务
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_task_control_transactions.py
+      - name: 验证审计事件派生筛选与分页
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_event_queries.py
       - name: 验证真实数据库日志目录尾部水位
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_catalog_watermarks.py
       - name: 验证多路真实协议分卷与归档完整性
@@ -95,3 +99,13 @@ jobs:
       - name: 清理隔离容器与测试卷
         if: always()
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml down --volumes --remove-orphans
+  component-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 验证 Linux 独立组件部署
+        run: python scripts/verify_component_deployment.py --timeout 240

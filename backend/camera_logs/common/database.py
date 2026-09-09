@@ -59,6 +59,10 @@ class Repository:
         await self.db.ip_policy.create_index("id", unique=True)
         await self.db.download_sessions.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.download_sessions.create_index("tokenHash", unique=True)
+        # 排障访问记录不属于设备日志；30 天 TTL 控制其容量且不会触及采集与下载数据。
+        await self.db.request_events.create_index("createdAt", expireAfterSeconds=30 * 24 * 60 * 60)
+        await self.db.request_events.create_index("requestId")
+        await self.db.request_events.create_index([("taskId", 1), ("createdAt", -1)])
 
     def encrypt(self, password):
         """将设备密码加密后存储；空值保持为空以支持无密码串口。"""
@@ -77,7 +81,11 @@ class Repository:
 
     async def audit(self, actor, action, target, *, session=None):
         """追加用户操作审计事件，不在事件中保存敏感请求内容。"""
-        await self.db.audit.insert_one({"actor": actor, "action": action, "targetId": target, "createdAt": now()}, session=session)
+        from camera_logs.common.request_context import current_request_context
+        context = current_request_context()
+        await self.db.audit.insert_one({"actor": actor, "action": action, "targetId": target,
+                                        "requestId": context.get("requestId"), "clientIp": context.get("clientIp"),
+                                        "createdAt": now()}, session=session)
 
     async def idem(self, actor, key, route, payload, collection, build):
         """以 actor 和幂等键串行化创建，并识别同键不同载荷冲突。"""

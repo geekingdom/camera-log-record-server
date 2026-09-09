@@ -1,21 +1,48 @@
 #!/usr/bin/env bash
-# Linux 一键部署入口：保留已有环境和卷，构建并验证完整 Compose 服务。
+# Linux 统一部署入口。默认一次部署前端、API、采集节点、三成员数据库。
+# 可修改配置放在 .env，详见 deploy/config/*.env.example；不要在脚本中填写密码。
+# HOST_LOG_ROOT 控制宿主机采集日志目录；API_DATA_ROOT 控制后端运行日志与临时文件。
+# 保留已有环境和数据；重复执行不会重置管理员密码，也不会删除日志或数据库卷。
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+component=all
+if [[ "${1:-}" == "--component" ]]; then
+  component="${2:-}"
+  shift 2
+fi
+case "$component" in all|frontend|backend|worker|database) ;; *) echo "未知部署组件" >&2; exit 2 ;; esac
 project="${COMPOSE_PROJECT_NAME:-camera-log-record-server}"
 compose_file="$root/deploy/docker-compose.yml"
 env_file="$root/.env"
+if [[ "$component" != all ]]; then
+  # 即使用户给四个入口设置同一基名，也以组件后缀隔离，避免同名初始化服务互相覆盖。
+  project="${COMPOSE_PROJECT_NAME:-camera-log-record-server}-$component"
+  compose_file="$root/deploy/$component.yml"
+  env_file="$root/.env.$component"
+fi
+if [[ "${1:-}" == "--env-file" && -n "${2:-}" ]]; then
+  env_file="$2"
+  shift 2
+fi
 
 if [[ "${1:-}" == "--help" ]]; then
   cat <<'EOF'
-用法：./deploy.sh
+用法：./deploy.sh [--env-file /绝对路径/部署.env] [--init]
+独立入口：./deploy-frontend.sh、./deploy-backend.sh、./deploy-worker.sh、./deploy-database.sh
 
 在 Linux 上准备 Docker Compose、首次创建权限 0600 的 .env，并启动 camera-log-record-server。
 可用 COMPOSE_PROJECT_NAME 覆盖默认稳定项目名；已有 .env 和同项目卷会被保留。
+--init 只生成配置，不安装或启动任何服务；编辑配置后再执行部署。
+可自定义项（含日志目录、端口、远程地址、保留天数）见 deploy/config 与 docs/deployment.md。
 EOF
   exit 0
 fi
+if [[ "${1:-}" == "--init" ]]; then
+  python3 "$root/scripts/deploy_env.py" --output "$env_file" --component "$component"
+  exit 0
+fi
+if [[ $# -ne 0 ]]; then echo "不支持的参数，请使用 --help" >&2; exit 2; fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "一键部署仅支持 Linux" >&2
@@ -47,7 +74,21 @@ if [[ "$docker_installed" == true && "$EUID" -ne 0 ]]; then
     exit 1
   fi
   # 仅保留会影响 Compose 展开和健康检查的非敏感覆盖，避免新 Docker 组会话丢失端口等部署参数。
-  exec sudo --preserve-env=COMPOSE_PROJECT_NAME,DEPLOY_HEALTH_TIMEOUT,FRONTEND_PORT,COMPOSE_MONGO_URI,DATABASE_NAME,COLLECTOR_NODE_ID,COLLECTOR_NODE_URL,KNOWN_HOSTS_FILE "$root/deploy.sh"
+  exec sudo --preserve-env=COMPOSE_PROJECT_NAME,DEPLOY_HEALTH_TIMEOUT,FRONTEND_PORT,COMPOSE_MONGO_URI,DATABASE_NAME,COLLECTOR_NODE_ID,COLLECTOR_NODE_URL,KNOWN_HOSTS_FILE,HOST_LOG_ROOT,API_DATA_ROOT "$root/deploy.sh" --component "$component" --env-file "$env_file"
+fi
+# systemd 主机除了容器 restart 策略，还必须启用 Docker daemon 的开机启动。
+# 在已有 Docker 的服务器上也执行；容器内/非 systemd 环境由宿主机管理 Docker。
+if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+  if [[ "$EUID" -eq 0 ]]; then
+    systemctl enable --now docker
+  elif systemctl is-enabled --quiet docker && systemctl is-active --quiet docker; then
+    : # Docker 已开机启用且正在运行，docker组用户无需重复提权。
+  elif ! command -v sudo >/dev/null 2>&1; then
+    echo "需要root权限启用Docker开机启动；请以root运行或预先执行systemctl enable --now docker" >&2
+    exit 1
+  else
+    sudo systemctl enable --now docker || { echo "未能启用Docker开机启动，请由管理员执行systemctl enable --now docker" >&2; exit 1; }
+  fi
 fi
 if ! docker info >/dev/null 2>&1; then
   echo "当前用户无法访问 Docker daemon；请确认 Docker 服务运行且账号已加入 docker 组后重试" >&2
@@ -64,10 +105,18 @@ if [[ ! -f "$env_file" ]]; then
     echo "检测到项目 $project 的既有数据卷但缺少 .env；拒绝生成新密钥以保护现有数据" >&2
     exit 1
   fi
-  python3 "$root/scripts/deploy_env.py" --output "$env_file"
-  echo "初始管理员凭据已保存在 ${env_file}（权限 0600），脚本不会输出密码或令牌"
+  python3 "$root/scripts/deploy_env.py" --output "$env_file" --component "$component"
+  echo "部署配置已保存在 ${env_file}（权限 0600），脚本不会输出密码或令牌"
 fi
 chmod 600 "$env_file"
+# Compose 的 env_file 与变量展开必须指向同一份配置；不 source 配置，避免执行其中内容。
+env_file="$(cd "$(dirname "$env_file")" && pwd)/$(basename "$env_file")"
+export DEPLOY_ENV_FILE="$env_file"
 
-docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" up --build --detach --remove-orphans
-python3 "$root/scripts/deploy_health.py" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
+if [[ "$component" == all ]]; then
+  docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" up --build --detach --remove-orphans
+  python3 "$root/scripts/deploy_health.py" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
+else
+  # 独立部署不使用 --remove-orphans，避免误删同项目已运行的其它服务。
+  python3 "$root/scripts/deploy_component.py" --component "$component" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
+fi

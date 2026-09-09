@@ -1,4 +1,13 @@
 services:
+  storage-init:
+    image: alpine:3.21
+    user: "0:0"
+    restart: "no"
+    # 只初始化挂载根及固定子目录权限，不递归修改已有设备日志。
+    command: ["sh", "-ec", "mkdir -p /api/data /api/service-logs /worker/data /worker/service-logs; chown 10001:10001 /api /api/data /api/service-logs /worker /worker/data /worker/service-logs"]
+    volumes:
+      - ${API_DATA_ROOT:-api-data}:/api
+      - ${HOST_LOG_ROOT:-worker-data}:/worker
   mongo1:
     image: mongo:7.0
     restart: unless-stopped
@@ -8,7 +17,7 @@ services:
         max-size: "10m"
         max-file: "3"
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    volumes: ["mongo1-data:/data/db"]
+    volumes: ["${MONGO_DATA_1:-mongo1-data}:/data/db"]
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
       interval: 10s
@@ -20,7 +29,7 @@ services:
     restart: unless-stopped
     logging: *service-logging
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    volumes: ["mongo2-data:/data/db"]
+    volumes: ["${MONGO_DATA_2:-mongo2-data}:/data/db"]
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
       interval: 10s
@@ -32,7 +41,7 @@ services:
     restart: unless-stopped
     logging: *service-logging
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    volumes: ["mongo3-data:/data/db"]
+    volumes: ["${MONGO_DATA_3:-mongo3-data}:/data/db"]
     healthcheck:
       test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
       interval: 10s
@@ -55,7 +64,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/api.Dockerfile
-    env_file: ../.env
+    env_file: ${DEPLOY_ENV_FILE:-../.env}
     restart: unless-stopped
     logging: *service-logging
     environment:
@@ -67,8 +76,9 @@ services:
       LOG_ROOT: /var/lib/camera-logs/data
     depends_on:
       mongo-init: { condition: service_completed_successfully }
+      storage-init: { condition: service_completed_successfully }
     expose: ["8000"]
-    volumes: ["api-data:/var/lib/camera-logs"]
+    volumes: ["${API_DATA_ROOT:-api-data}:/var/lib/camera-logs"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
       interval: 15s
@@ -79,7 +89,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/worker.Dockerfile
-    env_file: ../.env
+    env_file: ${DEPLOY_ENV_FILE:-../.env}
     restart: unless-stopped
     logging: *service-logging
     environment:
@@ -91,9 +101,10 @@ services:
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
     depends_on:
       mongo-init: { condition: service_completed_successfully }
+      storage-init: { condition: service_completed_successfully }
     # 默认单节点使用稳定身份与命名卷；多机扩容使用 worker-node.yml 独立部署。
     volumes:
-      - worker-data:/var/lib/camera-logs
+      - ${HOST_LOG_ROOT:-worker-data}:/var/lib/camera-logs
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
     networks: [camera-logs]
   frontend:
@@ -101,6 +112,8 @@ services:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
     restart: unless-stopped
+    environment:
+      BACKEND_UPSTREAM: http://api:8000
     logging: *service-logging
     depends_on:
       api: { condition: service_healthy }

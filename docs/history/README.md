@@ -13,6 +13,8 @@
 - [2026-09-09 实时省略范围与补读](2026-09-09-live-range-recovery.md)：字节范围状态机、分页阅读、并发隔离、浏览器及临时数据清理。
 - [2026-09-09 审计页会话与业务事务](2026-09-09-audit-session-and-transactions.md)：Cookie 请求修复、真实浏览器验证、资源模板账户审计事务及范围边界。
 - [2026-09-09 管理配置审计事务](2026-09-09-admin-audit-transactions.md)：保留期、节点与 IP 策略正式接口的失败回滚、并发 CAS 及后续控制事务边界。
+- [2026-09-09 任务控制审计事务](2026-09-09-task-control-transactions.md)：控制操作、资源删除竞争、真实副本集回滚与 Worker/自动启动边界。
+- [2026-09-09 审计排障与组件部署](2026-09-09-audit-observability-and-component-deployment.md)：请求排障事件、派生筛选、隔离浏览器证据、组件项目名隔离及待运行的 Linux CI 边界。
 - [历轮验证记录](../validation.md)：保留既有路径，避免破坏引用。
 - [HTTP 延迟诊断](../http-latency-diagnostics.md)：连接池与阶段延迟实验。
 - [服务压测](../service-benchmark.md) 和 [调度压测](../scheduler-benchmark.md)：操作说明和历史样本，不代替集群验收。

@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     internal_token: str = ""
     node_id: str = socket.gethostname()
     node_url: str = "http://127.0.0.1:8001"
+    # 独立节点部署可自定义监听地址/端口；node_url 仍是后端实际访问的公布地址。
+    node_bind_ip: str = "0.0.0.0"
+    node_port: int = Field(default=8001, ge=1, le=65535)
     log_root: Path = Path("data/logs")
     known_hosts: str = ""
     ssh_verify_host_key: bool = False

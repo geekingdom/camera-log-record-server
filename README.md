@@ -14,7 +14,7 @@
 
 ## 开发
 
-Linux 单机部署在拉取代码后执行 `./deploy.sh`，详见 [一键部署](docs/deployment.md)。首次管理员为 `admin`，初始密码 `asdf!234`，登录后必须修改；重复部署不会覆盖已修改密码。用户、资源范围及客户端 IP 权限见 [登录与访问控制](docs/user-access.md)。
+Linux 完整部署执行 `./deploy-all.sh`（兼容 `./deploy.sh`）；也提供 `deploy-frontend.sh`、`deploy-backend.sh`、`deploy-worker.sh`、`deploy-database.sh` 四个独立部署入口。每个脚本支持 `--init` 生成配置，日志路径、端口、保留天数、分机地址和 Docker 开机自启动详见 [一键部署](docs/deployment.md) 与 `deploy/config/*.env.example`。首次管理员为 `admin`，初始密码 `asdf!234`，登录后必须修改；重复部署不会覆盖已修改密码。用户、资源范围及客户端 IP 权限见 [登录与访问控制](docs/user-access.md)。
 
 ```sh
 python -m pip install '.[test]'

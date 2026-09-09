@@ -67,7 +67,10 @@ def test_runtime_events_filter_task_node_type_and_utc_range(client):
     })
     assert response.status_code == 200, response.text
     assert response.json()["total"] == 1
-    assert response.json()["items"][0]["type"] == "CONNECTION_GAP"
+    item = response.json()["items"][0]
+    assert item["type"] == "CONNECTION_GAP"
+    assert item["summary"] == "采集连接中断"
+    assert item["outcome"] == "UNKNOWN" and item["level"] == "WARNING"
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")

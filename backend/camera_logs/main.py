@@ -11,6 +11,7 @@ from pymongo import AsyncMongoClient
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, public
 from camera_logs.common.node_http import NodeHttpPool
+from camera_logs.common.observability import redact_text
 
 
 def create_app(settings=None, db=None):
@@ -63,19 +64,22 @@ def create_app(settings=None, db=None):
             try:
                 await enforce_ip(app.state.repo, request)
             except HTTPException as exc:
+                request.state.safe_error = redact_text(str(exc.detail))
                 return JSONResponse(status_code=exc.status_code, content={"error": {
-                    "code": "IP_ACCESS_DENIED", "message": exc.detail,
+                    "code": "IP_ACCESS_DENIED", "message": request.state.safe_error,
                     "requestId": getattr(request.state, "request_id", None)}})
         return await call_next(request)
     @app.exception_handler(HTTPException)
     async def http_error(request, exc):
         """将业务 HTTP 异常包装为包含 requestId 的稳定 API 错误结构。"""
+        request.state.safe_error = redact_text(str(exc.detail))
         return JSONResponse(status_code=exc.status_code, headers=exc.headers, content={"error": {
-            "code": str(exc.status_code), "message": exc.detail, "requestId": request.state.request_id}})
+            "code": str(exc.status_code), "message": request.state.safe_error, "requestId": request.state.request_id}})
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         """将 Pydantic 请求校验细节转换为前端可消费的 422 结构。"""
+        request.state.safe_error = "输入校验失败"
         errors = [{"location": list(e["loc"]), "message": e["msg"]} for e in exc.errors()]
         return JSONResponse(status_code=422, content={"error": {
             "code": "VALIDATION_ERROR", "message": "输入校验失败", "details": errors,
@@ -84,6 +88,7 @@ def create_app(settings=None, db=None):
     @app.exception_handler(Exception)
     async def unexpected_error(request, exc):
         """完整堆栈由请求中间件记录，对外仅返回关联号而不暴露内部路径或凭据。"""
+        request.state.safe_error = "服务内部异常"
         return JSONResponse(status_code=500, content={"error": {
             "code": "INTERNAL_ERROR", "message": "服务内部异常，请凭请求编号查询运行日志",
             "requestId": getattr(request.state, "request_id", None)}})
