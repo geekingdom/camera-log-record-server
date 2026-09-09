@@ -41,6 +41,21 @@ def test_missing_service_token_does_not_create_revoke_audit(client):  # noqa: F8
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+def test_download_audit_includes_related_task_and_device(client):  # noqa: F811
+    """作业事件须关联实际任务和设备，避免仅显示无法识别的随机作业 ID。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.tasks.insert_one, {"id": "device-task", "name": "设备打印", "ip": "192.0.2.9"})
+    client.portal.call(repo.db.jobs.insert_one, {"id": "export", "taskId": "device-task", "kind": "DOWNLOAD"})
+    client.portal.call(repo.audit, "bootstrap", "DOWNLOAD", "export")
+    response = client.get("/api/v1/audit-events?action=DOWNLOAD")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["summary"] == "创建日志下载作业"
+    assert item["taskId"] == "device-task" and item["taskName"] == "设备打印"
+    assert item["deviceIp"] == "192.0.2.9"
+
+
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_isolation_evidence_is_recursively_redacted_before_runtime_event_output(client, monkeypatch):  # noqa: F811
     """JSON 隔离依据中的嵌套凭据不能进入存储或管理员运行事件响应。"""
     repo = client.app.state.repo

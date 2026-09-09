@@ -21,7 +21,7 @@ from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.security import actor, authenticate, authorize
 from camera_logs.logs.download_sessions import download_actor
 from camera_logs.logs.hour_catalog import summarize_hours
-from camera_logs.logs.order import ordered_files
+from camera_logs.logs.job_submission import cancel_job, submit_job
 from camera_logs.users.sessions import COOKIE, check_origin, session_identity
 
 logger = logging.getLogger(__name__)
@@ -123,54 +123,7 @@ def install_log_routes(app):
     async def create_job(body, request, user, kind):
         """冻结任务文件目录，申请保留期保护，并通过幂等键提交后台作业。"""
         authorize(user, "logs:download" if kind == "DOWNLOAD" else "logs:read", body.taskId)
-        task = await repo().get("tasks", body.taskId)
-        async def build(identifier):
-            query = {"taskId": body.taskId, "status": {"$ne": "DELETED"}}
-            if kind == "DOWNLOAD":
-                query["hour"] = {"$in": body.hourIds}
-            else:
-                try:
-                    end = datetime.fromisoformat(body.end) if body.end else now()
-                    start = datetime.fromisoformat(body.start) if body.start else end-timedelta(hours=1)
-                    if start.tzinfo is None or end.tzinfo is None or not timedelta(0) < end-start <= timedelta(hours=24):
-                        raise ValueError()
-                except ValueError as exc:
-                    raise HTTPException(422, "时间范围须包含时区且不超过24小时") from exc
-                start, end = start.astimezone(now().tzinfo), end.astimezone(now().tzinfo)
-                query["hour"] = {"$gte": start.replace(minute=0, second=0, microsecond=0).isoformat(), "$lte": end.isoformat()}
-            files = ordered_files([public(f) async for f in repo().db.files.find(query)])
-            if not files:
-                raise HTTPException(404, "所选范围没有日志")
-            unavailable = [f for f in files if f["status"] not in ("OPEN", "READY")]
-            if unavailable and (kind != "DOWNLOAD" or not body.allowPartial):
-                raise HTTPException(409, "所选范围包含暂不可用片段，请刷新或明确允许部分导出")
-            # 发布作业前保护所有可用片段；不可用片段仍保留在清单中，由作业明确报告。
-            for file in files:
-                if file["status"] not in ("OPEN", "READY"):
-                    continue
-                claim = await repo().db.files.update_one({"id": file["id"], "status": {"$in": ["OPEN", "READY"]}},
-                    {"$max": {"retainUntil": now()+timedelta(hours=24)}})
-                if claim.matched_count != 1:
-                    raise HTTPException(409, "日志片段正在清理，请刷新后重试")
-            if kind == "DOWNLOAD" and not body.allowPartial and set(body.hourIds)-{f["hour"] for f in files}:
-                raise HTTPException(409, "部分小时没有可用片段")
-            archive_sizes = {}
-            for file in files:
-                group = (file["nodeId"], file.get("archiveGroupId") or file["id"])
-                archive_sizes[group] = max(archive_sizes.get(group, 0), file.get("archiveBytes") or file.get("bytes", 0))
-            estimate = sum(archive_sizes.values())
-            if kind == "DOWNLOAD" and estimate > 20_000_000_000:
-                raise HTTPException(422, "预计下载超过20GB，请拆分小时")
-            doc = body.model_dump() | {"id": identifier, "kind": kind, "status": "QUEUED", "progress": 0,
-                "actor": user["id"], "files": files, "nodeId": task.get("nodeId") or files[0]["nodeId"],
-                "taskName": task["name"], "taskIp": task["ip"],
-                "createdAt": now(), "expiresAt": now()+timedelta(hours=24)}
-            if kind == "SEARCH":
-                doc.update(start=start.isoformat(), end=end.isoformat())
-            await repo().db.jobs.insert_one(doc)
-            return doc
-        return public(await repo().idem(user["id"], request.headers.get("Idempotency-Key"), kind,
-                                        body.model_dump(), "jobs", build))
+        return public(await submit_job(repo(), user["id"], request.headers.get("Idempotency-Key"), body, kind))
 
     @app.post("/api/v1/downloads", status_code=202)
     async def download(body: DownloadCreate, request: Request, user: User):
@@ -211,13 +164,7 @@ def install_log_routes(app):
         authorize(user, "logs:read", doc["taskId"])
         if doc["actor"] != user["id"]:
             authorize(user, "admin")
-        changed = await repo().db.jobs.update_one(
-            {"id": identifier, "status": {"$in": ["QUEUED", "RUNNING"]}},
-            {"$set": {"status": "CANCELLED"}},
-        )
-        # 只有确实改变作业状态才记录取消，避免已结束作业产生错误审计事实。
-        if changed.modified_count:
-            await repo().audit(user["id"], f"cancel_{doc['kind'].lower()}", identifier)
+        await cancel_job(repo(), user["id"], doc)
 
     @app.websocket("/api/v1/tasks/{task_id}/logs")
     async def live(ws: WebSocket, task_id: str):

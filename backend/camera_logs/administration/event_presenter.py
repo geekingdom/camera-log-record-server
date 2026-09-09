@@ -13,6 +13,8 @@ ACTION_SUMMARIES = {
     "delete_resource": "删除设备资源", "create_template": "创建命令模板",
     "edit_template": "修改命令模板", "delete_template": "删除命令模板",
     "create_token": "创建服务令牌", "revoke_token": "撤销服务令牌",
+    "DOWNLOAD": "创建日志下载作业", "SEARCH": "创建日志检索作业",
+    "cancel_download": "取消日志下载作业", "cancel_search": "取消日志检索作业",
     "update_platform_settings": "修改平台设置", "update_ip_policy": "修改来源访问规则",
     "confirm_node_isolation": "确认节点外部隔离",
     "login": "用户登录", "login_failed": "用户登录失败", "logout": "用户退出登录",
@@ -33,7 +35,7 @@ _TARGET_COLLECTIONS = {
     "tasks": {"id": 1, "name": 1, "ip": 1}, "resources": {"id": 1, "name": 1, "ip": 1},
     "templates": {"id": 1, "name": 1}, "users": {"id": 1, "username": 1, "displayName": 1},
     "nodes": {"id": 1, "name": 1}, "node_configs": {"id": 1, "name": 1},
-    "jobs": {"id": 1, "name": 1}, "commands": {"id": 1, "taskId": 1, "kind": 1},
+    "jobs": {"id": 1, "name": 1, "taskId": 1}, "commands": {"id": 1, "taskId": 1, "kind": 1},
 }
 
 
