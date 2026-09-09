@@ -4,7 +4,7 @@ import { Edit3, Trash2 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../../shared/api";
 import type { Template } from "../../shared/types";
-const props = defineProps<{ items: Template[] }>();
+const props = defineProps<{ items: Template[]; canWrite?: boolean }>();
 const emit = defineEmits<{ edit: [Template]; changed: [] }>();
 async function remove(template: Template) {
   try {
@@ -32,7 +32,7 @@ async function remove(template: Template) {
       label="版本"
       width="100" /><el-table-column label="操作" width="120"
       ><template #default="{ row }"
-        ><el-button text :icon="Edit3" @click="emit('edit', row)" /><el-button
+        ><el-button v-if="props.canWrite" text :icon="Edit3" @click="emit('edit', row)" /><el-button v-if="props.canWrite"
           text
           type="danger"
           :icon="Trash2"

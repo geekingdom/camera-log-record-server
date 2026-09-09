@@ -14,6 +14,7 @@ from camera_logs.common.security import actor, authorize
 SERVICE_TOKEN_SCOPES = frozenset({
     "admin", "commands:send", "logs:download", "logs:read", "tasks:control",
     "tasks:read", "tasks:write", "templates:read", "templates:write",
+    "resources:create", "resources:write", "tasks:create",
 })
 
 
@@ -56,8 +57,8 @@ def install_command_routes(app, repo, listing):
 
     @app.get("/api/v1/nodes")
     async def nodes(user: User):
-        """返回采集节点心跳视图，要求普通任务读取权限。"""
-        authorize(user, "tasks:read")
+        """基础设施节点列表仅管理员可读取。"""
+        authorize(user, "admin")
         return await listing("nodes", {}, 1, 100, "heartbeat")
 
     @app.post("/api/v1/service-tokens", status_code=201)

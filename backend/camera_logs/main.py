@@ -34,6 +34,8 @@ def create_app(settings=None, db=None):
         background = None
         try:
             await repo.initialize()
+            from camera_logs.users.sessions import initialize_admin
+            await initialize_admin(repo)
             app.state.repo = repo
             # 固定分池降低高并发连接状态扫描成本，全部客户端归 API 生命周期管理。
             async with NodeHttpPool() as node_http:
@@ -55,10 +57,22 @@ def create_app(settings=None, db=None):
     app = FastAPI(title="设备日志记录服务", version="0.1.0", lifespan=lifespan)
     from camera_logs.common.observability import add_request_logging
     add_request_logging(app)
+    @app.middleware("http")
+    async def client_network_policy(request, call_next):
+        """平台来源白名单在登录前生效；健康检查与独立采集节点不受此策略影响。"""
+        if request.url.path.startswith("/api/v1/"):
+            from camera_logs.access_policy.policy import enforce_ip
+            try:
+                await enforce_ip(app.state.repo, request)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"error": {
+                    "code": "IP_ACCESS_DENIED", "message": exc.detail,
+                    "requestId": getattr(request.state, "request_id", None)}})
+        return await call_next(request)
     @app.exception_handler(HTTPException)
     async def http_error(request, exc):
         """将业务 HTTP 异常包装为包含 requestId 的稳定 API 错误结构。"""
-        return JSONResponse(status_code=exc.status_code, content={"error": {
+        return JSONResponse(status_code=exc.status_code, headers=exc.headers, content={"error": {
             "code": str(exc.status_code), "message": exc.detail, "requestId": request.state.request_id}})
 
     @app.exception_handler(RequestValidationError)
@@ -93,6 +107,10 @@ def create_app(settings=None, db=None):
         return {"status": "ok"}
 
     from camera_logs.tasks.api import install_task_routes
+    from camera_logs.users.api import install_user_routes
+    install_user_routes(app)
+    from camera_logs.access_policy.api import install_ip_policy_routes
+    install_ip_policy_routes(app)
     install_task_routes(app, repo, listing)
     from camera_logs.resources.api import install_resource_routes
     install_resource_routes(app, repo, listing)

@@ -10,13 +10,15 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, Response
 
+from camera_logs.access_policy.policy import apply_ip_permissions
 from camera_logs.common.database import now
 from camera_logs.common.security import actor, authorize
+from camera_logs.users.sessions import COOKIE
 
 
 async def download_actor(request: Request):
     """校验请求头或作用于本作业的下载票据，身份权限在内容路由再次检查。"""
-    if request.headers.get("authorization"):
+    if request.headers.get("authorization") or request.cookies.get(COOKIE):
         return await actor(request)
     ticket = request.cookies.get("download_access", "")
     repo = request.app.state.repo
@@ -31,6 +33,8 @@ async def download_actor(request: Request):
             raise HTTPException(401, "访问令牌已失效")
     else:
         identity = {"id": "bootstrap", "scopes": ["*"], "taskIds": None}
+    # 无平台会话的第三方下载票据也必须受当前客户端 IP 权限限制。
+    identity = await apply_ip_permissions(repo, request, identity)
     request.state.actor = identity
     return identity
 

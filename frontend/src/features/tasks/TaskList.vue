@@ -12,7 +12,7 @@ import { taskStatusLabel, taskStatusTone } from "./taskStatus";
 
 const loadTaskDiagnostics = () => import("./TaskDiagnostics.vue");
 
-const props = defineProps<{ items: Task[]; loading: boolean }>();
+const props = defineProps<{ items: Task[]; loading: boolean; canWrite?: boolean; canControl?: boolean }>();
 const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: [] }>();
 const pendingIds = ref(new Set<string>());
 const diagnosticId = ref<string>();
@@ -110,7 +110,7 @@ const rows = computed(() => props.items);
         <el-tooltip :content="`查看任务状态 · ID: ${row.id}`">
           <el-button text :icon="Info" aria-label="查看任务状态" @click="showDiagnostics(row)" />
         </el-tooltip>
-        <el-tooltip v-if="!row.resourceDeleted" :content="`编辑任务 · ID: ${row.id}`"
+        <el-tooltip v-if="props.canWrite && !row.resourceDeleted" :content="`编辑任务 · ID: ${row.id}`"
           ><el-button
             text
             :icon="Edit3"
@@ -118,7 +118,7 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="emit('edit', row)"
         /></el-tooltip>
-        <el-tooltip v-if="showsAction(row, 'start')" :content="`启动任务 · ID: ${row.id}`"
+        <el-tooltip v-if="props.canControl && showsAction(row, 'start')" :content="`启动任务 · ID: ${row.id}`"
           ><el-button
             text
             type="success"
@@ -127,7 +127,7 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="state(row, 'start')"
         /></el-tooltip>
-        <el-tooltip v-if="showsAction(row, 'stop')" :content="`停止任务 · ID: ${row.id}`"
+        <el-tooltip v-if="props.canControl && showsAction(row, 'stop')" :content="`停止任务 · ID: ${row.id}`"
           ><el-button
             text
             type="danger"
@@ -136,7 +136,7 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="state(row, 'stop')"
         /></el-tooltip>
-        <el-tooltip v-if="showsAction(row, 'pause')" :content="`暂停任务 · ID: ${row.id}`"
+        <el-tooltip v-if="props.canControl && showsAction(row, 'pause')" :content="`暂停任务 · ID: ${row.id}`"
           ><el-button
             text
             :icon="CirclePause"
@@ -144,7 +144,7 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="state(row, 'pause')"
         /></el-tooltip>
-        <el-tooltip v-if="showsAction(row, 'resume')" :content="`继续任务 · ID: ${row.id}`"
+        <el-tooltip v-if="props.canControl && showsAction(row, 'resume')" :content="`继续任务 · ID: ${row.id}`"
           ><el-button
             text
             :icon="CirclePlay"

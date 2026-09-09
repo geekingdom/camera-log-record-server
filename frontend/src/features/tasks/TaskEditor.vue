@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import { ElMessage, ElMessageBox, type FormInstance } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
+import { usePermissions } from "../../shared/permissions";
 import type { Resource, Task, Template } from "../../shared/types";
 import CommandEditor from "../commands/CommandEditor.vue";
 import LiveLogs from "../logs/LiveLogs.vue";
@@ -12,6 +13,9 @@ import CommandHistory from "../commands/CommandHistory.vue";
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource }>();
 const emit = defineEmits<{ saved: [] }>();
+const permissions = usePermissions();
+const canSave = computed(() => permissions.can(props.task ? "tasks:write" : "tasks:create") &&
+  ((!props.task && !props.initialResource) || permissions.resource(props.task?.resourceId ?? props.initialResource?.id)));
 const blank = (): Task => ({
   id: "",
   name: "",
@@ -54,6 +58,7 @@ let templateGeneration = 0;
 let resourceGeneration = 0;
 // 模板选择器独立分页；序号保证抽屉关闭、重开或翻页时旧响应不会覆盖当前页。
 async function loadTemplatePage(page: number) {
+  if (!permissions.can("templates:read")) return;
   const current = ++templateGeneration;
   templateLoading.value = true;
   try {
@@ -70,6 +75,7 @@ async function loadTemplatePage(page: number) {
   }
 }
 async function loadResources() {
+  if (!permissions.can("tasks:read")) return;
   const current = ++resourceGeneration;
   resourceLoading.value = true;
   try {
@@ -134,6 +140,7 @@ watch(
       resourceLoading.value = false;
       return;
     }
+    if (!canSave.value || (task && !permissions.can("tasks:read"))) { open.value = false; return; }
     loading.value = true;
     saving.value = false;
     resources.value = props.initialResource ? [props.initialResource] : [];
@@ -228,6 +235,10 @@ async function replaceTemplate() {
 }
 // 仅提交与初始快照不同的字段，保留编辑密码为空时“不覆盖原密码”的后端语义。
 async function save() {
+  if (!canSave.value) return;
+  if (!permissions.resource(form.value.resourceId) ||
+    (form.value.serialServerResourceId && !permissions.resource(form.value.serialServerResourceId))) return;
+  if (autoStart.value && !permissions.can("tasks:control")) return;
   const current = generation;
   if (
     saving.value ||
@@ -360,7 +371,7 @@ async function save() {
               /></el-form-item>
             </div>
             <el-checkbox v-if="serial && props.task" v-model="clearPassword">清除已保存密码</el-checkbox>
-            <el-checkbox v-if="!props.task" v-model="autoStart"
+            <el-checkbox v-if="!props.task && permissions.can('tasks:control')" v-model="autoStart"
               >保存后立即启动</el-checkbox
             >
           </section>
@@ -368,6 +379,7 @@ async function save() {
             <div class="section-heading">
               <h2>命令配置</h2>
               <el-select
+                v-if="permissions.can('templates:read')"
                 v-model="templateId"
                 clearable
                 :loading="templateLoading"
@@ -399,15 +411,16 @@ async function save() {
           </section>
         </el-form>
       </el-tab-pane>
-      <el-tab-pane v-if="props.task" label="实时打印" name="live"
-        ><LiveLogs v-if="open && workspace === 'live'" :task-id="props.task.id" @history="workspace = 'archives'"
+      <el-tab-pane v-if="props.task && permissions.can('logs:read')" label="实时打印" name="live"
+        ><LiveLogs v-if="open && workspace === 'live'" :task-id="props.task.id" :can-send="permissions.can('commands:send')" @history="workspace = 'archives'"
       /></el-tab-pane>
-      <el-tab-pane v-if="props.task" label="小时归档" name="archives"
+      <el-tab-pane v-if="props.task && permissions.can('logs:read')" label="小时归档" name="archives"
         ><LogArchives
           v-if="open && workspace === 'archives'"
           :task-id="props.task.id"
+          :can-download="permissions.can('logs:download')"
       /></el-tab-pane>
-      <el-tab-pane v-if="props.task" label="命令记录" name="commands"
+      <el-tab-pane v-if="props.task && permissions.can('tasks:read')" label="命令记录" name="commands"
         ><CommandHistory
           v-if="open && workspace === 'commands'"
           :task-id="props.task.id"

@@ -5,11 +5,16 @@ import { ElMessage, type FormInstance } from "element-plus";
 import { Fingerprint, KeyRound, Network, Server, ShieldCheck } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
+import { usePermissions } from "../../shared/permissions";
 import type { Resource, ResourceAuthentication, ResourceAuthType, ResourceKind } from "../../shared/types";
 
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ resource?: Resource }>();
 const emit = defineEmits<{ saved: [] }>();
+const permissions = usePermissions();
+const canSave = computed(() => props.resource
+  ? permissions.can("resources:write") && permissions.resource(props.resource.id)
+  : permissions.can("resources:create") && permissions.allResources());
 const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType });
 const form = ref(blank());
 const authenticated = ref<ResourceAuthentication>();
@@ -53,6 +58,7 @@ watch(() => [open.value, props.resource] as const, async ([visible, resource]) =
     saving.value = false;
     return;
   }
+  if (!canSave.value) { open.value = false; return; }
   form.value = blank();
   authenticated.value = undefined;
   verifiedFingerprint = "";
@@ -74,13 +80,14 @@ watch(() => [open.value, props.resource] as const, async ([visible, resource]) =
   } else loading.value = false;
 });
 async function authenticate() {
+  if (!canSave.value) return;
   if (authenticating.value || saving.value) return;
   if (!form.value.password) return ElMessage.warning("重新认证请填写 HTTP 密码");
   if (!(await formRef.value?.validateField(["name", "ip", "username", "password"]).catch(() => false))) return;
   const current = ++authenticationGeneration;
   authenticating.value = true;
   try {
-    const result = await api.authenticateResource({ ...form.value });
+    const result = await api.authenticateResource({ ...form.value }, props.resource?.id);
     if (current !== authenticationGeneration || !open.value) return;
     authenticated.value = result;
     verifiedFingerprint = fingerprint.value;
@@ -93,6 +100,7 @@ async function authenticate() {
   } finally { if (current === authenticationGeneration) authenticating.value = false; }
 }
 async function save() {
+  if (!canSave.value) return;
   if (saving.value) return;
   const current = formGeneration;
   if (!(await formRef.value?.validate().catch(() => false))) return;

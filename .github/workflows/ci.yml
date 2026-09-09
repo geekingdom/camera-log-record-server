@@ -58,29 +58,34 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install '.[test]'
-      - name: 生成隔离验收密钥
-        run: python scripts/prepare_container_env.py
-      - name: 构建并启动完整容器服务
-        run: docker compose -f deploy/docker-compose.yml up --build -d
+      - name: 一键部署并验证重复运行保留密钥与卷
+        run: |
+          ./deploy.sh
+          first_env_digest="$(sha256sum .env | awk '{print $1}')"
+          docker volume inspect camera-log-ci_mongo1-data > /dev/null
+          ./deploy.sh
+          test "$first_env_digest" = "$(sha256sum .env | awk '{print $1}')"
       - name: 验证代理采集命令与归档下载链路
         run: |
           gateway="$(docker network inspect camera-log-ci_camera-logs --format '{{(index .IPAM.Config 0).Gateway}}')"
           python scripts/verify_container_service.py --url http://127.0.0.1:15173 --device-host "$gateway" --check-frontend
+      - name: 验证内置管理员、只读子账号与会话停用
+        run: python scripts/verify_user_auth.py --isolated --url http://127.0.0.1:15173 --env-file .env
       - name: 验证真实副本集隔离事务和心跳冲突
-        run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_isolation_transaction.py
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_isolation_transaction.py
       - name: 验证调度取消和租约接管的事务一致性
-        run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_scheduler_transaction.py
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_scheduler_transaction.py
       - name: 验证定时预算与执行记录事务一致性
-        run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_command_reservation.py
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_command_reservation.py
       - name: 验证真实数据库日志目录尾部水位
-        run: docker compose -f deploy/docker-compose.yml exec -T api python < scripts/verify_catalog_watermarks.py
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_catalog_watermarks.py
       - name: 验证多路真实协议分卷与归档完整性
         run: |
           gateway="$(docker network inspect camera-log-ci_camera-logs --format '{{(index .IPAM.Config 0).Gateway}}')"
           python scripts/benchmark_service.py --url http://127.0.0.1:15173 --device-host "$gateway" --bind-host 0.0.0.0 --routes 8 --seconds 60 --realtime-clients-per-route 1 --search-interval 5 --output .local/service-benchmark-ci
       - name: 收集容器诊断日志
         if: failure()
-        run: docker compose -f deploy/docker-compose.yml logs --no-color --tail 150 api worker mongo-init frontend
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml logs --no-color --tail 150 api worker mongo-init frontend
       - name: 清理隔离容器与测试卷
         if: always()
-        run: docker compose -f deploy/docker-compose.yml down --volumes --remove-orphans
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml down --volumes --remove-orphans

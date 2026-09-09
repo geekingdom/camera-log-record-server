@@ -20,6 +20,9 @@ export const setToken = (token: string) =>
   sessionStorage.setItem(tokenKey, token.trim());
 export const clearToken = () => sessionStorage.removeItem(tokenKey);
 export const idempotencyKey = () => crypto.randomUUID();
+export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; resourceIds: string[] | null; enabled: boolean; mustChangePassword: boolean; version?: number; builtin?: boolean; }
+export interface UserPage { items: SessionUser[]; total: number; page: number; pageSize: number; }
+export interface IpPolicy { version: number; enabled: boolean; clientIp: string; rules: { label: string; network: string; scopes: string[] }[]; }
 
 export class ApiError extends Error {
   constructor(
@@ -35,10 +38,12 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body) headers.set("Content-Type", "application/json");
+  if (init.method && init.method !== "GET" && init.method !== "HEAD") headers.set("X-Requested-With", "XMLHttpRequest");
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(`${base}${path}`, { ...init, headers });
+  const response = await fetch(`${base}${path}`, { ...init, headers, credentials: "same-origin" });
   if (!response.ok) {
+    if (response.status === 401 && response.headers.get("x-auth-required") === "true") window.dispatchEvent(new Event("auth-required"));
     let message = response.statusText;
     try {
       const body = await response.json();
@@ -61,6 +66,21 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+export const authApi = {
+  login: async (username: string, password: string) => { clearToken(); return request<{ user: SessionUser }>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }); },
+  me: () => request<{ user: SessionUser }>("/auth/me"),
+  logout: () => request<void>("/auth/logout", { method: "POST" }),
+  password: (currentPassword: string, newPassword: string) => request<{ user: SessionUser }>("/auth/password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
+};
+export const usersApi = {
+  list: (page = 1, pageSize = 20) => request<UserPage>(`/users?page=${page}&pageSize=${pageSize}`),
+  permissions: () => request<{ scopes: { value: string; label: string }[] }>("/users/permissions"),
+  create: (body: Pick<SessionUser, "username" | "displayName" | "isAdmin" | "scopes" | "resourceIds" | "enabled"> & { password: string }) => request<SessionUser>("/users", { method: "POST", body: JSON.stringify(body) }),
+  update: (id: string, body: Partial<Pick<SessionUser, "displayName" | "scopes" | "resourceIds" | "enabled">> & { version: number }) => request<SessionUser>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  resetPassword: (id: string, password: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}/reset-password`, { method: "POST", body: JSON.stringify({ password, version }) }),
+  disable: (id: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
+};
+export const ipPolicyApi = { get: () => request<IpPolicy>("/admin/ip-policy"), update: (body: IpPolicy) => request<IpPolicy>("/admin/ip-policy", { method: "PATCH", body: JSON.stringify(body) }) };
 const query = (
   page = 1,
   pageSize = 20,
@@ -128,8 +148,8 @@ export const api = {
     username: string;
     password: string;
     authType: ResourceAuthType;
-  }) =>
-    request<ResourceAuthentication>("/resources/authenticate", {
+  }, resourceId?: string) =>
+    request<ResourceAuthentication>(resourceId ? `/resources/${resourceId}/authenticate` : "/resources/authenticate", {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(input),

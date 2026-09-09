@@ -4,11 +4,13 @@ import { ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
+import { usePermissions } from "../../shared/permissions";
 import type { Template } from "../../shared/types";
 import CommandEditor from "../commands/CommandEditor.vue";
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ template?: Template }>();
 const emit = defineEmits<{ saved: [] }>();
+const permissions = usePermissions();
 const editorRef = ref<InstanceType<typeof CommandEditor>>();
 const saving = ref(false),
   loading = ref(false);
@@ -27,6 +29,9 @@ watch(
   async ([visible, template]) => {
     const current = ++generation;
     if (!visible) return;
+    if (!permissions.can("templates:write") || (template && !permissions.can("templates:read"))) {
+      open.value = false; return;
+    }
     loading.value = true;
     try {
       const value = template ? await api.template(template.id) : blank();
@@ -40,6 +45,7 @@ watch(
   { immediate: true },
 );
 async function save() {
+  if (!permissions.can("templates:write")) return;
   if (saving.value || !editorRef.value?.validate()) return;
   if (!form.value.name.trim()) return ElMessage.warning("请输入模板名称");
   if (!await confirmAction(`确认保存命令模板“${form.value.name}”吗？`, "确认保存模板")) return;

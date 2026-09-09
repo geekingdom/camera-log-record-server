@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     mongo_uri: str = "mongodb://127.0.0.1:27019/?directConnection=true"
     database_name: str = "camera_logs"
     bootstrap_token: str = ""
+    admin_username: str = "admin"
+    # 用户指定的首次管理员口令；仅初始化空库，既有账号不会被覆盖。
+    admin_password: str = "asdf!234"
+    session_seconds: int = Field(default=28800, ge=300, le=604800)
+    session_cookie_secure: bool = False
     encryption_key: str = ""
     internal_token: str = ""
     node_id: str = socket.gethostname()

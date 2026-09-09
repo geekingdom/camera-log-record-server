@@ -14,6 +14,8 @@
 
 ## 开发
 
+Linux 单机部署在拉取代码后执行 `./deploy.sh`，详见 [一键部署](docs/deployment.md)。首次管理员为 `admin`，初始密码 `asdf!234`，登录后必须修改；重复部署不会覆盖已修改密码。用户、资源范围及客户端 IP 权限见 [登录与访问控制](docs/user-access.md)。
+
 ```sh
 python -m pip install '.[test]'
 uvicorn camera_logs.main:app --host 0.0.0.0 --port 8000

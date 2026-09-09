@@ -1,9 +1,22 @@
-// 浏览器验收脚本：验证模板、任务、实时日志、归档和真实下载链路。
-// 凭据仅注入 sessionStorage；脚本输出、截图文件名和控制台均不包含令牌。
+// 浏览器验收脚本：只验证显式指定的合成任务，不接触真实设备采集任务。
+// Bootstrap 令牌仅用于创建和回收临时账号；页面及业务 API 全程使用 HttpOnly cookie 会话。
 import { mkdir } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 
 process.loadEnvFile(".env");
 const baseUrl = process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
+const bootstrapToken = process.env.BOOTSTRAP_TOKEN;
+const smokeTaskId = process.env.BROWSER_SMOKE_TASK_ID;
+const smokeMarker = /(?:协议压测|容器验收|浏览器验收|browser[-_ ]?smoke|synthetic|合成)/i;
+const operatorScopes = [
+  "tasks:read", "tasks:write", "resources:create", "resources:write",
+  "tasks:create", "tasks:control", "logs:read", "logs:download",
+  "commands:send", "templates:read", "templates:write",
+];
+if (!bootstrapToken)
+  throw new Error("浏览器验收需要 BOOTSTRAP_TOKEN 来创建临时账号");
+if (!smokeTaskId)
+  throw new Error("浏览器验收需要显式设置 BROWSER_SMOKE_TASK_ID 为合成任务 ID");
 const playwrightModule = await import(
   process.env.PLAYWRIGHT_MODULE || "playwright"
 );
@@ -14,10 +27,6 @@ const context = await browser.newContext({
   viewport: { width: 1440, height: 1000 },
   acceptDownloads: true,
 });
-await context.addInitScript(
-  (token) => sessionStorage.setItem("camera-log-record-token", token),
-  process.env.BOOTSTRAP_TOKEN,
-);
 
 const page = await context.newPage();
 // 让验收脚本在某个 UI 契约失配时快速失败，而不是用 Playwright 默认值长时间挂起。
@@ -26,37 +35,78 @@ const errors = [];
 const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const name = `浏览器验收-${Date.now()}`;
 let createdTemplateId;
+let temporaryUser;
 page.on("pageerror", (error) => errors.push(error.message));
 page.on("console", (message) => {
   if (message.type() === "error") errors.push(message.text());
 });
 
-// 精确匹配表格单元格，避免 toast、下拉选项和表格中的同名文本触发 strict locator 错误。
-function taskRow(taskName) {
-  return page
-    .getByRole("row")
-    .filter({ has: page.getByRole("cell", { name: taskName, exact: true }) });
+function password() {
+  return randomBytes(24).toString("base64url");
 }
 
-// 在已认证的浏览器上下文中选择确有小时归档的任务，保证下载验收不会依赖固定测试设备。
-async function exportableTaskId() {
-  return page.evaluate(async () => {
-    const token = sessionStorage.getItem("camera-log-record-token");
-    const headers = { Authorization: `Bearer ${token}` };
-    const tasks = await fetch("/api/v1/tasks?page=1&pageSize=20&status=COLLECTING", {
-      headers,
-    }).then((response) => response.json());
-    for (const task of tasks.items) {
-      // 实时验收必须选正在采集的任务，停止任务的历史归档不能证明实时订阅正常。
-      if (task.status !== "COLLECTING") continue;
-      const hours = await fetch(
-        `/api/v1/tasks/${encodeURIComponent(task.id)}/log-hours`,
-        { headers },
-      ).then((response) => (response.ok ? response.json() : { items: [] }));
-      if (hours.items?.length) return task.id;
-    }
-    throw new Error("没有可用于下载验收的小时归档任务");
+function assertResponse(response, action) {
+  if (!response.ok()) throw new Error(`${action} 失败：HTTP ${response.status()}`);
+}
+
+async function createTemporaryUser() {
+  const suffix = randomBytes(8).toString("hex");
+  const initialPassword = password();
+  const response = await context.request.post(`${baseUrl}/api/v1/users`, {
+    headers: {
+      Authorization: `Bearer ${bootstrapToken}`,
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    data: {
+      username: `browser-smoke-${suffix}`,
+      displayName: "浏览器验收临时账号",
+      password: initialPassword,
+      scopes: operatorScopes,
+      resourceIds: null,
+    },
   });
+  assertResponse(response, "创建浏览器验收临时账号");
+  const user = await response.json();
+  return { id: user.id, version: user.version, username: user.username, initialPassword };
+}
+
+async function loginTemporaryUser(user) {
+  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.getByLabel("用户名", { exact: true }).fill(user.username);
+  await page.getByLabel("密码", { exact: true }).fill(user.initialPassword);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  const passwordDialog = page.getByRole("dialog", { name: "修改密码", exact: true });
+  await passwordDialog.waitFor();
+  await passwordDialog.getByLabel("当前密码", { exact: true }).fill(user.initialPassword);
+  await passwordDialog.getByLabel("新密码", { exact: true }).fill(password());
+  await passwordDialog.getByRole("button", { name: "保存新密码", exact: true }).click();
+  await page.getByRole("dialog", { name: "确认修改密码", exact: true })
+    .getByRole("button", { name: "确认", exact: true }).click();
+  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
+  // 密码轮换会递增账号版本；finally 必须使用新版本才能软删除临时账号。
+  user.version += 1;
+}
+
+async function explicitSyntheticTask() {
+  const taskResponse = await context.request.get(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(smokeTaskId)}`,
+  );
+  assertResponse(taskResponse, "读取显式合成任务");
+  const task = await taskResponse.json();
+  const resourceResponse = await context.request.get(
+    `${baseUrl}/api/v1/resources/${encodeURIComponent(task.resourceId)}`,
+  );
+  assertResponse(resourceResponse, "读取显式合成任务资源");
+  const resource = await resourceResponse.json();
+  if (task.status !== "COLLECTING" || !smokeMarker.test(`${task.name} ${resource.name}`))
+    throw new Error("BROWSER_SMOKE_TASK_ID 必须指向名称含合成验收标识的采集中任务");
+  const hoursResponse = await context.request.get(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(task.id)}/log-hours?page=1&pageSize=1`,
+  );
+  assertResponse(hoursResponse, "读取显式合成任务归档");
+  if (!(await hoursResponse.json()).items?.length)
+    throw new Error("显式合成任务没有可用于下载验收的小时归档");
+  return task.id;
 }
 
 // 截图前直接检查抽屉和当前工作区标题的几何边界，防止 overflow:hidden 掩盖内容被推到屏外。
@@ -84,19 +134,13 @@ async function assertMobileDrawer(heading) {
 
 try {
   await mkdir(screenshots, { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
+  temporaryUser = await createTemporaryUser();
+  await loginTemporaryUser(temporaryUser);
   await page.screenshot({ path: `${screenshots}/resources-desktop.png`, fullPage: true });
-  // 逐页等待业务组件，根布局标题出现不足以证明异步页面及其样式已加载。
-  for (const [tab, selector] of [
-    ["服务节点", ".workspace .data-table"],
-    ["服务账号", ".access-manager"],
-    ["审计与事件", ".audit-workspace"],
-    ["后台配置", ".settings-manager"],
-  ]) {
-    await page.getByRole("tab", { name: tab, exact: true }).click();
-    await page.locator(selector).waitFor();
-  }
+  // 临时操作员不具备管理员权限；管理员菜单由独立的 browser_user_auth.mjs 验收。
+  for (const tab of ["服务节点", "服务账号", "审计与事件", "后台配置"])
+    if (await page.getByRole("tab", { name: tab, exact: true }).count())
+      throw new Error(`临时操作员不应看到管理员菜单：${tab}`);
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   // 历史资源的任务仍可查询日志，但不允许编辑；第一页不保证存在可编辑任务。
   await page.locator(".task-filters").waitFor();
@@ -142,10 +186,8 @@ try {
   await page.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: "刷新列表", exact: true }).click();
 
-  // 与 API 候选范围使用相同筛选和分页，历史合成任务增多不能挤走实时验收目标。
-  await page.locator(".task-filters .el-select").click();
-  await page.getByRole("option", { name: "采集中", exact: true }).click();
-  const taskId = await exportableTaskId();
+  // 仅使用调用者明确指定、名称带合成验收标识的任务，绝不扫描或误用真实采集任务。
+  const taskId = await explicitSyntheticTask();
   const existing = page
     .locator(".el-table__body tbody tr")
     .filter({ hasText: taskId })
@@ -237,9 +279,23 @@ try {
 } finally {
   try {
     if (createdTemplateId) {
-      await context.request.delete(`${baseUrl}/api/v1/command-templates/${createdTemplateId}?version=1`, {
-        headers: { Authorization: `Bearer ${process.env.BOOTSTRAP_TOKEN}` },
-      });
+      const response = await context.request.delete(
+        `${baseUrl}/api/v1/command-templates/${createdTemplateId}?version=1`,
+        { headers: { "X-Requested-With": "XMLHttpRequest" } },
+      );
+      assertResponse(response, "删除浏览器验收模板");
+    }
+    if (temporaryUser) {
+      const response = await context.request.delete(
+        `${baseUrl}/api/v1/users/${encodeURIComponent(temporaryUser.id)}?version=${temporaryUser.version}`,
+        {
+          headers: {
+            Authorization: `Bearer ${bootstrapToken}`,
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        },
+      );
+      assertResponse(response, "删除浏览器验收临时账号");
     }
   } finally { await browser.close(); }
 }

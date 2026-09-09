@@ -10,7 +10,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now, public
 from camera_logs.common.models import TaskCreate, TaskPatch, new_id
-from camera_logs.common.security import actor, authorize
+from camera_logs.common.security import actor, authorize, authorize_resource
 from camera_logs.tasks.resource_binding import bind_resource
 
 
@@ -38,11 +38,13 @@ def install_task_routes(app, repo, listing):
     @app.post("/api/v1/tasks", status_code=201)
     async def create_task(body: TaskCreate, request: Request, user: User):
         """复制命令配置并分配独立命令 ID，幂等请求只能创建一个任务。"""
-        authorize(user, "tasks:write")
+        authorize(user, "tasks:create")
         if body.autoStart:
             authorize(user, "tasks:control")
-        if user.get("taskIds") is not None:
+        if user.get("taskIds") is not None and user.get("kind") != "session":
             raise HTTPException(403, "受限账号不能创建授权范围外的新任务")
+        for resource_id in filter(None, (body.resourceId, body.serialServerResourceId)):
+            authorize_resource(user, resource_id)
         async def build(identifier):
             binding = await bind_resource(repo(), body)
             doc = body.model_dump()
@@ -64,7 +66,10 @@ def install_task_routes(app, repo, listing):
                         {"$set": {"resourceDeleted": True, "desiredState": "STOPPED"}})
                     raise HTTPException(409, "设备资源已删除，任务不会启动")
             if auto_start:
-                operation = await change_state(identifier, "RUNNING", user)
+                creator = user
+                if user.get("taskIds") is not None:
+                    creator = user | {"taskIds": [*user["taskIds"], identifier]}
+                operation = await change_state(identifier, "RUNNING", creator)
                 doc = await repo().get("tasks", identifier)
                 doc["operationId"] = operation["id"]
             return doc
@@ -99,6 +104,8 @@ def install_task_routes(app, repo, listing):
         except ValueError as exc:
             raise HTTPException(422, "任务配置无效，请检查协议、账号和命令字段") from exc
         doc = checked.model_dump(exclude={"autoStart", "password"})
+        for resource_id in filter(None, (checked.resourceId, checked.serialServerResourceId)):
+            authorize_resource(user, resource_id)
         doc.update(await bind_resource(repo(), checked))
         if "scheduledCommands" in updates:
             for cmd in doc["scheduledCommands"]:

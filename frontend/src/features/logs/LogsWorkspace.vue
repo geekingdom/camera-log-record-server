@@ -9,6 +9,7 @@ import LiveLogs from "./LiveLogs.vue";
 import LogArchives from "./LogArchives.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
 const selected = defineModel<string>({ default: "" });
+const props = defineProps<{ canDownload?: boolean; canSend?: boolean }>();
 const tasks = ref<Task[]>([]);
 const busy = ref(false);
 const tab = ref("live");
@@ -42,8 +43,8 @@ onBeforeUnmount(() => generation++);
     </el-select>
   </div>
   <el-tabs v-if="selected" v-model="tab" class="logs-workspace-tabs">
-    <el-tab-pane label="实时打印" name="live"><LiveLogs v-if="tab === 'live'" :key="selected" :task-id="selected" @history="tab = 'archives'" /></el-tab-pane>
-    <el-tab-pane label="小时归档与检索" name="archives"><LogArchives v-if="tab === 'archives'" :key="selected" :task-id="selected" /></el-tab-pane>
+    <el-tab-pane label="实时打印" name="live"><LiveLogs v-if="tab === 'live'" :key="selected" :task-id="selected" :can-send="props.canSend" @history="tab = 'archives'" /></el-tab-pane>
+    <el-tab-pane label="小时归档与检索" name="archives"><LogArchives v-if="tab === 'archives'" :key="selected" :task-id="selected" :can-download="props.canDownload" /></el-tab-pane>
     <el-tab-pane label="命令记录" name="commands"><CommandHistory v-if="tab === 'commands'" :key="selected" :task-id="selected" /></el-tab-pane>
   </el-tabs>
   <div v-else class="log-workspace-empty"><Search :size="32" /><h2>未选择采集任务</h2></div>

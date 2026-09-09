@@ -7,7 +7,7 @@ from fastapi import Depends, HTTPException, Query, Request
 from pymongo import ReturnDocument
 
 from camera_logs.common.database import now, public
-from camera_logs.common.security import actor, authorize
+from camera_logs.common.security import actor, authorize, authorize_resource
 from camera_logs.resources.authentication import authenticate_network_resource
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.models import ResourceInput, ResourcePatch
@@ -20,6 +20,8 @@ def _resource_public(document):
 
 async def _accessible_resource_ids(repo, user: dict) -> list[str] | None:
     """将受限令牌的任务白名单投影为已关联的资源 ID，避免越权读取资源。"""
+    if user.get("kind") == "session":
+        return user.get("resourceIds")
     task_ids = user.get("taskIds")
     if task_ids is None:
         return None
@@ -89,7 +91,7 @@ def install_resource_routes(app, repo, listing):
     @app.post("/api/v1/resources/authenticate")
     async def authenticate_resource(body: ResourceInput, user: User):
         """返回网络设备认证预览，结果只来自本次服务端设备请求。"""
-        authorize(user, "tasks:write")
+        authorize(user, "resources:create")
         if user.get("taskIds") is not None:
             raise HTTPException(403, "受限账号不能探测授权范围外的新资源")
         if body.kind == "SERIAL_SERVER":
@@ -99,7 +101,7 @@ def install_resource_routes(app, repo, listing):
     @app.post("/api/v1/resources", status_code=201)
     async def create_resource(body: ResourceInput, request: Request, user: User):
         """重新认证网络设备后保存密文凭据，客户端不能提交设备元数据。"""
-        authorize(user, "tasks:write")
+        authorize(user, "resources:create")
         if user.get("taskIds") is not None:
             raise HTTPException(403, "受限账号不能创建授权范围外的新资源")
         async def build(identifier):
@@ -116,12 +118,30 @@ def install_resource_routes(app, repo, listing):
                                    body.model_dump(), "resources", build)
         return await _resource_view(repo, result, user)
 
+    @app.post("/api/v1/resources/{identifier}/authenticate")
+    async def authenticate_existing_resource(identifier: str, body: ResourceInput, user: User):
+        """编辑资源的认证预览只能访问该已授权资源的固定地址。"""
+        authorize(user, "resources:write")
+        authorize_resource(user, identifier)
+        if user.get("taskIds") is not None and user.get("kind") != "session":
+            raise HTTPException(403, "受限令牌不能编辑共享资源")
+        old = await repo().get("resources", identifier)
+        if old.get("deletedAt") or body.ip != old["ip"] or body.kind != old["kind"]:
+            raise HTTPException(409, "资源地址、类型已变化或资源已删除")
+        metadata = await _verified_metadata(body)
+        if old["kind"] == "HIKVISION_NETWORK" and (
+            metadata["model"] != old.get("model") or metadata["subSerialNumber"] != old.get("subSerialNumber")
+        ):
+            raise HTTPException(409, "认证设备身份已变化；请新建资源")
+        return metadata
+
     @app.patch("/api/v1/resources/{identifier}")
     async def edit_resource(identifier: str, body: ResourcePatch, user: User):
         """以版本条件更新名称或 HTTP 凭据；物理 IP、类型和设备身份始终固定。"""
-        authorize(user, "tasks:write")
-        if user.get("taskIds") is not None:
+        authorize(user, "resources:write")
+        if user.get("taskIds") is not None and user.get("kind") != "session":
             raise HTTPException(403, "受限账号不能编辑共享资源")
+        authorize_resource(user, identifier)
         old = await repo().get("resources", identifier)
         if old.get("deletedAt") is not None:
             raise HTTPException(409, "资源已删除，不能编辑")
@@ -154,10 +174,16 @@ def install_resource_routes(app, repo, listing):
     @app.delete("/api/v1/resources/{identifier}", status_code=202)
     async def delete_resource(identifier: str, user: User, version: int = Query(ge=1)):
         """软删除资源并请求所有关联任务受控停止，保留任务、文件和历史目录。"""
-        authorize(user, "tasks:write")
+        authorize(user, "resources:write")
         authorize(user, "tasks:control")
-        if user.get("taskIds") is not None:
+        if user.get("taskIds") is not None and user.get("kind") != "session":
             raise HTTPException(403, "受限账号不能删除共享资源")
+        authorize_resource(user, identifier)
+        if user.get("taskIds") is not None:
+            # 删除串口服务器也会停止关联网络设备任务，禁止波及范围外设备。
+            outside = {"$and": [task_resource_query(identifier), {"id": {"$nin": user["taskIds"]}}]}
+            if await repo().db.tasks.find_one(outside):
+                raise HTTPException(403, "资源关联了授权范围外的任务，不能删除")
         old = await repo().get("resources", identifier)
         if old.get("deletedAt") is not None:
             result = await reconcile_resource_deletion(repo(), identifier)

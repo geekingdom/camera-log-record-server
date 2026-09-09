@@ -11,7 +11,7 @@ import {
 } from "../../shared/composables/liveLogBuffer";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
 
-const props = defineProps<{ taskId: string }>();
+const props = defineProps<{ taskId: string; canSend?: boolean }>();
 const emit = defineEmits<{ history: [] }>();
 const buffer = new LiveLogBuffer();
 const lines = ref<string[]>([]);
@@ -112,6 +112,7 @@ function openSocket(current: number) {
   socket = new WebSocket(socketUrl());
   socket.onopen = () => {
     if (current !== generation) return;
+    // Cookie 会话同源建立后无需在帧中重复发送凭据；保留 Bearer 工具兼容值。
     socket?.send(JSON.stringify({ token: getToken(), cursor: buffer.cursor }));
     connected.value = true;
   };
@@ -246,7 +247,7 @@ onBeforeUnmount(() => { stateGeneration++; clearTimeout(stateTimer); resize.disc
         v-model="command"
         placeholder="输入手工命令"
         @keyup.enter="send"
-      /><el-button type="primary" :icon="Send" :disabled="taskState?.commandBlocked && command.trim() !== 'debug'" @click="send">发送</el-button>
+      /><el-button v-if="props.canSend" type="primary" :icon="Send" :disabled="taskState?.commandBlocked && command.trim() !== 'debug'" @click="send">发送</el-button>
     </div>
     <el-alert v-if="taskState?.debugError || taskState?.commandBlocked" :title="taskState.commandBlocked ? '命令通道尚未恢复，日志采集继续' : '调试切换失败，普通命令与日志采集继续'" :description="taskState.debugError || undefined" type="warning" :closable="false" />
   </section>

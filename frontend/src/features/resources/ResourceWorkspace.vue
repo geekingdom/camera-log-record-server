@@ -11,6 +11,7 @@ import AsyncView from "../../shared/AsyncView.vue";
 const loadResourceEditor = () => import("./ResourceEditor.vue");
 
 const emit = defineEmits<{ tasks: [Resource] }>();
+const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canControl?: boolean; resourceIds?: string[] | null }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
@@ -29,7 +30,8 @@ async function load() {
   finally { if (current === generation) loading.value = false; }
 }
 function filter() { if (page.value === 1) void load(); else page.value = 1; }
-function edit(resource?: Resource) { selectedResource.value = resource; editorOpen.value = true; }
+function permitted(resource?: Resource) { return Boolean(props.canWrite && resource && (props.resourceIds === null || props.resourceIds?.includes(resource.id))); }
+function edit(resource?: Resource) { if (resource && !permitted(resource)) return; selectedResource.value = resource; editorOpen.value = true; }
 async function remove(resource: Resource) {
   if (deleting.value.has(resource.id)) return;
   deleting.value = new Set(deleting.value).add(resource.id);
@@ -62,7 +64,7 @@ defineExpose({ reload: load });
     <el-input v-model="search" aria-label="搜索资源" placeholder="搜索名称或 IP" :prefix-icon="Search" clearable @keyup.enter="filter" />
     <el-select v-model="kind" aria-label="按资源类型筛选" clearable placeholder="全部资源" @change="filter"><el-option label="海康网络设备" value="HIKVISION_NETWORK" /><el-option label="串口服务器" value="SERIAL_SERVER" /></el-select>
     <el-checkbox v-model="includeDeleted" @change="filter">包含已删除资源</el-checkbox>
-    <el-button @click="filter">筛选</el-button><el-button type="primary" :icon="Plus" @click="edit()">新建资源</el-button>
+    <el-button @click="filter">筛选</el-button><el-button v-if="props.canCreate && props.resourceIds === null" type="primary" :icon="Plus" @click="edit()">新建资源</el-button>
   </div>
   <el-table :data="resources" v-loading="loading" scrollbar-always-on class="data-table resource-table" empty-text="暂无设备资源">
     <el-table-column label="资源身份" min-width="250"><template #default="{ row }"><div class="resource-identity"><span class="resource-kind-icon" :class="row.kind === 'HIKVISION_NETWORK' ? 'network' : 'serial'"><component :is="kindIcon(row.kind)" :size="17" /></span><div><strong>{{ row.name }}</strong><div class="resource-type-line"><span>{{ kindLabel(row.kind) }}</span><el-tag v-if="row.deletedAt" type="info" size="small">已删除 · 日志保留</el-tag></div></div></div></template></el-table-column>
@@ -71,8 +73,8 @@ defineExpose({ reload: load });
     <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 活跃</span></div></template></el-table-column>
     <el-table-column label="操作" width="220" fixed="right"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
-      <el-tooltip v-if="!row.deletedAt" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
-      <el-tooltip v-if="!row.deletedAt" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
+      <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
+      <el-tooltip v-if="!row.deletedAt && permitted(row) && props.canControl" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
     </div></template></el-table-column>
   </el-table>
   <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" />

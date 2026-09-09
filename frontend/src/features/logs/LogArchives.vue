@@ -9,7 +9,7 @@ import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
 import LogFileViewer from "./LogFileViewer.vue";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
-const props = defineProps<{ taskId: string }>();
+const props = defineProps<{ taskId: string; canDownload?: boolean }>();
 const date = ref<string>(), hourPage = ref(1), hourTotal = ref(0), progress = ref(0);
 const file = ref<LogFile>(), viewerOpen = ref(false), resultPage = ref(1), resultTotal = ref(0), resultJob = ref("");
 const integrityLabels: Record<string, string> = { VERIFIED: "归档已校验", OPEN: "正在写入", UNAVAILABLE: "含不可用片段", UNVERIFIED: "待确认摘要" };
@@ -243,7 +243,7 @@ onBeforeUnmount(() => {
     <el-pagination v-if="hourTotal > 24" v-model:current-page="hourPage" :page-size="24" :total="hourTotal" layout="total, prev, pager, next" />
     <div class="archive-controls">
       <el-checkbox v-model="allowPartial">允许部分片段不可用</el-checkbox
-      ><el-button
+      ><el-button v-if="props.canDownload"
         :icon="Download"
         :disabled="busy || !selected.length"
         @click="download"

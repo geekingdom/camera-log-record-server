@@ -19,8 +19,8 @@ npm exec vite -- preview --host 127.0.0.1 --port 4173 --strictPort
 在仓库根目录执行，Playwright 模块位置可通过 `PLAYWRIGHT_MODULE` 配置：
 
 ```sh
-BROWSER_BASE_URL=http://127.0.0.1:4173 BROWSER_SCREENSHOTS=output/playwright-production node scripts/browser_smoke.mjs
+BROWSER_BASE_URL=http://127.0.0.1:4173 BROWSER_SMOKE_TASK_ID=<合成验收任务ID> BROWSER_SCREENSHOTS=output/playwright-production node scripts/browser_smoke.mjs
 BROWSER_BASE_URL=http://127.0.0.1:4173 node scripts/browser_loading_smoke.mjs
 ```
 
-完整验收覆盖资源、任务、节点、账号、审计、设置、模板草稿、实时打印、小时下载和搜索，检查桌面与移动端布局。加载专用验收确认首屏不请求未访问的业务分块、资源轮询保留未保存草稿、加载后无残留遮罩，以及中断审计分块后通过用户重载恢复。专用验收不提交任何业务写操作。两项生产浏览器验收和前端 25 项单元测试均已通过；生产完整流程控制台错误为零，已检查桌面日志页与移动抽屉截图。
+完整验收覆盖资源、任务、模板草稿、实时打印、小时下载和搜索，检查桌面与移动端布局。脚本必须传入名称含“合成”“协议压测”或“容器验收”等标识的 `BROWSER_SMOKE_TASK_ID`，拒绝扫描或操作真实采集任务；它会创建首登改密的临时操作员账号，并在结束时删除账号和模板。管理员菜单由 `browser_user_auth.mjs` 的路由替身验收。加载专用验收确认首屏不请求未访问的业务分块、资源轮询保留未保存草稿、加载后无残留遮罩，以及中断审计分块后通过用户重载恢复。专用验收不提交任何业务写操作。两项生产浏览器验收和前端 25 项单元测试均已通过；生产完整流程控制台错误为零，已检查桌面日志页与移动抽屉截图。

@@ -1,6 +1,12 @@
 services:
   mongo1:
     image: mongo:7.0
+    restart: unless-stopped
+    logging: &service-logging
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     volumes: ["mongo1-data:/data/db"]
     healthcheck:
@@ -11,6 +17,8 @@ services:
     networks: [camera-logs]
   mongo2:
     image: mongo:7.0
+    restart: unless-stopped
+    logging: *service-logging
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     volumes: ["mongo2-data:/data/db"]
     healthcheck:
@@ -21,6 +29,8 @@ services:
     networks: [camera-logs]
   mongo3:
     image: mongo:7.0
+    restart: unless-stopped
+    logging: *service-logging
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     volumes: ["mongo3-data:/data/db"]
     healthcheck:
@@ -39,12 +49,15 @@ services:
       - ./mongo-init.js:/scripts/mongo-init.js:ro
     command: ["mongosh", "mongodb://mongo1:27017/admin", "/scripts/mongo-init.js"]
     restart: "no"
+    logging: *service-logging
     networks: [camera-logs]
   api:
     build:
       context: ..
       dockerfile: deploy/api.Dockerfile
     env_file: ../.env
+    restart: unless-stopped
+    logging: *service-logging
     environment:
       MONGO_URI: ${COMPOSE_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/camera_logs?replicaSet=rs0}
       DATABASE_NAME: ${DATABASE_NAME:-camera_logs}
@@ -67,6 +80,8 @@ services:
       context: ..
       dockerfile: deploy/worker.Dockerfile
     env_file: ../.env
+    restart: unless-stopped
+    logging: *service-logging
     environment:
       MONGO_URI: ${COMPOSE_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/camera_logs?replicaSet=rs0}
       DATABASE_NAME: ${DATABASE_NAME:-camera_logs}
@@ -85,9 +100,16 @@ services:
     build:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
+    restart: unless-stopped
+    logging: *service-logging
     depends_on:
       api: { condition: service_healthy }
     ports: ["${FRONTEND_PORT:-5173}:80"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     networks: [camera-logs]
 
 volumes:
