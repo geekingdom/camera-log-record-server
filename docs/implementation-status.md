@@ -4,6 +4,8 @@
 
 ## 当前任务与恢复
 
+正在推进R26浏览器下载授权：`logs/download_sessions.py` 已将固定票据与审计共同提交，确认后才设置Cookie；两项回归先失败后通过，真实副本集失败/取消回滚及确认丢失恢复验证通过，临时库与目录清理完成。本地后端全量743项及Ruff通过，新增CI待收取，见[本轮记录](history/2026-09-09-download-ticket-audit.md)。作业完成审计仍未改造；最新业务节点与时区修复保持已完成，不重复实现。
+
 当前增量：日志下载/检索作业的文件保护、目录快照、幂等映射、入队和审计已改为同一事务，取消也与审计原子提交。功能提交 `1226e5a` 已通过 [Linux CI 34343287577](https://github.com/geekingdom/camera-log-record-server/actions/runs/34343287577) 六个作业，后端741项及Ruff通过，覆盖原生、独立组件和容器集成验证。真实副本集失败/取消回滚、并发重试、提交确认丢失验证通过，临时数据已删除。本机API/Worker尚未更新。此项推进R26，不替代下述用户最新节点与时区需求；记录见 [日志作业审计](history/2026-09-09-log-job-audit.md)。
 
 最新业务重点：修复服务器 Docker 节点 HTTP 登记失败，支持删除节点，并解释 UTC 服务器与上海小时归档的时差。功能提交 `dfe70a4` 已通过 [CI34341798389](https://github.com/geekingdom/camera-log-record-server/actions/runs/34341798389) 六个作业，含真实 Docker 默认 HTTP 节点登记/保存/持续心跳、节点删除竞争、原生与独立部署及多路分卷归档。本地后端736项、前端52项/构建、真实副本集及模拟浏览器12次确认操作通过。未连接用户服务器，未更新本机API/Worker；下一步按部署排障文档更新目标服务，继续全项目剩余验收。见 R29/R30 和 [本轮记录](history/2026-09-09-node-management-and-timezone.md)。
@@ -55,7 +57,7 @@
 | R23 五类 Linux 部署、中文配置、自启动、重复执行保留配置与卷 | 根部署入口、`deploy/*.yml`、`mongo-host-user-init.sh`、`deploy_component.py`；组件后缀隔离项目；systemd 启用 Docker、常驻容器 `unless-stopped` | 本地部署回归 43 项；Linux CI 34324896916 实际完整部署两次及独立四组件部署/重跑/重启；返回 restartHealth、temporaryProjectsRemoved、temporaryDataRemoved 均 true | 未实际重启宿主机；裸机安装 Docker 和 systemd 启用分支为脚本检查；未验收其他发行版与多机部署 | 在目标服务器验收开机启动及真实多机网络；维护已有环境和数据 |
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
-| R26 平台访问记录、业务审计与凭据脱敏 | 任务/会话/手动命令/令牌事务已交付；`logs/job_submission.py` 新增下载检索文件保护、入队和取消审计事务，作业审计显示任务及设备 | 1226e5a的CI34343287577六作业成功，后端741项；真实副本集作业失败/取消回滚、并发/确认丢失恢复及临时数据清理通过 | `logs/jobs.py` 作业完成和 `download_sessions.py` 浏览器授权的审计边界仍待处理；旧Repository.idem已无业务调用；本机新增入口未部署 | 继续完成状态和浏览器下载授权审计，不重复改造已完成事务 |
+| R26 平台访问记录、业务审计与凭据脱敏 | 任务/会话/手动命令/令牌及作业提交取消事务已交付；`logs/download_sessions.py` 补齐浏览器授权审计事务，确认后设置Cookie | 1226e5a的CI34343287577六作业成功，后端741项；新增授权定向六项和真实副本集失败/取消回滚、确认丢失恢复及临时数据清理通过 | `logs/jobs.py` 作业完成审计边界仍待处理；本轮授权新增CI待收取；本机新增入口未部署 | 继续作业完成状态审计，不重复改造已完成事务 |
 | R27 Ubuntu/Debian无Docker主机部署、五类入口、详细注释与自启动 | `deploy-native*.sh`、`scripts/native_*.py`、`deploy_native.py`、`docs/native-deployment.md`，已交付；Nginx权限和跨组件合同预检已修正 | `eb4e829` CI34338375626 Ubuntu24.04真实首次/重跑/重启通过，配置不变，临时安装已删除 | 未物理重启宿主机；Ubuntu22.04/Debian12自动依赖分支尚未实机验收 | 目标服务器按文档部署，验收实际依赖源和开机启动 |
 | R28 其他电脑通过HTTP服务器IP正常操作 | 共用`frontend/src/shared/api.ts`兼容UUIDv4；Docker/原生前端均重新编译该源码；CI加入`verify_http_browser.mjs` | 先复现相同异常，前端52项/构建通过；真实非安全IPv4 Chrome成功发出启动/命令/下载模拟请求；CI34338375626两类部署通过 | 目标服务器需拉取并重新构建前端；模拟浏览器不等于全部实体设备业务验收 | 更新目标服务器前端并强制刷新，继续产品全链路验收 |
 

@@ -16,6 +16,51 @@ from fastapi.testclient import TestClient
 from test_api import client  # noqa: F401
 
 
+def test_ticket_transaction_failure_never_sets_cookie(client, monkeypatch):  # noqa: F811
+    """数据库提交不可确认时，不发布任何浏览器授权。"""
+    from camera_logs.common import audited_mutations
+    from pymongo.errors import ConnectionFailure
+
+    repo = client.app.state.repo
+    client.portal.call(repo.db.jobs.insert_one, {
+        "id": "unconfirmed", "taskId": "task-a", "status": "SUCCEEDED"})
+
+    async def unavailable(*args):
+        raise ConnectionFailure("simulated database failure")
+
+    monkeypatch.setattr(audited_mutations, "mutation_transaction", unavailable)
+    result = client.post("/api/v1/downloads/unconfirmed/browser-session")
+    assert result.status_code == 503
+    assert "set-cookie" not in result.headers
+    assert client.portal.call(repo.db.download_sessions.count_documents, {}) == 0
+
+
+def test_ticket_commit_acknowledgement_loss_recovers_without_reissuing(client, monkeypatch):  # noqa: F811
+    """提交已完成但确认丢失，只读恢复原票据，审计和凭据各一份。"""
+    from camera_logs.common import audited_mutations
+    from pymongo.errors import ConnectionFailure
+
+    repo = client.app.state.repo
+    client.portal.call(repo.db.jobs.insert_one, {
+        "id": "confirmed", "taskId": "task-a", "status": "SUCCEEDED"})
+    original = audited_mutations.mutation_transaction
+    calls = []
+
+    async def lost_ack(repo, callback):
+        calls.append(True)
+        await original(repo, callback)
+        raise ConnectionFailure("simulated acknowledgement loss")
+
+    monkeypatch.setattr(audited_mutations, "mutation_transaction", lost_ack)
+    result = client.post("/api/v1/downloads/confirmed/browser-session")
+    assert result.status_code == 200
+    assert len(calls) == 1
+    assert "HttpOnly" in result.headers["set-cookie"]
+    assert client.portal.call(repo.db.download_sessions.count_documents, {}) == 1
+    assert client.portal.call(repo.db.audit.count_documents, {
+        "action": "browser_download_authorization", "targetId": "confirmed"}) == 1
+
+
 def test_cookie_download_is_scoped_revocable_and_expires(client):  # noqa: F811
     repo = client.app.state.repo
     client.portal.call(repo.db.jobs.insert_one, {

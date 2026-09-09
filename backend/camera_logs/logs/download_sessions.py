@@ -9,11 +9,40 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, Response
+from pymongo.errors import PyMongoError
 
 from camera_logs.access_policy.policy import apply_ip_permissions
+from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.security import actor, authorize
 from camera_logs.users.sessions import COOKIE
+
+
+async def issue_download_ticket(repo, actor_id, identifier):
+    """固定票据与审计原子提交；确认丢失只读恢复，确认前不得发送 Cookie。"""
+    token = secrets.token_urlsafe(32)
+    document = {"tokenHash": hashlib.sha256(token.encode()).hexdigest(),
+                "jobId": identifier, "actor": actor_id,
+                "expiresAt": now() + timedelta(minutes=5)}
+
+    async def commit(session):
+        await repo.db.download_sessions.insert_one(document, session=session)
+        await repo.audit(actor_id, "browser_download_authorization", identifier, session=session)
+
+    try:
+        await audited_mutations.mutation_transaction(repo, commit)
+    except PyMongoError as error:
+        try:
+            database = audited_mutations._majority_primary_database(repo)
+            confirmed = await database.download_sessions.find_one({
+                "tokenHash": document["tokenHash"], "jobId": identifier,
+                "actor": actor_id, "expiresAt": {"$gt": now()},
+            })
+        except PyMongoError:
+            confirmed = None
+        if confirmed is None:
+            raise HTTPException(503, "下载授权提交结果未知，请重新申请下载授权") from error
+    return token
 
 
 async def download_actor(request: Request):
@@ -48,11 +77,8 @@ def install_download_sessions(app):
         authorize(user, "logs:download", job["taskId"])
         if job["status"] != "SUCCEEDED":
             raise HTTPException(409, "导出尚未完成")
-        token = secrets.token_urlsafe(32)
-        await repo.db.download_sessions.insert_one({"tokenHash": hashlib.sha256(token.encode()).hexdigest(),
-            "jobId": identifier, "actor": user["id"], "expiresAt": now()+timedelta(minutes=5)})
+        token = await issue_download_ticket(repo, user["id"], identifier)
         path = f"/api/v1/downloads/{identifier}/content"
         response.set_cookie("download_access", token, httponly=True, samesite="strict", secure=request.url.scheme == "https",
                             path=path, max_age=300)
-        await repo.audit(user["id"], "browser_download_authorization", identifier)
         return {"url": path, "expiresInSeconds": 300}
