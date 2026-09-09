@@ -1,12 +1,12 @@
 # 当前状态总表
 
-核对日期：2026-09-09。本轮基线 `59337d8`，正在收尾审计排障信息增强、五类部署入口及任务创建/控制事务。提交后用 `git log -1 -- docs/implementation-status.md` 定位总表版本，不把工作区改动冒充已发布。[历史记录](history/README.md) 不替代本表。
+核对日期：2026-09-09。功能提交 `f80ee14` 已推送，审计排障、五类部署入口及任务创建/控制事务通过 [Linux CI 34324896916](https://github.com/geekingdom/camera-log-record-server/actions/runs/34324896916) 的五个作业；后端 689 项、前端 49 项通过。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。[历史记录](history/README.md) 不替代本表。
 
 ## 当前任务与恢复
 
 最新用户问题复核（2026-09-09 15:25 上海时间，工作区仍以 `59337d8` 为提交基线）：旧 API PID 49854 的 OpenAPI 中没有 `/api/v1/request-events`，访问日志在 `.local/service-logs/api/camera-logs.jsonl:2318` 记录请求 `6dd61839ad6b48f193c760193dbe5199` 于 15:25:30 返回 404、耗时 2.297ms。受控更新 API 至 PID 79958 后，审计、运行和请求三类事件接口均以管理员 Token 返回 200；Chrome 刷新请求记录后 404 消失并正常显示空列表。未导入旧文件访问日志，未改动真实业务数据。Worker PID 25871 未重启，34/35 的 `COLLECTING` 状态、run、session 和 generation=28 均保持不变。
 
-当前重点（最新用户变更）：审计与事件已补齐中文摘要、对象名称、安全异常原因、请求关联和请求排障记录；本地隔离 Cookie 浏览器、真实 Mongo 派生筛选及后端/前端验证已完成，详见 [本轮审计与部署记录](history/2026-09-09-audit-observability-and-component-deployment.md)。部署已拆分为完整平台、前端、后端、采集节点、数据库五个入口，脚本与配置提供中文注释、日志目录可定制项及容器重启策略；独立组件项目名采用组件后缀隔离，已修复此前 `storage-init` 名称碰撞及独立 Mongo 在 Linux host 网络下的官方初始化端口 27017 冲突，部署相关 43 项测试通过。`component-smoke` 已写入 CI 工作流但当前未提交工作区没有对应 Linux CI 运行结果，不能表述为已发布或已验收。任务创建自动启动与控制事务也在本轮收尾，已进行真实副本集故障验证，尚不能以局部通过宣称本轮发布完成。后续仍有任务编辑、登录/退出会话审计和 Worker 物理收尾的一致性缺口；已有命令预算与领取事务不重复实施。真实 Worker 不因 API 开发重启。白名单只约束平台客户端，不约束任何设备目标；生成交接摘要不是业务目标。
+当前重点（最新用户变更）：请求记录页 404 已通过更新本机 API 解决；审计与事件已补齐中文摘要、对象名称、安全异常原因、请求关联和请求排障记录。五类部署入口、详细中文配置、可定制日志目录、Docker 开机启用和常驻容器 `unless-stopped` 已实现。Linux CI 已实际验证完整部署及独立四组件部署、重复执行保留配置、容器重启后 API/前端代理/Worker 心跳恢复和临时项目清理。尚未实际重启宿主机，systemd 开机启用分支仍为脚本检查。详见 [本轮审计与部署记录](history/2026-09-09-audit-observability-and-component-deployment.md)。任务创建自动启动与控制事务已通过真实副本集故障验证；下一步继续任务编辑、登录/退出会话审计和 Worker 物理收尾一致性，以及全项目产品/容量验收。已有命令预算与领取事务不重复实施。真实 Worker 不因 API 开发重启。白名单只约束平台客户端，不约束任何设备目标；生成交接摘要不是业务目标。
 
 恢复时先读最新业务消息与总表，再核对工作区、提交和相关源码。摘要中的默认值、运行状态和结果必须重新验证。“源码/测试存在”不等于本轮重跑通过；继承的历史结果明确标为历史。
 
@@ -39,15 +39,15 @@
 | R15 流式搜索、并发/读预算、配额与到期清理 | `logs/jobs.py`、限制器、`logs/maintenance.py`，部分验收 | 导出限制测试、合成报告 | 混合持续负载未证明 | 与采集联合验收 |
 | R16 美观 UI、侧栏折叠/滚动、状态按钮、修改二次确认 | 前端 app/features，命令草稿删除已补确认；按对象定位避免异步确认误删 | 前端 32 项测试；`browser_confirmations.mjs` 11 项模拟写入、零控制台错误；1440/390 截图核对 | 真实设备完整产品链路尚需专用模拟任务复验 | 保持草稿确认与保存确认独立，推进全链路验收 |
 | R17 实时虚拟列表/限速、ANSI、暂停跟随与续传 | `LiveLogs.vue`、`LiveLogRanges.vue`、`shared/composables/liveLogBuffer.ts`；已知字节范围补读已实现 | 前端 42 项；浏览器精确五页补读、暂停/任务切换/迟到响应及 1440/390/320 视口；隔离真实 API 的 1200 行/秒模拟流补读与全链路通过 | 服务端无 file/offset 的 gap 事件只能转小时归档；仅保留最近更新的 200 个范围；跨文件范围分别阅读 | 后续完善跨节点/跨文件未知缺口目录定位，继续规模验收；不重复实现已知范围窗口 |
-| R18 保留天数、节点登记/准入、审计/事件 | `administration/settings.py` 的保留期/节点配置与审计同事务；`administration/event_presenter.py`、`event_queries.py` 和审计界面提供中文摘要、关联对象、安全原因及 Mongo 派生筛选分页 | 本轮隔离 Cookie 浏览器显示 `CONNECTION_GAP` 中文摘要、任务/IP、`WARNING/UNKNOWN` 和详情；真实 Mongo `verify_event_queries.py` 通过并清理随机库；后端相关 30 项、前端 49 项与构建通过 | 登记不等于部署；缺输入速率准入阈值；本轮未提交，Linux CI 未运行 | 提交后运行包含事件聚合验证的 container-smoke，并继续配置生效与速率准入验收 |
+| R18 保留天数、节点登记/准入、审计/事件 | `administration/settings.py` 的保留期/节点配置与审计同事务；`event_presenter.py`、`event_queries.py` 和审计界面提供中文摘要、关联对象、安全原因及 Mongo 派生筛选分页 | 隔离 Cookie 浏览器显示连接缺口、任务/IP、级别/结果与详情；真实 Mongo 派生查询验证与 Linux CI 34324896916 通过；本机三事件接口 200 | 登记不等于部署；缺输入速率准入阈值 | 继续配置生效与速率准入验收 |
 | R19 Token/撤销/权限、加密审计、TLS | Token/公共鉴权、`users/sessions.py`，会话用户支持资源范围；服务 Token 保留任务范围 | `test_user_permissions.py`、权限/脱敏测试，本轮全量通过 | 分布式 TLS 未验收 | 真实代理与会话撤销验证 |
 | R20 500×1200 行/秒×24小时，文件可读 P99≤200ms | 压测工具与写入指标，待验收 | 短时报告仅证明对应样本 | 无等规模证据，API 观察不能替代文件可读 | 独立文件探针与 Linux 集群全天验收 |
 | R21 及时清理开发日志，保留证据 | 下载副本清理及新 `scripts/cleanup_dev_server_logs.py`、`dev_cleanup_evidence.py`；受限 ID 维护入口 | 历史清理 1,028 个副本/601,373,134 字节；本轮实际解压核验 10 归档/18 catalog/3,080,799 字节，预览 PROTECTED | 两份合成数据最晚保护到上海 2026-09-09 23:12:23.673；当前未物理删除；失败实验仍需完整来源证据 | 到期重跑预览/执行，不缩短保护或全局保留期；见开发清理文档 |
 | R22 中文提交、部署/API/运维文档、持续总表 | `AGENTS.md`、hooks、CI、docs，部分交付 | 本轮总表和历史入口，既有提交校验 | 压缩率与全天容量报告未交付 | 每次同步对应状态行 |
-| R23 Linux 一键部署、重复执行保留配置与卷 | 根 `deploy.sh`、组件入口、`deploy/*.yml`、`scripts/deploy_component.py`；`verify_component_deployment.py` 为数据库、后端、节点、前端使用同一随机基名加组件后缀的独立项目和临时目录 | 既有 CI 34304331562 实际执行完整脚本两次；本轮 `test_deploy_components.py`、`test_deploy.py` 29 项和真实 Compose 配置展开通过；`component-smoke` 已加入 CI 工作流 | 裸机自动安装 Docker 的分支为脚本检查；本轮 Linux 独立四组件部署/重跑/重启/清理尚待 CI 实跑；未验收其他发行版与多机部署 | 提交后运行 `component-smoke`，验证随机组件项目和临时目录均被清理 |
+| R23 五类 Linux 部署、中文配置、自启动、重复执行保留配置与卷 | 根部署入口、`deploy/*.yml`、`mongo-host-user-init.sh`、`deploy_component.py`；组件后缀隔离项目；systemd 启用 Docker、常驻容器 `unless-stopped` | 本地部署回归 43 项；Linux CI 34324896916 实际完整部署两次及独立四组件部署/重跑/重启；返回 restartHealth、temporaryProjectsRemoved、temporaryDataRemoved 均 true | 未实际重启宿主机；裸机安装 Docker 和 systemd 启用分支为脚本检查；未验收其他发行版与多机部署 | 在目标服务器验收开机启动及真实多机网络；维护已有环境和数据 |
 | R24 正常登录、内置管理员、子账户及权限 | `users/`、前端 `features/auth/`、`app/AppNavigation.vue`；App 已拆至 494 行 | 前轮 Linux CI；本轮前端 28 项测试含退出后迟到响应/恢复失败清理，构建和模拟浏览器通过 | 真实浏览器完整采集操作仍需专用模拟任务复验 | 按产品缺口推进，保持会话代次隔离 |
 | R25 平台来源 IP 白名单、多网段独立权限 | `access_policy/`、Nginx、前端 IP 管理，已实现并通过 Linux CI | IPv4/IPv6、权限交集、设备和串口目标不受限测试；CI 真实代理启用/关闭策略及伪造 XFF 检查通过 | 额外反向代理拓扑需单独配置可信来源链 | 部署时按实际代理链检查 clientIp |
-| R26 平台访问记录、业务审计与凭据脱敏 | `request_context.py` 使 `Repository.audit()` 自动关联 `requestId`、`clientIp`；`observability.py` 保存脱敏的 `/api/v1/` 请求排障事件，`request_events` 以 30 天 TTL 管理；展示层只投影关联对象安全字段 | 本轮请求关联、4xx 安全原因、取消/写入故障边界、历史 `level/outcome` 派生筛选与 1000 条分页回归通过；隔离浏览器确认仅 Cookie 会话、409 请求事件及随机库/日志目录清理 | 通用 `Repository.idem` 未迁移；任务编辑、登录/退出，以及手动命令外层和其他作业创建审计仍需处理；socket 不属于数据库事务；本轮未提交，Linux CI 未运行 | 提交后执行 container-smoke 的 `verify_event_queries.py`，继续任务编辑和会话轮换审计 |
+| R26 平台访问记录、业务审计与凭据脱敏 | `request_context.py` 关联请求/来源；`observability.py` 保存脱敏排障事件、30 天 TTL；任务创建/控制数据库状态与业务审计同事务 | 请求关联、4xx 原因、取消/写入故障边界、历史派生筛选与 1000 条分页通过；隔离 Cookie 浏览器与 Linux CI 34324896916 真实事务验证通过，临时数据清理 | 通用 `Repository.idem` 未迁移；任务编辑、登录/退出、手动命令外层及其他作业创建审计仍需处理；socket 不属于数据库事务 | 继续任务编辑和会话轮换审计，不重复实施已完成事务 |
 
 ## 验收口径
 

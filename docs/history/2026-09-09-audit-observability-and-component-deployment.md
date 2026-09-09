@@ -2,7 +2,7 @@
 
 ## 范围
 
-本记录覆盖工作区中尚未提交的审计排障、事件展示与独立组件部署增强。它不代表发布完成，也不替代当前状态总表。
+本记录覆盖功能提交 `f80ee14` 的审计排障、事件展示与独立组件部署增强。代码已推送并通过 Linux CI，不替代当前状态总表及全项目验收。
 
 ## 审计与请求排障
 
@@ -30,4 +30,10 @@
 
 独立数据库、后端、采集节点和前端部署现在以同一随机基名加组件后缀创建 Compose 项目，避免此前共享项目名导致 `storage-init` 服务名碰撞。`scripts/verify_component_deployment.py` 在 Linux 上将验证四组件独立启动、重复执行不改写环境文件、容器重启后的健康检查，以及容器、卷和临时挂载目录清理。
 
-`component-smoke` 已配置在 CI 工作流，但当前工作区没有新提交对应的 Linux 运行结果。因此本记录只确认脚本和本地静态/单元证据，不能将独立组件部署描述为已在 Linux CI 通过或已发布。独立 Mongo 在 Linux host 网络下的官方初始化端口 27017 冲突已在 `deploy/mongo-host-user-init.sh` 与 `deploy/database.yml` 修复，部署相关两份测试文件共 43 项通过；仍须提交后由 Linux CI 实跑，组件部署验收才可完成。
+独立 Mongo 在 Linux host 网络下的官方初始化端口 27017 冲突已在 `deploy/mongo-host-user-init.sh` 与 `deploy/database.yml` 修复，部署相关两份测试文件共 43 项通过。
+
+## Linux CI 结果
+
+[CI 34324896916](https://github.com/geekingdom/camera-log-record-server/actions/runs/34324896916) 对提交 `f80ee14` 的五个作业全部成功：后端 689 项测试及 Ruff、前端 49 项测试及构建、中文提交校验、完整容器集成、独立组件部署集成。完整容器集成包含正式代理、账号权限、真实副本集事件/任务事务及多路协议分卷归档验证。
+
+独立组件作业在 Linux 上实际部署四组件、重复部署并校验环境文件字节未变，重启后检查 API、前端代理及 Worker 接口/数据库心跳。2026-09-09T07:42:31Z 返回 `passed=true`、`independentComponents=true`、`repeatPreservesEnvironment=true`、`restartHealth=true`、`temporaryProjectsRemoved=true`、`temporaryDataRemoved=true`。未进行宿主机重启或多机部署，不将容器重启验收等同于这些场景，也不替代 500 路全天容量验收。
