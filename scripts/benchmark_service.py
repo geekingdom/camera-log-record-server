@@ -17,6 +17,7 @@ from uuid import uuid4
 import httpx
 from camera_logs.common.config import Settings
 from service_benchmark_diagnostics import capture_failure
+from service_benchmark_http import BenchmarkTransport
 from service_benchmark_io import LoadSource, verify_download
 from service_benchmark_latency import BatchLatency, observe_read_latency
 from service_benchmark_realtime import observe_realtime
@@ -166,7 +167,7 @@ async def execute(args):
     started = time.monotonic()
     async with httpx.AsyncClient(base_url=args.url.rstrip("/"),
         headers={"Authorization": "Bearer " + token}, timeout=120,
-        limits=httpx.Limits(max_connections=max(32, args.routes + 8))) as client:
+        transport=BenchmarkTransport(args.routes)) as client:
         try:
             node_data = await request(client, "GET", "/api/v1/nodes")
             available = sum(max(0, node.get("capacity", 0) - node.get("activeTasks", 0))
