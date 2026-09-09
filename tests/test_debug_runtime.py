@@ -89,12 +89,34 @@ async def test_storage_stop_error_is_not_absorbed_as_psh_failure(tmp_path):
     assert await repo.db.endpoint_locks.count_documents({"taskId": task["id"]}) == 1
 
 
-async def test_debug_without_challenge_keeps_runtime_collecting_without_password_or_reconnect(tmp_path):
+@pytest.mark.parametrize("publish_delay", [0, .2])
+async def test_debug_without_challenge_keeps_runtime_collecting_without_password_or_reconnect(tmp_path, monkeypatch, publish_delay):
     """无密文时只封锁命令，运行与日志继续，且不再解密或自动重试 debug。"""
     repo, task = await repository(tmp_path)
     task["pshSerialCharacterInterval"] = 0
     repo.settings.psh_serial_character_interval = 0
     task["initialCommands"] = [{"command": "debug", "timeoutSeconds": .05}, {"command": "next"}]
+    blocked, published = asyncio.Event(), asyncio.Event()
+    original_on_log = SessionRuntime.on_log
+    original_on_debug = SessionRuntime.on_debug
+
+    async def on_debug(self, event, details):
+        """等待无挑战码的失败状态完成持久化，而不是等待不会出现的第三次发送。"""
+        await original_on_debug(self, event, details)
+        if event == "BLOCKED":
+            blocked.set()
+
+    async def on_log(self, chunk):
+        """模拟发布协程被调度延迟，完成后以事件通知断言方。"""
+        continuous = b"continuous device log" in chunk.data
+        if continuous:
+            await asyncio.sleep(publish_delay)
+        await original_on_log(self, chunk)
+        if continuous:
+            published.set()
+
+    monkeypatch.setattr(SessionRuntime, "on_log", on_log)
+    monkeypatch.setattr(SessionRuntime, "on_debug", on_debug)
 
     class Connection:
         def __init__(self):
@@ -117,19 +139,18 @@ async def test_debug_without_challenge_keeps_runtime_collecting_without_password
     runtime = SessionRuntime(repo, task, connection_factory=factory)
     provider = AsyncMock(return_value="must-not-be-sent")
     runtime.debug_passwords = provider
-    for _ in range(100):
-        if len(connection.sent) >= 3:
-            break
-        await asyncio.sleep(.01)
-    await connection.received.put(b"continuous device log\r\n")
-    await asyncio.sleep(.15)
-    assert runtime.error is None
-    assert not runtime.background.done()
-    factory.assert_awaited_once()
-    provider.assert_not_awaited()
-    assert connection.sent == [b"debug\n", b"\x03"]
-    assert any(b"continuous device log" in __import__("base64").b64decode(frame["data"]) for frame in runtime.frames)
-    await runtime.stop()
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=2)
+        await connection.received.put(b"continuous device log\r\n")
+        await asyncio.wait_for(published.wait(), timeout=2)
+        assert runtime.error is None
+        assert not runtime.background.done()
+        factory.assert_awaited_once()
+        provider.assert_not_awaited()
+        assert connection.sent == [b"debug\n", b"\x03"]
+        assert any(b"continuous device log" in __import__("base64").b64decode(frame["data"]) for frame in runtime.frames)
+    finally:
+        await runtime.stop()
 
 
 async def test_debug_events_persist_task_recovery_state_without_run_latch(tmp_path):
