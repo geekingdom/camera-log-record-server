@@ -79,4 +79,4 @@ R10 手动命令实现阶段后端全量 610 项、前端 32 项及构建、Ruff
 
 R17 功能提交 `17747f9` 本地后端 610 项、前端 42 项、生产构建与 Ruff 通过，独立复核未发现阻塞问题；[Linux CI 34314414779](https://github.com/geekingdom/camera-log-record-server/actions/runs/34314414779) 四个作业全部成功。详细边界、浏览器与真实 API 证据及临时数据清理见 [实时范围补读记录](history/2026-09-09-live-range-recovery.md)。
 
-R18/R26 本轮本地后端全量 623 项、前端 47 项、生产构建、Ruff 和 diff 检查通过。隔离真实 Cookie 浏览器与真实 Mongo 事务验证通过，临时服务/数据库/日志目录均已回收。独立审查发现的测试夹具适配遗漏已修正，同名冲突回滚转由真实数据库证明。新提交的 Linux CI 和本机 API 更新仍须单独确认，不能沿用上一轮绿色状态。详情见 [审计会话与事务记录](history/2026-09-09-audit-session-and-transactions.md)。
+R18/R26 功能提交 `19bdb74` 本地后端全量 623 项、前端 47 项、生产构建、Ruff 和 diff 检查通过；[Linux CI 34316605024](https://github.com/geekingdom/camera-log-record-server/actions/runs/34316605024) 后端、前端、中文提交、容器集成四个作业全部成功，包含新增真实审计事务和多路归档回归。隔离真实 Cookie 浏览器通过，临时服务/数据库/日志目录已回收。独立审查发现的夹具适配遗漏已修正，同名冲突回滚由真实数据库证明。本机 API 已更新为 PID 43955，Worker 25871 未变；34/35 维持原运行/会话/generation=28，日志继续增长。真实用户浏览器已刷新，当前需重新登录；未改真实管理员密码。详情见 [审计会话与事务记录](history/2026-09-09-audit-session-and-transactions.md)。
