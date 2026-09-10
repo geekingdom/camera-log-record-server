@@ -62,6 +62,8 @@ def request_example(schema, schemas):
         return {"taskId": "task-example", "start": STAMP, "end": "2026-09-09T11:00:00+00:00", "keyword": ""}
     if name == "DownloadCreate":
         return {"taskId": "task-example", "hourIds": [STAMP], "allowPartial": False}
+    if name == "CoredumpExportCreate":
+        return {"fileIds": ["coredump-example"]}
     if name == "TaskPatch":
         return {"version": 1, "name": "更新后的任务名称"}
     return schema_example(schema, schemas)
@@ -79,6 +81,17 @@ def response_example(path, method, status):
         return {"status": "ok"}
     if path == "/metrics":
         return "# TYPE camera_tasks gauge\ncamera_tasks 2\n"
+    if "coredump" in path:
+        if path.endswith("/browser-session"):
+            return {"url": path.removesuffix("/browser-session") + "/content", "expiresInSeconds": 300}
+        if path.endswith("/content"):
+            return "<二进制 coredump 或 ZIP STORE；支持 Range: bytes=0-1048575 和 If-Range>"
+        if path.endswith("/coredumps"):
+            return page({"id": "coredump-example", "resourceId": "resource-example", "nodeId": "collector-01",
+                         "name": "core-example", "status": "RECEIVING", "size": 1048576,
+                         "receivedAt": STAMP, "sourceModifiedAt": STAMP, "version": 1})
+        return {"id": "coredump-export-example", "kind": "COREDUMP_EXPORT", "status": "QUEUED",
+                "createdAt": STAMP, "expiresAt": "2026-09-10T10:00:00+00:00"}
     if path.endswith("/browser-session"):
         return {"url": "/api/v1/downloads/job-example/content", "expiresInSeconds": 300}
     if path.endswith("/content"):

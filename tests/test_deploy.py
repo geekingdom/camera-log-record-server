@@ -127,6 +127,14 @@ def test_deploy_script_protects_existing_volumes_before_generating_keys():
     assert "deploy_env.py" in script and "deploy_health.py" in script
 
 
+def test_deploy_script_uses_sudo_to_revoke_existing_project_nfs_export():
+    """空 NFS 地址重跑时，遗留专属 export 也必须走可写系统目录的提权分支。"""
+    script = (root / "deploy.sh").read_text(encoding="utf-8")
+    assert 'nfs_export_file="/etc/exports.d/camera-logs-coredump.exports"' in script
+    assert '[[ -e "$nfs_export_file" && "$EUID" -ne 0 ]]' in script
+    assert 'sudo python3 "$root/scripts/configure_nfs_export.py" --env-file "$env_file"' in script
+
+
 def _deployment_copy(tmp_path):
     """复制部署入口及其最小依赖，以真实 Bash 进程配合假 Docker 验证编排。"""
     app = tmp_path / "app"
@@ -134,7 +142,7 @@ def _deployment_copy(tmp_path):
     (app / "deploy").mkdir()
     for name in ("deploy.sh",):
         shutil.copy2(root / name, app / name)
-    for name in ("deploy_env.py", "deploy_docker.sh", "deploy_health.py"):
+    for name in ("configure_nfs_export.py", "deploy_env.py", "deploy_docker.sh", "deploy_health.py"):
         shutil.copy2(root / "scripts" / name, app / "scripts" / name)
     (app / "deploy" / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     return app

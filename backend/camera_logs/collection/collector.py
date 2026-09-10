@@ -134,6 +134,13 @@ class Collector:
         if delay > 0:
             await asyncio.sleep(delay)
 
+    def start_coredump_monitor(self, server: str, root: str, report: Callback, guard: Callback | None = None) -> None:
+        """挂载监控与定时协程共用会话取消/回收机制，不引入额外连接。"""
+        from .coredump_monitor import run_monitor
+        if self._initializing or self._closed.is_set() or not self._accepting_commands:
+            return
+        self._scheduled.append(asyncio.create_task(run_monitor(self, server, root, report, guard=guard)))
+
     async def enqueue_manual(
         self,
         command: str,

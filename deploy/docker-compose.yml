@@ -98,6 +98,8 @@ services:
       LOG_ROOT: /var/lib/camera-logs/data
       NODE_ID: ${COLLECTOR_NODE_ID:-compose-worker-1}
       NODE_URL: ${COLLECTOR_NODE_URL:-http://worker:8001}
+      NFS_ROOT: ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
+      NFS_SERVER_IP: ${NFS_SERVER_IP:-}
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
     depends_on:
       mongo-init: { condition: service_completed_successfully }
@@ -105,6 +107,7 @@ services:
     # 默认单节点使用稳定身份与命名卷；多机扩容使用 worker-node.yml 独立部署。
     volumes:
       - ${HOST_LOG_ROOT:-worker-data}:/var/lib/camera-logs
+      - ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}:${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
     networks: [camera-logs]
   frontend:

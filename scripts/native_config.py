@@ -17,6 +17,7 @@ def defaults():
     return {
         "INSTALL_ROOT": "/opt/camera-logs", "DATA_ROOT": "/var/lib/camera-logs",
         "LOG_ROOT": "/var/lib/camera-logs/collector", "API_LOG_ROOT": "/var/lib/camera-logs/api",
+        "NFS_ROOT": "/srv/camera-logs/nfs-coredump", "NFS_SERVER_IP": "",
         "MONGO_DATA_ROOT": "/var/lib/camera-logs/mongo", "SERVICE_USER": "camera-logs",
         "PYTHON_BIN": "python3.12", "INSTALL_PACKAGES": "true",
         "MONGO_BIND_IP": "127.0.0.1", "MONGO_ADVERTISED_HOST": "127.0.0.1",
@@ -41,6 +42,8 @@ COMMENTS = {
     "DATA_ROOT": "可修改：数据根目录；其它 *_ROOT 独立配置，不随此项自动改变。",
     "LOG_ROOT": "可修改：设备日志、10 MiB 分卷和小时归档保存路径；迁移前先停止节点并搬迁原数据。",
     "API_LOG_ROOT": "可修改：API 运行日志及导出临时文件目录，不与采集路径共用。",
+    "NFS_ROOT": "设备coredump的NFS总目录；必须是非根绝对路径，Worker会在此创建设备IP子目录。",
+    "NFS_SERVER_IP": "设备可达的宿主机NFS地址；留空禁用NFS，不安装服务或修改exports。",
     "MONGO_DATA_ROOT": "可修改：MongoDB 数据目录；已有数据库不能换空目录后继续使用原平台。",
     "SERVICE_USER": "可修改：专用非 root 系统用户，脚本自动创建；不要复用人工登录用户。",
     "PYTHON_BIN": "可修改：已有 Python 3.12+ 路径；找不到则通过 uv 安装隔离 Python 3.12。",
@@ -144,6 +147,14 @@ def validate(values, component):
             raise ValueError("NODE_URL端口必须与NODE_PORT一致")
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", values.get("NODE_ID", "")):
             raise ValueError("NODE_ID 不能为空且只能使用安全名称")
+        nfs_address = values.get("NFS_SERVER_IP", "")
+        if nfs_address:
+            try:
+                address = ipaddress.ip_address(nfs_address)
+            except ValueError as error:
+                raise ValueError("启用NFS时NFS_SERVER_IP必须是设备可达IP地址") from error
+            if address.is_unspecified or address.is_loopback:
+                raise ValueError("NFS_SERVER_IP不能为通配或回环地址")
     if component in {"all", "backend", "worker"}:
         if not values["MONGO_URI"].startswith(("mongodb://", "mongodb+srv://")):
             raise ValueError("MONGO_URI 必须是副本集连接地址")

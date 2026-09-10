@@ -24,6 +24,7 @@ const loading = ref(false);
 const editVersion = ref(1);
 const formRef = ref<FormInstance>();
 const isNetwork = computed(() => form.value.kind === "HIKVISION_NETWORK");
+const healthText = computed(() => ({ ONLINE: "当前连通", AUTH_FAILED: "HTTP 凭据失效", OFFLINE: "设备离线", ERROR: "认证检查异常" }[props.resource?.healthStatus ?? ""] ?? "尚未检查"));
 const fingerprint = computed(() => JSON.stringify([form.value.kind, form.value.ip, form.value.username, form.value.password, form.value.authType]));
 let verifiedFingerprint = "";
 let authenticationGeneration = 0;
@@ -78,7 +79,8 @@ watch(() => [open.value, props.resource] as const, async ([visible, resource]) =
       if (current === formGeneration) ElMessage.error(error instanceof Error ? error.message : "读取资源失败");
     } finally { if (current === formGeneration) loading.value = false; }
   } else loading.value = false;
-});
+// 懒加载编辑器在首次挂载时已经打开，需要立即读取原资源，不能只等下次变更。
+}, { immediate: true });
 async function authenticate() {
   if (!canSave.value) return;
   if (authenticating.value || saving.value) return;
@@ -147,7 +149,8 @@ async function save() {
           <el-form-item :label="props.resource ? '密码（留空保持原值）' : '密码'" prop="password"><el-input v-model="form.password" type="password" show-password autocomplete="new-password" /></el-form-item>
           <el-form-item label="认证方式"><el-select v-model="form.authType"><el-option label="摘要认证" value="DIGEST" /><el-option label="基础认证" value="BASIC" /></el-select></el-form-item>
         </div>
-        <div v-if="authenticated" class="resource-auth-result" role="status"><div class="resource-auth-title"><Fingerprint :size="17" /><strong>已验证设备身份</strong></div><div><span>设备型号</span><strong>{{ authenticated.model || "未返回" }}</strong></div><div><span>设备序列号</span><strong>{{ authenticated.subSerialNumber || "未返回" }}</strong></div><div><span>软件版本</span><strong>{{ authenticated.softwareVersion || "未返回" }}</strong></div></div>
+        <div v-if="props.resource" class="resource-auth-result" role="status"><div class="resource-auth-title"><Fingerprint :size="17" /><strong>已保存设备身份</strong></div><div><span>当前检查</span><strong>{{ healthText }}</strong></div><div><span>设备型号</span><strong>{{ props.resource.model || "未返回" }}</strong></div><div><span>设备序列号</span><strong>{{ props.resource.subSerialNumber || "未返回" }}</strong></div></div>
+        <div v-if="authenticated && verifiedFingerprint === fingerprint" class="resource-auth-result" role="status"><div class="resource-auth-title"><ShieldCheck :size="17" /><strong>本次认证结果</strong></div><div><span>设备型号</span><strong>{{ authenticated.model || "未返回" }}</strong></div><div><span>设备序列号</span><strong>{{ authenticated.subSerialNumber || "未返回" }}</strong></div><div><span>软件版本</span><strong>{{ authenticated.softwareVersion || "未返回" }}</strong></div></div>
       </section>
     </el-form>
     <template #footer><el-button @click="open = false">关闭</el-button><el-button type="primary" :loading="saving" :disabled="loading || (isNetwork && (!authenticated || verifiedFingerprint !== fingerprint))" @click="save">保存资源</el-button></template>

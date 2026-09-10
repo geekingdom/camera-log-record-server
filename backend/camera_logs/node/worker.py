@@ -7,7 +7,9 @@ import asyncio
 import logging
 import shutil
 import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -38,12 +40,30 @@ class Worker:
         self.releases = {}
         self.disk_level = "NORMAL"
         self.write_pressure = WritePressure()
+        self.coredump_scanner = None
+        self.coredump_scan_task = None
+        self.last_coredump_scan = 0.0
+        self.instance_id = uuid.uuid4().hex
 
     def discard_closed(self, runtime):
         """仅移除已关闭的同一对象，等待期间安装的后继实例不得被旧回调移除。"""
         task_id = runtime.task["id"]
         if self.active.get(task_id) is runtime:
             self.active.pop(task_id)
+
+    def track_background(self, task, label):
+        """记录后台扫描/导出异常，已完成任务必须取回异常而不能静默丢失。"""
+        self.jobs.add(task)
+        def completed(future):
+            self.jobs.discard(future)
+            try:
+                future.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("节点后台任务失败 kind=%s", label)
+        task.add_done_callback(completed)
+        return task
 
     async def finish_runtime(self, runtime, action):
         """绑定旧实例处理异步收尾异常；隔离关闭不代表可以释放数据库归属。"""
@@ -200,6 +220,15 @@ class Worker:
         from camera_logs.collection.connections import connect
         root = self.repo.settings.log_root
         root.mkdir(parents=True, exist_ok=True)
+        # NFS 扫描与采集会话完全分离，且最多一个后台任务；扫描慢不能阻塞心跳或写入。
+        if self.coredump_scanner is None:
+            from camera_logs.coredumps.scanner import CoredumpScanner
+            self.coredump_scanner = CoredumpScanner(self.repo)
+        interval = float(self.repo.settings.coredump_scan_interval_seconds)
+        if (self.coredump_scan_task is None or self.coredump_scan_task.done()) and time.monotonic() - self.last_coredump_scan >= interval:
+            self.last_coredump_scan = time.monotonic()
+            self.coredump_scan_task = asyncio.create_task(self.coredump_scanner.scan_once())
+            self.coredump_scan_task.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
         disk = shutil.disk_usage(root)
         disk_percent = disk.used / disk.total * 100
         await self.report_disk_pressure(disk_percent)
@@ -290,13 +319,28 @@ class Worker:
                 {"$set": {"status": "RUNNING", "startedAt": now()}}, return_document=ReturnDocument.AFTER)
             if job:
                 from camera_logs.logs.jobs import run_job
-                self.jobs.add(asyncio.create_task(run_job(self.repo, job)))
+                self.track_background(asyncio.create_task(run_job(self.repo, job)), "日志导出")
+        if len(self.jobs) < 2:
+            export = await self.repo.db.coredump_exports.find_one_and_update(
+                {"coordinatorNodeId": self.repo.settings.node_id, "status": "QUEUED"},
+                {"$set": {"status": "RUNNING", "startedAt": now(), "workerInstanceId": self.instance_id,
+                          "leaseUntil": now() + timedelta(seconds=90)}}, return_document=ReturnDocument.AFTER)
+            if export:
+                from camera_logs.coredumps.jobs import run_export
+                self.track_background(asyncio.create_task(run_export(self.repo, export)), "coredump 导出")
         if time.monotonic() - self.last_maintenance >= 60:
+            from camera_logs.coredumps.jobs import cleanup_expired_exports
             from camera_logs.logs.maintenance import maintain
 
             self.last_maintenance = time.monotonic()
             if self.maintenance_task is None or self.maintenance_task.done():
-                self.maintenance_task = asyncio.create_task(maintain(self.repo))
+                async def maintenance():
+                    """日志和 coredump 保留清理共享同一低频维护任务，避免并行删除。"""
+                    await maintain(self.repo)
+                    await cleanup_expired_exports(self.repo)
+                    from camera_logs.coredumps.snapshots import reconcile_snapshots
+                    await reconcile_snapshots(self.repo)
+                self.maintenance_task = asyncio.create_task(maintenance())
         self.last_database_ok = time.monotonic()
 
     async def run(self):
@@ -330,6 +374,9 @@ class Worker:
         if self.maintenance_task:
             self.maintenance_task.cancel()
             tasks.append(self.maintenance_task)
+        if self.coredump_scan_task:
+            self.coredump_scan_task.cancel()
+            tasks.append(self.coredump_scan_task)
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -345,6 +392,12 @@ def create_worker_app(settings=None):
         repo = Repository(client[settings.database_name], settings)
         await repo.initialize()
         worker = Worker(repo)
+        # coredump 导出没有可安全重放的源复制阶段；Worker 重启后把遗留运行项明确标失败，
+        # 用户可重新请求当前 catalog 版本，不能无限显示 RUNNING。
+        await repo.db.coredump_exports.update_many(
+            {"coordinatorNodeId": settings.node_id, "status": "RUNNING", "leaseUntil": {"$lt": now()}},
+            {"$set": {"status": "FAILED", "error": "WORKER_RESTART", "updatedAt": now()}},
+        )
         from camera_logs.logs.maintenance import recover_orphan_archives
         await recover_orphan_archives(repo)
         app.state.repo, app.state.worker = repo, worker

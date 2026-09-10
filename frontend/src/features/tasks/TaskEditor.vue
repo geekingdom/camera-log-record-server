@@ -23,6 +23,7 @@ const blank = (): Task => ({
   port: 22,
   username: "",
   password: "",
+  enableCoredumpMonitor: false,
   initialCommands: [],
   scheduledCommands: [],
   resourceId: "",
@@ -52,6 +53,9 @@ const linkedSerialServer = computed(() => resources.value.find((item) => item.id
 const serialUsesResource = computed(() => serial.value && Boolean(form.value.serialServerResourceId));
 const serialServerOwnedTask = computed(() => linkedResource.value?.kind === "SERIAL_SERVER" ||
   (!props.task && props.initialResource?.id === form.value.resourceId && props.initialResource?.kind === "SERIAL_SERVER"));
+const coredumpEligible = computed(() => form.value.protocol === "SSH" &&
+  (linkedResource.value?.kind ??
+    (props.initialResource?.id === form.value.resourceId ? props.initialResource.kind : undefined)) === "HIKVISION_NETWORK");
 let generation = 0;
 let templateGeneration = 0;
 let resourceGeneration = 0;
@@ -180,6 +184,7 @@ watch(
       form.value.port =
         protocol === "SSH" ? 22 : protocol === "TELNET_DEVICE" ? 23 : undefined;
     if (protocol !== "TELNET_SERIAL") clearPassword.value = false;
+    if (protocol !== "SSH") form.value.enableCoredumpMonitor = false;
   },
 );
 watch([linkedResource, serial], ([resource]) => {
@@ -199,6 +204,10 @@ watch(serial, (isSerial) => {
 });
 watch(serialServerMode, (mode) => {
   if (mode === "custom") form.value.serialServerResourceId = null;
+});
+watch(linkedResource, (resource) => {
+  // 编辑既有任务时详情与资源列表并发加载；资源尚未解析不能提前清掉已保存的开关。
+  if (resource && resource.kind !== "HIKVISION_NETWORK") form.value.enableCoredumpMonitor = false;
 });
 async function replaceTemplate() {
   const template = templateItems.value.find((item) => item.id === templateId.value);
@@ -367,6 +376,9 @@ async function save() {
                   :disabled="clearPassword"
               /></el-form-item>
             </div>
+            <el-form-item v-if="coredumpEligible" label="Coredump 监控">
+              <el-switch v-model="form.enableCoredumpMonitor" active-text="启用 SSH Coredump NFS 挂载监控" />
+            </el-form-item>
             <el-checkbox v-if="serial && props.task" v-model="clearPassword">清除已保存密码</el-checkbox>
             <el-checkbox v-if="!props.task && permissions.can('tasks:control')" v-model="autoStart"
               >保存后立即启动</el-checkbox

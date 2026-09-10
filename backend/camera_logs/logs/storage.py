@@ -76,6 +76,11 @@ class HourlyWriter:
                  timezone: str = "Asia/Shanghai", now: Callable[[], datetime] | None = None) -> None:
         self.task_id, self.run_id, self.session_id = task_id, run_id, session_id
         self.task_name = safe_filename_component(task_name or task_id)
+        # 完整任务 ID 是同名任务的物理隔离键；目录组件保留其全部安全文本，
+        # 任务名只占剩余字节，确保改名不会影响已经创建的写入器路径。
+        self.task_id_component = safe_filename_component(task_id, max_utf8_bytes=64)
+        name_bytes = 80 - len(self.task_id_component.encode("utf-8")) - 1
+        self.task_directory = f"{safe_filename_component(task_name or task_id, max_utf8_bytes=name_bytes)}-{self.task_id_component}"
         self.device_ip = safe_device_address(device_ip or "unknown")
         self.storage_identity = safe_filename_component(storage_identity)
         self.root, self.zone, self._now = Path(root), ZoneInfo(timezone), now or (lambda: datetime.now(UTC))
@@ -117,7 +122,8 @@ class HourlyWriter:
         return value.astimezone(zone).replace(minute=0, second=0, microsecond=0)
 
     def _base(self, hour: datetime) -> Path:
-        return self.root / "resources" / self.storage_identity / self.task_id / f"{hour:%Y}" / f"{hour:%m}" / f"{hour:%d}" / f"{hour:%H}"
+        """返回新写入的浅层目录；历史 ``resources`` 目录由读取路径继续兼容。"""
+        return self.root / self.storage_identity / self.task_directory / f"{hour:%Y-%m-%d}" / f"{hour:%H}"
 
     def _target(self, hour: datetime, base: Path) -> Path:
         existing = next(iter(sorted(base.glob("*.tar.gz"))), None)

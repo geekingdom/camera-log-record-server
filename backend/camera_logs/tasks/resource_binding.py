@@ -30,17 +30,21 @@ async def bind_resource(repo, task):
             raise HTTPException(422, "连接目标必须是串口服务器资源")
         if task.ip != server["ip"]:
             raise HTTPException(422, "任务 IP 必须与所选串口服务器一致")
-    if network:
-        identity = [resource["ip"], (resource.get("model") or "").strip(),
-                    (resource.get("subSerialNumber") or "").strip()]
-        # 使用可读目录名，同时保留身份摘要防止名称变化导致不同设备混写。
-        readable = "-".join(_safe_component(value) for value in identity)
-        digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()[:16]
-        # 存储层将整个目录组件限制为 80 字节，必须先缩短展示部分再追加摘要。
-        storage = f"{readable[:63].rstrip('._-')}-{digest}"
-    else:
-        storage = resource["id"]
+    storage = storage_identity(resource)
     return {"resourceId": resource["id"], "storageIdentity": storage}
+
+
+def storage_identity(resource: dict) -> str:
+    """按资源快照计算任务目录身份，供认证更新与创建路径复用同一规范化规则。"""
+    if resource["kind"] != "HIKVISION_NETWORK":
+        return resource["id"]
+    identity = [resource["ip"], (resource.get("model") or "").strip(),
+                (resource.get("subSerialNumber") or "").strip()]
+    # 使用可读目录名，同时保留身份摘要防止名称变化导致不同设备混写。
+    readable = "-".join(_safe_component(value) for value in identity)
+    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    # 存储层将整个目录组件限制为 80 字节，必须先缩短展示部分再追加摘要。
+    return f"{readable[:63].rstrip('._-')}-{digest}"
 
 
 def _safe_component(value: object) -> str:

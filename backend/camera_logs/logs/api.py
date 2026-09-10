@@ -62,18 +62,25 @@ async def node_request(repo, node_id, path, params=None, *, client, downstream=N
         raise HTTPException(503, "采集节点暂不可用") from exc
 
 
-async def proxy_file(repo, node_id, path, range_header=None):
+async def proxy_file(repo, node_id, path, range_header=None, if_range=None):
     """流式代理文件及 Range 响应；客户端离开后释放上游连接，不整包驻留内存。"""
     node = await repo.get("nodes", node_id)
     client = httpx.AsyncClient(timeout=120)
     headers = {"Authorization": "Bearer "+repo.settings.internal_token}
     if range_header:
         headers["Range"] = range_header
+    if if_range:
+        headers["If-Range"] = if_range
     try:
         response = await client.send(client.build_request("GET", node["url"]+path, headers=headers), stream=True)
     except httpx.HTTPError as exc:
         await client.aclose()
         raise HTTPException(503, "下载节点暂不可用") from exc
+    if response.status_code == 416:
+        content_range = response.headers.get("content-range")
+        await response.aclose()
+        await client.aclose()
+        raise HTTPException(416, "下载范围不可用", headers={"Content-Range": content_range} if content_range else None)
     if response.status_code not in (200, 206):
         status = response.status_code
         await response.aclose()
@@ -87,8 +94,16 @@ async def proxy_file(repo, node_id, path, range_header=None):
             await response.aclose()
             await client.aclose()
     forwarded = {key: value for key, value in response.headers.items()
-                 if key in {"content-length", "content-range", "accept-ranges", "content-disposition", "content-type"}}
-    return StreamingResponse(chunks(), status_code=response.status_code, headers=forwarded)
+                 if key in {"content-length", "content-range", "accept-ranges", "content-disposition", "content-type", "etag", "cache-control"}}
+    class ProxiedStreamingResponse(StreamingResponse):
+        """上游已在响应正文前建立，任意 ASGI 失败均需主动归还连接。"""
+        async def __call__(self, scope, receive, send):
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                await response.aclose()
+                await client.aclose()
+    return ProxiedStreamingResponse(chunks(), status_code=response.status_code, headers=forwarded)
 
 
 def install_log_routes(app):

@@ -207,7 +207,7 @@ def test_network_authentication_previews_write_sanitized_audit_events(resource_c
         return {"model": "DS-2CD-CHANGED", "subSerialNumber": "REPLACED", "softwareVersion": "V5.8"}
 
     monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", identity_changed)
-    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 409
+    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 200
 
     async def audits():
         return [item async for item in repo.db.audit.find({}).sort("createdAt", 1)]
@@ -218,7 +218,7 @@ def test_network_authentication_previews_write_sanitized_audit_events(resource_c
         ("bootstrap", "authenticate_resource_succeeded", "audit-resource"),
         ("bootstrap", "authenticate_resource_credentials_rejected", "audit-resource"),
         ("bootstrap", "authenticate_resource_device_error", "ip:192.0.2.66"),
-        ("bootstrap", "authenticate_resource_identity_changed", "audit-resource"),
+        ("bootstrap", "authenticate_resource_succeeded", "audit-resource"),
     ]
     assert "audit-secret" not in str(events)
     assert "audit-admin" not in str(events)
@@ -278,8 +278,8 @@ def test_user_bound_token_shares_resource_reads_but_cannot_modify_other_owners(r
     assert resource_client.delete("/api/v1/resources/resource-allowed?version=1", headers=headers).status_code == 403
 
 
-def test_network_resource_patch_reauthenticates_and_keeps_physical_identity(resource_client, monkeypatch):
-    """资源名称或 HTTP 凭据可更新，但 IP、类型和设备身份不可借编辑改变。"""
+def test_network_resource_patch_reauthenticates_and_allows_identity_change(resource_client, monkeypatch):
+    """资源编辑可接受认证到的新身份，但仍拒绝修改固定 IP 和类型。"""
     calls = []
 
     async def verified(**kwargs):
@@ -295,6 +295,7 @@ def test_network_resource_patch_reauthenticates_and_keeps_physical_identity(reso
     assert patched.status_code == 200, patched.text
     assert patched.json()["name"] == "新名称"
     assert patched.json()["version"] == 2
+    assert patched.json()["softwareVersion"] == "V5.8"
     assert calls[-1]["password"] == "old"
     assert resource_client.patch(f"/api/v1/resources/{created['id']}", json=patched_body | {"version": 1}).status_code == 409
     assert resource_client.patch(f"/api/v1/resources/{created['id']}", json=patched_body | {"version": 2, "ip": "192.0.2.31"}).status_code == 422

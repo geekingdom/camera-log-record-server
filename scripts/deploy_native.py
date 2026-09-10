@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
+from configure_nfs_export import configure as configure_nfs_export
 from native_config import create_config, read_config, validate
 from native_packages import build_frontend, install_packages, prepare_venv, python_runtime, run
 from native_units import render
@@ -93,7 +94,7 @@ def prepare_directories(values):
     root = Path(values["INSTALL_ROOT"])
     root.mkdir(parents=True, exist_ok=True)
     root.chmod(0o755)
-    paths = [root / "etc", *(Path(values[key]) for key in ("DATA_ROOT", "LOG_ROOT", "API_LOG_ROOT", "MONGO_DATA_ROOT")),
+    paths = [root / "etc", *(Path(values[key]) for key in ("DATA_ROOT", "LOG_ROOT", "API_LOG_ROOT", "MONGO_DATA_ROOT", "NFS_ROOT")),
              Path(values["DATA_ROOT"]) / "nginx"]
     for directory in paths:
         if directory.is_symlink():
@@ -160,6 +161,12 @@ def deploy(values, component, config, source):
     if values["INSTALL_PACKAGES"] == "true":
         install_packages(component)
     account = prepare_directories(values)
+    if component in {"all", "worker"}:
+        configure_nfs_export(
+            values,
+            install_package=values["INSTALL_PACKAGES"] == "true",
+            owner=(account.pw_uid, account.pw_gid),
+        )
     python = python_runtime(values) if component != "frontend" else None
     files = render(values, source)
     for selected in components:

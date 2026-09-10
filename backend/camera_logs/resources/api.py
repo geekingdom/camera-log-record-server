@@ -12,6 +12,7 @@ from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_owner
 from camera_logs.resources.address_claim import claim_address, release_address
 from camera_logs.resources.authentication import authenticate_network_resource
+from camera_logs.resources.health import grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.models import ResourceInput, ResourcePatch
 
@@ -150,17 +151,12 @@ def install_resource_routes(app, repo, listing):
         if old["kind"] == "SERIAL_SERVER":
             return {}
         metadata = await authenticated_preview_metadata(body, user, identifier)
-        if old["kind"] == "HIKVISION_NETWORK" and (
-            metadata["model"] != old.get("model") or metadata["subSerialNumber"] != old.get("subSerialNumber")
-        ):
-            await repo().audit(user["id"], "authenticate_resource_identity_changed", identifier)
-            raise HTTPException(409, "认证设备身份已变化；请新建资源")
         await repo().audit(user["id"], "authenticate_resource_succeeded", identifier)
         return metadata
 
     @app.patch("/api/v1/resources/{identifier}")
     async def edit_resource(identifier: str, body: ResourcePatch, user: User):
-        """以版本条件更新名称或 HTTP 凭据；物理 IP、类型和设备身份始终固定。"""
+        """以版本条件更新名称、HTTP 凭据和认证身份，资源 IP 与类型不可修改。"""
         authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
         authorize_owner(user, old)
@@ -177,23 +173,27 @@ def install_resource_routes(app, repo, listing):
         except ValueError as exc:
             raise HTTPException(422, "资源配置无效") from exc
         metadata = await _verified_metadata(checked)
-        if checked.kind == "HIKVISION_NETWORK" and (
-            metadata["model"] != old.get("model") or metadata["subSerialNumber"] != old.get("subSerialNumber")
-        ):
-            raise HTTPException(409, "认证设备身份已变化；请新建资源")
         update = {"name": checked.name, "updatedAt": now()}
         if checked.kind == "HIKVISION_NETWORK":
             update.update(username=checked.username, authType=checked.authType,
-                          passwordEncrypted=repo().encrypt(password), authenticatedAt=now(), **metadata)
+                          passwordEncrypted=repo().encrypt(password), authenticatedAt=now(),
+                          healthStatus="ONLINE", healthCheckedAt=now(), **metadata)
         async def commit(session):
             """版本 CAS 与审计共享会话；凭据和设备元信息已在事务外准备。"""
             changed = await repo().db.resources.find_one_and_update(
                 {"id": identifier, "version": body.version, "deletedAt": None},
-                {"$set": update, "$inc": {"version": 1}}, return_document=ReturnDocument.AFTER,
+                {"$set": update, "$inc": {"version": 1, **({"healthRevision": 1} if checked.kind == "HIKVISION_NETWORK" else {})}},
+                return_document=ReturnDocument.AFTER,
                 session=session,
             )
             if not changed:
                 raise HTTPException(409, "资源版本已变化或已删除，请刷新")
+            if checked.kind == "HIKVISION_NETWORK":
+                await grant_after_user_authentication(
+                    repo(), changed, session,
+                    identity_changed=(changed.get("model"), changed.get("subSerialNumber"))
+                    != (old.get("model"), old.get("subSerialNumber")),
+                )
             return changed
 
         changed = await audited_mutation(repo(), user["id"], "edit_resource", identifier, commit)

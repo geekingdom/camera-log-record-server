@@ -10,10 +10,11 @@ import logging
 import re
 import time
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from pymongo import ReturnDocument
 from pymongo.errors import ConnectionFailure, ExecutionTimeout, PyMongoError
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
@@ -64,6 +65,48 @@ class SessionRuntime:
                 {"$set": {"shellMode": details["mode"], "debugPhase": event,
                     "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()}})
         logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
+
+    async def on_coredump(self, status, error):
+        """单独登记挂载事件，不覆盖采集状态或把敏感挂载命令写入审计。"""
+        try:
+            await self.repo.db.events.insert_one({"type": "COREDUMP_MOUNT", "taskId": self.task["id"],
+                "runId": self.task["runId"], "sessionId": self.collector.session_id,
+                "nodeId": self.repo.settings.node_id, "status": status, "error": error, "createdAt": now()})
+            await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {
+                "coredumpMountStatus": status, "coredumpMountError": error, "coredumpCheckedAt": now()}})
+        except Exception:
+            # coredump 状态记录不可反向中断日志接收或挂载重试。
+            logger.exception("coredump 状态记录失败 task=%s", self.task["id"])
+
+    async def coredump_guard(self):
+        """在每次可选设备控制前续租资源，并确认本运行仍拥有任务及健康资源。"""
+        if self.stopping or self.retired or self.collector is None or self.collector._closed.is_set():
+            return False
+        task = await self.repo.db.tasks.find_one({**owner_filter(self.task), "resourceDeleted": {"$ne": True},
+                                                   "desiredState": "RUNNING", "status": "COLLECTING"}, {"id": 1})
+        if not task:
+            return False
+        resource_id = self.task.get("resourceId")
+        if not resource_id:
+            return False
+        resource = await self.repo.db.resources.find_one({"id": resource_id}, {"deletedAt": 1, "healthStatus": 1})
+        if not resource or resource.get("deletedAt") is not None or resource.get("healthStatus") != "ONLINE":
+            # None 专用于健康资源被其它运行租用；设备已不可用则终止监控并留下可见原因。
+            await self.on_coredump("FAILED", "设备资源不可用，已停止 Coredump 监控")
+            return False
+        timestamp = now()
+        lease = await self.repo.db.resources.find_one_and_update(
+            {"id": resource_id, "deletedAt": None, "healthStatus": "ONLINE", "$or": [
+                {"coredumpLeaseUntil": {"$exists": False}},
+                {"coredumpLeaseUntil": {"$lte": timestamp}},
+                {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"]},
+            ]},
+            {"$set": {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"],
+                      "coredumpLeaseUntil": timestamp + timedelta(seconds=70)}},
+            return_document=ReturnDocument.AFTER,
+        )
+        # None 表示同资源另一会话仍持有租约；监控等待而不以重复 gdbcfg 打断对方。
+        return True if lease is not None else None
 
     def file_id(self, path):
         """以不可变原始分卷路径生成逻辑 ID，多个成员可共享一个小时归档。"""
@@ -144,8 +187,14 @@ class SessionRuntime:
     def _hour_from_path(path):
         """把上海自然小时目录转换为数据库统一使用的 UTC 时间文本。"""
         try:
-            year, month, day, hour = (int(value) for value in path.parts[-5:-1])
-            local = datetime(year, month, day, hour, tzinfo=ZoneInfo("Asia/Shanghai"))
+            parent = Path(path).parent
+            zone = ZoneInfo("Asia/Shanghai")
+            try:
+                year, month, day = (int(value) for value in parent.parent.name.split("-"))
+                local = datetime(year, month, day, int(parent.name), tzinfo=zone)
+            except ValueError:
+                year, month, day, hour = (int(value) for value in parent.parts[-4:])
+                local = datetime(year, month, day, hour, tzinfo=zone)
             return local.astimezone(UTC).isoformat()
         except (TypeError, ValueError):
             return now().astimezone(UTC).isoformat()
@@ -369,6 +418,14 @@ class SessionRuntime:
                 session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
                                     "sessionId": self.collector.session_id}
                 await self.collector.start()
+                if config.get("enableCoredumpMonitor") and config.get("protocol") == "SSH":
+                    if self.repo.settings.nfs_server_ip:
+                        self.collector.start_coredump_monitor(
+                            self.repo.settings.nfs_server_ip, str(self.repo.settings.nfs_root), self.on_coredump,
+                            guard=self.coredump_guard)
+                    else:
+                        # 节点部署缺少 NFS 配置只影响可选监控，日志采集会话照常运行。
+                        await self.on_coredump("FAILED", "节点未配置 NFS_SERVER_IP，未启动 Coredump 监控")
                 delay = 1
                 await self.collector.wait_closed()
             except asyncio.CancelledError:
@@ -396,6 +453,15 @@ class SessionRuntime:
                     if self.collector:
                         await self._stop_collector()
                 finally:
+                    # 只释放仍属于本运行的资源租约，避免旧会话清掉后继接管者的控制权。
+                    try:
+                        await self.repo.db.resources.update_one(
+                            {"id": self.task.get("resourceId"), "coredumpLeaseTaskId": self.task["id"],
+                             "coredumpLeaseRunId": self.task["runId"]},
+                            {"$set": {"coredumpLeaseUntil": now()}},
+                        )
+                    except Exception:
+                        logger.exception("coredump 租约释放失败 task=%s", self.task["id"])
                     # 连接或归档收尾报错仍需结束本会话命令；不能跳过并遗留 SENDING。
                     if session_commands is not None:
                         await self.repo.db.commands.update_many({**session_commands, "status": "QUEUED"},

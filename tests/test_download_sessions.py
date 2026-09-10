@@ -158,3 +158,26 @@ def test_login_cookie_download_is_revoked_by_ip_scope_and_account_disable(tmp_pa
         })
         assert deleted.status_code == 204, deleted.text
         assert browser.get(ticket.json()["url"]).status_code == 401
+
+
+def test_coredump_browser_ticket_is_path_scoped_and_downloads_natively(client, monkeypatch):  # noqa: F811
+    """coredump 的浏览器票据只能访问已成功且未过期的同一导出内容 URL。"""
+    from camera_logs.coredumps import api as coredump_api
+
+    async def fake_proxy(*_args, **_kwargs):
+        return JSONResponse({"download": "coredump"})
+
+    monkeypatch.setattr(coredump_api, "proxy_file", fake_proxy)
+    repo = client.app.state.repo
+    client.portal.call(repo.db.coredump_exports.insert_one, {
+        "id": "core-export", "actor": "bootstrap", "status": "SUCCEEDED", "coordinatorNodeId": "test-node",
+        "resultPath": "/not-exposed", "expiresAt": now() + timedelta(hours=1),
+    })
+    ticket = client.post("/api/v1/coredump-exports/core-export/browser-session")
+    assert ticket.status_code == 200, ticket.text
+    assert ticket.json()["url"] == "/api/v1/coredump-exports/core-export/content"
+    assert "HttpOnly" in ticket.headers["set-cookie"]
+    client.headers.pop("Authorization", None)
+    assert client.get(ticket.json()["url"]).json() == {"download": "coredump"}
+    # Cookie Path 不匹配时不会发送，且已移除 Bearer，另一对象必须无法借用票据。
+    assert client.get("/api/v1/coredump-exports/other/content").status_code == 401

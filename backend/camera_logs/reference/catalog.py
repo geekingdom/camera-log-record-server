@@ -3,6 +3,8 @@
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
+    {"title": "设备重启与暂停恢复", "text": "SSH暂停释放连接并保留运行预算。设备重启期间，周期认证可以显示离线，但不会把用户暂停改成停止。显式resume返回202和操作ID，任务进入WAITING_DEVICE并等待新认证；即使缓存显示ONLINE也会重新探测。等待时可暂停或停止取消；同一设备恢复沿用预算，身份变更后建立新运行。操作到COLLECTING才完成。因认证失败被系统停止的其他任务，需用户编辑并成功认证后才恢复，手动停止任务不自动启动。"},
+    {"title": "Coredump接收与下载", "text": "海康网络资源的SSH任务可设置enableCoredumpMonitor=true；节点部署需配置NFS_ROOT和NFS_SERVER_IP，NFS允许所有网络可达来源，不使用平台IP白名单筛选设备。GET /api/v1/resources/{resource_id}/coredumps按name字面文件名及receivedFrom/receivedTo接收时间查询。RECEIVING代表已观测文件，FROZEN代表服务器固定副本，并非设备完成崩溃文件的证明。POST /api/v1/coredump-exports提交fileIds并携带Idempotency-Key，轮询返回ID的状态；单文件导出原文件，多文件ZIP STORE。成功后GET /api/v1/coredump-exports/{identifier}/content支持Range和If-Range，适合流式或断点下载；不得把大文件整体装入客户端内存。"},
     {"title": "查看服务账号口令", "text": "管理员可查看全部服务账号，普通用户只可查看绑定给本人的账号。GET /api/v1/service-tokens和POST /api/v1/service-tokens/{id}/reveal要求service-tokens:read；列表不含口令，reveal返回token并记录无敏感内容的审计。新口令加密保存可重复查看，旧版仅保存摘要的口令无法还原。管理员可用POST /api/v1/service-tokens/{id}/rotate携带version重新生成，旧口令立即失效；普通用户不能新增、编辑、撤销或重新生成。永久有效不绕过用户禁用、删除和来源IP限制。"},
     {"title": "第三方鉴权", "text": "管理员通过服务令牌接口创建可撤销Token。普通HTTP请求携带Authorization: Bearer <SERVICE_TOKEN>。Token范围与平台来源IP权限取交集；IP白名单只约束调用方，不约束设备IP。接口目录不授予接口执行权限。"},
     {"title": "资源发现与任务关联", "text": "GET /api/v1/resources 的search匹配资源名、IP、型号、序列号和软件版本。name、model、subSerialNumber、softwareVersion是字面子串；ip精确匹配；同时传入的条件取交集。每项包含tasks摘要，默认100条、taskLimit最大500；tasksTruncated=true时通过tasksUrl继续分页。拥有tasks:read的有效用户可读取全部资源和任务，不再按资源或任务ID白名单收窄可见范围。"},
@@ -30,7 +32,7 @@ SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停SSH�
 
 def group(path):
     """按正式路径归类，不依赖前端功能是否对当前用户展示。"""
-    for fragment, title in (("resources", "设备资源"), ("command-templates", "命令模板"),
+    for fragment, title in (("coredump", "Coredump文件"), ("resources", "设备资源"), ("command-templates", "命令模板"),
                              ("commands", "命令交互"), ("command-executions", "命令交互"),
                              ("log-", "日志查询"), ("downloads", "日志下载"), ("tasks", "采集任务"),
                              ("operations", "异步操作"), ("service-tokens", "服务令牌"),
@@ -61,6 +63,10 @@ def permission(path, method):
         return "admin"
     if "api-reference" in path:
         return "有效Token或登录会话"
+    if "coredump" in path:
+        if path.endswith("/coredumps"):
+            return "logs:read"
+        return "logs:download" + (" + 导出创建者或admin" if "/coredump-exports/" in path else "")
     if "/resources" in path:
         if method == "GET":
             return "tasks:read"
@@ -96,7 +102,7 @@ def request_headers(path, method, schema, idempotent):
         headers = {"Cookie": "camera_session=<登录会话Cookie>"}
     elif path.endswith("/auth/password"):
         headers = {"X-Requested-With": "XMLHttpRequest", "Cookie": "camera_session=<登录会话Cookie>"}
-    elif path.endswith("/downloads/{identifier}/content"):
+    elif path.endswith("/content") and any(fragment in path for fragment in ("/downloads/", "/coredumps/", "/coredump-exports/")):
         headers = {"Authorization": "Bearer <SERVICE_TOKEN>（或 camera_session / download_access Cookie）"}
     elif "api-reference" in path:
         headers = {"Authorization": "Bearer <SERVICE_TOKEN>（或已登录会话 Cookie）"}
@@ -122,7 +128,7 @@ def catalog(app):
             schema = definition.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema")
             code = min(int(code) for code in definition["responses"] if code.startswith("2"))
             title = SPECIAL.get(path.split("/")[-1], TITLES.get(method, verb) + group(path))
-            idempotent = method == "post" and (path.split("/")[-1] in {"resources", "tasks", "command-templates", "downloads", "log-searches", "commands"})
+            idempotent = method == "post" and (path.split("/")[-1] in {"resources", "tasks", "command-templates", "downloads", "log-searches", "commands", "coredump-exports"})
             headers = request_headers(path, verb, schema, idempotent)
             parameters = [{**item, "example": schema_example(item.get("schema", {}), schemas, item["name"])}
                           for item in definition.get("parameters", [])]

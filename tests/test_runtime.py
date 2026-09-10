@@ -89,6 +89,69 @@ def runtime_for_callbacks(tmp_path):
     return runtime
 
 
+def test_coredump_guard_claims_resource_once_and_rejects_stale_runtime(tmp_path):
+    """真实数据库条件保证首次领取、资源健康与运行代次都在发送前复核。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        settings = Settings(log_root=tmp_path, node_id="node-a")
+        repo = Repository(database, settings)
+        task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"}
+        await database.tasks.insert_one(task)
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE"})
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo, runtime.task = repo, task
+        runtime.stopping = runtime.retired = False
+        runtime.collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
+        assert await runtime.coredump_guard() is True
+        resource = await database.resources.find_one({"id": "resource-a"})
+        assert resource["coredumpLeaseTaskId"] == "task-a" and resource["coredumpLeaseRunId"] == "run-a"
+        await database.tasks.update_one({"id": "task-a"}, {"$set": {"generation": 4}})
+        assert await runtime.coredump_guard() is False
+        await database.tasks.update_one({"id": "task-a"}, {"$set": {"generation": 3}})
+        await database.resources.update_one({"id": "resource-a"}, {"$set": {
+            "coredumpLeaseTaskId": "task-b", "coredumpLeaseRunId": "run-b"}})
+        assert await runtime.coredump_guard() is None
+    asyncio.run(scenario())
+
+
+def test_coredump_guard_rejects_non_collecting_or_unhealthy_resource(tmp_path):
+    """停止中的任务和离线资源均不得刷新租约或进入设备控制队列。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(log_root=tmp_path, node_id="node-a"))
+        task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"}
+        await database.tasks.insert_one(task)
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "OFFLINE"})
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo, runtime.task = repo, task
+        runtime.stopping = runtime.retired = False
+        runtime.collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
+        assert await runtime.coredump_guard() is False
+        await database.resources.update_one({"id": "resource-a"}, {"$set": {"healthStatus": "ONLINE"}})
+        await database.tasks.update_one({"id": "task-a"}, {"$set": {"status": "STOPPING"}})
+        assert await runtime.coredump_guard() is False
+    asyncio.run(scenario())
+
+
+def test_coredump_status_report_is_independent_of_log_collection(tmp_path):
+    """节点未配置 NFS 时的失败说明只写独立事件和任务字段，不触碰采集状态。"""
+    async def scenario():
+        events, tasks = InsertCollection(), FakeCollection()
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo = SimpleNamespace(settings=SimpleNamespace(node_id="node-a"), db=SimpleNamespace(events=events, tasks=tasks))
+        runtime.task = {"id": "task-a", "runId": "run-a", "generation": 1, "nodeId": "node-a"}
+        runtime.collector = SimpleNamespace(session_id="session-a")
+
+        await runtime.on_coredump("FAILED", "节点未配置 NFS_SERVER_IP")
+
+        assert events.values[0]["status"] == "FAILED"
+        assert events.values[0]["error"] == "节点未配置 NFS_SERVER_IP"
+        assert tasks.calls[0][1]["$set"]["coredumpMountStatus"] == "FAILED"
+    asyncio.run(scenario())
+
+
 def test_live_chunks_use_their_immutable_path_and_offset(tmp_path):
     runtime = runtime_for_callbacks(tmp_path)
     first = tmp_path / "task-a/run-a/session/2026/09/08/09/part-001.log"
@@ -101,6 +164,15 @@ def test_live_chunks_use_their_immutable_path_and_offset(tmp_path):
     assert frames[0]["fileId"] != frames[1]["fileId"]
     stored_hour = runtime.repo.db.files.calls[0][1]["$set"]["hour"]
     assert stored_hour.endswith("+00:00")
+
+
+def test_hour_from_path_supports_new_and_legacy_layouts(tmp_path):
+    """目录改版只能影响新写入，既有归档的 catalog 小时仍须保持可读。"""
+    new_path = tmp_path / "device-a" / "采集任务-full-task-id" / "2026-09-08" / "09" / "part-000001.log"
+    legacy_path = tmp_path / "resources" / "device-a" / "full-task-id" / "2026" / "09" / "08" / "09" / "part-000001.log"
+
+    assert SessionRuntime._hour_from_path(new_path) == "2026-09-08T01:00:00+00:00"
+    assert SessionRuntime._hour_from_path(legacy_path) == "2026-09-08T01:00:00+00:00"
 
 
 def test_catalog_flush_publishes_last_quiet_tail_without_next_log(tmp_path):

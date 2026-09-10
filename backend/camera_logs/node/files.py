@@ -5,19 +5,22 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import Depends, Header, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
-from camera_logs.logs.archive_access import snapshot
+from camera_logs.logs.archive_access import read_limiter, snapshot
 from camera_logs.logs.file_reads import FileReads
 from camera_logs.logs.job_threads import job_thread
 
@@ -56,9 +59,96 @@ def _read_watermark(runtime: Any, file: dict[str, Any]) -> int | None:
     return max(registered or 0, confirmed) if confirmed is not None else registered
 
 
+async def _limited_response(reads: FileReads, downloads: Any, path: Path, request: Request, *, filename: str, etag: str | None = None):
+    """以有界读取池和全局读预算流式提供固定文件，断流 finally 必定关闭 fd。"""
+    try:
+        size = (await reads.run(path.stat)).st_size
+    except FileNotFoundError as error:
+        raise HTTPException(404, "冻结副本已过期") from error
+    start, end = 0, size - 1
+    range_header = request.headers.get("range", "")
+    if request.headers.get("if-range") not in (None, etag):
+        range_header = ""
+    if range_header:
+        try:
+            unit, value = range_header.split("=", 1)
+            left, right = value.split("-", 1)
+            if unit != "bytes" or "," in value:
+                raise ValueError
+            if not left and not right:
+                raise ValueError
+            if left:
+                start = int(left)
+                end = int(right) if right else size - 1
+            else:
+                suffix = int(right)
+                if suffix <= 0:
+                    raise ValueError
+                start, end = max(0, size - suffix), size - 1
+            if start < 0 or end < start or start >= size:
+                raise ValueError
+            end = min(end, size - 1)
+        except (ValueError, OverflowError):
+            raise HTTPException(416, "Range 不可用", headers={"Content-Range": f"bytes */{size}"}) from None
+    remaining = end - start + 1
+    await downloads.acquire()
+    descriptor = None
+    try:
+        descriptor = await reads.run(os.open, path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        await reads.run(os.lseek, descriptor, start, os.SEEK_SET)
+    except BaseException:
+        if descriptor is not None:
+            await reads.run(os.close, descriptor)
+        downloads.release()
+        raise
+    released = False
+
+    async def close_descriptor() -> None:
+        """响应尚未进入正文或已进入正文时都只释放一次 fd 与下载槽。"""
+        nonlocal released
+        if not released:
+            released = True
+            await reads.run(os.close, descriptor)
+            downloads.release()
+    def read_chunk():
+        data = os.read(descriptor, min(262144, remaining))
+        read_limiter.consume(len(data))
+        return data
+    async def chunks():
+        nonlocal remaining
+        try:
+            while remaining:
+                data = await reads.run(read_chunk)
+                if not data:
+                    raise RuntimeError("冻结副本长度变化")
+                remaining -= len(data)
+                yield data
+        finally:
+            await close_descriptor()
+    safe_name = Path(filename).name.replace("\r", "").replace("\n", "") or "download"
+    headers = {"Accept-Ranges": "bytes", "Content-Disposition": f"attachment; filename=download; filename*=UTF-8''{quote(safe_name)}",
+               "Cache-Control": "private, no-store", "Content-Length": str(end - start + 1)}
+    if etag:
+        headers["ETag"] = etag
+    if range_header:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    class LimitedStreamingResponse(StreamingResponse):
+        """即使 ASGI 在 response.start 前失败，也要收回预先取得的描述符。"""
+        async def __call__(self, scope, receive, send):
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                await close_descriptor()
+
+    return LimitedStreamingResponse(chunks(), status_code=206 if range_header else 200,
+                                    media_type="application/octet-stream", headers=headers)
+
+
 def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
     """注册仅供节点和 API 使用的内部路由，每次调用都校验内部令牌。"""
     reads = FileReads()
+    # 活跃下载而非瞬时 read() 受限，确保慢客户端也不会耗尽文件描述符。
+    downloads = asyncio.Semaphore(4)
     # 独立测试应用使用默认 ASGI 生命周期；正式 Worker 在自己的 lifespan 中显式关闭。
     app.router.add_event_handler("shutdown", reads.close)
     async def internal(authorization: str | None = Header(default=None)) -> None:
@@ -126,5 +216,52 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
             raise HTTPException(404, "导出文件不存在")
         path = _path(runtime, repo, {"path": job["resultPath"]})
         return FileResponse(path, filename=job.get("filename") or path.name)
+
+    @app.post("/internal/coredumps/{identifier}/freeze")
+    async def freeze_coredump(identifier: str, _: None = Depends(internal)):
+        """节点按当前登记版本创建不可变副本；源文件从不直接暴露下载。"""
+        from camera_logs.coredumps.snapshots import freeze
+
+        document = await repo.db.coredump_files.find_one({"id": identifier, "nodeId": repo.settings.node_id})
+        if document is None:
+            raise HTTPException(404, "coredump 不存在")
+        try:
+            result = await freeze(repo, document)
+        except OverflowError as error:
+            raise HTTPException(413, str(error)) from error
+        except (FileNotFoundError, RuntimeError, ValueError) as error:
+            raise HTTPException(409, "coredump 源文件仍在变化或不可安全冻结，请稍后重试") from error
+        return {"id": result["id"], "status": result["status"], "size": result["snapshot"]["size"],
+                "etag": result["snapshot"]["etag"]}
+
+    @app.get("/internal/coredumps/{identifier}/content")
+    async def coredump_content(identifier: str, request: Request, _: None = Depends(internal)):
+        """只响应节点已发布的固定副本；If-Range 不匹配时返回完整固定版本。"""
+        document = await repo.db.coredump_files.find_one({"id": identifier, "nodeId": repo.settings.node_id})
+        snapshot = document.get("snapshot") if document else None
+        if not snapshot or document.get("status") != "FROZEN":
+            raise HTTPException(409, "coredump 尚未冻结")
+        path = Path(snapshot["path"])
+        try:
+            root = Path(repo.settings.log_root).resolve().parent / "coredump-snapshots"
+            if root not in path.resolve().parents or not path.is_file():
+                raise ValueError()
+        except (FileNotFoundError, ValueError):
+            raise HTTPException(404, "coredump 快照已过期") from None
+        return await _limited_response(reads, downloads, path, request, filename=document["name"], etag=snapshot["etag"])
+
+    @app.get("/internal/coredump-exports/{identifier}/content")
+    async def coredump_export_content(identifier: str, request: Request, _: None = Depends(internal)):
+        """导出产物仅在成功和未过期时由协调节点流式提供。"""
+        job = await repo.db.coredump_exports.find_one({"id": identifier, "status": "SUCCEEDED"})
+        expires = job.get("expiresAt") if job else None
+        if not job or not job.get("resultPath") or job.get("coordinatorNodeId") != repo.settings.node_id or (expires and expires.astimezone(UTC) <= datetime.now(UTC)):
+            raise HTTPException(404, "coredump 导出不存在")
+        path = Path(job["resultPath"])
+        root = Path(repo.settings.log_root).resolve() / "exports" / "coredumps"
+        if root not in path.resolve().parents or not path.is_file():
+            raise HTTPException(404, "coredump 导出已过期")
+        return await _limited_response(reads, downloads, path, request, filename=job.get("filename") or path.name,
+                                       etag=job.get("etag"))
 
     return reads

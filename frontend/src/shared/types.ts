@@ -15,6 +15,8 @@ export interface Resource extends ResourceAuthentication {
   username?: string;
   authType?: ResourceAuthType;
   version?: number;
+  healthStatus?: "ONLINE" | "AUTH_FAILED" | "OFFLINE" | "ERROR" | string;
+  healthCheckedAt?: string;
   deletedAt?: string | null;
   createdAt?: string;
   taskCount?: number;
@@ -51,6 +53,7 @@ export interface Task {
   port?: number;
   username?: string;
   password?: string;
+  enableCoredumpMonitor?: boolean;
   status?: TaskActualStatus;
   desiredState?: TaskDesiredState;
   error?: string | null;
@@ -136,6 +139,31 @@ export interface LogFile {
   sha256?: string;
   firstSequence?: number;
   lastSequence?: number;
+}
+export type CoredumpStatus = "RECEIVING" | "FREEZING" | "FROZEN" | string;
+export interface CoredumpFile {
+  id: string;
+  resourceId: string;
+  nodeId: string;
+  name: string;
+  size: number;
+  receivedAt: string;
+  firstSeenAt?: string;
+  sourceModifiedAt?: string;
+  updatedAt?: string;
+  status: CoredumpStatus;
+  version?: number;
+}
+export interface CoredumpExport {
+  id: string;
+  status: string;
+  kind?: "COREDUMP_EXPORT" | string;
+  createdAt?: string;
+  expiresAt?: string;
+  filename?: string;
+  bytes?: number;
+  etag?: string;
+  error?: string;
 }
 export interface CommandExecution {
   id?: string;

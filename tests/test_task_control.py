@@ -196,10 +196,10 @@ def test_resume_paused_ssh_keeps_run_budget_and_unassigned_state(client):
 
     assert response.status_code == 202, response.text
     operation = _operation(client, response.json()["id"])
-    assert (operation["action"], operation["status"]) == ("resume", "PENDING")
+    assert (operation["action"], operation["status"]) == ("resume-wait-device", "PENDING")
     current = _task(client, task["id"])
     assert (current["status"], current["desiredState"], current["nodeId"], current["runId"]) == (
-        "PAUSED", "RUNNING", None, "paused-run"
+            "WAITING_DEVICE", "RUNNING", None, "paused-run"
     )
     assert client.portal.call(repo.db.endpoint_locks.count_documents, {"taskId": task["id"], "runId": "paused-run"}) == 1
     assert client.portal.call(repo.db.budgets.find_one, {"_id": "paused-run:periodic"})["attempts"] == 2
@@ -249,7 +249,7 @@ def test_unassigned_pending_task_pauses_immediately_then_resumes_running(client)
     assert "runId" not in current and "sessionId" not in current
     resumed = _control(client, task["id"], "resume")
     assert resumed.status_code == 202, resumed.text
-    assert _operation(client, resumed.json()["id"])["action"] == "resume"
+    assert _operation(client, resumed.json()["id"])["action"] == "resume-wait-device"
     assert _task(client, task["id"])["desiredState"] == "RUNNING"
 
 
@@ -309,7 +309,30 @@ def test_repeated_resume_reuses_the_accepted_resume_operation(client):
     assert first.status_code == second.status_code == 202
     assert second.json()["id"] == first.json()["id"]
     operation = _operation(client, first.json()["id"])
-    assert (operation["action"], operation["status"]) == ("resume", "PENDING")
+    assert (operation["action"], operation["status"]) == ("resume-wait-device", "PENDING")
+
+
+def test_resume_waiting_device_replays_and_pause_stop_cancel_it(client):
+    """正式 API 的等待继续可幂等重放，用户暂停或停止必须取消该次设备认证等待。"""
+    task = _create_task(client)
+    _set_task(client, task["id"], status="PAUSED", desiredState="PAUSED", nodeId=None, runId="paused-run")
+    repo = client.app.state.repo
+    client.portal.call(repo.db.runs.insert_one, {"id": "paused-run"})
+    client.portal.call(repo.db.endpoint_locks.insert_one, {"taskId": task["id"], "runId": "paused-run"})
+    first = _control(client, task["id"], "resume")
+    second = _control(client, task["id"], "resume")
+    assert first.status_code == second.status_code == 202 and first.json()["id"] == second.json()["id"]
+    paused = _control(client, task["id"], "pause")
+    assert paused.status_code == 202
+    waiting = _operation(client, first.json()["id"])
+    assert waiting["status"] == "CANCELLED"
+    current = _task(client, task["id"])
+    assert (current["status"], current["desiredState"], current["runId"]) == ("PAUSED", "PAUSED", "paused-run")
+    third = _control(client, task["id"], "resume")
+    stopped = _control(client, task["id"], "stop")
+    assert third.status_code == stopped.status_code == 202
+    assert _operation(client, third.json()["id"])["status"] == "CANCELLED"
+    assert _task(client, task["id"])["desiredState"] == "STOPPED"
 
 
 @pytest.mark.parametrize("status,desired,action", [

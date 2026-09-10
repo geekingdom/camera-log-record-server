@@ -10,9 +10,12 @@ services:
       NODE_URL: ${NODE_URL:?Set a stable NODE_URL reachable by the API}
       LOG_ROOT: /var/lib/camera-logs/data
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
+      NFS_ROOT: ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
+      NFS_SERVER_IP: ${NFS_SERVER_IP:-}
     network_mode: host
     restart: unless-stopped
     volumes:
       - ${HOST_LOG_ROOT:-/srv/camera-logs}:/var/lib/camera-logs
+      - ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}:${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
       # 默认账号密码模式无需主机公钥文件；仅严格模式需要覆盖为已确认的文件。
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro

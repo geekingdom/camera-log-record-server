@@ -38,7 +38,7 @@ def create_environment(path: Path, component: str = "all") -> None:
         # 节点必须使用 API 的原密钥和令牌，不能生成一套不相容的凭据。
         values.update(MONGO_URI="", ENCRYPTION_KEY="", BOOTSTRAP_TOKEN="", INTERNAL_TOKEN="",
                       ADMIN_PASSWORD="", NODE_ID="", NODE_URL="", NODE_PORT="8001",
-                      HOST_LOG_ROOT="worker-data")
+                      HOST_LOG_ROOT="worker-data", NFS_ROOT="/srv/camera-logs/nfs-coredump", NFS_SERVER_IP="")
     elif component == "database":
         values = {"DATABASE_HOST": "127.0.0.1", "DATABASE_BIND_IP": "127.0.0.1",
                   "MONGO_PORT_1": "27017", "MONGO_PORT_2": "27018", "MONGO_PORT_3": "27019",
@@ -50,9 +50,12 @@ def create_environment(path: Path, component: str = "all") -> None:
     else:
         values.update(HOST_LOG_ROOT="worker-data", API_DATA_ROOT="api-data", FRONTEND_PORT="5173",
                       COLLECTOR_NODE_ID="compose-worker-1", COLLECTOR_NODE_URL="http://worker:8001",
-                      MONGO_DATA_1="mongo1-data", MONGO_DATA_2="mongo2-data", MONGO_DATA_3="mongo3-data")
+                      MONGO_DATA_1="mongo1-data", MONGO_DATA_2="mongo2-data", MONGO_DATA_3="mongo3-data",
+                      NFS_ROOT="/srv/camera-logs/nfs-coredump", NFS_SERVER_IP="")
     comments = {
         "HOST_LOG_ROOT": "可改为宿主机绝对路径：/srv/camera-logs/collector；设备日志在data/，运行日志在service-logs/。",
+        "NFS_ROOT": "设备coredump的NFS总目录，必须是宿主机非根绝对路径；Worker容器以相同路径挂载并创建设备IP子目录。",
+        "NFS_SERVER_IP": "设备可达的NFS宿主机IP；留空禁用NFS，不安装服务或修改exports。",
         "API_DATA_ROOT": "可改为宿主机绝对路径：/srv/camera-logs/api；不应与采集节点共用。",
         "MONGO_DATA_1": "可改为/srv/camera-logs/mongo1；三成员目录必须不同，已有数据不会自动搬迁。",
         "MONGO_DATA_2": "可改为/srv/camera-logs/mongo2；不能与其它成员共用目录。",

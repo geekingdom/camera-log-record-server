@@ -1,6 +1,8 @@
 // 统一 API 边界：负责认证、幂等键、字段白名单和可关联服务端日志的错误信息。
 import type {
   CommandExecution,
+  CoredumpExport,
+  CoredumpFile,
   InitialCommand,
   LogHour,
   Node,
@@ -124,6 +126,7 @@ const taskFields = [
   "encoding",
   "loginPrompt",
   "passwordPrompt",
+  "enableCoredumpMonitor",
   "resourceId",
   "serialServerResourceId",
   "clearPassword",
@@ -169,6 +172,18 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(input),
     }),
+  coredumps: (resourceId: string, page = 1, pageSize = 50, filters?: {
+    name?: string; receivedFrom?: string; receivedTo?: string;
+  }) => request<Page<CoredumpFile>>(`/resources/${encodeURIComponent(resourceId)}/coredumps${query(page, pageSize, filters)}`),
+  createCoredumpExport: (fileIds: string[]) => request<CoredumpExport>("/coredump-exports", {
+    method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: JSON.stringify({ fileIds }),
+  }),
+  coredumpExport: (id: string) => request<CoredumpExport>(`/coredump-exports/${encodeURIComponent(id)}`),
+  cancelCoredumpExport: (id: string) => request<void>(`/coredump-exports/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  coredumpBrowserDownload: (id: string, exportFile = false) => {
+    const prefix = exportFile ? "/coredump-exports" : "/coredumps";
+    return request<{ url: string }>(`${prefix}/${encodeURIComponent(id)}/browser-session`, { method: "POST" });
+  },
   createResource: (resource: {
     name: string;
     kind: ResourceKind;

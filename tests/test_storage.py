@@ -41,7 +41,7 @@ async def test_shared_hour_directory_reuses_one_tar_and_keeps_indexes_outside(tm
     await second.write(b"second\n", received_at=instant)
     two = await second.close()
     assert one.path == two.path
-    assert one.path.parent == tmp_path / "resources" / "device" / "task" / "2026" / "09" / "08" / "09"
+    assert one.path.parent == tmp_path / "device" / "task-task" / "2026-09-08" / "09"
     with tarfile.open(one.path, "r:gz") as bundle:
         assert all(name.endswith(".log") for name in bundle.getnames())
         assert b"".join(bundle.extractfile(name).read() for name in bundle.getnames()) == b"first\nsecond\n"
@@ -49,6 +49,37 @@ async def test_shared_hour_directory_reuses_one_tar_and_keeps_indexes_outside(tm
     assert metadata["formatVersion"] == 2
     assert [member["runId"] for member in metadata["members"]] == ["run-a", "run-b"]
     assert all((one.path.parent / member["indexName"]).exists() for member in metadata["members"])
+
+
+async def test_same_named_tasks_use_full_ids_in_separate_hour_directories(tmp_path):
+    """同名任务的完整 ID 必须进入目录，避免共享小时包而混淆下载范围。"""
+    instant = datetime(2026, 9, 8, 1, 0, tzinfo=UTC)
+    first = HourlyWriter("full-task-id-a", "run-a", "session-a", tmp_path,
+                         storage_identity="device-a", task_name="采集任务")
+    second = HourlyWriter("full-task-id-b", "run-b", "session-b", tmp_path,
+                          storage_identity="device-a", task_name="采集任务")
+    await first.write(b"first\n", received_at=instant)
+    await second.write(b"second\n", received_at=instant)
+    first_archive, second_archive = await first.close(), await second.close()
+
+    assert first_archive.path.parent == tmp_path / "device-a" / "采集任务-full-task-id-a" / "2026-09-08" / "09"
+    assert second_archive.path.parent == tmp_path / "device-a" / "采集任务-full-task-id-b" / "2026-09-08" / "09"
+    assert first_archive.path != second_archive.path
+
+
+async def test_task_rename_keeps_each_writer_directory_immutable_and_hour_stable(tmp_path):
+    """运行创建后名称不回溯；改名后的同小时归档仍保留相同自然小时语义。"""
+    instant = datetime(2026, 9, 8, 1, 0, tzinfo=UTC)
+    old = HourlyWriter("full-task-id", "run-a", "session-a", tmp_path,
+                       storage_identity="device-a", task_name="改名前")
+    renamed = HourlyWriter("full-task-id", "run-b", "session-b", tmp_path,
+                           storage_identity="device-a", task_name="改名后")
+    await old.write(b"old\n", received_at=instant)
+    await renamed.write(b"new\n", received_at=instant)
+    old_archive, renamed_archive = await old.close(), await renamed.close()
+
+    assert old_archive.path.parent != renamed_archive.path.parent
+    assert old_archive.hour_start == renamed_archive.hour_start
 
 
 async def test_single_input_larger_than_10_mib_is_split_at_strict_limit(tmp_path):

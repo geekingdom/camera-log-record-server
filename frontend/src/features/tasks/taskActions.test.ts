@@ -56,6 +56,11 @@ describe("availableTaskActions", () => {
       .toEqual(["stop"]);
   });
 
+  it("等待设备认证的暂停继续允许撤销为暂停或停止", () => {
+    expect(availableTaskActions(task({ status: "WAITING_DEVICE", desiredState: "RUNNING" })))
+      .toEqual(["pause", "stop"]);
+  });
+
   it("Telnet 设备采集中不显示 SSH 暂停，未归属的错误任务可以启动", () => {
     expect(availableTaskActions(task({
       protocol: "TELNET_DEVICE", status: "COLLECTING", desiredState: "RUNNING",

@@ -11,6 +11,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.resources.health import reconcile_authorized_recoveries
 from camera_logs.resources.lifecycle import reconcile_deleted_resources
 from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task
 
@@ -49,6 +50,7 @@ async def schedule_once(repo, lease=None):
     """在一次持有调度租约的周期内处理停止、失联和待分配任务。"""
     db = repo.db
     await reconcile_deleted_resources(repo)
+    await reconcile_authorized_recoveries(repo)
     cutoff = now() - timedelta(seconds=30)
     async for node in db.nodes.find({"heartbeat": {"$lt": cutoff}}):
         await db.tasks.update_many({"nodeId": node["id"], "status": {"$nin": ["STOPPED", "BLOCKED"]}},

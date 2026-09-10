@@ -16,11 +16,14 @@ services:
       NODE_PORT: ${NODE_PORT:-8001}
       LOG_ROOT: /var/lib/camera-logs/data
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
+      NFS_ROOT: ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
+      NFS_SERVER_IP: ${NFS_SERVER_IP:-}
     network_mode: host
     restart: unless-stopped
     depends_on: {storage-init: {condition: service_completed_successfully}}
     volumes:
       - ${HOST_LOG_ROOT:-worker-data}:/var/lib/camera-logs
+      - ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}:${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
     logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
 volumes:

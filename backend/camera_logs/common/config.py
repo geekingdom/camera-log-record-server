@@ -27,7 +27,18 @@ class Settings(BaseSettings):
     node_port: int = Field(default=8001, ge=1, le=65535)
     log_root: Path = Path("data/logs")
     # 海康 SSH coredump 的 NFS 总挂载目录；Worker 部署时应配置为宿主机绝对路径。
-    nfs_root: Path = Path("data/nfs-coredump")
+    nfs_root: Path = Path("/srv/camera-logs/nfs-coredump")
+    # 设备可达的宿主机 IP，不能使用 Docker 服务名或容器内回环地址。
+    nfs_server_ip: str = ""
+    # NFS coredump 扫描/冻结独立于采集会话；接收源文件默认不自动删除。
+    coredump_scan_interval_seconds: int = Field(default=60, ge=1, le=3600)
+    coredump_scan_max_files: int = Field(default=500, ge=1, le=10000)
+    coredump_snapshot_max_bytes: int = Field(default=20_000_000_000, ge=1)
+    coredump_snapshot_quota_bytes: int = Field(default=100_000_000_000, ge=1)
+    coredump_export_max_bytes: int = Field(default=20_000_000_000, ge=1)
+    coredump_export_quota_bytes: int = Field(default=100_000_000_000, ge=1)
+    # 仅冻结快照和导出产物的保留时间；绝不按此删除设备直接写入的 NFS 原文件。
+    coredump_retention_hours: int = Field(default=24, ge=1, le=168)
     known_hosts: str = ""
     ssh_verify_host_key: bool = False
     node_capacity: int = 100

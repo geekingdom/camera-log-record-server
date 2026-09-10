@@ -2,7 +2,7 @@
 // 资源是设备身份入口；软删除后仍可进入所属任务查询和下载历史日志。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { Activity, Archive, Edit3, Eye, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
+import { Activity, Archive, Edit3, Eye, FileArchive, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { Resource, ResourceKind } from "../../shared/types";
@@ -13,11 +13,13 @@ import CreatorFilter from "../../shared/CreatorFilter.vue";
 import ResourceBatchDelete from "./ResourceBatchDelete.vue";
 
 const loadResourceEditor = () => import("./ResourceEditor.vue");
+const loadCoredumpFiles = () => import("../coredumps/CoredumpFiles.vue");
 
 const emit = defineEmits<{ tasks: [Resource]; createTask: [Resource] }>();
 const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
+const coredumpOpen = ref(false), coredumpResource = ref<Resource>();
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
 const showAll = ref(Boolean(props.isAdmin));
 const createdBy = ref("");
@@ -56,12 +58,19 @@ function changeScope(value: boolean | string | number) {
 function formatDate(value?: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) : "-";
 }
+function healthLabel(value?: Resource["healthStatus"]) {
+  return ({ ONLINE: "当前连通", AUTH_FAILED: "HTTP 凭据失效", OFFLINE: "设备离线", ERROR: "认证检查异常" }[value ?? ""] ?? "尚未检查");
+}
+function healthTone(value?: Resource["healthStatus"]) {
+  return ({ ONLINE: "success", AUTH_FAILED: "danger", OFFLINE: "warning", ERROR: "danger" }[value ?? ""] ?? "info");
+}
 function owns(resource?: Resource) { return Boolean(resource && canManageOwnedRecord(props.userId, props.isAdmin, resource.createdBy)); }
 function permitted(resource?: Resource) { return Boolean(props.canWrite && owns(resource)); }
 function canBulkDelete(resource?: Resource) { return Boolean(!batchDeleting.value && resource && !resource.deletedAt && permitted(resource) && props.canControl); }
 function updateSelection(items: Resource[]) { selected.value = items.filter(canBulkDelete); }
 function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt); }
 function edit(resource?: Resource) { if (resource && !permitted(resource)) return; selectedResource.value = resource; editorOpen.value = true; }
+function viewCoredumps(resource: Resource) { coredumpResource.value = resource; coredumpOpen.value = true; }
 async function remove(resource: Resource) {
   if (!permitted(resource)) return;
   if (batchDeleting.value || deleting.value.has(resource.id)) return;
@@ -121,12 +130,14 @@ defineExpose({ reload: load });
     <el-table-column label="资源身份" min-width="250"><template #default="{ row }"><div class="resource-identity"><span class="resource-kind-icon" :class="row.kind === 'HIKVISION_NETWORK' ? 'network' : 'serial'"><component :is="kindIcon(row.kind)" :size="17" /></span><div><strong>{{ row.name }}</strong><div class="resource-type-line"><span>{{ kindLabel(row.kind) }}</span><el-tag v-if="row.deletedAt" type="info" size="small">已删除 · 日志保留</el-tag></div></div></div></template></el-table-column>
     <el-table-column label="网络地址" min-width="165"><template #default="{ row }"><span class="resource-ip">{{ row.ip }}</span><small class="resource-subtle">{{ row.kind === 'HIKVISION_NETWORK' ? 'HTTP 设备入口' : 'Telnet 串口入口' }}</small></template></el-table-column>
     <el-table-column label="设备身份" min-width="270"><template #default="{ row }"><div class="resource-device-meta"><strong>{{ row.model || (row.kind === 'SERIAL_SERVER' ? '串口服务器' : '-') }}</strong><span>序列号 {{ row.subSerialNumber || '-' }}</span><span>软件 {{ row.softwareVersion || '-' }}</span></div></template></el-table-column>
+    <el-table-column label="设备认证" min-width="175"><template #default="{ row }"><template v-if="row.kind === 'HIKVISION_NETWORK'"><el-tag :type="healthTone(row.healthStatus)" size="small">{{ healthLabel(row.healthStatus) }}</el-tag><small class="resource-subtle">检查 {{ formatDate(row.healthCheckedAt) }}</small></template><span v-else>-</span></template></el-table-column>
     <el-table-column label="创建用户" min-width="130"><template #default="{ row }">{{ row.createdByName || row.createdBy || "未知" }}</template></el-table-column>
     <el-table-column label="创建时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
     <el-table-column label="删除时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.deletedAt) }}</template></el-table-column>
     <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 活跃</span></div></template></el-table-column>
-    <el-table-column label="操作" width="252" fixed="right"><template #default="{ row }"><div class="resource-actions">
+    <el-table-column label="操作" width="292" fixed="right"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
+      <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看 coredump 文件"><el-button text :icon="FileArchive" aria-label="查看 coredump 文件" @click="viewCoredumps(row)" /></el-tooltip>
       <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row) && props.canControl" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="batchDeleting || deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
@@ -140,6 +151,9 @@ defineExpose({ reload: load });
     :component-props="{ modelValue: editorOpen, resource: selectedResource, canEdit: !selectedResource || permitted(selectedResource) }"
     :listeners="{ 'update:modelValue': (value: boolean) => editorOpen = value, saved: () => load() }"
   />
+  <AsyncView v-if="coredumpOpen" overlay :loader="loadCoredumpFiles"
+    :component-props="{ modelValue: coredumpOpen, resource: coredumpResource }"
+    :listeners="{ 'update:modelValue': (value: boolean) => coredumpOpen = value }" />
 </template>
 <style scoped>
 .resource-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }

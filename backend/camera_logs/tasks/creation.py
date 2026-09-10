@@ -25,6 +25,8 @@ async def _claim_resources(db, document, session):
             if await db.resources.find_one({"id": identifier}, session=session) is None:
                 raise HTTPException(404, "设备资源不存在")
             raise HTTPException(409, "设备资源已删除，任务不会启动")
+        if resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
+            raise HTTPException(409, "设备资源认证或连通性异常，任务不会启动")
 
 
 def _response(document):

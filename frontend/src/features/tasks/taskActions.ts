@@ -19,6 +19,9 @@ export function availableTaskActions(task: Task): TaskAction[] {
   if (status === "PAUSED" && desiredState === "PAUSED" && task.protocol === "SSH") {
     return ["resume", "stop"];
   }
+  if (status === "WAITING_DEVICE" && desiredState === "RUNNING" && task.protocol === "SSH") {
+    return ["pause", "stop"];
+  }
   if (status === "COLLECTING" && desiredState === "RUNNING") {
     return task.protocol === "SSH" ? ["pause", "stop"] : ["stop"];
   }

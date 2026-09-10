@@ -32,7 +32,7 @@ def create_app(settings=None, db=None):
         repo = Repository(database, settings)
         from camera_logs.common.observability import setup_logging
         listener = setup_logging(settings.log_root.parent / "service-logs" / "api")
-        background = None
+        background = []
         try:
             await repo.initialize()
             from camera_logs.users.sessions import initialize_admin
@@ -42,14 +42,16 @@ def create_app(settings=None, db=None):
             async with NodeHttpPool() as node_http:
                 app.state.node_http = node_http
                 if settings.start_background:
+                    from camera_logs.resources.health import health_loop
                     from camera_logs.tasks.scheduler import scheduler_loop
-                    background = asyncio.create_task(scheduler_loop(repo))
+                    background = [asyncio.create_task(scheduler_loop(repo)), asyncio.create_task(health_loop(repo))]
                 try:
                     yield
                 finally:
+                    for task in background:
+                        task.cancel()
                     if background:
-                        background.cancel()
-                        await asyncio.gather(background, return_exceptions=True)
+                        await asyncio.gather(*background, return_exceptions=True)
         finally:
             if client:
                 await client.close()
@@ -125,6 +127,8 @@ def create_app(settings=None, db=None):
 
     from camera_logs.logs.api import install_log_routes
     install_log_routes(app)
+    from camera_logs.coredumps.api import install_coredump_routes
+    install_coredump_routes(app)
     from camera_logs.administration.api import install_admin_routes
     install_admin_routes(app)
     from camera_logs.administration.settings import install_settings_routes

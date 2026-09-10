@@ -12,6 +12,14 @@ MAX_DEVICE_INFO_BYTES = 1024 * 1024
 MAX_DEVICE_FIELD_LENGTH = 512
 
 
+class DeviceOfflineError(RuntimeError):
+    """TCP 连接或响应超时，周期健康检查可将其显示为设备离线。"""
+
+
+class DeviceAuthenticationError(RuntimeError):
+    """非 401 的 HTTP、协议或设备信息错误，不能误报为离线或凭据失效。"""
+
+
 def _device_info_url(ip: str) -> str:
     """构造 ISAPI 地址；IPv6 字面量必须用方括号包裹以符合 URL 语法。"""
     normalized = ip_address(ip)
@@ -60,14 +68,15 @@ async def authenticate_network_resource(*, ip: str, username: str, password: str
                     if response.status_code == 401:
                         raise PermissionError("设备凭据错误")
                     if response.status_code != 200:
-                        raise RuntimeError("设备异常")
+                        raise DeviceAuthenticationError("设备异常")
                     chunks = bytearray()
                     async for chunk in response.aiter_bytes():
                         chunks.extend(chunk)
                         if len(chunks) > MAX_DEVICE_INFO_BYTES:
                             raise ValueError("设备信息格式无效")
     except TimeoutError as exc:
-        raise RuntimeError("设备异常") from exc
+        # 周期健康检查需要区分超时离线与设备返回的其它异常；API 仍统一映射为 502。
+        raise DeviceOfflineError("设备异常") from exc
     except httpx.HTTPError as exc:
-        raise RuntimeError("设备异常") from exc
+        raise DeviceOfflineError("设备异常") from exc
     return _parse_device_info(bytes(chunks))

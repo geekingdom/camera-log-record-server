@@ -236,7 +236,7 @@ def _component_deployment_copy(tmp_path):
     (app / "deploy").mkdir(parents=True)
     (app / "scripts").mkdir()
     shutil.copy2(root / "deploy.sh", app / "deploy.sh")
-    for name in ("deploy_env.py", "deploy_docker.sh"):
+    for name in ("configure_nfs_export.py", "deploy_env.py", "deploy_docker.sh"):
         shutil.copy2(root / "scripts" / name, app / "scripts" / name)
     for name in ("backend.yml", "worker.yml", "database.yml", "frontend.yml"):
         (app / "deploy" / name).write_text("services: {}\n", encoding="utf-8")

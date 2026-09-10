@@ -113,10 +113,39 @@ chmod 600 "$env_file"
 env_file="$(cd "$(dirname "$env_file")" && pwd)/$(basename "$env_file")"
 export DEPLOY_ENV_FILE="$env_file"
 
+# 配置器只维护项目专属 exports；空地址禁用 NFS，并仅撤销遗留的本项目导出。
+configure_nfs() {
+  local nfs_export_file="/etc/exports.d/camera-logs-coredump.exports"
+  # 未启用时只撤销本项目遗留导出。普通用户在文件存在时也须经 sudo 写系统目录；
+  # 文件不存在则配置器无副作用，可直接执行而不额外要求管理员权限。
+  if ! grep -Eq '^NFS_SERVER_IP=[^[:space:]#]' "$env_file"; then
+    if [[ -e "$nfs_export_file" && "$EUID" -ne 0 ]]; then
+      if ! command -v sudo >/dev/null 2>&1; then
+        echo "撤销遗留NFS导出需要root权限；请以root运行或安装sudo" >&2
+        exit 1
+      fi
+      sudo python3 "$root/scripts/configure_nfs_export.py" --env-file "$env_file"
+    else
+      python3 "$root/scripts/configure_nfs_export.py" --env-file "$env_file"
+    fi
+    return
+  fi
+  if [[ "$EUID" -eq 0 ]]; then
+    python3 "$root/scripts/configure_nfs_export.py" --env-file "$env_file" --install-package
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo python3 "$root/scripts/configure_nfs_export.py" --env-file "$env_file" --install-package
+  else
+    echo "已启用NFS但当前无root权限；请以root运行或安装sudo" >&2
+    exit 1
+  fi
+}
+
 if [[ "$component" == all ]]; then
+  configure_nfs
   docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" up --build --detach --remove-orphans
   python3 "$root/scripts/deploy_health.py" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
 else
   # 独立部署不使用 --remove-orphans，避免误删同项目已运行的其它服务。
+  if [[ "$component" == worker ]]; then configure_nfs; fi
   python3 "$root/scripts/deploy_component.py" --component "$component" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
 fi

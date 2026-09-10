@@ -31,6 +31,8 @@ async def _guard_resources(db, task, session):
             if await db.resources.find_one({"id": identifier}, session=session) is None:
                 raise HTTPException(404, "设备资源不存在")
             raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
+        if resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
+            raise HTTPException(409, "设备资源认证或连通性异常，暂不能启动采集")
 
 
 def _validate(task, desired, require_paused):
@@ -91,7 +93,7 @@ async def _local_transition(db, task, desired, session):
     changes, unset = {}, {}
     if task.get("nodeId") is not None:
         return changes, unset
-    if desired == "STOPPED" and task["status"] == "PAUSED":
+    if desired == "STOPPED" and task["status"] in {"PAUSED", "WAITING_DEVICE"}:
         run_id = task.get("runId")
         # 已暂停意味着原连接关闭，缺少旧锁/运行记录仍可停止恢复；但未知运行的锁
         # 不属于本次收尾权限，不能遗留它并向调用者报告停止成功。
@@ -105,6 +107,9 @@ async def _local_transition(db, task, desired, session):
             await db.runs.update_one({"id": run_id, "endedAt": None},
                                      {"$set": {"endedAt": now()}}, session=session)
         changes["status"] = "STOPPED"
+    elif desired == "PAUSED" and task["status"] == "WAITING_DEVICE":
+        # 等待 HTTP 探测时再次暂停只撤销继续意图，保留原暂停运行、锁和命令预算。
+        changes["status"] = "PAUSED"
     elif desired == "PAUSED" and task["status"] in {"STOPPED", "PENDING"}:
         # 尚未领取的新任务不需要 Worker 关闭连接；但不能复用上次已结束的 runId。
         if await db.endpoint_locks.find_one({"taskId": task["id"]}, session=session):
@@ -135,14 +140,42 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
 
     async def commit(session):
         db = repo.db
+        claim_update = {"$inc": {"controlClaimVersion": 1}}
+        # 用户停止（含已停止任务的幂等重放）必须原子撤销系统故障恢复资格。
+        if desired == "STOPPED":
+            claim_update["$unset"] = {"resourceHealthRecovery": ""}
         task = await db.tasks.find_one_and_update(
-            {"id": task_id}, {"$inc": {"controlClaimVersion": 1}},
+            {"id": task_id}, claim_update,
             return_document=ReturnDocument.AFTER, session=session,
         )
         if task is None:
             raise HTTPException(404, "任务不存在")
         authorize_owner(user, task)
-        if desired != "STOPPED":
+        if require_paused and task.get("status") == "WAITING_DEVICE":
+            previous = await db.operations.find_one({"id": task.get("controlOperationId"), "taskId": task_id,
+                                                     "action": "resume-wait-device", "status": "PENDING"}, session=session)
+            if previous:
+                return previous
+        # 第三方设备重启期间，暂停运行保留原预算，显式继续转为等待 HTTP 重新认证。
+        resource = await db.resources.find_one({"id": task["resourceId"], "deletedAt": None}, session=session)
+        if require_paused and task["protocol"] == "SSH" and task["status"] == "PAUSED" and task.get("nodeId") is None \
+                and task["desiredState"] == "PAUSED" and resource and resource.get("kind") == "HIKVISION_NETWORK":
+            await _validate_paused_run(db, task, session)
+            timestamp = now()
+            operation = {"id": identifier, "taskId": task_id, "desiredState": "RUNNING", "action": "resume-wait-device",
+                         "actor": user["id"], "status": "PENDING", "createdAt": timestamp}
+            await db.operations.update_many({"taskId": task_id, "status": "PENDING"},
+                                            {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session)
+            await db.operations.insert_one(operation, session=session)
+            await db.tasks.update_one({"id": task_id, "desiredState": "PAUSED"}, {"$set": {
+                "desiredState": "RUNNING", "status": "WAITING_DEVICE", "controlOperationId": identifier,
+                "resumeWaiting": {"operationId": identifier, "pausedRunId": task.get("runId"),
+                                  "generation": task.get("generation"), "requestedAt": timestamp,
+                                  "waitingReason": resource.get("healthStatus") or "CHECKING"}, "updatedAt": timestamp}}, session=session)
+            await db.resources.update_one({"id": resource["id"]}, {"$set": {"nextHealthCheckAt": timestamp}} ,session=session)
+            await repo.audit(user["id"], "control:RUNNING", task_id, session=session)
+            return operation
+        if desired != "STOPPED" and not (desired == "PAUSED" and task.get("status") == "WAITING_DEVICE"):
             await _guard_resources(db, task, session)
         previous = await _previous_operation(db, task, desired, session)
         # 继续请求一经接受，desiredState 已是 RUNNING。仅重放确由 resume 建立的
@@ -175,6 +208,8 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
         changes.update(desiredState=desired, updatedAt=timestamp, controlOperationId=identifier)
         if desired == "STOPPED":
             changes["restartRequested"] = False
+        if desired in {"STOPPED", "PAUSED"}:
+            unset["resumeWaiting"] = ""
         query = {"id": task_id}
         if desired != "STOPPED":
             query["resourceDeleted"] = {"$ne": True}

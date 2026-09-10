@@ -33,6 +33,7 @@ const desiredLabels: Record<string, string> = {
   STOPPED: "停止",
   RUNNING: "运行",
   PAUSED: "暂停",
+  WAITING_DEVICE: "等待设备",
 };
 const protocolLabels: Record<string, string> = {
   SSH: "SSH",

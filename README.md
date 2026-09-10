@@ -31,7 +31,7 @@ npm run dev -- --host 0.0.0.0 --port 5173
 npm run build
 ```
 
-部署、环境变量、TLS、副本集恢复和基准压测见 [docs/operations.md](docs/operations.md)，组件职责与数据路由见 [docs/architecture.md](docs/architecture.md)。提交前可运行 `scripts/install-git-hooks.sh` 启用中文提交标题及“背景、变更、测试、影响”正文模板。
+部署、环境变量、TLS、副本集恢复和基准压测见 [docs/operations.md](docs/operations.md)，组件职责与数据路由见 [docs/architecture.md](docs/architecture.md)。海康 SSH 的可选 coredump 监控及不限来源网段的 NFS 部署见 [NFS 配置](docs/nfs-coredump-deployment.md)。当前实现、验证与待验收项统一见 [当前状态总表](docs/implementation-status.md)。提交前可运行 `scripts/install-git-hooks.sh` 启用中文提交标题及“背景、变更、测试、影响”正文模板。
 
 接口、浏览器下载会话、任务控制、后台管理和日志检索示例见 [docs/api.md](docs/api.md)。运行时以 JSONL 写入 API/worker 的模块日志、操作记录及异常追踪；日志字段会脱敏密码、令牌和授权头。
 

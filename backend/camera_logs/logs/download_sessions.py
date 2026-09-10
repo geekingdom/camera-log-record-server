@@ -19,11 +19,12 @@ from camera_logs.common.security import actor, authorize
 from camera_logs.users.sessions import COOKIE, user_identity
 
 
-async def issue_download_ticket(repo, identity, identifier):
+async def issue_download_ticket(repo, identity, identifier, *, target_type="job"):
     """固定票据与审计原子提交；确认丢失只读恢复，确认前不得发送 Cookie。"""
     token = secrets.token_urlsafe(32)
     document = {"tokenHash": hashlib.sha256(token.encode()).hexdigest(),
-                "jobId": identifier, "actor": identity["id"], "serviceTokenId": identity.get("serviceTokenId"),
+                "jobId": identifier if target_type == "job" else None, "targetId": identifier, "targetType": target_type,
+                "actor": identity["id"], "serviceTokenId": identity.get("serviceTokenId"),
                 "expiresAt": now() + timedelta(minutes=5)}
 
     async def commit(session):
@@ -36,7 +37,7 @@ async def issue_download_ticket(repo, identity, identifier):
         try:
             database = audited_mutations._majority_primary_database(repo)
             confirmed = await database.download_sessions.find_one({
-                "tokenHash": document["tokenHash"], "jobId": identifier,
+                "tokenHash": document["tokenHash"], "targetId": identifier, "targetType": target_type,
                 "actor": identity["id"], "expiresAt": {"$gt": now()},
             })
         except PyMongoError:
@@ -46,7 +47,7 @@ async def issue_download_ticket(repo, identity, identifier):
     return token
 
 
-async def download_actor(request: Request):
+async def _ticket_actor(request: Request, target_type: str):
     """校验请求头或作用于本作业的下载票据，身份权限在内容路由再次检查。"""
     if request.headers.get("authorization") or request.cookies.get(COOKIE):
         return await actor(request)
@@ -54,7 +55,7 @@ async def download_actor(request: Request):
     repo = request.app.state.repo
     document = await repo.db.download_sessions.find_one({
         "tokenHash": hashlib.sha256(ticket.encode()).hexdigest(),
-        "jobId": request.path_params["identifier"], "expiresAt": {"$gt": now()}})
+        "targetId": request.path_params["identifier"], "targetType": target_type, "expiresAt": {"$gt": now()}})
     if document is None:
         raise HTTPException(401, "下载授权不存在或已过期")
     if document["actor"] != "bootstrap":
@@ -78,6 +79,18 @@ async def download_actor(request: Request):
         context["serviceTokenId"] = identity["serviceTokenId"]
     request.state.actor = identity
     return identity
+
+
+async def download_actor(request: Request):
+    """兼容既有日志作业下载票据。"""
+    return await _ticket_actor(request, "job")
+
+
+def download_actor_for(target_type: str):
+    """构造指定下载对象的鉴权依赖，Cookie 不能跨 coredump 与日志复用。"""
+    async def dependency(request: Request):
+        return await _ticket_actor(request, target_type)
+    return dependency
 
 
 def install_download_sessions(app):

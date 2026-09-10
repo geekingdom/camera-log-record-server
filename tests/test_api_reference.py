@@ -102,3 +102,23 @@ def test_reference_guides_document_inherited_permissions_owner_contract_and_temp
 
     for text in ("自动拥有", "来源IP", "仅创建者", "sharedWith", "sharedWithAll", "任务快照"):
         assert text in guides
+
+
+def test_reference_coredumps_describe_binary_downloads_and_real_permissions(client):
+    """coredump 不得继承资源编辑权限或被错误描述成日志 Base64 读取接口。"""
+    reference = client.get("/api/v1/api-reference").json()
+    operations = {item["id"]: item for item in reference["operations"]}
+    listing = operations["GET /api/v1/resources/{resource_id}/coredumps"]
+    assert listing["group"] == "Coredump文件"
+    assert listing["permission"] == "logs:read"
+    assert listing["responseExample"]["items"][0]["receivedAt"]
+    create = operations["POST /api/v1/coredump-exports"]
+    assert create["requestExample"] == {"fileIds": ["coredump-example"]}
+    assert "Idempotency-Key" in create["headers"]
+    for route in ("coredumps", "coredump-exports"):
+        content = operations[f"GET /api/v1/{route}/{{identifier}}/content"]
+        assert "logs:download" in content["permission"]
+        assert "download_access" in content["headers"]["Authorization"]
+        assert "二进制" in content["responseExample"]
+    guides = "\n".join(item["text"] for item in reference["guides"])
+    assert "WAITING_DEVICE" in guides and "新认证" in guides

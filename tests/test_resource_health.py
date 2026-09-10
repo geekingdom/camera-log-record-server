@@ -1,0 +1,274 @@
+"""资源周期认证、系统停止标记与目录身份更新的隔离回归。"""
+
+import asyncio
+from datetime import timedelta
+
+from camera_logs.common.config import Settings
+from camera_logs.common.database import Repository, now
+from camera_logs.resources.health import (
+    check_resource,
+    grant_after_user_authentication,
+    health_once,
+    reconcile_authorized_recoveries,
+)
+from mongomock_motor import AsyncMongoMockClient
+
+
+def _repo(tmp_path):
+    """构造不连接真实设备的内存仓库，凭据只用于验证解密和调用边界。"""
+    settings = Settings(encryption_key="4SkbHRtubkER4lQFz_4Zj0z3Yb6t86M5A_d9o8RwSgI=", bootstrap_token="test",
+                        log_root=tmp_path / "logs", start_background=False)
+    return Repository(AsyncMongoMockClient().db, settings)
+
+
+def test_auth_failure_marks_resource_and_stops_only_running_tasks(tmp_path, monkeypatch):
+    """401 标识凭据失败，系统停止只作用于未由用户暂停的运行任务。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.1",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "version": 1, "deletedAt": None})
+        await repo.db.tasks.insert_many([
+            {"id": "running", "resourceId": "camera", "desiredState": "RUNNING", "storageIdentity": "old"},
+            {"id": "paused", "resourceId": "camera", "desiredState": "PAUSED", "storageIdentity": "old"},
+        ])
+        async def rejected(**_kwargs):
+            raise PermissionError("bad")
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        resource = await repo.db.resources.find_one({"id": "camera"})
+        assert resource["healthStatus"] == "AUTH_FAILED"
+        running = await repo.db.tasks.find_one({"id": "running"})
+        paused = await repo.db.tasks.find_one({"id": "paused"})
+        assert running["desiredState"] == "STOPPED"
+        assert running["resourceHealthRecovery"]["resourceId"] == "camera"
+        assert paused["desiredState"] == "PAUSED"
+        assert "resourceHealthRecovery" not in paused
+    asyncio.run(scenario())
+
+
+def test_auth_failure_preserves_paused_run_and_budget_context(tmp_path, monkeypatch):
+    """设备离线不会把已暂停 SSH 任务变成 STOPPED，原运行和预算可等待用户显式继续。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.3",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None})
+        await repo.db.tasks.insert_one({"id": "paused", "resourceId": "camera", "desiredState": "PAUSED",
+                                        "status": "PAUSED", "runId": "kept-run", "generation": 7})
+        async def offline(**_kwargs):
+            from camera_logs.resources.authentication import DeviceOfflineError
+            raise DeviceOfflineError("timeout")
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", offline)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        task = await repo.db.tasks.find_one({"id": "paused"})
+        assert (task["desiredState"], task["status"], task["runId"], task["generation"]) == ("PAUSED", "PAUSED", "kept-run", 7)
+        assert "resourceHealthRecovery" not in task
+    asyncio.run(scenario())
+
+
+def test_offline_during_manual_pause_keeps_pending_worker_cleanup(tmp_path, monkeypatch):
+    """暂停请求已落库但 Worker 未停时，离线不能改写用户暂停意图和运行预算。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.31",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None})
+        await repo.db.tasks.insert_one({"id": "pausing", "resourceId": "camera", "desiredState": "PAUSED",
+                                        "status": "COLLECTING", "runId": "kept-run", "generation": 8,
+                                        "remainingCommandBudget": 23})
+        async def offline(**_kwargs):
+            from camera_logs.resources.authentication import DeviceOfflineError
+            raise DeviceOfflineError("timeout")
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", offline)
+
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+
+        task = await repo.db.tasks.find_one({"id": "pausing"})
+        assert (task["desiredState"], task["status"], task["runId"], task["generation"]) == (
+            "PAUSED", "COLLECTING", "kept-run", 8)
+        assert task["remainingCommandBudget"] == 23
+        assert await repo.db.operations.count_documents({"taskId": "pausing"}) == 0
+    asyncio.run(scenario())
+
+
+def test_repeated_same_failure_does_not_create_system_operations_for_stopped_task(tmp_path, monkeypatch):
+    """同一失败状态后，已系统停止或手动停止的任务不能每分钟新增停止操作。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.30",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None})
+        await repo.db.tasks.insert_one({"id": "running", "resourceId": "camera", "desiredState": "RUNNING"})
+        async def rejected(**_kwargs):
+            raise PermissionError("bad")
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        first = await repo.db.operations.count_documents({"taskId": "running", "action": "system-resource-health-stop"})
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        assert first == 1 == await repo.db.operations.count_documents({"taskId": "running", "action": "system-resource-health-stop"})
+    asyncio.run(scenario())
+
+
+def test_identity_change_ends_paused_run_before_new_resume_can_be_claimed(tmp_path, monkeypatch):
+    """设备身份变化不能沿用旧暂停预算，旧锁和运行必须结束后才创建新运行。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.4",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "model": "old", "subSerialNumber": "old", "deletedAt": None})
+        await repo.db.tasks.insert_one({"id": "waiting", "resourceId": "camera", "desiredState": "RUNNING",
+                                        "status": "WAITING_DEVICE", "runId": "old-run", "generation": 3})
+        await repo.db.runs.insert_one({"id": "old-run"})
+        await repo.db.endpoint_locks.insert_one({"taskId": "waiting", "runId": "old-run"})
+        async def changed(**_kwargs):
+            return {"model": "new", "subSerialNumber": "new", "softwareVersion": "V"}
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", changed)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        task = await repo.db.tasks.find_one({"id": "waiting"})
+        assert (task["desiredState"], task["status"]) == ("RUNNING", "WAITING_DEVICE")
+        assert "runId" not in task and await repo.db.endpoint_locks.count_documents({"taskId": "waiting"}) == 0
+        assert (await repo.db.runs.find_one({"id": "old-run"}))["endedAt"]
+    asyncio.run(scenario())
+
+
+def test_user_auth_identity_change_ends_manual_paused_run_consistently(tmp_path):
+    """用户保存新设备身份也必须结束旧暂停运行，不能留下 PAUSED 意图配 STOPPED 状态。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        resource = {"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.5", "model": "new",
+                    "subSerialNumber": "new", "healthStatus": "ONLINE"}
+        await repo.db.resources.insert_one(resource)
+        await repo.db.tasks.insert_one({"id": "paused", "resourceId": "camera", "desiredState": "PAUSED",
+                                        "status": "PAUSED", "runId": "old-run"})
+        await repo.db.runs.insert_one({"id": "old-run"})
+        await repo.db.endpoint_locks.insert_one({"taskId": "paused", "runId": "old-run"})
+        await grant_after_user_authentication(repo, resource, None, identity_changed=True)
+        task = await repo.db.tasks.find_one({"id": "paused"})
+        assert (task["desiredState"], task["status"]) == ("PAUSED", "PAUSED")
+        assert "runId" not in task and (await repo.db.runs.find_one({"id": "old-run"}))["endedAt"]
+    asyncio.run(scenario())
+
+
+def test_identity_result_started_before_resume_request_cannot_release_waiting_task(tmp_path, monkeypatch):
+    """认证在 resume 前已启动时，即使返回新身份也只能更新资源，不能兑现后发等待操作。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        requested = now()
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.6",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "model": "old", "subSerialNumber": "old", "deletedAt": None})
+        await repo.db.tasks.insert_one({"id": "waiting", "resourceId": "camera", "desiredState": "RUNNING",
+            "status": "WAITING_DEVICE", "runId": "old-run", "generation": 4,
+            "resumeWaiting": {"operationId": "resume", "pausedRunId": "old-run", "generation": 4,
+                              "requestedAt": requested}})
+        async def changed(**_kwargs):
+            return {"model": "new", "subSerialNumber": "new", "softwareVersion": "V"}
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", changed)
+        snapshot = await repo.db.resources.find_one({"id": "camera"})
+        snapshot["healthLeaseStartedAt"] = requested - timedelta(seconds=1)
+        await check_resource(repo, snapshot)
+        task = await repo.db.tasks.find_one({"id": "waiting"})
+        assert (task["desiredState"], task["status"]) == ("RUNNING", "WAITING_DEVICE")
+        assert task["resumeWaiting"]["operationId"] == "resume" and "runId" not in task
+    asyncio.run(scenario())
+
+
+def test_identity_waiting_task_accepts_later_probe_and_becomes_claimable(tmp_path, monkeypatch):
+    """换机清理旧 run 后，早期探测不兑现，后续新鲜探测将等待任务恢复为可领取暂停态。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        requested = now()
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.7",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "model": "old", "subSerialNumber": "old", "deletedAt": None})
+        waiting = {"operationId": "resume", "pausedRunId": "old-run", "generation": 5, "requestedAt": requested}
+        await repo.db.tasks.insert_one({"id": "waiting", "resourceId": "camera", "desiredState": "RUNNING",
+            "status": "WAITING_DEVICE", "runId": "old-run", "generation": 5, "resumeWaiting": waiting})
+        await repo.db.runs.insert_one({"id": "old-run"})
+        await repo.db.endpoint_locks.insert_one({"taskId": "waiting", "runId": "old-run"})
+        async def changed(**_kwargs):
+            return {"model": "new", "subSerialNumber": "new", "softwareVersion": "V"}
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", changed)
+        early = await repo.db.resources.find_one({"id": "camera"})
+        early["healthLeaseStartedAt"] = requested - timedelta(seconds=1)
+        await check_resource(repo, early)
+        after_early = await repo.db.tasks.find_one({"id": "waiting"})
+        assert after_early["status"] == "WAITING_DEVICE" and after_early["resumeWaiting"]["pausedRunId"] is None
+        fresh = await repo.db.resources.find_one({"id": "camera"})
+        fresh["healthLeaseStartedAt"] = requested + timedelta(seconds=1)
+        await check_resource(repo, fresh)
+        ready = await repo.db.tasks.find_one({"id": "waiting"})
+        assert (ready["desiredState"], ready["status"]) == ("RUNNING", "PAUSED")
+        assert "runId" not in ready and "resumeWaiting" not in ready
+    asyncio.run(scenario())
+
+
+def test_background_success_never_restores_system_stop_marker(tmp_path, monkeypatch):
+    """后台健康成功不能绕过用户重新保存认证这一恢复授权边界。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.2",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "model": "old", "subSerialNumber": "old", "version": 1, "deletedAt": None})
+        marker = {"resourceId": "camera", "stoppedAt": "before", "desiredState": "RUNNING"}
+        await repo.db.tasks.insert_many([
+            {"id": "recover", "resourceId": "camera", "desiredState": "STOPPED", "storageIdentity": "old", "resourceHealthRecovery": marker},
+            {"id": "manual", "resourceId": "camera", "desiredState": "STOPPED", "storageIdentity": "old"},
+            {"id": "paused", "resourceId": "camera", "desiredState": "STOPPED", "storageIdentity": "old",
+             "resourceHealthRecovery": {"resourceId": "camera", "stoppedAt": "before", "desiredState": "PAUSED"}},
+        ])
+        async def verified(**_kwargs):
+            return {"model": "DS-2CD", "subSerialNumber": "SN2", "softwareVersion": "V5.8"}
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", verified)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        recovered = await repo.db.tasks.find_one({"id": "recover"})
+        manual = await repo.db.tasks.find_one({"id": "manual"})
+        paused = await repo.db.tasks.find_one({"id": "paused"})
+        assert recovered["desiredState"] == "STOPPED" and recovered["resourceHealthRecovery"] == marker
+        assert manual["desiredState"] == "STOPPED"
+        assert paused["desiredState"] == "STOPPED"
+        assert recovered["storageIdentity"] != "old"
+        assert (await repo.db.resources.find_one({"id": "camera"}))["healthStatus"] == "ONLINE"
+    asyncio.run(scenario())
+
+
+def test_health_once_limits_parallel_authentication(tmp_path, monkeypatch):
+    """单轮受信号量限制，慢设备认证不会无限制占用 API 后台任务。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        for index in range(3):
+            await repo.db.resources.insert_one({"id": str(index), "kind": "HIKVISION_NETWORK", "ip": f"192.0.2.{index + 10}",
+                "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "version": 1, "deletedAt": None})
+        active = maximum = 0
+        async def slow(**_kwargs):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {"model": "", "subSerialNumber": "", "softwareVersion": "V"}
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", slow)
+        await health_once(repo, concurrency=1)
+        assert maximum == 1
+    asyncio.run(scenario())
+
+
+def test_user_auth_restores_only_after_worker_cleanup_and_manual_stop_cannot_return(tmp_path):
+    """保存认证先保留授权，旧节点收尾后恢复；清除标记的手动停止永不被恢复。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        resource = {"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.40", "model": "M",
+                    "subSerialNumber": "S", "healthStatus": "ONLINE"}
+        await repo.db.resources.insert_one(resource)
+        marker = {"resourceId": "camera", "desiredState": "RUNNING"}
+        await repo.db.tasks.insert_many([
+            {"id": "waiting", "resourceId": "camera", "desiredState": "STOPPED", "nodeId": "node",
+             "resourceHealthRecovery": marker},
+            {"id": "manual", "resourceId": "camera", "desiredState": "STOPPED"},
+        ])
+        await grant_after_user_authentication(repo, resource, None)
+        waiting = await repo.db.tasks.find_one({"id": "waiting"})
+        assert waiting["desiredState"] == "STOPPED" and waiting["resourceHealthRecovery"]["authorizedAt"]
+        await repo.db.tasks.update_one({"id": "waiting"}, {"$set": {"nodeId": None}})
+        await reconcile_authorized_recoveries(repo)
+        assert (await repo.db.tasks.find_one({"id": "waiting"}))["desiredState"] == "RUNNING"
+        assert (await repo.db.tasks.find_one({"id": "manual"}))["desiredState"] == "STOPPED"
+    asyncio.run(scenario())
