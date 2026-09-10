@@ -32,11 +32,6 @@ def _expired(value: datetime, stamp: datetime) -> bool:
     return value <= stamp
 
 
-def _active_after(value: datetime, stamp: datetime) -> bool:
-    """与 _expired 对称地比较冻结租约，保留无时区旧记录兼容。"""
-    return not _expired(value, stamp)
-
-
 def _same(left: os.stat_result, right: os.stat_result) -> bool:
     """复制前后必须是同一 inode、长度和时间版本，变化即丢弃副本。"""
     return (left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns, left.st_ctime_ns) == (
@@ -112,7 +107,7 @@ def _owned_path(root: Path, value: str | None, token: str) -> Path | None:
     return path if path.parent == root and path.name.endswith(f".{token}.partial") else None
 
 
-async def _reserve(repo: Any, token: str, file_id: str, size: int) -> None:
+async def _reserve(repo: Any, token: str, file_id: str, size: int, version: int | None = None) -> None:
     """按令牌预留非零容量；活动令牌使重复释放不会把 used 减成负数。"""
     if size <= 0:
         raise ValueError("零字节 coredump 不创建快照配额声明")
@@ -141,6 +136,7 @@ async def _reserve(repo: Any, token: str, file_id: str, size: int) -> None:
                 "$set": {
                     "nodeId": node_id,
                     "fileId": file_id,
+                    "version": version,
                     "bytes": size,
                     "state": "RESERVED",
                     "expiresAt": stamp + timedelta(seconds=RESERVATION_LEASE_SECONDS),
@@ -261,7 +257,7 @@ async def freeze(repo: Any, document: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("零字节 coredump 不创建快照")
         if source_info.st_size > limit:
             raise OverflowError("单个 coredump 超过节点快照上限")
-        await _reserve(repo, token, document["id"], source_info.st_size)
+        await _reserve(repo, token, document["id"], source_info.st_size, document["version"])
         reserved = True
         from camera_logs.logs.job_threads import job_thread
 
@@ -422,15 +418,6 @@ async def reconcile_snapshots(repo: Any, *, timestamp: datetime | None = None) -
                 },
             )
             continue
-        active_freeze = (
-            file
-            and file.get("status") == "FREEZING"
-            and file.get("freezeToken") == claim["id"]
-            and file.get("freezeLeaseUntil")
-            and _active_after(file["freezeLeaseUntil"], stamp)
-        )
-        if not active_freeze:
-            await _release(repo, claim["id"])
     async for document in repo.db.coredump_files.find(
         {
             "nodeId": repo.settings.node_id,
@@ -443,7 +430,8 @@ async def reconcile_snapshots(repo: Any, *, timestamp: datetime | None = None) -
         if claim and claim.get("expiresAt") and _expired(claim["expiresAt"], stamp):
             await release_snapshot(repo, document)
     from camera_logs.coredumps.snapshot_lifecycle import reconcile_snapshots as reconcile_lifecycle
-    return recovered + await reconcile_lifecycle(repo, timestamp=stamp)
+    from camera_logs.coredumps.snapshot_orphans import reconcile_orphans
+    return recovered + await reconcile_lifecycle(repo, timestamp=stamp) + await reconcile_orphans(repo, timestamp=stamp)
 
 
 async def release_snapshot(repo: Any, document: dict[str, Any]) -> bool:

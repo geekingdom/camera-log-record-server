@@ -90,8 +90,12 @@ class Repository:
         await self.db.coredump_files.create_index([("resourceId", 1), ("receivedAt", -1), ("id", 1)])
         await self.db.coredump_files.create_index([("nodeId", 1), ("status", 1), ("updatedAt", -1)])
         await self.db.coredump_files.create_index([("sourceKey", 1), ("nodeId", 1), ("version", -1)])
+        # 快照孤儿回收按本节点 token 引用核对，避免每个过期 claim 扫描整个 catalog。
+        await self.db.coredump_files.create_index([("nodeId", 1), ("freezeToken", 1)])
+        await self.db.coredump_files.create_index([("nodeId", 1), ("snapshot.reservationToken", 1)])
         await self.db.coredump_snapshot_reservations.create_index("id", unique=True)
         await self.db.coredump_snapshot_claims.create_index("id", unique=True)
+        await self.db.coredump_snapshot_claims.create_index([("nodeId", 1), ("state", 1), ("expiresAt", 1)])
         await self.db.coredump_export_reservations.create_index("id", unique=True)
         await self.db.coredump_exports.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1)])

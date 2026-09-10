@@ -62,3 +62,13 @@
 - 导出工作流真实Mongo复跑通过；前端73项、类型检查及构建通过，coredump桌面/390浏览器验收通过且主代理查看手机截图。
 
 容器CI加入上述读者脚本及导出工作流脚本。此阶段没有实机NFS传输，没有重新执行2GiB压力实验；历史无catalog孤立PUBLISHED声明及断电/网络失联矩阵仍未覆盖。
+
+## 孤立副本回收与连接复核
+
+`872c02b`的CI `34441011617`六作业成功，包括上一节新增的真实Mongo读者/导出脚本。本次在该基线上处理历史孤立声明：过期RESERVED/PUBLISHED且无catalog引用，或此前失败的RECLAIMING，按本节点的fileId/version/token精确删除私有副本后归还配额。源文件、替代token、未登记文件不删除；标识损坏、符号链接或物理错误保留声明并记录日志。
+
+`scripts/verify_coredump_orphans.py`首先在旧基线上真实Mongo复现副本未清理的失败，finally完成随机库和目录清理。实现后主代理复跑通过旧已发布副本、未发布partial/core回收，新token及NFS源保留、重复回收配额不重复扣减；1000条RELEASED历史记录下到期候选查询`totalDocsExamined=2`。同脚本已加入容器CI。
+
+主代理后端全量878项（66.62秒）及Ruff通过；孤立回收专属9项覆盖精确归属、失败后重跑、错误单项不阻塞其他token、四种catalog引用保护、symlink拒绝、取消时等待删除线程、非法标识/版本和不同节点/未到期声明保护。真实Mongo读者12轮竞争复验通过。所有实验均使用临时目录和随机库并清理。
+
+子代理独立SSH/Telnet生命周期审查未发现新确定性缺口；connections/runtime/pause/scheduler/worker/isolation/debug定向66项通过。默认10秒无打印重连、关闭/取消abort、暂停禁重连及恢复预算保留有源码与测试证据；Telnet保活失败到重连、首次关闭失败后人工隔离恢复的端到端覆盖仍可补充。没有操作真实设备或重启业务服务，不能据此证明设备端五个SSH槽位已经在实机释放。
