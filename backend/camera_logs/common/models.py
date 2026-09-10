@@ -17,6 +17,20 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class BlockedRestart(Model):
+    """请求恢复一个关闭结果未确认的阻塞采集任务。"""
+    confirmIsolation: bool = False
+    evidence: str | None = Field(default=None, min_length=10, max_length=2000)
+
+    @field_validator("evidence")
+    @classmethod
+    def nonblank_evidence(cls, value):
+        """隔离依据不能只由空白组成，避免确认审计失去可核查内容。"""
+        if value is not None and not value.strip():
+            raise ValueError("隔离证据不能为空白")
+        return value
+
+
 class InitialCommand(Model):
     """描述一次发送到设备的初始或手动命令及其交互等待条件。"""
     command: str = Field(min_length=1, max_length=8192)
@@ -108,8 +122,8 @@ class TaskCreate(TemplateCreate):
         """SSH 与 Telnet 设备必须有账号密码；串口设备可不需要认证。"""
         if self.protocol != "TELNET_SERIAL" and (not self.username.strip() or not self.password):
             raise ValueError("SSH 和 Telnet 设备必须填写用户名和密码")
-        if self.enableCoredumpMonitor and self.protocol != "SSH":
-            raise ValueError("coredump 监控仅支持海康网络设备的 SSH 任务")
+        if self.enableCoredumpMonitor and self.protocol not in {"SSH", "TELNET_DEVICE"}:
+            raise ValueError("coredump 监控仅支持海康网络设备的 SSH 或 Telnet 设备任务")
         return self
 
 

@@ -21,28 +21,45 @@ if [[ "$component" != all ]]; then
   compose_file="$root/deploy/$component.yml"
   env_file="$root/.env.$component"
 fi
-if [[ "${1:-}" == "--env-file" && -n "${2:-}" ]]; then
-  env_file="$2"
-  shift 2
-fi
-
-if [[ "${1:-}" == "--help" ]]; then
+multi_host=false
+initialize=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env-file)
+      if [[ -z "${2:-}" ]]; then echo "--env-file 缺少配置文件路径" >&2; exit 2; fi
+      env_file="$2"; shift 2 ;;
+    --multi-host) multi_host=true; shift ;;
+    --init) initialize=true; shift ;;
+    --help|-h)
   cat <<'EOF'
-用法：./deploy.sh [--env-file /绝对路径/部署.env] [--init]
+用法：./deploy.sh [--env-file /绝对路径/部署.env] [--init] [--multi-host]
 独立入口：./deploy-frontend.sh、./deploy-backend.sh、./deploy-worker.sh、./deploy-database.sh
 
 在 Linux 上准备 Docker Compose、首次创建权限 0600 的 .env，并启动 camera-log-record-server。
 可用 COMPOSE_PROJECT_NAME 覆盖默认稳定项目名；已有 .env 和同项目卷会被保留。
 --init 只生成配置，不安装或启动任何服务；编辑配置后再执行部署。
+--multi-host 仅用于首次在服务器A创建完整平台跨机配置；生成后DEPLOY_TOPOLOGY=multi-host使重跑自动预检。
 可自定义项（含日志目录、端口、远程地址、保留天数）见 deploy/config 与 docs/deployment.md。
 EOF
   exit 0
-fi
-if [[ "${1:-}" == "--init" ]]; then
+      ;;
+    *) echo "不支持的参数，请使用 --help" >&2; exit 2 ;;
+  esac
+done
+if [[ "$initialize" == true ]]; then
   python3 "$root/scripts/deploy_env.py" --output "$env_file" --component "$component"
+  if [[ "$multi_host" == true ]]; then
+    if [[ "$component" == all ]]; then
+      python3 "$root/scripts/deploy_cluster.py" init "$env_file"
+    elif [[ "$component" == worker ]]; then
+      python3 "$root/scripts/deploy_cluster.py" worker-init "$env_file"
+    else
+      echo "--multi-host 仅支持 deploy-all.sh 或 deploy-worker.sh" >&2
+      exit 2
+    fi
+  fi
   exit 0
 fi
-if [[ $# -ne 0 ]]; then echo "不支持的参数，请使用 --help" >&2; exit 2; fi
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "一键部署仅支持 Linux" >&2
@@ -112,6 +129,35 @@ chmod 600 "$env_file"
 # Compose 的 env_file 与变量展开必须指向同一份配置；不 source 配置，避免执行其中内容。
 env_file="$(cd "$(dirname "$env_file")" && pwd)/$(basename "$env_file")"
 export DEPLOY_ENV_FILE="$env_file"
+
+# 首次 A/B 用 --multi-host 创建标记；以后按 dotenv 解析值自动预检，拒绝未知模式。
+if [[ ( "$component" == all || "$component" == worker ) ]] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?DEPLOY_TOPOLOGY[[:space:]]*=' "$env_file"; then
+  topology="$(python3 "$root/scripts/deploy_cluster.py" topology "$env_file")"
+  case "$topology" in
+    "") ;;
+    multi-host) multi_host=true ;;
+    *) echo "DEPLOY_TOPOLOGY 只能为空或 multi-host" >&2; exit 1 ;;
+  esac
+fi
+if [[ "$multi_host" == true && "$component" == all ]]; then
+  # 跨机认证合同只读取指定 env-file，防止调用者 shell 的同名密码覆盖 Compose 展开结果。
+  unset DATABASE_NAME MONGO_ROOT_USERNAME MONGO_ROOT_PASSWORD MONGO_REPLICA_KEY MONGO_URI COMPOSE_MONGO_URI
+  python3 "$root/scripts/deploy_cluster.py" platform "$env_file"
+  "$root/deploy.sh" --component database --env-file "$env_file"
+  "$root/deploy.sh" --component backend --env-file "$env_file"
+  "$root/deploy.sh" --component worker --env-file "$env_file"
+  exec "$root/deploy.sh" --component frontend --env-file "$env_file"
+fi
+if [[ "$multi_host" == true && "$component" == worker ]]; then
+  unset DATABASE_NAME MONGO_ROOT_USERNAME MONGO_ROOT_PASSWORD MONGO_REPLICA_KEY MONGO_URI COMPOSE_MONGO_URI
+  python3 "$root/scripts/deploy_cluster.py" worker "$env_file"
+fi
+
+# 单机完整平台始终采用认证 MongoDB；跨机路径会在上方递归组件部署后 exec 退出。
+if [[ "$component" == all ]]; then
+  unset DATABASE_NAME MONGO_ROOT_USERNAME MONGO_ROOT_PASSWORD MONGO_REPLICA_KEY MONGO_URI COMPOSE_MONGO_URI
+  python3 "$root/scripts/deploy_cluster.py" single-host "$env_file"
+fi
 
 # 配置器只维护项目专属 exports；空地址禁用 NFS，并仅撤销遗留的本项目导出。
 configure_nfs() {

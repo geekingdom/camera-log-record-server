@@ -4,12 +4,15 @@ import type {
   CoredumpExport,
   CoredumpFile,
   CoredumpMonitorStatus,
+  CommandExecutionPage,
   InitialCommand,
   LogHour,
   Node,
   Page,
   Resource,
   ResourceAuthentication,
+  AuthenticationRecord,
+  AuthenticationRecordResult,
   ResourceAuthType,
   ResourceKind,
   Task,
@@ -62,10 +65,13 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       const body = await response.json();
       message =
         body.message ??
+        body.detail?.message ??
         body.error?.message ??
         body.error ??
         JSON.stringify(body);
-      code = typeof body.code === "string" ? body.code : typeof body.error?.code === "string" ? body.error.code : undefined;
+      code = typeof body.code === "string" ? body.code
+        : typeof body.detail?.code === "string" ? body.detail.code
+          : typeof body.error?.code === "string" ? body.error.code : undefined;
     } catch {
       /* text response */
     }
@@ -173,6 +179,14 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(input),
     }),
+  authenticationRecords: (resourceId: string, page = 1, filters?: {
+    result?: AuthenticationRecordResult;
+    start?: string;
+    end?: string;
+    identityChanged?: "true" | "false";
+  }) => request<Page<AuthenticationRecord>>(
+    `/resources/${encodeURIComponent(resourceId)}/authentication-records${query(page, 20, filters)}`,
+  ),
   coredumps: (resourceId: string, page = 1, pageSize = 50, filters?: {
     name?: string; receivedFrom?: string; receivedTo?: string;
   }) => request<Page<CoredumpFile>>(`/resources/${encodeURIComponent(resourceId)}/coredumps${query(page, pageSize, filters)}`),
@@ -228,6 +242,13 @@ export const api = {
       method: "POST",
       headers: { "Idempotency-Key": idempotencyKey() },
     }),
+  restartBlocked: (id: string, body: { confirmIsolation?: boolean; evidence?: string } = {}) =>
+    request<unknown>(`/tasks/${id}/restart`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey() },
+      body: JSON.stringify(body),
+    }),
+  operationStatus: (id: string) => request<{ status?: string; phase?: string }>(`/operations/${id}`),
   logHours: (id: string, date?: string, page = 1) => request<Page<LogHour>>(`/tasks/${id}/log-hours${query(page, 24, { date })}`),
   // 缺口阅读器关闭或切换任务时取消读取，避免失效查询继续占用连接。
   fileContent: (id: string, offset = 0, limit = 65536, signal?: AbortSignal) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`, { signal }),
@@ -237,8 +258,8 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(command),
     }),
-  executions: (id: string, page = 1) =>
-    request<Page<CommandExecution>>(`/tasks/${id}/command-executions${query(page, 50)}`),
+  executions: (id: string, page = 1, filters?: { commandId?: string; kind?: "MANUAL" | "SCHEDULED" }) =>
+    request<CommandExecutionPage>(`/tasks/${id}/command-executions${query(page, 50, filters)}`),
   templates: (page?: number, pageSize?: number, filters: Record<string, string | undefined> = {}) =>
     request<Page<Template>>(`/command-templates${query(page, pageSize, filters)}`),
   template: (id: string) => request<Template>(`/command-templates/${id}`),

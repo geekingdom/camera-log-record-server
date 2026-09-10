@@ -51,7 +51,9 @@ def create_environment(path: Path, component: str = "all") -> None:
         values.update(HOST_LOG_ROOT="worker-data", API_DATA_ROOT="api-data", FRONTEND_PORT="5173",
                       COLLECTOR_NODE_ID="compose-worker-1", COLLECTOR_NODE_URL="http://worker:8001",
                       MONGO_DATA_1="mongo1-data", MONGO_DATA_2="mongo2-data", MONGO_DATA_3="mongo3-data",
-                      NFS_ROOT="/srv/camera-logs/nfs-coredump", NFS_SERVER_IP="")
+                      NFS_ROOT="/srv/camera-logs/nfs-coredump", NFS_SERVER_IP="",
+                      MONGO_ROOT_USERNAME="camera_admin", MONGO_ROOT_PASSWORD=secrets.token_urlsafe(36),
+                      MONGO_REPLICA_KEY=base64.b64encode(secrets.token_bytes(384)).decode())
     comments = {
         "HOST_LOG_ROOT": "可改为宿主机绝对路径：/srv/camera-logs/collector；设备日志在data/，运行日志在service-logs/。",
         "NFS_ROOT": "设备coredump的NFS总目录，必须是宿主机非根绝对路径；Worker容器以相同路径挂载并创建设备IP子目录。",
@@ -61,7 +63,10 @@ def create_environment(path: Path, component: str = "all") -> None:
         "MONGO_DATA_2": "可改为/srv/camera-logs/mongo2；不能与其它成员共用目录。",
         "MONGO_DATA_3": "可改为/srv/camera-logs/mongo3；不能与其它成员共用目录。",
         "MONGO_URI": "必填：API和节点可达的MongoDB副本集地址；包含数据库用户名/密码、replicaSet=rs0、authSource=admin。",
-        "ENCRYPTION_KEY": "必须与原平台及各节点一致；已有数据库不能重新生成此密钥。",
+        "MONGO_ROOT_USERNAME": "认证 MongoDB 管理员名称；密码中的 URI 保留字符由部署器编码，不要手工拼接 URI。",
+        "MONGO_ROOT_PASSWORD": "认证 MongoDB 管理员密码；含 $ 时在 dotenv 使用单引号，避免 Compose 展开宿主机变量。",
+        "MONGO_REPLICA_KEY": "认证副本集成员共享密钥；同一平台的三个成员必须使用同一值。",
+        "ENCRYPTION_KEY": "必须与同一平台的 API 和各节点一致；不要在节点侧另行生成。",
         "BOOTSTRAP_TOKEN": "必须与后端一致；服务账号凭据，勿公开或写入Git。",
         "INTERNAL_TOKEN": "必须与后端一致；节点内部接口认证凭据，勿公开。",
         "DATABASE_HOST": "跨机部署改为数据库服务器内网IPv4或DNS；此地址必须被所有成员/API/节点访问。",

@@ -10,7 +10,7 @@ const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, stri
 try {
   const address = server.httpServer.address();
   const environment = { ...process.env, BASE_URL: `http://127.0.0.1:${address.port}` };
-  for (const script of ["scripts/browser_workspace_layout.mjs", "scripts/browser_api_reference.mjs", "scripts/browser_account_templates.mjs", "scripts/browser_template_navigation.mjs", "scripts/browser_resource_bulk_delete.mjs", "scripts/browser_task_bulk_operations.mjs", "scripts/browser_coredump_shared_monitor.mjs"]) {
+  for (const script of ["scripts/browser_workspace_layout.mjs", "scripts/browser_api_reference.mjs", "scripts/browser_account_templates.mjs", "scripts/browser_template_navigation.mjs", "scripts/browser_default_resource_navigation.mjs", "scripts/browser_resource_bulk_delete.mjs", "scripts/browser_task_bulk_operations.mjs", "scripts/browser_coredump_shared_monitor.mjs", "scripts/browser_blocked_recovery.mjs", "scripts/browser_command_history.mjs", "scripts/browser_resource_authentication_records.mjs", "scripts/browser_node_dashboard.mjs"]) {
     const result = await promisify(execFile)(process.execPath, [script], {
       cwd: repository,
       env: environment,

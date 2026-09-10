@@ -16,14 +16,14 @@ let mounted = true;
 
 const failures = computed(() => results.value.filter(item => item.status === "error"));
 const taskCount = computed(() => props.items.reduce((total, item) => total + (item.taskCount ?? 0), 0));
-const activeTaskCount = computed(() => props.items.reduce((total, item) => total + (item.activeTaskCount ?? 0), 0));
+const unsettledTaskCount = computed(() => props.items.reduce((total, item) => total + (item.unsettledTaskCount ?? 0), 0));
 const selectedNames = computed(() => props.items.map(item => `“${item.name}”`).join("、"));
 
 async function removeSelected() {
   if (deleting.value || props.disabled || !props.items.length) return;
   const current = [...props.items];
   const currentGeneration = props.selectionGeneration;
-  const message = `确认删除 ${current.length} 个设备资源：${selectedNames.value}？关联 ${taskCount.value} 个采集任务，其中 ${activeTaskCount.value} 个尚未停止。删除已提交后会停止关联采集，已有日志保留，可继续查询和下载。`;
+  const message = `确认删除 ${current.length} 个设备资源：${selectedNames.value}？关联 ${taskCount.value} 个采集任务，其中 ${unsettledTaskCount.value} 个尚未收束。删除已提交后会停止关联采集，已有日志保留，可继续查询和下载。`;
   if (!await confirmAction(message, "确认批量删除设备资源")) return;
   if (!mounted || currentGeneration !== props.selectionGeneration) return;
   deleting.value = true;

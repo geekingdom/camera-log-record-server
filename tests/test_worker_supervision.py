@@ -56,6 +56,31 @@ async def test_tick_closes_disowned_or_blocked_runtime_without_releasing_lock(tm
     assert await repo.db.endpoint_locks.count_documents({}) == 1
 
 
+@pytest.mark.parametrize("restart_requested", [False, True])
+async def test_isolated_node_keeps_blocked_stop_or_restart_owner_records(tmp_path, monkeypatch, restart_requested):
+    """节点已隔离时，即使旧会话可关闭也不得按停止或恢复意图释放归属。"""
+    worker, repo, runtime = await setup_worker(tmp_path, monkeypatch)
+    await repo.db.tasks.update_one({"id": "task"}, {"$set": {
+        "status": "BLOCKED", "desiredState": "STOPPED", "restartRequested": restart_requested,
+        "sessionId": "old-session", "controlOperationId": "control",
+    }})
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task"})
+    await repo.db.nodes.insert_one({"id": "node", "isolated": True})
+    await repo.db.operations.insert_one({"id": "control", "taskId": "task",
+                                         "desiredState": "RUNNING" if restart_requested else "STOPPED",
+                                         "status": "PENDING"})
+    before = await repo.db.tasks.find_one({"id": "task"})
+
+    await worker.tick()
+    await asyncio.gather(*worker.releases.values())
+
+    runtime.stop.assert_awaited_once()
+    assert await repo.db.tasks.find_one({"id": "task"}) == before
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task", "runId": "run"}) == 1
+    assert (await repo.db.runs.find_one({"id": "run"})).get("endedAt") is None
+    assert (await repo.db.operations.find_one({"id": "control"}))["status"] == "PENDING"
+
+
 async def test_release_failure_after_reassignment_does_not_block_new_owner(tmp_path, monkeypatch):
     """关闭过程中发生重新领取，旧关闭错误不能失败新代次的操作。"""
     worker, repo, runtime = await setup_worker(tmp_path, monkeypatch)

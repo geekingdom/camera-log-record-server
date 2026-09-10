@@ -8,6 +8,7 @@ from pymongo.write_concern import WriteConcern
 
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.node.health import resource_pressure
 
 
 class SchedulerLeaseLost(RuntimeError):
@@ -72,6 +73,8 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
         )
         if (
             node is None
+            or node.get("isolated") or node.get("configurationMismatch")
+            or resource_pressure(node, current_time)
             or node.get("writeLatencyMs", 0) > 200
             or occupied >= node.get("capacity", 100)
         ):
@@ -95,6 +98,8 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             })
         current = await db.tasks.find_one(task_query, session=session)
         if current is None:
+            return None
+        if current.get("enableCoredumpMonitor") and not (node.get("capabilities") or {}).get("coredumpNfs"):
             return None
         # 旧迁移夹具和历史任务可能尚无资源绑定；正式创建路径始终具备 resourceId。
         if current.get("resourceId"):

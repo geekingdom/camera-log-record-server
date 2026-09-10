@@ -37,14 +37,13 @@ async def _guard_resources(db, task, session):
 
 def _validate(task, desired, require_paused):
     """根据本次事务读取的状态校验 SSH 暂停/继续，不能使用路由外旧快照。"""
-    if require_paused and (task["protocol"] != "SSH" or task["status"] != "PAUSED"
+    if require_paused and (task["status"] != "PAUSED"
                            or task["desiredState"] != "PAUSED" or task.get("nodeId") is not None):
         raise HTTPException(409, "任务尚未完成SSH暂停")
-    if desired == "PAUSED":
-        if task["protocol"] != "SSH":
-            raise HTTPException(409, "只有SSH任务支持暂停")
-        if task["desiredState"] not in {"RUNNING", "PAUSED"}:
-            raise HTTPException(409, "仅运行中的任务可以暂停")
+    if task["protocol"] == "TELNET_SERIAL" and (require_paused or desired == "PAUSED"):
+        raise HTTPException(409, "串口 Telnet 任务不支持暂停或恢复")
+    if desired == "PAUSED" and task["desiredState"] not in {"RUNNING", "PAUSED"}:
+        raise HTTPException(409, "仅运行中的任务可以暂停")
 
 
 def _reached(task, desired):
@@ -151,6 +150,8 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
         if task is None:
             raise HTTPException(404, "任务不存在")
         authorize_owner(user, task)
+        if desired == "RUNNING" and task.get("status") == "BLOCKED":
+            raise HTTPException(409, "任务阻塞，必须使用重新启动或隔离确认")
         if require_paused and task.get("status") == "WAITING_DEVICE":
             previous = await db.operations.find_one({"id": task.get("controlOperationId"), "taskId": task_id,
                                                      "action": "resume-wait-device", "status": "PENDING"}, session=session)
@@ -158,7 +159,7 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
                 return previous
         # 第三方设备重启期间，暂停运行保留原预算，显式继续转为等待 HTTP 重新认证。
         resource = await db.resources.find_one({"id": task["resourceId"], "deletedAt": None}, session=session)
-        if require_paused and task["protocol"] == "SSH" and task["status"] == "PAUSED" and task.get("nodeId") is None \
+        if require_paused and task["protocol"] in {"SSH", "TELNET_DEVICE"} and task["status"] == "PAUSED" and task.get("nodeId") is None \
                 and task["desiredState"] == "PAUSED" and resource and resource.get("kind") == "HIKVISION_NETWORK":
             await _validate_paused_run(db, task, session)
             timestamp = now()
@@ -180,7 +181,7 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
         previous = await _previous_operation(db, task, desired, session)
         # 继续请求一经接受，desiredState 已是 RUNNING。仅重放确由 resume 建立的
         # 当前操作，避免把任意运行任务上的 resume 误当作第一次有效继续。
-        if require_paused and previous and previous.get("action") == "resume" and task["protocol"] == "SSH":
+        if require_paused and previous and previous.get("action") == "resume" and task["protocol"] in {"SSH", "TELNET_DEVICE"}:
             return previous
         _validate(task, desired, require_paused)
         if desired != "STOPPED":

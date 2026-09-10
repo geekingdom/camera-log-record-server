@@ -13,7 +13,7 @@ from camera_logs.node.worker import Worker
 async def test_database_outage_stops_all_sessions_and_keeps_only_unconfirmed_instance():
     failing = SimpleNamespace(stop=AsyncMock(side_effect=OSError("flush failed")))
     stopped = SimpleNamespace(stop=AsyncMock())
-    worker = Worker(SimpleNamespace())
+    worker = Worker(SimpleNamespace(settings=SimpleNamespace(host_proc_root=None)))
     worker.active = {"failed": failing, "stopped": stopped}
 
     await worker.isolate_active_sessions()

@@ -1,7 +1,7 @@
 """提供设备资源的认证预览、保存和受限读取接口。"""
 
 import re
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
@@ -12,7 +12,8 @@ from camera_logs.common.audited_mutations import audited_create, audited_mutatio
 from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_owner
 from camera_logs.resources.address_claim import claim_address, release_address
-from camera_logs.resources.authentication import authenticate_network_resource
+from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
+from camera_logs.resources.authentication_records import record_authentication
 from camera_logs.resources.health import grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.models import CoredumpMonitorStatus, ResourceInput, ResourcePatch
@@ -33,12 +34,16 @@ def _lease_expired(value, timestamp) -> bool:
 
 
 async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100):
-    """共享读取任务摘要；摘要有界，剩余任务通过正式分页接口读取。"""
+    """返回有界任务列表，以及用于展示采集和删除风险的两类独立摘要。"""
     item = _resource_public(document)
     task_query = task_resource_query(item["id"])
     item["taskCount"] = await repo().db.tasks.count_documents(task_query)
-    item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {"$or": [
+    item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {
+        "status": "COLLECTING", "desiredState": "RUNNING",
+    }]})
+    item["unsettledTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {"$or": [
         {"nodeId": {"$exists": True, "$ne": None}}, {"desiredState": {"$in": ["RUNNING", "PAUSED"]}},
+        {"status": "BLOCKED"},
     ]}]})
     fields = {key: 1 for key in ("id", "name", "protocol", "ip", "port", "status", "desiredState",
                                  "resourceId", "serialServerResourceId", "createdBy", "createdByName")}
@@ -58,6 +63,8 @@ async def _verified_metadata(body: ResourceInput) -> dict[str, str]:
         )
     except PermissionError as exc:
         raise HTTPException(401, str(exc)) from exc
+    except DeviceOfflineError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(502, str(exc)) from exc
 
@@ -116,6 +123,35 @@ def install_resource_routes(app, repo, listing):
         authorize(user, "tasks:read")
         return await _resource_view(repo, await repo().get("resources", identifier), user, taskLimit)
 
+    @app.get("/api/v1/resources/{identifier}/authentication-records")
+    async def authentication_records(identifier: str, user: User, page: int = Query(1, ge=1),
+                                     pageSize: int = Query(20, ge=1, le=100), result: str | None = None,
+                                     start: str | None = None, end: str | None = None,
+                                     identityChanged: bool | None = None):
+        """分页读取认证历史；软删资源仍可读取既有安全记录。"""
+        authorize(user, "tasks:read")
+        await repo().get("resources", identifier)
+        query = {"resourceId": identifier}
+        if result:
+            if result not in {"SUCCESS", "AUTH_FAILED", "OFFLINE", "ERROR"}:
+                raise HTTPException(422, "认证结果筛选无效")
+            query["result"] = result
+        if identityChanged is not None:
+            query["identityChanged"] = identityChanged
+        if start or end:
+            if not start or not end:
+                raise HTTPException(422, "开始和结束时间必须同时提供")
+            try:
+                lower, upper = datetime.fromisoformat(start), datetime.fromisoformat(end)
+            except ValueError as error:
+                raise HTTPException(422, "时间必须使用 ISO 8601") from error
+            if lower.tzinfo is None or upper.tzinfo is None or upper <= lower:
+                raise HTTPException(422, "时间范围必须带时区且结束晚于开始")
+            query["createdAt"] = {"$gte": lower.astimezone(UTC), "$lt": upper.astimezone(UTC)}
+        total = await repo().db.authentication_records.count_documents(query)
+        cursor = repo().db.authentication_records.find(query, {"_id": 0}).sort([("createdAt", -1), ("id", -1)]).skip((page - 1) * pageSize).limit(pageSize)
+        return {"items": [public(item) async for item in cursor], "total": total, "page": page, "pageSize": pageSize}
+
     @app.get("/api/v1/resources/{identifier}/coredump-monitor", response_model=CoredumpMonitorStatus)
     async def coredump_monitor_status(identifier: str, user: User):
         """返回当前有效的资源级 Coredump owner，不把任务配置变成永久资源占用。"""
@@ -130,7 +166,8 @@ def install_resource_routes(app, repo, listing):
         owner = await repo().db.tasks.find_one({
             "id": resource.get("coredumpLeaseTaskId"), "resourceId": identifier,
             "runId": resource.get("coredumpLeaseRunId"), "generation": resource.get("coredumpLeaseGeneration"),
-            "nodeId": resource.get("coredumpLeaseNodeId"), "protocol": "SSH", "enableCoredumpMonitor": True,
+            "nodeId": resource.get("coredumpLeaseNodeId"), "protocol": {"$in": ["SSH", "TELNET_DEVICE"]},
+            "enableCoredumpMonitor": True,
             "desiredState": "RUNNING", "status": "COLLECTING", "resourceDeleted": {"$ne": True},
         }, {"id": 1, "name": 1, "coredumpMountStatus": 1, "coredumpMountRunId": 1})
         if owner is None:
@@ -173,6 +210,9 @@ def install_resource_routes(app, repo, listing):
 
         async def reserve(document, session):
             await claim_address(repo(), document, session)
+            if document["kind"] == "HIKVISION_NETWORK":
+                await record_authentication(repo(), document, source="CREATE", result="SUCCESS", after=document,
+                                            completed_at=document["authenticatedAt"], session=session)
 
         result = await audited_create(repo(), user["id"], request.headers.get("Idempotency-Key"), "create_resource",
                                       body.model_dump(), "resources", prepare, before_insert=reserve)
@@ -188,7 +228,13 @@ def install_resource_routes(app, repo, listing):
             raise HTTPException(409, "资源地址、类型已变化或资源已删除")
         if old["kind"] == "SERIAL_SERVER":
             return {}
-        metadata = await authenticated_preview_metadata(body, user, identifier)
+        try:
+            metadata = await authenticated_preview_metadata(body, user, identifier)
+        except HTTPException as error:
+            result = "AUTH_FAILED" if error.status_code == 401 else "OFFLINE" if error.status_code == 503 else "ERROR"
+            await record_authentication(repo(), old, source="MANUAL", result=result, before=old, after=old, message=result)
+            raise
+        await record_authentication(repo(), old, source="MANUAL", result="SUCCESS", before=old, after=old | metadata)
         await repo().audit(user["id"], "authenticate_resource_succeeded", identifier)
         return metadata
 
@@ -210,7 +256,13 @@ def install_resource_routes(app, repo, listing):
                                     password=password, authType=body.authType)
         except ValueError as exc:
             raise HTTPException(422, "资源配置无效") from exc
-        metadata = await _verified_metadata(checked)
+        try:
+            metadata = await _verified_metadata(checked)
+        except HTTPException as error:
+            result = "AUTH_FAILED" if error.status_code == 401 else "OFFLINE" if error.status_code == 503 else "ERROR"
+            await record_authentication(repo(), old, source="EDIT", result=result, before=old, after=old,
+                                        message=result)
+            raise
         update = {"name": checked.name, "updatedAt": now()}
         if checked.kind == "HIKVISION_NETWORK":
             update.update(username=checked.username, authType=checked.authType,
@@ -232,6 +284,8 @@ def install_resource_routes(app, repo, listing):
                     identity_changed=(changed.get("model"), changed.get("subSerialNumber"))
                     != (old.get("model"), old.get("subSerialNumber")),
                 )
+                await record_authentication(repo(), changed, source="EDIT", result="SUCCESS", before=old,
+                                            after=changed, session=session)
             return changed
 
         changed = await audited_mutation(repo(), user["id"], "edit_resource", identifier, commit)

@@ -18,6 +18,7 @@ from pymongo.errors import ConnectionFailure, ExecutionTimeout, PyMongoError
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.coredump_lease import (
+    bound_coredump_cleanup_guard,
     guard_coredump_monitor,
     record_coredump_status,
     release_coredump_lease,
@@ -396,11 +397,13 @@ class SessionRuntime:
                 session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
                                     "sessionId": self.collector.session_id}
                 await self.collector.start()
-                if config.get("enableCoredumpMonitor") and config.get("protocol") == "SSH":
+                if (config.get("enableCoredumpMonitor")
+                        and config.get("protocol") in {"SSH", "TELNET_DEVICE"}):
                     if self.repo.settings.nfs_server_ip:
                         self.collector.start_coredump_monitor(
                             self.repo.settings.nfs_server_ip, str(self.repo.settings.nfs_root), self.on_coredump,
-                            guard=self.coredump_guard)
+                            guard=self.coredump_guard,
+                            cleanup_guard=bound_coredump_cleanup_guard(self, self.collector))
                     else:
                         # 节点部署缺少 NFS 配置只影响可选监控，日志采集会话照常运行。
                         await self.on_coredump("FAILED", "节点未配置 NFS_SERVER_IP，未启动 Coredump 监控")

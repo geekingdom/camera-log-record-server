@@ -205,11 +205,23 @@ def test_resume_paused_ssh_keeps_run_budget_and_unassigned_state(client):
     assert client.portal.call(repo.db.budgets.find_one, {"_id": "paused-run:periodic"})["attempts"] == 2
 
 
-def test_telnet_pause_and_resume_are_rejected(client):
-    """Telnet 没有可保持的 SSH 运行会话，暂停和恢复均返回冲突。"""
-    task = _create_task(client, protocol="TELNET_SERIAL")
+def test_telnet_device_pause_and_resume_preserve_existing_run_budget(client):
+    """Telnet 暂停也复用原运行、锁和预算，恢复不重置定时命令计数。"""
+    task = _create_task(client, protocol="TELNET_DEVICE")
     _set_task(client, task["id"], status="PAUSED", desiredState="PAUSED", nodeId=None)
 
+    repo = client.app.state.repo
+    client.portal.call(repo.db.runs.insert_one, {"id": "telnet-run"})
+    client.portal.call(repo.db.endpoint_locks.insert_one, {"taskId": task["id"], "runId": "telnet-run"})
+    _set_task(client, task["id"], runId="telnet-run", generation=1)
+    assert _control(client, task["id"], "pause").status_code == 202
+    assert _control(client, task["id"], "resume").status_code == 202
+
+
+def test_telnet_serial_pause_and_resume_are_rejected(client):
+    """串口 Telnet 没有可安全保留的网络会话，必须维持原有拒绝语义。"""
+    task = _create_task(client, protocol="TELNET_SERIAL")
+    _set_task(client, task["id"], status="PAUSED", desiredState="PAUSED", nodeId=None)
     assert _control(client, task["id"], "pause").status_code == 409
     assert _control(client, task["id"], "resume").status_code == 409
 

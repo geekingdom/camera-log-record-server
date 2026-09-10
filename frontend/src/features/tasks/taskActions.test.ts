@@ -23,8 +23,10 @@ describe("availableTaskActions", () => {
     }))).toEqual(["stop"]);
   });
 
-  it("采集中的 SSH 任务显示暂停和停止，不显示重复启动", () => {
+  it("采集中的 SSH 和 Telnet 设备任务显示暂停和停止，不显示重复启动", () => {
     expect(availableTaskActions(task({ status: "COLLECTING", desiredState: "RUNNING" })))
+      .toEqual(["pause", "stop"]);
+    expect(availableTaskActions(task({ protocol: "TELNET_DEVICE", status: "COLLECTING", desiredState: "RUNNING" })))
       .toEqual(["pause", "stop"]);
   });
 
@@ -61,18 +63,23 @@ describe("availableTaskActions", () => {
       .toEqual(["pause", "stop"]);
   });
 
-  it("Telnet 设备采集中不显示 SSH 暂停，未归属的错误任务可以启动", () => {
+  it("Telnet 串口不显示暂停，Telnet 设备暂停后允许继续", () => {
     expect(availableTaskActions(task({
-      protocol: "TELNET_DEVICE", status: "COLLECTING", desiredState: "RUNNING",
+      protocol: "TELNET_SERIAL", status: "COLLECTING", desiredState: "RUNNING",
     }))).toEqual(["stop"]);
+    expect(availableTaskActions(task({
+      protocol: "TELNET_DEVICE", status: "PAUSED", desiredState: "PAUSED",
+    }))).toEqual(["resume", "stop"]);
     expect(availableTaskActions(task({ status: "ERROR", desiredState: "STOPPED", nodeId: undefined })))
       .toEqual(["start"]);
     expect(availableTaskActions(task({ status: "ERROR", desiredState: "STOPPED", nodeId: "node-a" })))
       .toEqual([]);
   });
 
-  it("隔离等待任务不显示无法完成的控制操作", () => {
-    expect(availableTaskActions(task({ status: "BLOCKED", desiredState: "RUNNING" }))).toEqual([]);
+  it("隔离等待任务允许重新启动或停止，批量停止沿用同一状态矩阵", () => {
+    const blocked = task({ status: "BLOCKED", desiredState: "RUNNING" });
+    expect(availableTaskActions(blocked)).toEqual(["restart", "stop"]);
+    expect(applicableTaskActions([blocked], "stop").applicable).toEqual([blocked]);
   });
 });
 

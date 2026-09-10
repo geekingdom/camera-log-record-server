@@ -139,6 +139,37 @@ def test_runtime_events_filter_task_node_type_and_utc_range(client):
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+def test_coredump_unmount_events_have_chinese_summary_and_derived_filters(client):
+    """卸载后任务不再是活跃 owner，运行事件仍须可按中文结果和派生筛选追溯。"""
+    repo = client.app.state.repo
+    stamp = datetime(2026, 9, 8, 8, tzinfo=UTC)
+    client.portal.call(repo.db.events.insert_many, [
+        {"id": "unmounted", "taskId": "task-a", "type": "COREDUMP_MOUNT", "status": "UNMOUNTED", "createdAt": stamp},
+        {"id": "unmount-skipped", "taskId": "task-a", "type": "COREDUMP_MOUNT", "status": "UNMOUNT_SKIPPED", "createdAt": stamp},
+        {"id": "unmount-failed", "taskId": "task-a", "type": "COREDUMP_MOUNT", "status": "UNMOUNT_FAILED", "createdAt": stamp},
+    ])
+
+    succeeded = client.get("/api/v1/runtime-events", params={"outcome": "SUCCEEDED", "level": "INFO"})
+    unknown = client.get("/api/v1/runtime-events", params={"outcome": "UNKNOWN", "level": "WARNING"})
+    failed = client.get("/api/v1/runtime-events", params={"outcome": "FAILED", "level": "ERROR"})
+
+    assert succeeded.status_code == unknown.status_code == failed.status_code == 200
+    assert succeeded.json()["total"] == unknown.json()["total"] == failed.json()["total"] == 1
+    success_item, unknown_item, failed_item = (
+        succeeded.json()["items"][0], unknown.json()["items"][0], failed.json()["items"][0],
+    )
+    assert success_item["id"] == "unmounted"
+    assert success_item["summary"] == "核心转储 NFS 已卸载"
+    assert success_item["outcome"] == "SUCCEEDED" and success_item["level"] == "INFO"
+    assert unknown_item["id"] == "unmount-skipped"
+    assert unknown_item["summary"] == "核心转储 NFS 跳过卸载，结果未确认"
+    assert unknown_item["outcome"] == "UNKNOWN" and unknown_item["level"] == "WARNING"
+    assert failed_item["id"] == "unmount-failed"
+    assert failed_item["summary"] == "核心转储 NFS 卸载失败"
+    assert failed_item["outcome"] == "FAILED" and failed_item["level"] == "ERROR"
+
+
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_runtime_events_filter_and_sort_legacy_detected_time(client):
     """连接缺口的历史 detectedAt 字段与新事件同样可筛选并返回统一展示时间。"""
     repo = client.app.state.repo

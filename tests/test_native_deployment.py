@@ -11,6 +11,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import deploy_native
 import pytest
 from native_config import defaults
+from native_units import render
+
+
+def publish_migration_contract(values, previous, root):
+    """写入首次部署会生成的受保护文件，用于验证公告地址迁移的预检边界。"""
+    etc = root / "etc"
+    etc.mkdir()
+    files = render(previous, Path(__file__).resolve().parents[1])
+    for name in ("api.env", "mongod.conf", "mongo.key"):
+        (etc / name).write_text(files["backend" if name == "api.env" else "database"][name])
 
 
 @pytest.mark.parametrize("key", ["INTERNAL_TOKEN", "MONGO_PORT", "API_PORT", "NODE_URL"])
@@ -88,3 +98,48 @@ def test_first_managed_database_deploy_explicitly_allows_initialization(monkeypa
 
     command = next(command for command in commands if any(Path(item).name == "native_database.py" for item in command))
     assert command[-1] == "--allow-initialize"
+
+
+def test_database_advertised_host_migration_is_explicit_and_refreshes_contract(monkeypatch, tmp_path):
+    """已有受管平台只在显式数据库迁移后更新合同摘要，不影响其它组件。"""
+    previous = defaults() | {"INSTALL_PACKAGES": "false", "INSTALL_ROOT": str(tmp_path), "MONGO_DATA_ROOT": str(tmp_path / "mongo")}
+    values = previous | {"MONGO_ADVERTISED_HOST": "10.42.0.10",
+                         "MONGO_BIND_IP": "127.0.0.1,10.42.0.10"}
+    values["MONGO_URI"] = previous["MONGO_URI"].replace("@127.0.0.1:", "@10.42.0.10:")
+    account = SimpleNamespace(pw_uid=10001, pw_gid=10001)
+    marker = {name: values[name] for name in ("SERVICE_USER", "DATA_ROOT", "MONGO_DATA_ROOT", "LOG_ROOT", "API_LOG_ROOT")}
+    marker.update(encryptionKeyHash=hashlib.sha256(values["ENCRYPTION_KEY"].encode()).hexdigest(), contractHash="old")
+    (tmp_path / ".native-managed.json").write_text(json.dumps(marker))
+    (tmp_path / "mongo").mkdir()
+    publish_migration_contract(values, previous, tmp_path)
+    (tmp_path / "native.env").write_text("CONFIG=existing\n")
+    commands = []
+    monkeypatch.setattr(deploy_native, "prepare_directories", lambda _values: account)
+    monkeypatch.setattr(deploy_native, "python_runtime", lambda _values: Path("/python312"))
+    monkeypatch.setattr(deploy_native, "render", lambda *_args: {"database": {"mongo.service": "unit"}})
+    monkeypatch.setattr(deploy_native, "prepare_venv", lambda *_args: Path("/venv/database/bin/python"))
+    monkeypatch.setattr(deploy_native, "publish", lambda *_args: None)
+    monkeypatch.setattr(deploy_native, "run", lambda command, **_kwargs: commands.append(command))
+
+    deploy_native.deploy(values, "database", tmp_path / "native.env", tmp_path, reconfigure_mongo_advertised_host=True)
+
+    command = next(command for command in commands if any(Path(item).name == "native_database.py" for item in command))
+    assert command[-1] == "--reconfigure-advertised-host"
+    assert json.loads((tmp_path / ".native-managed.json").read_text())["contractHash"] == deploy_native.contract_hash(values)
+
+
+@pytest.mark.parametrize("key", ["INTERNAL_TOKEN", "BOOTSTRAP_TOKEN", "API_PORT", "NODE_URL", "MONGO_REPLICA_KEY"])
+def test_advertised_host_migration_rejects_changed_protected_credentials(key, tmp_path):
+    """显式迁移不能借合同摘要更新同时替换令牌、节点地址或Mongo成员密钥。"""
+    previous = defaults() | {"INSTALL_ROOT": str(tmp_path), "MONGO_DATA_ROOT": str(tmp_path / "mongo")}
+    values = previous | {"MONGO_ADVERTISED_HOST": "10.42.0.10", "MONGO_BIND_IP": "127.0.0.1,10.42.0.10"}
+    values["MONGO_URI"] = previous["MONGO_URI"].replace("@127.0.0.1:", "@10.42.0.10:")
+    values[key] = "changed" if key not in {"API_PORT", "MONGO_REPLICA_KEY"} else ("28017" if key == "API_PORT" else "aGVsbG8=")
+    marker = {name: previous[name] for name in ("SERVICE_USER", "DATA_ROOT", "MONGO_DATA_ROOT", "LOG_ROOT", "API_LOG_ROOT")}
+    marker.update(encryptionKeyHash=hashlib.sha256(previous["ENCRYPTION_KEY"].encode()).hexdigest(),
+                  contractHash=deploy_native.contract_hash(previous))
+    (tmp_path / ".native-managed.json").write_text(json.dumps(marker))
+    publish_migration_contract(values, previous, tmp_path)
+
+    with pytest.raises(ValueError, match="受保护配置|成员密钥"):
+        deploy_native.preflight(values, ("database",), allow_mongo_advertised_host_migration=True)

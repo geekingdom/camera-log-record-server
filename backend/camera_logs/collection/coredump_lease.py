@@ -58,6 +58,38 @@ async def guard_coredump_monitor(repo, task, *, session_active, report_status):
     return True if lease is not None else None
 
 
+async def guard_coredump_cleanup(repo, task, *, session_active):
+    """仅向仍属当前会话的有效租约授权卸载，并短续租约防止收尾期间被接管。"""
+    if not session_active():
+        return False
+    current_task = await repo.db.tasks.find_one(owner_filter(task), {"id": 1})
+    if not current_task or not task.get("resourceId"):
+        return False
+    timestamp = now()
+    lease = await repo.db.resources.find_one_and_update(
+        {"id": task["resourceId"], "coredumpLeaseTaskId": task["id"],
+         "coredumpLeaseRunId": task["runId"], "coredumpLeaseGeneration": task.get("generation"),
+         "coredumpLeaseNodeId": task.get("nodeId"), "coredumpLeaseUntil": {"$gt": timestamp}},
+        # 已有监控租约通常更长，关闭保护只能延长，不能把它意外缩短。
+        {"$max": {"coredumpLeaseUntil": timestamp + timedelta(seconds=20)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    return lease is not None and session_active()
+
+
+def bound_coredump_cleanup_guard(runtime, collector):
+    """将关闭授权固定到实际采集器，重连后旧会话不能影响新的设备会话。"""
+    async def guard():
+        def session_active():
+            return not (runtime.retired or runtime.collector is not collector or collector._closed.is_set())
+
+        if not session_active():
+            return False
+        return await guard_coredump_cleanup(runtime.repo, runtime.task, session_active=session_active)
+
+    return guard
+
+
 async def release_coredump_lease(repo, task):
     """只缩短仍属于本运行的资源租约，旧会话不得释放后继控制权。"""
     await repo.db.resources.update_one(

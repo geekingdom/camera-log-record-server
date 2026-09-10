@@ -11,6 +11,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.node.health import rank_nodes
 from camera_logs.resources.health import reconcile_authorized_recoveries
 from camera_logs.resources.lifecycle import reconcile_deleted_resources
 from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task
@@ -71,11 +72,7 @@ async def schedule_once(repo, lease=None):
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
-        candidates = []
-        for node in nodes:
-            count = occupancy.get(node["id"], 0)
-            if count < node.get("capacity", 100) and node.get("writeLatencyMs", 0) <= 200:
-                candidates.append((count, node.get("inputBytesPerSecond", 0), node["id"]))
+        candidates = rank_nodes(nodes, occupancy, task)
         if not candidates:
             if task["status"] != "PAUSED":
                 # 候选查询期间用户可能已暂停或停止；旧快照只能回写同一排队意图。
@@ -86,7 +83,7 @@ async def schedule_once(repo, lease=None):
                     {"$set": {"status": "PENDING"}},
                 )
             continue
-        node_id = min(candidates)[2]
+        node_id = candidates[0][1]
         # 占用仅在领取事务确认提交后推进；未知提交会中止周期，下周期重读持久归属。
         claimed = await claim_task(repo, task, node_id, lease=lease, occupied=occupancy.get(node_id, 0))
         if claimed:

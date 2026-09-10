@@ -22,6 +22,9 @@ const mountDescription = computed(() => ({
   MOUNTED: "已挂载",
   FAILED: "挂载失败",
   PENDING: "待确认",
+  UNMOUNTED: "已卸载",
+  UNMOUNT_SKIPPED: "跳过卸载，结果未确认",
+  UNMOUNT_FAILED: "卸载失败",
 }[props.status?.mountStatus ?? ""] ?? props.status?.mountStatus));
 </script>
 
@@ -44,7 +47,7 @@ const mountDescription = computed(() => ({
         <el-switch
           :model-value="modelValue"
           :loading="loading"
-          active-text="启用 SSH Coredump NFS 挂载监控"
+          active-text="启用 Coredump NFS 挂载监控"
           @update:model-value="emit('update:modelValue', $event)"
         />
         <small v-if="ownedByCurrentTask" class="inline-option">{{ ownerDescription }}<template v-if="mountDescription">；挂载状态：{{ mountDescription }}</template></small>

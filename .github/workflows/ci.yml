@@ -148,6 +148,7 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml logs --no-color --tail 150 api worker mongo-init frontend
       - name: 清理隔离容器与测试卷
         if: always()
+        # 完整平台默认启用认证，清理项目专属副本集与日志测试卷。
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml down --volumes --remove-orphans
   component-smoke:
     runs-on: ubuntu-latest

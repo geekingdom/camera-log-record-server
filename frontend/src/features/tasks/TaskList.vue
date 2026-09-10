@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 任务列表负责生命周期按钮的可用性与同任务防重复提交，不持有任务详情状态。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { CirclePause, CirclePlay, CircleStop, Edit3, Info } from "lucide-vue-next";
+import { CirclePause, CirclePlay, CircleStop, Edit3, Info, RotateCcw } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
@@ -12,6 +12,7 @@ import { taskStatusLabel, taskStatusTone } from "./taskStatus";
 import { canManageOwnedRecord } from "../../shared/ownership";
 import { runSequentially, type BulkOperationEntry } from "../../shared/bulkOperations";
 import CreatorFilter from "../../shared/CreatorFilter.vue";
+import BlockedRestartDialog from "./BlockedRestartDialog.vue";
 
 const loadTaskDiagnostics = () => import("./TaskDiagnostics.vue");
 
@@ -20,6 +21,7 @@ const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: []; filters: [fi
 const pendingIds = ref(new Set<string>());
 const diagnosticId = ref<string>();
 const diagnosticsOpen = ref(false);
+const blockedRestartTask = ref<Task>();
 const selected = ref<Task[]>([]), selectedIds = ref(new Set<string>()), applying = ref(false), results = ref<BulkOperationEntry[]>([]);
 const table = ref<{ clearSelection: () => void; toggleRowSelection: (row: Task, selected?: boolean) => void }>();
 let pageGeneration = 0, mounted = true, restoringSelection = false, selectionInteraction = false;
@@ -40,7 +42,7 @@ const protocolLabels: Record<string, string> = {
   TELNET_DEVICE: "Telnet 设备",
   TELNET_SERIAL: "Telnet 串口",
 };
-const taskActions: TaskAction[] = ["start", "stop", "pause", "resume"];
+const taskActions: Exclude<TaskAction, "restart">[] = ["start", "stop", "pause", "resume"];
 
 function label(value: string | undefined, labels: Record<string, string>) {
   return labels[value ?? ""] ?? value ?? "未知";
@@ -80,9 +82,13 @@ watch(() => props.items, async items => {
   await nextTick();
   setTimeout(() => { restoringSelection = false; }, 0);
 });
-function applicable(action: TaskAction) { return applicableTaskActions(selected.value, action); }
-function actionLabel(action: TaskAction) { return ({ start: "启动", stop: "停止", pause: "暂停", resume: "继续" } as const)[action]; }
-async function applySelected(action: TaskAction) {
+function applicable(action: Exclude<TaskAction, "restart">) { return applicableTaskActions(selected.value, action); }
+function actionLabel(action: TaskAction) { return ({ start: "启动", restart: "重新启动", stop: "停止", pause: "暂停", resume: "继续" } as const)[action]; }
+function openBlockedRestart(task: Task) {
+  if (!props.canControl || !owns(task) || busy(task) || !showsAction(task, "restart")) return;
+  blockedRestartTask.value = task;
+}
+async function applySelected(action: Exclude<TaskAction, "restart">) {
   if (applying.value || !selected.value.length) return;
   const generation = pageGeneration;
   const classified = applicable(action);
@@ -200,6 +206,15 @@ const rows = computed(() => props.items);
             :disabled="busy(row)"
             @click="state(row, 'start')"
         /></el-tooltip>
+        <el-tooltip v-if="props.canControl && owns(row) && showsAction(row, 'restart')" :content="`重新启动任务 · ID: ${row.id}`"
+          ><el-button
+            text
+            type="warning"
+            :icon="RotateCcw"
+            aria-label="重新启动任务"
+            :disabled="busy(row)"
+            @click="openBlockedRestart(row)"
+        /></el-tooltip>
         <el-tooltip v-if="props.canControl && owns(row) && showsAction(row, 'stop')" :content="`停止任务 · ID: ${row.id}`"
           ><el-button
             text
@@ -233,5 +248,11 @@ const rows = computed(() => props.items);
     :loader="loadTaskDiagnostics"
     :component-props="{ modelValue: diagnosticsOpen, task: diagnosticTask }"
     :listeners="{ 'update:modelValue': (value: boolean) => diagnosticsOpen = value }"
+  />
+  <BlockedRestartDialog
+    v-if="blockedRestartTask"
+    v-model="blockedRestartTask"
+    :is-admin="props.isAdmin"
+    @submitted="emit('changed')"
   />
 </template>

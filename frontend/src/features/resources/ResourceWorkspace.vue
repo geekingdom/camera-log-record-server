@@ -2,7 +2,7 @@
 // 资源是设备身份入口；软删除后仍可进入所属任务查询和下载历史日志。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { Activity, Archive, Edit3, Eye, FileArchive, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
+import { Activity, Archive, Edit3, Eye, FileArchive, History, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { Resource, ResourceKind } from "../../shared/types";
@@ -14,12 +14,14 @@ import ResourceBatchDelete from "./ResourceBatchDelete.vue";
 
 const loadResourceEditor = () => import("./ResourceEditor.vue");
 const loadCoredumpFiles = () => import("../coredumps/CoredumpFiles.vue");
+const loadAuthenticationRecords = () => import("./AuthenticationRecordsDialog.vue");
 
 const emit = defineEmits<{ tasks: [Resource]; createTask: [Resource] }>();
 const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
 const coredumpOpen = ref(false), coredumpResource = ref<Resource>();
+const authenticationRecordsOpen = ref(false), authenticationRecordsResource = ref<Resource>();
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
 const showAll = ref(Boolean(props.isAdmin));
 const createdBy = ref("");
@@ -71,6 +73,7 @@ function updateSelection(items: Resource[]) { selected.value = items.filter(canB
 function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt); }
 function edit(resource?: Resource) { if (resource && !permitted(resource)) return; selectedResource.value = resource; editorOpen.value = true; }
 function viewCoredumps(resource: Resource) { coredumpResource.value = resource; coredumpOpen.value = true; }
+function viewAuthenticationRecords(resource: Resource) { authenticationRecordsResource.value = resource; authenticationRecordsOpen.value = true; }
 async function remove(resource: Resource) {
   if (!permitted(resource)) return;
   if (batchDeleting.value || deleting.value.has(resource.id)) return;
@@ -78,9 +81,9 @@ async function remove(resource: Resource) {
   try {
     const latest = await api.resource(resource.id);
     if (latest.deletedAt) { await load(); return; }
-    const count = latest.taskCount ?? 0, active = latest.activeTaskCount ?? 0;
+    const count = latest.taskCount ?? 0, unsettled = latest.unsettledTaskCount ?? 0;
     const message = count
-      ? `资源“${latest.name}”关联 ${count} 个采集任务，其中 ${active} 个尚未停止。删除后将停止关联采集，已有日志文件保留，可继续查询和下载。确认删除？`
+      ? `资源“${latest.name}”关联 ${count} 个采集任务，其中 ${unsettled} 个尚未收束。删除后将停止关联采集，已有日志文件保留，可继续查询和下载。确认删除？`
       : `确认删除资源“${latest.name}”？资源将标记为已删除，已有日志文件保留。`;
     const ownerNotice = !props.isAdmin && count ? "关联任务若由其他用户创建，服务端将拒绝本次删除。" : "";
     if (!(await confirmAction(`${message}${ownerNotice}`, "确认删除设备资源"))) return;
@@ -134,9 +137,10 @@ defineExpose({ reload: load });
     <el-table-column label="创建用户" min-width="130"><template #default="{ row }">{{ row.createdByName || row.createdBy || "未知" }}</template></el-table-column>
     <el-table-column label="创建时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
     <el-table-column label="删除时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.deletedAt) }}</template></el-table-column>
-    <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 活跃</span></div></template></el-table-column>
-    <el-table-column label="操作" width="292" fixed="right"><template #default="{ row }"><div class="resource-actions">
+    <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 采集中</span></div></template></el-table-column>
+    <el-table-column label="操作" width="328" fixed="right"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
+      <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看认证记录"><el-button text :icon="History" aria-label="查看认证记录" @click="viewAuthenticationRecords(row)" /></el-tooltip>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看 coredump 文件"><el-button text :icon="FileArchive" aria-label="查看 coredump 文件" @click="viewCoredumps(row)" /></el-tooltip>
       <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
@@ -154,6 +158,9 @@ defineExpose({ reload: load });
   <AsyncView v-if="coredumpOpen" overlay :loader="loadCoredumpFiles"
     :component-props="{ modelValue: coredumpOpen, resource: coredumpResource }"
     :listeners="{ 'update:modelValue': (value: boolean) => coredumpOpen = value }" />
+  <AsyncView v-if="authenticationRecordsOpen" overlay :loader="loadAuthenticationRecords"
+    :component-props="{ modelValue: authenticationRecordsOpen, resource: authenticationRecordsResource }"
+    :listeners="{ 'update:modelValue': (value: boolean) => authenticationRecordsOpen = value }" />
 </template>
 <style scoped>
 .resource-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }

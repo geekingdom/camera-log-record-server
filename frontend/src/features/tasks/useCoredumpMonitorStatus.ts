@@ -20,7 +20,7 @@ export function useCoredumpMonitorStatus(source: CoredumpMonitorStatusSource) {
   const status = ref<CoredumpMonitorStatus | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const eligible = computed(() => source.open.value && source.protocol.value === "SSH" &&
+  const eligible = computed(() => source.open.value && ["SSH", "TELNET_DEVICE"].includes(source.protocol.value) &&
     source.resourceKind.value === "HIKVISION_NETWORK" && Boolean(source.resourceId.value));
   let generation = 0;
   let timer: ReturnType<typeof setInterval> | undefined;

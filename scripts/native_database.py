@@ -79,6 +79,42 @@ def _same_replica(actual, expected):
         and members[0].get("host") == expected["members"][0]["host"]
 
 
+def reconfigure_advertised_host(values, client_factory=MongoClient, *, timeout_seconds=30):
+    """将受管单成员从回环公告地址迁移到配置的内网地址，不创建账号或修改数据。"""
+    settings = _settings(values)
+    expected = _replica_config(settings)
+    client = client_factory(_uri(settings, authenticated=True), serverSelectionTimeoutMS=5000)
+    try:
+        admin = client.admin
+        try:
+            admin.command("connectionStatus")
+            actual = admin.command("replSetGetConfig")["config"]
+        except OperationFailure as error:
+            raise RuntimeError("数据库管理员凭据核验失败") from error
+        if actual.get("_id") != expected["_id"] or len(actual.get("members", [])) != 1 or actual["members"][0].get("_id") != 0:
+            raise RuntimeError("仅支持迁移受管单成员副本集")
+        if _same_replica(actual, expected):
+            return {"changed": False, "host": settings["MONGO_ADVERTISED_HOST"], "port": settings["MONGO_PORT"]}
+        previous = str(actual["members"][0].get("host", ""))
+        old_host = previous.rsplit(":", 1)[0]
+        if old_host not in {"127.0.0.1", "localhost"}:
+            raise RuntimeError("已有副本集公布地址不是回环地址，拒绝自动迁移")
+        migrated = dict(actual)
+        migrated["version"] = int(actual.get("version", 1)) + 1
+        migrated["members"] = [dict(actual["members"][0], host=expected["members"][0]["host"])]
+        try:
+            admin.command({"replSetReconfig": migrated})
+        except OperationFailure as error:
+            raise RuntimeError("副本集公告地址迁移失败") from error
+        _wait_primary(admin, timeout_seconds)
+        verified = admin.command("replSetGetConfig")["config"]
+        if not _same_replica(verified, expected):
+            raise RuntimeError("副本集公告地址迁移后核验失败")
+        return {"changed": True, "host": settings["MONGO_ADVERTISED_HOST"], "port": settings["MONGO_PORT"]}
+    finally:
+        client.close()
+
+
 def _wait_primary(admin, timeout_seconds):
     """等待单成员当选 PRIMARY；服务未就绪时停止初始化且不重试写入。"""
     deadline = time.monotonic() + timeout_seconds
@@ -160,9 +196,18 @@ def main(argv=None):
     parser.add_argument("--config", required=True, type=Path, help="0600 原生数据库 KEY=VALUE 配置文件")
     parser.add_argument("--allow-initialize", action="store_true",
                         help="仅部署器已确认受管空数据目录时允许首次初始化")
+    parser.add_argument("--reconfigure-advertised-host", action="store_true",
+                        help="仅把受管单成员副本集从127.0.0.1公告地址迁移到配置内网地址")
     args = parser.parse_args(argv)
     try:
-        result = initialize(read_config(args.config), allow_initialize=args.allow_initialize)
+        values = read_config(args.config)
+        if args.reconfigure_advertised_host:
+            if args.allow_initialize:
+                raise ValueError("公告地址迁移不能同时初始化数据库")
+            result = reconfigure_advertised_host(values)
+            print("原生 MongoDB 公告地址迁移完成：成员={host}:{port} 已变更={changed}".format(**result))
+            return 0
+        result = initialize(values, allow_initialize=args.allow_initialize)
     except (OSError, PyMongoError, RuntimeError, ValueError):
         print("原生 MongoDB 初始化失败；请检查服务状态、配置和既有数据库归属")
         return 1

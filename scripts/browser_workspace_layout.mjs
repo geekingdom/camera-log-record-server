@@ -187,6 +187,9 @@ try {
     assert.equal(await ui.getByRole("button", { name: "编辑任务", exact: true }).count(), 0, "非创建者不能编辑他人任务");
     allowCreate = true;
     await ui.reload();
+    assert.equal(await ui.getByRole("tab", { name: "采集任务", exact: true }).getAttribute("aria-selected"), "true",
+      "刷新已登录会话必须保留当前采集任务页");
+    await ui.getByRole("tab", { name: "设备资源", exact: true }).click();
     await ui.locator(".resource-table .el-table__row").first().waitFor();
     assert.equal(await ui.getByRole("button", { name: "新建采集任务", exact: true }).count(), 2, "创建任务不依赖资源所有者");
     assert.deepEqual(errors, []);

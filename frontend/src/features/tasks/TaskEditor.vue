@@ -55,7 +55,7 @@ const linkedSerialServer = computed(() => resources.value.find((item) => item.id
 const serialUsesResource = computed(() => serial.value && Boolean(form.value.serialServerResourceId));
 const serialServerOwnedTask = computed(() => linkedResource.value?.kind === "SERIAL_SERVER" ||
   (!props.task && props.initialResource?.id === form.value.resourceId && props.initialResource?.kind === "SERIAL_SERVER"));
-const coredumpEligible = computed(() => form.value.protocol === "SSH" &&
+const coredumpEligible = computed(() => ["SSH", "TELNET_DEVICE"].includes(form.value.protocol) &&
   (linkedResource.value?.kind ??
     (props.initialResource?.id === form.value.resourceId ? props.initialResource.kind : undefined)) === "HIKVISION_NETWORK");
 const coredumpResourceKind = computed(() => linkedResource.value?.kind ??
@@ -199,7 +199,7 @@ watch(
       form.value.port =
         protocol === "SSH" ? 22 : protocol === "TELNET_DEVICE" ? 23 : undefined;
     if (protocol !== "TELNET_SERIAL") clearPassword.value = false;
-    if (protocol !== "SSH") form.value.enableCoredumpMonitor = false;
+    if (!["SSH", "TELNET_DEVICE"].includes(protocol)) form.value.enableCoredumpMonitor = false;
   },
 );
 watch([linkedResource, serial], ([resource]) => {

@@ -19,7 +19,10 @@ from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.common.ownership import owner_filter
+from camera_logs.node.health import resource_pressure
 from camera_logs.node.manual_queue import next_manual_command
+from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
+from camera_logs.node.telemetry import TelemetrySampler
 from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
 
 logger = logging.getLogger(__name__)
@@ -46,6 +49,28 @@ class Worker:
         self.coredump_scan_task = None
         self.last_coredump_scan = 0.0
         self.instance_id = uuid.uuid4().hex
+        self.telemetry = TelemetrySampler(repo.settings.host_proc_root)
+        self.telemetry_task = None
+        self.telemetry_work = None
+        self.telemetry_value = {"sampledAt": None, "scope": "UNKNOWN", "status": "UNKNOWN"}
+
+    async def _sample_telemetry(self):
+        """采样异常只保留未知状态，心跳继续写入其它节点字段。"""
+        work = self.telemetry_work = asyncio.create_task(asyncio.to_thread(self.telemetry.sample))
+        try:
+            self.telemetry_value = await asyncio.wait_for(asyncio.shield(work), timeout=2)
+        except TimeoutError:
+            self.telemetry_value = {"sampledAt": None, "scope": "UNKNOWN", "status": "UNKNOWN", "error": "TimeoutError"}
+            try:
+                await work
+            except Exception as error:  # noqa: BLE001 - 超时后的线程异常不得影响节点心跳。
+                logger.warning("节点 telemetry 超时后采样失败 type=%s", type(error).__name__)
+        except asyncio.CancelledError:
+            # to_thread 无法中断；关闭者也持有 work，重复取消不会允许下一周期重叠采样。
+            await asyncio.shield(work)
+            raise
+        except Exception as error:  # noqa: BLE001 - 采样库或主机 proc 失败不能影响节点心跳。
+            self.telemetry_value = {"sampledAt": None, "scope": "UNKNOWN", "status": "UNKNOWN", "error": type(error).__name__}
 
     def discard_closed(self, runtime):
         """仅移除已关闭的同一对象，等待期间安装的后继实例不得被旧回调移除。"""
@@ -73,8 +98,15 @@ class Worker:
         """绑定旧实例处理异步收尾异常；隔离关闭不代表可以释放数据库归属。"""
         ownership = owner_filter(runtime.task)
         try:
+            if action == "recover":
+                await self.recover_blocked_runtime(runtime)
+                return
             if action == "isolate":
                 await runtime.stop()
+                if getattr(runtime, "collector", None) is not None:
+                    await record_closed_receipt(
+                        self.repo, runtime.task, self.instance_id, runtime.collector.session_id,
+                    )
                 self.discard_closed(runtime)
             elif action == "pause":
                 await self.pause(runtime)
@@ -96,6 +128,20 @@ class Worker:
                     # 同一运行以原动作续做收尾，归属变化后会由重试前的 CAS 拒绝。
                     self.failed_cleanups[runtime.task["id"]] = (runtime, action)
             raise
+
+    async def recover_blocked_runtime(self, runtime):
+        """显式恢复先确认旧连接关闭并固化收据，历史运行错误不能否决新的恢复意图。"""
+        await runtime.stop()
+        collector = getattr(runtime, "collector", None)
+        if collector is None:
+            raise RuntimeError("阻塞恢复缺少已关闭会话，不能确认旧运行")
+        current = await self.repo.db.tasks.find_one(owner_filter(runtime.task), {"sessionId": 1})
+        if current is None or current.get("sessionId") != collector.session_id:
+            self.discard_closed(runtime)
+            return
+        await record_closed_receipt(self.repo, runtime.task, self.instance_id, collector.session_id)
+        await finalize_closed_task(self.repo, runtime.task)
+        self.discard_closed(runtime)
 
     async def retry_blocked_cleanup(self, runtime):
         """重试本 Worker 已知失败的收尾；未知隔离状态绝不在此路径释放。"""
@@ -195,6 +241,8 @@ class Worker:
         """结束运行后移除端点锁，持久化操作结果；关闭异常必须向监督周期传播。"""
         task = runtime.task
         await runtime.stop()
+        if getattr(runtime, "collector", None) is not None:
+            await record_closed_receipt(self.repo, task, self.instance_id, runtime.collector.session_id)
         failed = runtime.error or runtime.background_failure()
         update = {"nodeId": None, "status": "ERROR" if failed else "STOPPED", "error": str(failed) if failed else None, "updatedAt": now()}
         if failed:
@@ -243,6 +291,10 @@ class Worker:
         from camera_logs.collection.connections import connect
         root = self.repo.settings.log_root
         root.mkdir(parents=True, exist_ok=True)
+        if (self.telemetry_task is None or self.telemetry_task.done()) and (
+            self.telemetry_work is None or self.telemetry_work.done()
+        ):
+            self.telemetry_task = asyncio.create_task(self._sample_telemetry())
         # NFS 扫描与采集会话完全分离，且最多一个后台任务；扫描慢不能阻塞心跳或写入。
         if self.coredump_scanner is None:
             from camera_logs.coredumps.scanner import CoredumpScanner
@@ -270,6 +322,7 @@ class Worker:
             and not mismatch
             and not reported.get("isolated", False)
             and write_latency["writeLatencyMs"] <= WRITE_LATENCY_LIMIT_MS
+            and not resource_pressure({"telemetry": self.telemetry_value})
         )
         current_bytes = sum(r.input_bytes for r in self.active.values())
         tick = time.monotonic()
@@ -280,8 +333,10 @@ class Worker:
             "capacity": capacity, "activeTasks": len(self.active),
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
             **write_latency,
-            "accepting": accepting, "configurationMismatch": mismatch,
-            "configuredUrl": config.get("url")}}, upsert=True)
+            "configurationMismatch": mismatch,
+            "configuredUrl": config.get("url"), "telemetry": self.telemetry_value,
+            "capabilities": {"coredumpNfs": bool(self.repo.settings.nfs_server_ip)},
+            "accepting": accepting}}, upsert=True)
         for task_id, future in list(self.releases.items()):
             if future.done():
                 try:
@@ -306,6 +361,13 @@ class Worker:
             ):
                 self.releases[task_id] = asyncio.create_task(self.retry_blocked_cleanup(runtime))
                 continue
+            if task_id not in self.releases and current is not None and current["status"] == "BLOCKED" \
+                    and owner_filter(runtime.task) == owner_filter(current) and (current.get("restartRequested") \
+                    or current.get("desiredState") == "STOPPED") and not reported.get("isolated", False):
+                # 本机仍持有同一运行时，stop 成功就是关闭证据；普通停止和受控重启都可收尾。
+                action = "recover" if current.get("restartRequested") else "release"
+                self.releases[task_id] = asyncio.create_task(self.finish_runtime(runtime, action))
+                continue
             if task_id not in self.releases and (
                 current is None or owner_filter(runtime.task) != owner_filter(current)
                 or current["status"] == "BLOCKED" or reported.get("isolated", False)
@@ -318,6 +380,15 @@ class Worker:
                 continue
             runtime = self.active.get(task["id"])
             if task["status"] == "BLOCKED":
+                if runtime is None:
+                    if await finalize_closed_task(self.repo, task):
+                        continue
+                    await self.repo.db.operations.update_many(
+                        {"taskId": task["id"], "status": "PENDING", "$or": [
+                            {"action": "restart-blocked"}, {"desiredState": "STOPPED"},
+                        ]},
+                        {"$set": {"phase": "ISOLATION_REQUIRED", "updatedAt": now()}},
+                    )
                 continue
             if runtime and task["desiredState"] == "PAUSED":
                 await self.repo.db.tasks.update_one(owner_filter(task), {"$set": {"status": "PAUSING"}})
@@ -364,19 +435,22 @@ class Worker:
                 from camera_logs.coredumps.jobs import run_export
                 self.track_background(asyncio.create_task(run_export(self.repo, export)), "coredump 导出")
         if time.monotonic() - self.last_maintenance >= 60:
-            from camera_logs.coredumps.jobs import cleanup_expired_exports
-            from camera_logs.logs.maintenance import maintain
-
             self.last_maintenance = time.monotonic()
             if self.maintenance_task is None or self.maintenance_task.done():
-                async def maintenance():
-                    """日志和 coredump 保留清理共享同一低频维护任务，避免并行删除。"""
-                    await maintain(self.repo)
-                    await cleanup_expired_exports(self.repo)
-                    from camera_logs.coredumps.snapshots import reconcile_snapshots
-                    await reconcile_snapshots(self.repo)
-                self.maintenance_task = asyncio.create_task(maintenance())
+                self.maintenance_task = asyncio.create_task(self._maintain())
         self.last_database_ok = time.monotonic()
+
+    async def _maintain(self):
+        """执行低频清理；无 NFS 功能节点保留既有快照且跳过其专属回收。"""
+        from camera_logs.coredumps.jobs import cleanup_expired_exports
+        from camera_logs.logs.maintenance import maintain
+
+        await maintain(self.repo)
+        await cleanup_expired_exports(self.repo)
+        if not self.repo.settings.nfs_server_ip:
+            return
+        from camera_logs.coredumps.snapshots import reconcile_snapshots
+        await reconcile_snapshots(self.repo)
 
     async def run(self):
         """持续执行节点周期；长期失去数据库联系时主动关闭本机连接。"""
@@ -412,6 +486,11 @@ class Worker:
         if self.coredump_scan_task:
             self.coredump_scan_task.cancel()
             tasks.append(self.coredump_scan_task)
+        if self.telemetry_task:
+            self.telemetry_task.cancel()
+            tasks.append(self.telemetry_task)
+        if self.telemetry_work and self.telemetry_work is not self.telemetry_task:
+            tasks.append(self.telemetry_work)
         await asyncio.gather(*tasks, return_exceptions=True)
 
 

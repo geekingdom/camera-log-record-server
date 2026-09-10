@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
-from camera_logs.common.database import Repository
+from camera_logs.common.database import Repository, now
 from camera_logs.node.worker import Worker
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
@@ -228,3 +228,145 @@ async def test_blocked_cleanup_retry_does_not_release_successor_owner(tmp_path):
     assert not await worker.retry_blocked_cleanup(runtime)
     assert await repo.db.tasks.find_one({"id": "task"}) == successor
     assert await repo.db.endpoint_locks.find_one({"taskId": "task", "runId": "new-run"}) is not None
+
+
+async def test_blocked_stop_with_active_owner_releases_run_lock_and_stop_operation(tmp_path):
+    """BLOCKED 后普通停止仍由同 owner runtime 完成关闭、收据、锁和操作收尾。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+            "sessionId": "session", "status": "BLOCKED", "desiredState": "STOPPED",
+            "restartRequested": False}
+    await repo.db.tasks.insert_one(task)
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "run"})
+    await repo.db.operations.insert_one({"id": "stop", "taskId": "task", "desiredState": "STOPPED",
+                                         "status": "PENDING", "action": "stop"})
+    runtime = SimpleNamespace(task=task, collector=SimpleNamespace(session_id="session"), stop=AsyncMock(),
+                              error=None, input_bytes=0, background_failure=lambda: None)
+    worker = Worker(repo)
+    worker.active["task"] = runtime
+    worker.last_coredump_scan = worker.last_maintenance = time.monotonic()
+
+    await worker.tick()
+    await worker.releases["task"]
+
+    stored = await repo.db.tasks.find_one({"id": "task"})
+    assert runtime.stop.await_count == 1
+    assert stored["status"] == "STOPPED" and stored["nodeId"] is None
+    assert stored["closedReceipt"]["sessionId"] == "session"
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 0
+    assert (await repo.db.runs.find_one({"id": "run"}))["endedAt"]
+    assert (await repo.db.operations.find_one({"id": "stop"}))["status"] == "SUCCEEDED"
+
+
+async def test_blocked_restart_with_active_owner_ignores_old_runtime_error_after_confirmed_stop(tmp_path):
+    """用户已请求恢复时，旧会话历史错误不能覆盖成功关闭后的新运行意图。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+            "sessionId": "session", "resourceId": "resource", "status": "BLOCKED",
+            "desiredState": "STOPPED", "restartRequested": True, "controlOperationId": "restart"}
+    await repo.db.tasks.insert_one(task)
+    await repo.db.resources.insert_one({"id": "resource", "deletedAt": None, "healthStatus": "ONLINE"})
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "run"})
+    await repo.db.operations.insert_one({"id": "restart", "taskId": "task", "desiredState": "RUNNING",
+                                         "status": "PENDING", "action": "restart-blocked"})
+    runtime = SimpleNamespace(task=task, collector=SimpleNamespace(session_id="session"), stop=AsyncMock(),
+                              error="旧连接错误", input_bytes=0, background_failure=lambda: None)
+    worker = Worker(repo)
+    worker.active["task"] = runtime
+    worker.last_coredump_scan = worker.last_maintenance = time.monotonic()
+
+    await worker.tick()
+    await worker.releases["task"]
+
+    stored = await repo.db.tasks.find_one({"id": "task"})
+    assert runtime.stop.await_count == 1
+    assert (stored["status"], stored["desiredState"], stored["nodeId"], stored["restartRequested"]) == (
+        "STOPPED", "RUNNING", None, False
+    )
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 0
+    assert (await repo.db.operations.find_one({"id": "restart"}))["status"] == "PENDING"
+
+
+async def test_blocked_stop_without_runtime_marks_isolation_required_without_releasing(tmp_path):
+    """未知旧运行不能因普通停止假定关闭，操作需明确等待单任务隔离确认。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+            "status": "BLOCKED", "desiredState": "STOPPED", "restartRequested": False}
+    await repo.db.tasks.insert_one(task)
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "run"})
+    await repo.db.operations.insert_one({"id": "stop", "taskId": "task", "desiredState": "STOPPED",
+                                         "status": "PENDING", "action": "stop"})
+    worker = Worker(repo)
+    worker.last_coredump_scan = worker.last_maintenance = time.monotonic()
+
+    await worker.tick()
+
+    assert (await repo.db.tasks.find_one({"id": "task"}))["status"] == "BLOCKED"
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task", "runId": "run"}) == 1
+    assert (await repo.db.runs.find_one({"id": "run"})).get("endedAt") is None
+    assert (await repo.db.operations.find_one({"id": "stop"}))["phase"] == "ISOLATION_REQUIRED"
+
+
+async def test_blocked_stop_without_runtime_consumes_exact_closed_receipt(tmp_path):
+    """本机已丢失 runtime 时，精确关闭收据仍可完成普通停止的事务收尾。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+            "sessionId": "session", "status": "BLOCKED", "desiredState": "STOPPED",
+            "restartRequested": False, "controlOperationId": "stop"}
+    receipt = {"taskId": "task", "runId": "run", "nodeId": "node", "generation": 1,
+               "sessionId": "session", "instanceId": "worker", "closedAt": now()}
+    await repo.db.tasks.insert_one(task | {"closedReceipt": receipt})
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "run"})
+    await repo.db.commands.insert_many([
+        {"taskId": "task", "runId": "run", "status": "SENDING"},
+        {"taskId": "task", "runId": "run", "status": "QUEUED"},
+    ])
+    await repo.db.operations.insert_one({"id": "stop", "taskId": "task", "desiredState": "STOPPED",
+                                         "status": "PENDING", "action": "stop"})
+    worker = Worker(repo)
+    worker.last_coredump_scan = worker.last_maintenance = time.monotonic()
+
+    await worker.tick()
+
+    stored = await repo.db.tasks.find_one({"id": "task"})
+    assert (stored["status"], stored["desiredState"], stored["nodeId"]) == ("STOPPED", "STOPPED", None)
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 0
+    assert (await repo.db.runs.find_one({"id": "run"}))["endedAt"]
+    assert [entry["status"] async for entry in repo.db.commands.find({"taskId": "task"}).sort("status", 1)] == [
+        "CANCELLED", "UNKNOWN",
+    ]
+    operation = await repo.db.operations.find_one({"id": "stop"})
+    assert operation["status"] == "SUCCEEDED" and "phase" not in operation
+
+
+async def test_blocked_restart_without_runtime_consumes_receipt_but_stays_pending(tmp_path):
+    """收据可释放旧运行并重新排队，但 restart operation 必须等待新会话采集。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+            "sessionId": "session", "status": "BLOCKED", "desiredState": "STOPPED",
+            "restartRequested": True, "controlOperationId": "restart"}
+    receipt = {"taskId": "task", "runId": "run", "nodeId": "node", "generation": 1,
+               "sessionId": "session", "instanceId": "worker", "closedAt": now()}
+    await repo.db.tasks.insert_one(task | {"closedReceipt": receipt})
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "run"})
+    await repo.db.operations.insert_one({"id": "restart", "taskId": "task", "desiredState": "RUNNING",
+                                         "status": "PENDING", "action": "restart-blocked"})
+    await repo.db.resources.insert_one({"id": "resource", "deletedAt": None, "healthStatus": "ONLINE"})
+    await repo.db.tasks.update_one({"id": "task"}, {"$set": {"resourceId": "resource"}})
+    worker = Worker(repo)
+    worker.last_coredump_scan = worker.last_maintenance = time.monotonic()
+
+    await worker.tick()
+
+    stored = await repo.db.tasks.find_one({"id": "task"})
+    assert (stored["status"], stored["desiredState"], stored["nodeId"], stored["restartRequested"]) == (
+        "STOPPED", "RUNNING", None, False
+    )
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 0
+    operation = await repo.db.operations.find_one({"id": "restart"})
+    assert operation["status"] == "PENDING" and "phase" not in operation

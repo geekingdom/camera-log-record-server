@@ -2,7 +2,11 @@
 
 import inspect
 
-from camera_logs.administration.event_presenter import ACTION_OUTCOMES, present_events
+from camera_logs.administration.event_presenter import (
+    ACTION_OUTCOMES,
+    COREDUMP_MOUNT_OUTCOMES,
+    present_events,
+)
 from camera_logs.common.database import public
 
 
@@ -26,6 +30,10 @@ def _derived_fields() -> dict:
         {"case": {"$in": ["$status", _OUTCOMES]}, "then": "$status"},
         {"case": {"$eq": ["$httpStatus", 202]}, "then": "PENDING"},
         {"case": {"$gte": ["$httpStatus", 400]}, "then": "FAILED"},
+        {"case": {"$eq": ["$type", "COREDUMP_MOUNT"]}, "then": {"$switch": {"branches": [
+            {"case": {"$eq": ["$status", status]}, "then": result}
+            for status, result in COREDUMP_MOUNT_OUTCOMES.items()
+        ], "default": "SUCCEEDED"}}},
         {"case": {"$in": ["$type", ["CONNECTION_GAP", "CLOCK_ROLLBACK"]]}, "then": "UNKNOWN"},
         {"case": {"$in": ["$type", _PRESSURE_EVENTS]}, "then": {
             "$cond": [{"$eq": ["$level", "NORMAL"]}, "SUCCEEDED", "UNKNOWN"]}},

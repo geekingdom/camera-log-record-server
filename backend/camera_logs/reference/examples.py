@@ -7,7 +7,7 @@ TASK = {"id": "task-example", "resourceId": "resource-example", "name": "大厅�
 RESOURCE = {"id": "resource-example", "name": "大厅设备", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.10",
             "model": "DS-2CD", "subSerialNumber": "SN-EXAMPLE", "softwareVersion": "V5.10 build 260612",
             "createdBy": "user-example", "createdByName": "集成账号",
-            "taskCount": 1, "activeTaskCount": 0, "tasks": [TASK], "tasksTruncated": False,
+            "taskCount": 1, "activeTaskCount": 0, "unsettledTaskCount": 0, "tasks": [TASK], "tasksTruncated": False,
             "tasksUrl": "/api/v1/tasks?resourceId=resource-example", "version": 1}
 USER = {"id": "user-example", "username": "integration-user", "displayName": "集成账号", "isAdmin": False,
         "enabled": True, "scopes": ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"], "version": 1}
@@ -57,7 +57,11 @@ def schema_example(schema, schemas, name="", depth=0):
 
 def request_example(schema, schemas):
     """在Schema默认值之上补齐有业务含义的任务、查询及下载示例。"""
+    if "anyOf" in schema:
+        return request_example(next(item for item in schema["anyOf"] if item.get("type") != "null"), schemas)
     name = schema.get("$ref", "").split("/")[-1]
+    if name == "BlockedRestart":
+        return {"confirmIsolation": False}
     if name == "SearchCreate":
         return {"taskId": "task-example", "start": STAMP, "end": "2026-09-09T11:00:00+00:00", "keyword": ""}
     if name == "DownloadCreate":
@@ -81,6 +85,11 @@ def response_example(path, method, status):
         return {"status": "ok"}
     if path == "/metrics":
         return "# TYPE camera_tasks gauge\ncamera_tasks 2\n"
+    if path.endswith("/authentication-records"):
+        return page({"id": "authentication-example", "resourceId": "resource-example", "createdAt": STAMP,
+                     "source": "PERIODIC", "result": "SUCCESS", "modelBefore": "DS-2CD", "modelAfter": "DS-2CD",
+                     "serialBefore": "SN-OLD", "serialAfter": "SN-NEW", "identityChanged": True,
+                     "initialAuthentication": False, "message": "认证成功，设备身份已变化"})
     if path.endswith("/coredump-monitor"):
         return {"active": True, "ownerTask": {"id": "task-example", "name": "值守采集"}, "mountStatus": "MOUNTED"}
     if "coredump" in path:
@@ -109,14 +118,19 @@ def response_example(path, method, status):
         return page({"hourId": STAMP, "hour": STAMP, "status": "READY", "integrity": "VERIFIED",
                      "files": [{"id": "file-example", "bytes": 1024}], "bytes": 1024, "archiveBytes": 512})
     if path.endswith("/command-executions"):
-        return page(COMMAND)
+        return page(COMMAND | {"kind": "SCHEDULED", "commandId": "periodic-example", "command": "ps",
+                               "commandSource": "SNAPSHOT", "attempt": 2, "totalExecutions": 5,
+                               "intervalSeconds": 60}) | {
+            "runId": "run-example", "scheduledCommands": [{"id": "periodic-example", "command": "ps",
+                "totalExecutions": 5, "intervalSeconds": 60, "attempts": 2}],
+        }
     if path.endswith("/users/permissions"):
         return {"scopes": [{"value": "tasks:read", "label": "查看设备与任务"}]}
     if path.endswith("/users/share-targets"):
         return page({"id": "shared-user-example", "username": "shared-user", "displayName": "可共享用户"})
     if "/commands" in path:
         return COMMAND
-    if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume")) or "/operations/" in path:
+    if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume", "restart")) or "/operations/" in path:
         return {"id": "operation-example", "taskId": "task-example", "status": "PENDING",
                 "desiredState": "STOPPED" if path.endswith("/stop") else "PAUSED" if path.endswith("/pause") else "RUNNING"}
     if "/log-searches" in path or "/downloads" in path:

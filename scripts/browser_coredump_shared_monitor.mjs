@@ -13,6 +13,7 @@ const resources = [
 const ownTask = { id: "owner-self", name: "本人负责采集", resourceId: "camera-a", protocol: "SSH", ip: "192.0.2.10", port: 22,
   username: "fixture", enableCoredumpMonitor: true, status: "COLLECTING", desiredState: "RUNNING", version: 1, initialCommands: [], scheduledCommands: [] };
 const pageOf = items => ({ items, total: items.length, page: 1, pageSize: 100 });
+const viewports = (process.env.COREDUMP_MONITOR_VIEWPORTS || "1440,390").split(",").map(Number);
 
 function monitor(active, ownerTask, mountStatus = null) { return { active, ownerTask, mountStatus }; }
 async function assertViewport(page, width, label) {
@@ -23,9 +24,10 @@ async function assertViewport(page, width, label) {
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
 try {
   await mkdir(screenshots, { recursive: true });
-  for (const width of [1440, 390]) {
+  for (const width of viewports) {
     let cameraAReads = 0;
     let cameraBFailure = false;
+    let cameraBMountStatus = "MOUNTED";
     const created = [];
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.route("**/api/v1/**", async route => {
@@ -34,7 +36,7 @@ try {
       if (path === "/api/v1/resources") return route.fulfill({ json: pageOf(resources) });
       if (path === "/api/v1/resources/camera-a/coredump-monitor") {
         cameraAReads += 1;
-        return route.fulfill({ json: cameraAReads <= 2
+        return route.fulfill({ json: cameraAReads <= 2 || process.env.COREDUMP_UNMOUNT_STATUS_ONLY
           ? monitor(true, { id: "owner-other", name: "另一采集任务" }, "MOUNTED")
           : cameraAReads === 3
             ? monitor(true, { id: "owner-self", name: ownTask.name }, "MOUNTED")
@@ -42,7 +44,7 @@ try {
       }
       if (path === "/api/v1/resources/camera-b/coredump-monitor") {
         if (cameraBFailure) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "模拟查询失败" }) });
-        return route.fulfill({ json: monitor(true, { id: "owner-b", name: "B 资源负责人" }, "MOUNTED") });
+        return route.fulfill({ json: monitor(true, { id: "owner-b", name: "B 资源负责人" }, cameraBMountStatus) });
       }
       if (path === "/api/v1/tasks" && request.method() === "POST") {
         created.push(request.postDataJSON());
@@ -80,6 +82,23 @@ try {
     assert.ok(await sharedSwitch.isVisible(), "共享开启开关必须出现在截图视口中");
     assert.ok(await monitorItem.getByText("另一采集任务", { exact: false }).isVisible(), "负责人说明必须出现在截图视口中");
     await page.screenshot({ path: `${screenshots}/coredump-shared-owner-${width}.png`, fullPage: true });
+    if (process.env.COREDUMP_UNMOUNT_STATUS_ONLY) for (const [status, label] of [["UNMOUNTED", "已卸载"], ["UNMOUNT_SKIPPED", "跳过卸载，结果未确认"], ["UNMOUNT_FAILED", "卸载失败"]]) {
+      cameraBMountStatus = status;
+      await resourceSelect.click();
+      await page.getByRole("option", { name: /模拟海康 B/ }).click();
+      await monitorItem.getByText(`挂载状态：${label}`, { exact: false }).waitFor();
+      await page.getByRole("option", { name: /模拟海康 B/ }).waitFor({ state: "hidden" });
+      await assertViewport(page, width, `Coredump ${status} 状态`);
+      if (status === "UNMOUNT_SKIPPED")
+        await page.screenshot({ path: `${screenshots}/coredump-unmount-skipped-${width}.png`, fullPage: true });
+      await resourceSelect.click();
+      await page.getByRole("option", { name: /模拟海康 A/ }).click();
+      await monitorItem.getByText("另一采集任务", { exact: false }).waitFor();
+    }
+    if (process.env.COREDUMP_UNMOUNT_STATUS_ONLY) {
+      await context.close();
+      continue;
+    }
     await drawer.getByLabel("任务名称", { exact: true }).fill("共享状态新任务");
     await drawer.getByLabel("用户名", { exact: true }).fill("fixture");
     await drawer.getByLabel("密码", { exact: true }).fill("fixture-password");
@@ -126,13 +145,28 @@ try {
     await transitionItem.getByText("B 资源负责人", { exact: false }).waitFor();
     await transitionDrawer.locator(".el-form-item").filter({ hasText: "连接协议" }).locator(".el-select").click();
     await page.getByRole("option", { name: "Telnet 设备", exact: true }).click();
-    assert.equal(await transitionItem.count(), 0, "切换非 SSH 协议必须移除共享 Coredump 展示");
+    await transitionItem.getByText("B 资源负责人", { exact: false }).waitFor();
+    assert.equal(await transitionItem.count(), 1, "Telnet 设备必须保留共享 Coredump 展示");
+    await transitionDrawer.locator(".el-form-item").filter({ hasText: "连接协议" }).locator(".el-select").click();
+    await page.getByRole("option", { name: "Telnet 串口", exact: true }).click();
+    assert.equal(await transitionItem.count(), 0, "Telnet 串口必须移除共享 Coredump 展示");
     await transitionDrawer.locator(".el-form-item").filter({ hasText: "连接协议" }).locator(".el-select").click();
     await page.getByRole("option", { name: "SSH", exact: true }).click();
+    for (const [status, label] of [["UNMOUNTED", "已卸载"], ["UNMOUNT_SKIPPED", "跳过卸载，结果未确认"], ["UNMOUNT_FAILED", "卸载失败"]]) {
+      cameraBMountStatus = status;
+      await transitionResourceSelect.click();
+      await page.getByRole("option", { name: /模拟海康 A/ }).click();
+      await transitionResourceSelect.click();
+      await page.getByRole("option", { name: /模拟海康 B/ }).click();
+      await transitionItem.getByText(`挂载状态：${label}`, { exact: false }).waitFor();
+      await page.getByRole("option", { name: /模拟海康 B/ }).waitFor({ state: "hidden" });
+      await assertViewport(page, width, `Coredump ${status} 状态`);
+      if (status === "UNMOUNT_SKIPPED")
+        await page.screenshot({ path: `${screenshots}/coredump-unmount-skipped-${width}.png`, fullPage: true });
+    }
     cameraBFailure = true;
     await transitionResourceSelect.click();
     await page.getByRole("option", { name: /模拟海康 A/ }).click();
-    await page.waitForTimeout(5_200);
     await transitionDrawer.getByText("当前没有正在负责 Coredump NFS 挂载监控的任务", { exact: true }).waitFor();
     await transitionResourceSelect.click();
     await page.getByRole("option", { name: /模拟海康 B/ }).click();

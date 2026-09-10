@@ -9,7 +9,10 @@ from pathlib import Path
 def main():
     """在临时目录放置合成敏感文件，使用 scratch 导出并检查实际上下文。"""
     root = Path(__file__).resolve().parents[1]
-    allowed = ["backend/camera_logs/main.py", "frontend/src/main.ts", "frontend/package-lock.json"]
+    allowed = [
+        "backend/camera_logs/main.py", "frontend/src/main.ts", "frontend/package-lock.json",
+        "deploy/docker-compose.yml", "deploy/mongo-host-user-init.sh",
+    ]
     forbidden = [
         ".env", ".env.production", ".local/secrets/devices.json", ".git/config",
         ".venv/bin/python", "frontend/.env", "frontend/.env.production",

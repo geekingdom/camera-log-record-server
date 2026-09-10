@@ -1,13 +1,15 @@
 """提供手动命令、执行记录、节点视图和服务令牌的受权 API。"""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, Query, Request, Response
 
+from camera_logs.commands.history import execution_history
 from camera_logs.commands.manual_submission import submit_manual
 from camera_logs.common.database import public
 from camera_logs.common.models import InitialCommand, TokenCreate, TokenPatch, TokenRotate
 from camera_logs.common.security import actor, authorize, authorize_owner
+from camera_logs.node.health import node_health
 from camera_logs.users.service_tokens import (
     create_service_token,
     public_token,
@@ -37,16 +39,23 @@ def install_command_routes(app, repo, listing):
         return public(doc)
 
     @app.get("/api/v1/tasks/{task_id}/command-executions")
-    async def executions(task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100)):
-        """分页返回任务的手动和计划命令执行记录。"""
+    async def executions(
+        task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
+        commandId: str | None = Query(None, min_length=1, max_length=128),
+        kind: Literal["MANUAL", "SCHEDULED"] | None = None,
+    ):
+        """分页返回命令正文快照；按单项定时配置筛选并附当前运行独立预算。"""
         authorize(user, "tasks:read", task_id)
-        return await listing("commands", {"taskId": task_id}, page, pageSize)
+        return await execution_history(repo(), listing, task_id, page, pageSize, commandId, kind)
 
     @app.get("/api/v1/nodes")
     async def nodes(user: User):
         """基础设施节点列表仅管理员可读取。"""
         authorize(user, "admin")
-        return await listing("nodes", {"deletedAt": None}, 1, 100, "heartbeat")
+        result = await listing("nodes", {"deletedAt": None}, 1, 100, "id")
+        for node in result["items"]:
+            node["health"] = node_health(node)
+        return result
 
     @app.post("/api/v1/service-tokens", status_code=201)
     async def create_token(body: TokenCreate, response: Response, user: User):

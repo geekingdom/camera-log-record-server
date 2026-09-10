@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # 独立节点部署可自定义监听地址/端口；node_url 仍是后端实际访问的公布地址。
     node_bind_ip: str = "0.0.0.0"
     node_port: int = Field(default=8001, ge=1, le=65535)
+    # Docker Worker 读取宿主 CPU、内存和网络统计的只读 proc 根目录；原生部署保持空值。
+    host_proc_root: Path | None = None
     log_root: Path = Path("data/logs")
     # 海康 SSH coredump 的 NFS 总挂载目录；Worker 部署时应配置为宿主机绝对路径。
     nfs_root: Path = Path("/srv/camera-logs/nfs-coredump")
@@ -32,7 +34,7 @@ class Settings(BaseSettings):
     nfs_server_ip: str = ""
     # NFS coredump 扫描/冻结独立于采集会话；接收源文件默认不自动删除。
     # 十秒轮询及时发现设备子目录文件；稳定判定独立于设备端 mtime 时钟。
-    coredump_scan_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    coredump_scan_interval_seconds: int = Field(default=5, ge=1, le=3600)
     coredump_scan_max_files: int = Field(default=500, ge=1, le=10000)
     coredump_snapshot_max_bytes: int = Field(default=20_000_000_000, ge=1)
     coredump_snapshot_quota_bytes: int = Field(default=100_000_000_000, ge=1)

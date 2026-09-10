@@ -105,7 +105,14 @@ class Repository:
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
         await self.db.resources.create_index("deletionState")
+        await self.db.authentication_records.create_index("id", unique=True)
+        await self.db.authentication_records.create_index(
+            [("resourceId", 1), ("result", 1), ("identityChanged", 1), ("createdAt", -1)]
+        )
+        await self.db.authentication_records.create_index([("resourceId", 1), ("createdAt", -1), ("id", -1)])
         await self.db.commands.create_index([("taskId", 1), ("createdAt", -1)])
+        await self.db.commands.create_index([("taskId", 1), ("commandId", 1), ("createdAt", -1)])
+        await self.db.commands.create_index([("taskId", 1), ("kind", 1), ("createdAt", -1)])
         await self.db.commands.create_index(
             [
                 ("taskId", 1),

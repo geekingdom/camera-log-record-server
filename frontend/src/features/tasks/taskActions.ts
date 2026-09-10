@@ -6,7 +6,7 @@
  */
 import type { Task } from "../../shared/types";
 
-export type TaskAction = "start" | "stop" | "pause" | "resume";
+export type TaskAction = "start" | "restart" | "stop" | "pause" | "resume";
 
 const transitionalRunningStatuses = new Set(["PENDING", "CONNECTING", "RECONNECTING"]);
 
@@ -16,14 +16,15 @@ export function availableTaskActions(task: Task): TaskAction[] {
   const desiredState = task.desiredState ?? "";
 
   if (status === "PAUSING" || status === "STOPPING") return [];
-  if (status === "PAUSED" && desiredState === "PAUSED" && task.protocol === "SSH") {
+  if (status === "BLOCKED") return ["restart", "stop"];
+  if (status === "PAUSED" && desiredState === "PAUSED" && task.protocol !== "TELNET_SERIAL") {
     return ["resume", "stop"];
   }
-  if (status === "WAITING_DEVICE" && desiredState === "RUNNING" && task.protocol === "SSH") {
+  if (status === "WAITING_DEVICE" && desiredState === "RUNNING" && task.protocol !== "TELNET_SERIAL") {
     return ["pause", "stop"];
   }
   if (status === "COLLECTING" && desiredState === "RUNNING") {
-    return task.protocol === "SSH" ? ["pause", "stop"] : ["stop"];
+    return task.protocol !== "TELNET_SERIAL" ? ["pause", "stop"] : ["stop"];
   }
   if (transitionalRunningStatuses.has(status) && desiredState === "RUNNING") return ["stop"];
   if (status === "STOPPED" && desiredState === "STOPPED") return ["start"];

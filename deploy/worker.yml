@@ -14,6 +14,7 @@ services:
       NODE_ID: ${NODE_ID:?请填写稳定且唯一的节点ID}
       NODE_URL: ${NODE_URL:?请填写后端可达的节点URL}
       NODE_PORT: ${NODE_PORT:-8001}
+      HOST_PROC_ROOT: /host/proc
       LOG_ROOT: /var/lib/camera-logs/data
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
       NFS_ROOT: ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
@@ -23,6 +24,8 @@ services:
     depends_on: {storage-init: {condition: service_completed_successfully}}
     volumes:
       - ${HOST_LOG_ROOT:-worker-data}:/var/lib/camera-logs
+      # 主机指标只读，不授予容器修改主机配置的权限。
+      - /proc:/host/proc:ro
       - ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}:${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
     logging: {driver: local, options: {max-size: "10m", max-file: "3"}}

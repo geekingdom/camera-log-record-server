@@ -5,6 +5,20 @@ from pydantic import TypeAdapter
 from test_api import client  # noqa: F401
 
 
+def test_reference_blocked_restart_permission_and_pending_contract(client):
+    """恢复文档明确普通恢复与管理员隔离的边界，不能以202冒充采集成功。"""
+    reference = client.get("/api/v1/api-reference").json()
+    operation = next(item for item in reference["operations"] if item["id"] == "POST /api/v1/tasks/{task_id}/restart")
+    assert operation["title"] == "重新启动等待隔离任务"
+    assert "tasks:control" in operation["permission"] and "confirmIsolation=true" in operation["permission"]
+    assert operation["requestExample"] == {"confirmIsolation": False}
+    assert operation["responseStatus"] == 202
+    assert operation["responseExample"]["status"] == "PENDING"
+    guide = next(item["text"] for item in reference["guides"] if item["title"] == "等待隔离任务恢复")
+    for term in ("ISOLATION_REQUIRED", "COLLECTING", "evidence", "activeTaskCount", "unsettledTaskCount"):
+        assert term in guide
+
+
 def test_reference_covers_every_public_http_route_and_websocket(client):
     response = client.get("/api/v1/api-reference")
     assert response.status_code == 200

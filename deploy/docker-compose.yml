@@ -8,18 +8,67 @@ services:
     volumes:
       - ${API_DATA_ROOT:-api-data}:/api
       - ${HOST_LOG_ROOT:-worker-data}:/worker
-  mongo1:
+  key-init:
     image: mongo:7.0
-    restart: unless-stopped
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_REPLICA_KEY: ${MONGO_REPLICA_KEY:?请填写副本集成员认证密钥}
+    entrypoint: ["sh", "-ec", "umask 077; candidate=$$(mktemp); trap 'rm -f \"$$candidate\"' EXIT; printf '%s' \"$$MONGO_REPLICA_KEY\" > \"$$candidate\"; if [ -s /keys/replica.key ]; then cmp -s /keys/replica.key \"$$candidate\" || { echo '副本集成员认证密钥与已有持久化密钥不一致' >&2; exit 1; }; else mv \"$$candidate\" /keys/replica.key; fi; chown 999:999 /keys/replica.key; chmod 400 /keys/replica.key"]
+    volumes: ["mongo-key:/keys"]
     logging: &service-logging
       driver: local
       options:
         max-size: "10m"
         max-file: "3"
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    volumes: ["${MONGO_DATA_1:-mongo1-data}:/data/db"]
+    networks: [camera-logs]
+  mongo1-user-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "/scripts/mongo-host-user-init.sh"]
+    volumes: ["${MONGO_DATA_1:-mongo1-data}:/data/db", "./mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro"]
+    logging: *service-logging
+    networks: [camera-logs]
+  mongo2-user-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "/scripts/mongo-host-user-init.sh"]
+    volumes: ["${MONGO_DATA_2:-mongo2-data}:/data/db", "./mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro"]
+    logging: *service-logging
+    networks: [camera-logs]
+  mongo3-user-init:
+    image: mongo:7.0
+    user: "0:0"
+    restart: "no"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "/scripts/mongo-host-user-init.sh"]
+    volumes: ["${MONGO_DATA_3:-mongo3-data}:/data/db", "./mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro"]
+    logging: *service-logging
+    networks: [camera-logs]
+  mongo1:
+    image: mongo:7.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    logging: *service-logging
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--keyFile", "/keys/replica.key"]
+    depends_on:
+      key-init: {condition: service_completed_successfully}
+      mongo1-user-init: {condition: service_completed_successfully}
+    volumes: ["${MONGO_DATA_1:-mongo1-data}:/data/db", "mongo-key:/keys:ro"]
     healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -27,11 +76,17 @@ services:
   mongo2:
     image: mongo:7.0
     restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
     logging: *service-logging
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    volumes: ["${MONGO_DATA_2:-mongo2-data}:/data/db"]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--keyFile", "/keys/replica.key"]
+    depends_on:
+      key-init: {condition: service_completed_successfully}
+      mongo2-user-init: {condition: service_completed_successfully}
+    volumes: ["${MONGO_DATA_2:-mongo2-data}:/data/db", "mongo-key:/keys:ro"]
     healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -39,11 +94,17 @@ services:
   mongo3:
     image: mongo:7.0
     restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
     logging: *service-logging
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    volumes: ["${MONGO_DATA_3:-mongo3-data}:/data/db"]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--keyFile", "/keys/replica.key"]
+    depends_on:
+      key-init: {condition: service_completed_successfully}
+      mongo3-user-init: {condition: service_completed_successfully}
+    volumes: ["${MONGO_DATA_3:-mongo3-data}:/data/db", "mongo-key:/keys:ro"]
     healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
+      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -56,7 +117,11 @@ services:
       mongo3: { condition: service_healthy }
     volumes:
       - ./mongo-init.js:/scripts/mongo-init.js:ro
-    command: ["mongosh", "mongodb://mongo1:27017/admin", "/scripts/mongo-init.js"]
+    environment:
+      MONGO_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?请填写数据库管理员名称}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?请填写数据库管理员密码}
+    entrypoint: ["sh", "-ec", "exec mongosh --quiet --host mongo1 --port 27017 --username \"$$MONGO_ROOT_USERNAME\" --password \"$$MONGO_ROOT_PASSWORD\" --authenticationDatabase admin /scripts/mongo-init.js"]
+    command: []
     restart: "no"
     logging: *service-logging
     networks: [camera-logs]
@@ -98,6 +163,7 @@ services:
       LOG_ROOT: /var/lib/camera-logs/data
       NODE_ID: ${COLLECTOR_NODE_ID:-compose-worker-1}
       NODE_URL: ${COLLECTOR_NODE_URL:-http://worker:8001}
+      HOST_PROC_ROOT: /host/proc
       NFS_ROOT: ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
       NFS_SERVER_IP: ${NFS_SERVER_IP:-}
       KNOWN_HOSTS: /etc/camera-logs/known_hosts
@@ -107,6 +173,8 @@ services:
     # 默认单节点使用稳定身份与命名卷；多机扩容使用 worker-node.yml 独立部署。
     volumes:
       - ${HOST_LOG_ROOT:-worker-data}:/var/lib/camera-logs
+      # 只读采样宿主CPU、内存和网络；Docker Desktop中宿主指Linux虚拟机。
+      - /proc:/host/proc:ro
       - ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}:${NFS_ROOT:-/srv/camera-logs/nfs-coredump}
       - ${KNOWN_HOSTS_FILE:-./known_hosts.example}:/etc/camera-logs/known_hosts:ro
     networks: [camera-logs]
@@ -134,6 +202,7 @@ volumes:
   mongo1-data:
   mongo2-data:
   mongo3-data:
+  mongo-key:
 
 networks:
   camera-logs:

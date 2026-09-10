@@ -81,6 +81,43 @@ sudo bash ./deploy-native.sh frontend --config /etc/camera-logs/native.env
 
 跨服务器部署时，数据库、后端和所有 worker 必须使用同一个 `MONGO_URI`、`ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN` 与 `INTERNAL_TOKEN`。每个 worker 使用不同且稳定的节点 ID，并将 `NODE_URL` 写为后端可以访问的地址。前端的 `BACKEND_UPSTREAM` 指向后端实际可达地址；后端的 `FORWARDED_ALLOW_IPS` 只信任前端代理来源。组件入口只安装和重启对应的本机服务，外部依赖必须已经可达。
 
+## A 平台与 B 独立 Worker
+
+可将完整平台部署在服务器 A，并只在服务器 B 部署一个原生 Worker。B 不运行 MongoDB、API 或前端；它通过 A 的既有副本集连接平台。两台机器必须使用同一个 `DATABASE_NAME`、`MONGO_URI`、`ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN` 和 `INTERNAL_TOKEN`，每个 Worker 仍须使用不同且稳定的 `NODE_ID` 与 API 可达的 `NODE_URL`。
+
+新建平台时，先在 A 的 `native.env` 填写 A 的私网地址，例如：
+
+```ini
+MONGO_BIND_IP=127.0.0.1,10.42.0.10
+MONGO_ADVERTISED_HOST=10.42.0.10
+NODE_BIND_IP=10.42.0.10
+NODE_URL=http://10.42.0.10:8001
+MONGO_URI=mongodb://...@10.42.0.10:27017/camera_logs?replicaSet=rs0&authSource=admin
+```
+
+`127.0.0.1` 必须保留在 A 的监听地址中，供受认证的本地初始化和维护使用；`MONGO_ADVERTISED_HOST` 不能是 `127.0.0.1`，因为副本集会把它返回给 B。A 的防火墙仅向 B 的私网地址开放 `27017`，不应把认证数据库公开到互联网。
+
+已部署的单机 A 默认可能把副本集成员公布为 `127.0.0.1:27017`。即使 B 的 `MONGO_URI` 写为 A 的 IP，MongoDB 驱动仍会从副本集发现结果取得该回环地址，因而无法连接。不要新建密钥、删除数据目录或重建副本集。完成备份和维护窗口确认后，先修改 A 的受保护配置中的 `MONGO_BIND_IP`、`MONGO_ADVERTISED_HOST` 与 `MONGO_URI`，再显式执行：
+
+```sh
+sudo bash ./deploy-native.sh database --config /etc/camera-logs/native.env --reconfigure-mongo-advertised-host
+sudo bash ./deploy-native.sh backend --config /etc/camera-logs/native.env
+sudo bash ./deploy-native.sh worker --config /etc/camera-logs/native.env
+```
+
+迁移命令会先用已有管理员凭据认证，只接受受管的单成员 `rs0` 且旧公告地址为 `127.0.0.1` 或 `localhost`；它仅递增副本集配置版本并替换成员地址，绝不创建用户、替换成员密钥或删除数据。非回环旧地址、认证失败或迁移后核验不一致都会停止，需由数据库管理员按既有拓扑处理。成功后脚本才更新 A 的受管合同摘要；A 上 API 与 Worker 随后使用新 URI 重启。该命令只允许 Mongo 公告地址、监听地址及 URI 主机名变化，不能同时更新 `NODE_URL`、端口、服务令牌或其它跨组件配置。已有 A 若仍将 `NODE_URL` 写为 `127.0.0.1`，必须先按停机的跨组件配置迁移流程，将 `NODE_BIND_IP` 和 `NODE_URL` 更新为 B 可访问的 A 私网地址，再部署 B；仅完成 Mongo 公告地址迁移不能保证 B 可从 A 下载日志。
+
+在 B 创建 Worker 专用配置并填写 A 的既有共享合同。不要复制 A 的 Mongo 数据目录、`MONGO_REPLICA_KEY` 或数据库 systemd 服务：
+
+```sh
+sudo bash ./deploy-native-worker.sh --config /etc/camera-logs/worker-b.env --init
+sudo editor /etc/camera-logs/worker-b.env
+sudo chmod 0600 /etc/camera-logs/worker-b.env
+sudo bash ./deploy-native-worker.sh --config /etc/camera-logs/worker-b.env
+```
+
+B 的 `MONGO_URI` 指向 A 的公告地址；`NODE_BIND_IP` 和 `NODE_URL` 使用 B 的私网地址，例如 `10.42.0.11` 与 `http://10.42.0.11:8001`。部署器会在 B 通过该 URI 查询本节点新鲜心跳；失败时检查 A 到 B 的 `8001` 连通性、B 到 A 的 `27017` 连通性、两边防火墙及相同的共享应用密钥。B 的 `LOG_ROOT` 是 B 本地日志目录，不能假定与 A 的物理磁盘共享。
+
 ## 重跑、运维与限制
 
 重复执行相同命令用于更新程序或修复 systemd/Nginx 配置。脚本保留已有配置、管理员密码、MongoDB 数据和日志；它不自动清理历史设备日志、不缩短保留期，也不重置服务间密钥。变更数据库凭据、加密密钥或节点公开地址前，应先进行备份并按停机迁移流程验证。

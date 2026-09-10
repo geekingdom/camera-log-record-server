@@ -12,8 +12,8 @@ const activeStatus = (taskId = "owner-1"): CoredumpMonitorStatus => ({
 });
 
 describe("useCoredumpMonitorStatus", () => {
-  it("仅对打开的 SSH 海康资源读取负责人状态", async () => {
-    const open = ref(true), protocol = ref<"SSH" | "TELNET_DEVICE">("SSH");
+  it("仅对打开的 SSH 或 Telnet 设备海康资源读取负责人状态", async () => {
+    const open = ref(true), protocol = ref<"SSH" | "TELNET_DEVICE" | "TELNET_SERIAL">("SSH");
     const resourceId = ref("resource-1"), kind = ref<"HIKVISION_NETWORK" | "SERIAL_SERVER">("HIKVISION_NETWORK");
     const getStatus = vi.fn().mockResolvedValue(activeStatus());
     const subject = useCoredumpMonitorStatus({
@@ -24,7 +24,7 @@ describe("useCoredumpMonitorStatus", () => {
     await vi.waitFor(() => expect(subject.status.value).toEqual(activeStatus()));
     expect(getStatus).toHaveBeenCalledWith("resource-1");
 
-    protocol.value = "TELNET_DEVICE";
+    protocol.value = "TELNET_SERIAL";
     await nextTick();
     expect(subject.status.value).toBeNull();
     expect(getStatus).toHaveBeenCalledTimes(1);

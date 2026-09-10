@@ -36,6 +36,14 @@ const loadApiReferenceWorkspace = () => import("../features/api/ApiReferenceWork
 const sidebarCollapsed = ref(
   localStorage.getItem("camera-log-sidebar-collapsed") === "true",
 );
+const defaultWorkspace = "resources";
+function workspaceFromHash() {
+  return window.location.hash.slice(1) || defaultWorkspace;
+}
+function syncWorkspaceHash(key: string) {
+  const next = `#${key}`;
+  if (window.location.hash !== next) window.history.replaceState(null, "", next);
+}
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value;
   try {
@@ -49,7 +57,7 @@ function toggleSidebar() {
 }
 const selectedWorkspace = ref("config");
 const selectedLogTask = ref("");
-const activeTab = ref("resources"),
+const activeTab = ref(workspaceFromHash()),
   taskEditorOpen = ref(false),
   templateEditorOpen = ref(false);
 const {
@@ -137,8 +145,11 @@ const activeNavigationLabel = computed(() =>
   visibleNavigation.value.find((item) => item.key === activeTab.value)?.label,
 );
 watch(visibleNavigation, (items) => {
+  if (!user.value) return;
   if (!items.some((item) => item.key === activeTab.value))
-    activeTab.value = items[0]?.key ?? "empty";
+    activeTab.value = items.some((item) => item.key === defaultWorkspace)
+      ? defaultWorkspace
+      : items[0]?.key ?? "empty";
 });
 const selectedTask = ref<Task>(),
   selectedTemplate = ref<Template>();
@@ -227,18 +238,29 @@ function applyTemplateFilters(filters: {
   templatePage.value = 1;
   void loadTemplates().catch(error);
 }
-watch(activeTab, () => {
+watch(activeTab, (key) => {
+  syncWorkspaceHash(key);
   page.value = 1;
   void refresh();
 });
 watch([page, pageSize], () => void refresh());
 let timer: ReturnType<typeof setInterval>;
+function restoreWorkspaceFromHash() {
+  const key = workspaceFromHash();
+  if (visibleNavigation.value.some((item) => item.key === key)) activeTab.value = key;
+  else activeTab.value = visibleNavigation.value.some((item) => item.key === defaultWorkspace)
+    ? defaultWorkspace
+    : visibleNavigation.value[0]?.key ?? "empty";
+}
 onMounted(() => {
+  syncWorkspaceHash(activeTab.value);
   startSession();
+  window.addEventListener("hashchange", restoreWorkspaceFromHash);
   timer = setInterval(() => void refresh(true), 5000);
 });
 onBeforeUnmount(() => {
   clearInterval(timer);
+  window.removeEventListener("hashchange", restoreWorkspaceFromHash);
   stopSession();
 });
 </script>

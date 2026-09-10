@@ -15,7 +15,7 @@ pytest_plugins = ("test_resources",)
         ({}, {"resourceId": "other-resource"}, {}),
         ({}, {"runId": "other-run"}, {}),
         ({}, {"generation": 9}, {}),
-        ({}, {"protocol": "TELNET_DEVICE"}, {}),
+        ({}, {"protocol": "TELNET_SERIAL"}, {}),
         ({}, {"enableCoredumpMonitor": False}, {}),
         ({}, {"desiredState": "STOPPED"}, {}),
         ({}, {}, {"heartbeat": now() - timedelta(seconds=16)}),
@@ -46,3 +46,28 @@ def test_coredump_monitor_status_rejects_each_stale_owner_component(
 
     assert response.status_code == 200
     assert response.json() == {"active": False, "ownerTask": None, "mountStatus": None}
+
+
+def test_coredump_monitor_status_accepts_telnet_device_owner(resource_client):
+    """Telnet 设备任务使用同一资源租约，并作为有效的 Coredump owner 展示。"""
+    repo = resource_client.app.state.repo
+    stamp = now()
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None, "healthStatus": "ONLINE",
+        "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a", "coredumpLeaseGeneration": 4,
+        "coredumpLeaseNodeId": "node-a", "coredumpLeaseUntil": stamp + timedelta(seconds=60),
+    })
+    resource_client.portal.call(repo.db.tasks.insert_one, {
+        "id": "owner", "name": "Telnet 值守", "resourceId": "camera", "runId": "run-a", "generation": 4,
+        "nodeId": "node-a", "protocol": "TELNET_DEVICE", "enableCoredumpMonitor": True,
+        "desiredState": "RUNNING", "status": "COLLECTING", "coredumpMountStatus": "MOUNTED",
+        "coredumpMountRunId": "run-a",
+    })
+    resource_client.portal.call(repo.db.nodes.insert_one, {"id": "node-a", "heartbeat": stamp})
+
+    response = resource_client.get("/api/v1/resources/camera/coredump-monitor")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "active": True, "ownerTask": {"id": "owner", "name": "Telnet 值守"}, "mountStatus": "MOUNTED",
+    }

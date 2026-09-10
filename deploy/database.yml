@@ -7,7 +7,7 @@ services:
     restart: "no"
     environment:
       MONGO_REPLICA_KEY: ${MONGO_REPLICA_KEY:?请先生成数据库部署配置}
-    entrypoint: ["sh", "-ec", "umask 077; if [ ! -s /keys/replica.key ]; then printf '%s' \"$$MONGO_REPLICA_KEY\" > /keys/replica.key; fi; chown 999:999 /keys/replica.key; chmod 400 /keys/replica.key"]
+    entrypoint: ["sh", "-ec", "umask 077; candidate=$$(mktemp); trap 'rm -f \"$$candidate\"' EXIT; printf '%s' \"$$MONGO_REPLICA_KEY\" > \"$$candidate\"; if [ -s /keys/replica.key ]; then cmp -s /keys/replica.key \"$$candidate\" || { echo '副本集成员认证密钥与已有持久化密钥不一致' >&2; exit 1; }; else mv \"$$candidate\" /keys/replica.key; fi; chown 999:999 /keys/replica.key; chmod 400 /keys/replica.key"]
     volumes: ["mongo-key:/keys"]
   # 官方镜像的空卷初始化固定在容器 localhost:27017；这些作业保持 bridge 网络，互不占用宿主机端口。
   mongo1-user-init:

@@ -54,7 +54,9 @@ await context.route("**/api/v1/**", async route => {
   if (method === "POST" && /^\/api\/v1\/tasks\/[^/]+\/(start|stop|pause|resume)$/.test(path)) return json(route, {});
   if (method === "PATCH" && path.startsWith("/api/v1/tasks/")) return json(route, { ...tasks.find(task => path.endsWith(task.id)), ...payload });
   if (method === "GET" && path === "/api/v1/resources") return json(route, page([{ id: "network-resource", name: "模拟网络设备", kind: "HIKVISION_NETWORK", ip: "192.0.2.10", model: "DS-2CD", subSerialNumber: "SN-fixture", version: 1 }]));
+  if (method === "GET" && path === "/api/v1/resources/network-resource/coredump-monitor") return json(route, { active: false, ownerTask: null, mountStatus: null });
   if (method === "GET" && path === "/api/v1/command-templates") return json(route, page(state.templates));
+  if (method === "GET" && path === "/api/v1/users/share-targets") return json(route, page([]));
   if (method === "GET" && path.startsWith("/api/v1/command-templates/")) return json(route, state.templates[0]);
   if (method === "PATCH" && path.startsWith("/api/v1/command-templates/")) return json(route, { ...state.templates[0], ...payload });
   if (method === "GET" && path === "/api/v1/nodes") return json(route, page([]));

@@ -69,15 +69,19 @@ class Collector:
         )
         self.write_latency = WriteLatency()
         self._queue: asyncio.PriorityQueue[
-            tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, asyncio.Future[None]]
+            tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, bool, asyncio.Future[None]]
         ] = (
             asyncio.PriorityQueue()
         )
         self._sender: asyncio.Task[None] | None = None
         self._reader: asyncio.Task[None] | None = None
         self._scheduled: list[asyncio.Task[None]] = []
+        self._coredump_monitor: asyncio.Task[None] | None = None
+        self._coredump_cleanup: Any | None = None
+        self._coredump_report: Callback | None = None
         self._closed = asyncio.Event()
         self._accepting_commands = True
+        self._stopping_commands = False
         self._command_blocked = False
         self._initializing = True
         self._counter = 0
@@ -136,12 +140,14 @@ class Collector:
         if delay > 0:
             await asyncio.sleep(delay)
 
-    def start_coredump_monitor(self, server: str, root: str, report: Callback, guard: Callback | None = None) -> None:
+    def start_coredump_monitor(
+        self, server: str, root: str, report: Callback, guard: Callback | None = None,
+        cleanup_guard: Callback | None = None,
+    ) -> None:
         """挂载监控与定时协程共用会话取消/回收机制，不引入额外连接。"""
-        from .coredump_monitor import run_monitor
-        if self._initializing or self._closed.is_set() or not self._accepting_commands:
-            return
-        self._scheduled.append(asyncio.create_task(run_monitor(self, server, root, report, guard=guard)))
+        from .coredump_monitor import start_monitor
+
+        start_monitor(self, server, root, report, guard=guard, cleanup_guard=cleanup_guard)
 
     async def enqueue_manual(
         self,
@@ -154,7 +160,10 @@ class Collector:
         session_guard: Callback | None = None,
     ) -> str:
         """将人工命令加入唯一发送队列；提示符和发送后延时都在本会话内串行完成。"""
-        if not command or not command.strip() or self._initializing or not self._accepting_commands or self._connection is None:
+        if (
+            not command or not command.strip() or self._initializing or not self._accepting_commands
+            or self._stopping_commands or self._connection is None
+        ):
             raise RuntimeError("collector is not accepting manual commands")
         # 普通命令也进入唯一发送队列，由 sender 在需要时重新确认 shell；
         # 首次 debug 恢复失败不能在入队处永久锁住后续命令。
@@ -191,11 +200,16 @@ class Collector:
         timeout_seconds: float = 30,
         before_send: Callback | None = None,
         session_guard: Callback | None = None,
+        allow_during_shutdown: bool = False,
     ) -> None:
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._counter += 1
+        if not allow_during_shutdown and (
+            not self._accepting_commands or self._stopping_commands or self._connection_closed
+        ):
+            raise ConnectionError("connection closed")
         await self._queue.put((priority, self._counter, command, newline, prompt, timeout_seconds,
-                               before_send, session_guard, future))
+                               before_send, session_guard, allow_during_shutdown, future))
         try:
             await future
         except Exception:
@@ -208,17 +222,21 @@ class Collector:
 
     async def _sender_loop(self) -> None:
         while True:
-            _, _, command, newline, prompt, timeout_seconds, before_send, session_guard, future = await self._queue.get()
+            _, _, command, newline, prompt, timeout_seconds, before_send, session_guard, allow_during_shutdown, future = await self._queue.get()
             self._sending_future = future
             try:
                 if future.cancelled():
                     continue
-                if self._connection is None or self._connection_closed or not self._accepting_commands:
+                if self._connection is None or self._connection_closed or (
+                    (not self._accepting_commands or self._stopping_commands) and not allow_during_shutdown
+                ):
                     raise ConnectionError("connection closed")
                 # 手动命令在排队期间可能已失属。先于 PSH 恢复探测复核，避免旧会话
                 # 写入 Ctrl-C、ls 或口令；定时预算回调不在此处执行，防止重复扣减。
                 if session_guard:
                     await _call(session_guard)
+                if self._stopping_commands and not allow_during_shutdown:
+                    raise ConnectionError("connection is stopping")
                 if self._command_blocked:
                     # 每个后续命令都可重新确认通道，不重试前次 debug 或口令。
                     # 未回到 shell 时本次仍未进入发送阶段，定时预算必须保留。
@@ -228,9 +246,13 @@ class Collector:
                 # 恢复过程和前一条命令都可能耗时，业务命令写 socket 前再次核对归属。
                 if session_guard:
                     await _call(session_guard)
+                if self._stopping_commands and not allow_during_shutdown:
+                    raise ConnectionError("connection is stopping")
                 # 预算在真正写 socket 前才占用，恢复未确认的命令不能虚耗执行次数。
                 if before_send and not await _call(before_send):
                     raise BudgetExhausted("scheduled command budget is exhausted")
+                if self._stopping_commands and not allow_during_shutdown:
+                    raise ConnectionError("connection is stopping")
                 if command.strip() == "debug":
                     # 整个解密握手占用同一发送槽，后续命令不能穿插为设备口令输入。
                     await self._debug.ensure_ash(self._write_debug, newline, timeout_seconds)
@@ -266,7 +288,7 @@ class Collector:
         for index, piece in enumerate(pieces):
             if index and interval:
                 await asyncio.sleep(interval)
-            if not self._accepting_commands or self._connection_closed or self._connection is None:
+            if self._stopping_commands or not self._accepting_commands or self._connection_closed or self._connection is None:
                 raise PshSwitchError("PSH 切换会话已经关闭")
             await self._connection.write(piece)
 
@@ -394,6 +416,7 @@ class Collector:
         finally:
             cleanup_error: Exception | None = None
             try:
+                await self.stop_coredump_monitor(connection_usable=False)
                 await self._close_connection()
                 if pending:
                     to_flush, pending = pending, []
@@ -465,21 +488,24 @@ class Collector:
             )
 
     async def stop(self) -> None:
-        self._accepting_commands = False
+        self._stopping_commands = True
         for task in self._scheduled:
             task.cancel()
-        await self._close_connection()
-        if self._reader:
-            # 先断开网络使 read 返回，再等待收尾落盘；禁止取消最终 flush/归档路径。
-            await self._reader
-        if self._sender:
-            self._fail_queued(ConnectionError("collector stopped before command dispatch"))
-            self._sender.cancel()
-            try:
-                await self._sender
-            except asyncio.CancelledError:
-                pass
-        self._closed.set()
+        try:
+            await self.stop_coredump_monitor()
+        finally:
+            await self._close_connection()
+            if self._reader:
+                # 先断开网络使 read 返回，再等待收尾落盘；禁止取消最终 flush/归档路径。
+                await self._reader
+            if self._sender:
+                self._fail_queued(ConnectionError("collector stopped before command dispatch"))
+                self._sender.cancel()
+                try:
+                    await self._sender
+                except asyncio.CancelledError:
+                    pass
+            self._closed.set()
         if self._terminal_error:
             raise self._terminal_error
 
@@ -504,6 +530,12 @@ class Collector:
             self._debug.close()
             await self._connection.close()
             self._connection_closed = True
+
+    async def stop_coredump_monitor(self, *, connection_usable: bool = True) -> None:
+        """先停止重挂载轮询，再用同一发送队列尽力卸载本会话的 NFS 目标。"""
+        from .coredump_cleanup import stop_monitor
+
+        await stop_monitor(self, connection_usable=connection_usable)
 
     async def wait_closed(self) -> None:
         await self._closed.wait()

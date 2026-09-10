@@ -111,8 +111,9 @@ async def test_collector_monitor_uses_existing_sender_lifecycle(tmp_path, monkey
     """监控作为采集器受管任务启动，停止采集器会取消它，不会建立第二条设备连接。"""
     started = asyncio.Event()
 
-    async def fake_monitor(collector, _server, _root, _report, *, guard=None):
+    async def fake_monitor(collector, _server, _root, _report, *, guard=None, cleanup=None):
         assert collector._connection is connection and guard is not None
+        assert cleanup is not None
         started.set()
         await asyncio.Future()
 
@@ -124,6 +125,7 @@ async def test_collector_monitor_uses_existing_sender_lifecycle(tmp_path, monkey
     monkeypatch.setattr("camera_logs.collection.coredump_monitor.run_monitor", fake_monitor)
     collector.start_coredump_monitor("10.0.0.1", "/srv/core", lambda *_: None, guard=lambda: True)
     await started.wait()
-    task = collector._scheduled.pop()
+    task = collector._coredump_monitor
+    assert task is not None
     task.cancel()
     assert (await asyncio.gather(task, return_exceptions=True))[0] is not None

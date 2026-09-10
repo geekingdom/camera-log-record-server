@@ -1,0 +1,23 @@
+// API 边界必须保留服务端的隔离错误码，并按专用路径提交管理员确认。
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { api } from "./api";
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("阻塞任务重新启动 API", () => {
+  it("提交隔离确认并保留服务端 detail 中的错误码", async () => {
+    vi.stubGlobal("crypto", { randomUUID: () => "request-key" });
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: { code: "ISOLATION_REQUIRED", message: "需隔离" } }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "operation-1" })));
+    vi.stubGlobal("fetch", fetch);
+
+    await expect(api.restartBlocked("task-1")).rejects.toMatchObject({ status: 409, code: "ISOLATION_REQUIRED" });
+    await api.restartBlocked("task-1", { confirmIsolation: true, evidence: "旧实例已由值班人员隔离" });
+
+    expect(fetch.mock.calls[1][0]).toBe("/api/v1/tasks/task-1/restart");
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ confirmIsolation: true, evidence: "旧实例已由值班人员隔离" });
+  });
+});

@@ -3,14 +3,20 @@
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
+    {"title": "设备认证历史", "text": "GET /api/v1/resources/{identifier}/authentication-records需要tasks:read，所有可读用户均可查询海康资源的认证结果，软删资源历史保留。支持result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR、同时提供带时区的start/end（开始包含、结束不包含）、identityChanged=true|false，多个条件取交集，并使用page/pageSize分页。记录包含认证时间、source、结果、型号与序列号前后值；initialAuthentication=true为初始基线，不算设备身份变更。认证失败保留原身份，旧系统未保存的逐次认证历史无法补造。不会返回密码或原始设备XML。"},
+    {"title": "Coredump扫描周期", "text": "Worker默认每5秒扫描目录，上一轮扫描未完成时不重叠执行。显式配置COREDUMP_SCAN_INTERVAL_SECONDS可覆盖默认值；源文件稳定判断仍使用10秒观测窗口，目录扫描频率不等同于传输完成通知。Docker和原生部署使用同一默认值，需更新Worker进程后生效。"},
+    {"title": "等待隔离任务恢复", "text": "BLOCKED任务使用POST /api/v1/tasks/{task_id}/restart，正文{\"confirmIsolation\":false}，需要tasks:control且为创建者或管理员。旧Worker先关闭原连接并同步日志，关闭收据核实后释放旧运行，再建立新运行；操作保持PENDING直到COLLECTING。旧节点不可达返回409及ISOLATION_REQUIRED；节点在线但找不到可证明关闭的原实例时，已受理操作的phase为ISOLATION_REQUIRED。仅管理员可在实际隔离该任务旧实例后提交confirmIsolation=true及非空evidence，确认只影响目标任务，不代表整个节点已隔离。不得仅凭心跳或设备重新在线跳过隔离。stop可以取消恢复意图，旧运行关闭或隔离尚未证明时仍保留待收尾状态。资源activeTaskCount只统计COLLECTING且期望RUNNING的任务；unsettledTaskCount用于删除前的待收尾提示，不能当作采集中数量。"},
+    {"title": "NFS暂停与停止卸载", "text": "负责Coredump NFS监控的SSH或Telnet设备任务暂停或停止时，通过原采集连接使用umount -l卸载该任务配置的设备NFS源路径，然后释放连接；恢复或重新启动后重新挂载。其他共享显示已开启的任务不负责卸载。仅当前有效资源租约的原会话可执行清理，失属时跳过，离线或卸载超时不会阻止任务停止。任务coredumpMountStatus为UNMOUNTED表示已确认从挂载表分离，底层引用由设备内核延后释放，不表示传输文件已完整落盘；UNMOUNT_FAILED表示失败或超时，UNMOUNT_SKIPPED表示未执行且结果未确认；管理员可在运行事件页追溯。操作返回202只是已受理，最终PAUSED/STOPPED也不等于设备NFS已卸载，需另查挂载状态。不会删除已接收core或关闭服务器NFS服务。"},
     {"title": "Coredump默认访问权限", "text": "有效第三方服务账号默认允许Coredump查询、导出和下载，无需额外勾选权限，也无需重新创建已有令牌。账号实时继承绑定用户的logs:read和logs:download基础权限；可查询所有可读设备资源的Coredump文件并为其创建自己的导出，单文件或批量下载均支持。导出作业本身仍仅创建者或管理员可查询、下载、取消；其他用户可针对同一源文件创建自己的导出。平台登录用户的设备资源页同样可进入Coredump查询下载。绑定用户禁用、删除、令牌撤销或到期后不再允许访问，来源IP策略仍会收窄本次有效权限。"},
     {"title": "Coredump副本到期", "text": "固定副本到期后进入RETIRING（等待读取结束），已有下载或导出继续使用其固定版本，新请求可能返回409。全部读者退出后进入DELETING（清理副本），完成后回到RECEIVING。该清理不删除设备写入的NFS源文件；源文件仍存在时可重新创建导出。大文件下载应流式写盘，续传时携带上次ETag作为If-Range，不能把不同固定版本的响应直接拼接。"},
-    {"title": "设备重启与暂停恢复", "text": "SSH暂停释放连接并保留运行预算。设备重启期间，周期认证可以显示离线，但不会把用户暂停改成停止。显式resume返回202和操作ID，任务进入WAITING_DEVICE并等待新认证；即使缓存显示ONLINE也会重新探测。等待时可暂停或停止取消；同一设备恢复沿用预算，身份变更后建立新运行。操作到COLLECTING才完成。因认证失败被系统停止的其他任务，需用户编辑并成功认证后才恢复，手动停止任务不自动启动。"},
-    {"title": "Coredump接收与下载", "text": "海康网络资源的SSH任务可设置enableCoredumpMonitor=true；节点部署需配置NFS_ROOT和NFS_SERVER_IP，NFS允许所有网络可达来源，不使用平台IP白名单筛选设备。GET /api/v1/resources/{resource_id}/coredump-monitor只在租约、任务采集状态和节点心跳均有效时返回共享监控owner；新任务不得据此保存自己的开关。GET /api/v1/resources/{resource_id}/coredumps按name字面文件名及receivedFrom/receivedTo接收时间查询，并隐藏历史coredump_flag.cdf标志文件。receivedAt和firstSeenAt是服务器首次扫描观测时间，不表示设备已完成写入；sourceModifiedAt来自设备文件系统mtime，可能受设备时间影响。sourceState、sourceObservedAt、sourceUnchangedSince和sourceStableAt说明扫描器对源文件的连续观测，稳定只代表观测窗口内的源元数据未变。RECEIVING代表已观测文件，FROZEN代表服务器固定副本，并非设备完成崩溃文件的证明。POST /api/v1/coredump-exports提交fileIds并携带Idempotency-Key，轮询返回ID的状态；单文件导出原文件，多文件ZIP STORE。成功后GET /api/v1/coredump-exports/{identifier}/content支持Range和If-Range，适合流式或断点下载；不得把大文件整体装入客户端内存。"},
+    {"title": "设备重启与暂停恢复", "text": "SSH和Telnet设备暂停释放连接并保留运行预算，Telnet串口不支持暂停或恢复。设备重启期间，周期认证可以显示离线，但不会把用户暂停改成停止。显式resume返回202和操作ID，任务进入WAITING_DEVICE并等待新认证；即使缓存显示ONLINE也会重新探测。等待时可暂停或停止取消；同一设备恢复沿用预算，身份变更后建立新运行。操作到COLLECTING才完成。因认证失败被系统停止的其他任务，需用户编辑并成功认证后才恢复，手动停止任务不自动启动。"},
+    {"title": "Coredump接收与下载", "text": "海康网络资源的SSH和TELNET_DEVICE任务可设置enableCoredumpMonitor=true；节点部署需配置NFS_ROOT和NFS_SERVER_IP，NFS允许所有网络可达来源，不使用平台IP白名单筛选设备。GET /api/v1/resources/{resource_id}/coredump-monitor只在租约、任务采集状态和节点心跳均有效时返回共享监控owner；新任务不得据此保存自己的开关。GET /api/v1/resources/{resource_id}/coredumps按name字面文件名及receivedFrom/receivedTo接收时间查询，并隐藏历史coredump_flag.cdf标志文件。receivedAt和firstSeenAt是服务器首次扫描观测时间，不表示设备已完成写入；sourceModifiedAt来自设备文件系统mtime，可能受设备时间影响。sourceState、sourceObservedAt、sourceUnchangedSince和sourceStableAt说明扫描器对源文件的连续观测，稳定只代表观测窗口内的源元数据未变。RECEIVING代表已观测文件，FROZEN代表服务器固定副本，并非设备完成崩溃文件的证明。POST /api/v1/coredump-exports提交fileIds并携带Idempotency-Key，轮询返回ID的状态；单文件导出原文件，多文件ZIP STORE。成功后GET /api/v1/coredump-exports/{identifier}/content支持Range和If-Range，适合流式或断点下载；不得把大文件整体装入客户端内存。"},
     {"title": "查看服务账号口令", "text": "管理员可查看全部服务账号，普通用户只可查看绑定给本人的账号。GET /api/v1/service-tokens和POST /api/v1/service-tokens/{id}/reveal要求service-tokens:read；列表不含口令，reveal返回token并记录无敏感内容的审计。新口令加密保存可重复查看，旧版仅保存摘要的口令无法还原。管理员可用POST /api/v1/service-tokens/{id}/rotate携带version重新生成，旧口令立即失效；普通用户不能新增、编辑、撤销或重新生成。永久有效不绕过用户禁用、删除和来源IP限制。"},
     {"title": "第三方鉴权", "text": "管理员通过服务令牌接口创建可撤销Token。普通HTTP请求携带Authorization: Bearer <SERVICE_TOKEN>。Token范围与平台来源IP权限取交集；IP白名单只约束调用方，不约束设备IP。接口目录不授予接口执行权限。"},
     {"title": "资源发现与任务关联", "text": "GET /api/v1/resources 的search匹配资源名、IP、型号、序列号和软件版本。name、model、subSerialNumber、softwareVersion是字面子串；ip精确匹配；同时传入的条件取交集。每项包含tasks摘要，默认100条、taskLimit最大500；tasksTruncated=true时通过tasksUrl继续分页。拥有tasks:read的有效用户可读取全部资源和任务，不再按资源或任务ID白名单收窄可见范围。"},
-    {"title": "按任务ID控制", "text": "POST /api/v1/tasks/{task_id}/start、stop、pause、resume返回202及operation id；轮询GET /api/v1/operations/{identifier}确认完成。pause/resume仅SSH，暂停释放连接并保留运行预算；停止后启动建立新运行。202不代表设备已经连接。"},
+    {"title": "按任务ID控制", "text": "POST /api/v1/tasks/{task_id}/start、stop、pause、resume返回202及operation id；轮询GET /api/v1/operations/{identifier}确认完成。pause/resume支持SSH和Telnet设备，Telnet串口不支持；暂停释放连接并保留运行预算，恢复重新初始化；停止后启动建立新运行。202不代表设备已经连接。"},
+    {"title": "定时命令逐项记录", "text": "GET /api/v1/tasks/{task_id}/command-executions按page/pageSize分页，commandId按单项定时配置筛选，kind可为MANUAL或SCHEDULED。记录保存command正文、totalExecutions、intervalSeconds及attempt快照；scheduledCommands返回当前runId内每项独立attempts预算，同正文不同ID不合并。commandSource=SNAPSHOT表示历史快照，CURRENT_CONFIGURATION表示依相同配置ID恢复旧记录正文，UNAVAILABLE表示无法还原。任务编辑会重建定时配置ID，不以新正文覆盖旧执行；发送次数不代表设备业务成功次数。"},
+    {"title": "NFS支持协议", "text": "海康网络资源的SSH和TELNET_DEVICE任务均可设置enableCoredumpMonitor=true，TELNET_SERIAL不支持。两种协议共用同一资源唯一负责人租约，复用采集连接与发送队列完成ASH确认、gdbcfg挂载、每分钟检查与卸载；挂载失败不阻断日志采集。"},
     {"title": "幂等、版本与错误", "text": "创建资源、任务、模板、下载、检索和发送命令必须传Idempotency-Key，长度1至128。同键同请求重放，不同请求冲突409。编辑及节点删除需当前version。错误统一包含error.code/message/requestId；422还包含details。401为认证失效，403为权限不足，503为暂不可确认。"},
     {"title": "按时间查询日志", "text": "POST /api/v1/log-searches提交taskId、start、end，可省略keyword。时间为带时区ISO8601，最多24小时，省略时默认最近一小时。空keyword按采集块接收时间的[start,end)返回字节片段，每片不超过4096字节，data为Base64，按fileId与offset无损拼接；text仅供预览。无完整时间索引则失败，不能猜测日志时间。非空keyword为字面检索。"},
     {"title": "查询结果与完整日志", "text": "检索返回作业id；查询作业状态后，通过/log-searches/{id}/results分页获取结果，最多1000项，truncated=true表示需缩短区间或读取原文件。按文件的/content?offset=0&limit=65536可续读，limit最大262144。搜索结果上限不影响原始日志保存。"},
@@ -23,7 +29,9 @@ GUIDES = [
 ]
 
 TITLES = {"get": "查询", "post": "创建", "patch": "编辑", "delete": "删除"}
-SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停SSH任务", "resume": "恢复SSH任务",
+SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网络设备任务", "resume": "恢复网络设备任务",
+           "authentication-records": "查询设备认证记录",
+           "restart": "重新启动等待隔离任务",
            "creators": "查询历史创建用户",
            "reveal": "查看服务账号口令", "rotate": "重新生成服务账号口令",
            "authenticate": "认证设备资源", "login": "账号登录", "logout": "退出登录", "password": "修改本人密码",
@@ -85,6 +93,8 @@ def permission(path, method):
         return "logs:read"
     if path.endswith("/commands") and method == "POST":
         return "commands:send + 仅任务创建者或admin"
+    if path.endswith("/restart"):
+        return "tasks:control + 仅任务创建者或admin；confirmIsolation=true仅admin"
     if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume")):
         return "tasks:control + 仅任务创建者或admin"
     if path.endswith("/tasks") and method == "POST":

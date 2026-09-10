@@ -7,6 +7,7 @@ import runpy
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,49 @@ def test_compose_declares_restart_log_rotation_and_frontend_healthcheck():
     assert "frontend:" in compose and "wget -q -O /dev/null http://127.0.0.1/" in compose
 
 
+def test_single_host_compose_uses_empty_volume_initializers_and_authenticated_clients():
+    """完整单机部署默认认证，并在空卷阶段创建各成员的 root 用户。"""
+    compose = (root / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    database = (root / "deploy" / "database.yml").read_text(encoding="utf-8")
+    assert "key-init:" in compose and "mongo-key:" in compose
+    for source in (compose, database):
+        assert "cmp -s /keys/replica.key" in source
+        assert "副本集成员认证密钥与已有持久化密钥不一致" in source
+    for index in (1, 2, 3):
+        assert f"mongo{index}-user-init:" in compose
+        assert f"mongo{index}-user-init: {{condition: service_completed_successfully}}" in compose
+        assert "MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:?" in compose
+        assert "--keyFile" in compose
+    assert "--authenticationDatabase admin" in compose
+    assert "mongo-host-user-init.sh:/scripts/mongo-host-user-init.sh:ro" in compose
+
+
+def test_compose_command_uses_single_authenticated_deployment_file():
+    """完整单机 Compose、健康检查和清理使用同一份默认认证配置。"""
+    base = root / "deploy" / "docker-compose.yml"
+    command = health["_compose"]("camera-log-test", base, root / ".env", "config")
+    assert command.count("--file") == 1
+    assert command[command.index("--file") + 1] == str(base)
+
+
+def test_worker_heartbeat_uses_the_worker_configured_database_uri(monkeypatch, tmp_path):
+    """完整部署心跳必须查询 Worker 实际使用的数据库，而不是假定内置 mongo1。"""
+    calls = []
+
+    def fake_run(command, _deadline):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setitem(health["_worker_heartbeat"].__globals__, "_run", fake_run)
+    assert health["_worker_heartbeat"](
+        "camera-log-test", tmp_path / "compose.yml", tmp_path / ".env", "worker-1", time.monotonic() + 1,
+    )
+    command = calls[0]
+    assert command[-4:-1] == ["worker", "python", "-c"]
+    assert "settings.mongo_uri" in command[-1]
+    assert "MONGO_ROOT_PASSWORD=" not in " ".join(command)
+
+
 def test_health_check_waits_for_services_and_worker_heartbeat(monkeypatch, tmp_path):
     """健康检查必须同时观察副本集、API、前端、worker 运行态及 MongoDB 心跳。"""
     calls = []
@@ -94,8 +138,8 @@ def test_health_check_waits_for_services_and_worker_heartbeat(monkeypatch, tmp_p
     env_file.write_text("DATABASE_NAME=misleading\nCOLLECTOR_NODE_ID=misleading\n", encoding="utf-8")
     url = health["wait_for_health"]("camera-log-test", tmp_path / "compose.yml", env_file, 1)
     assert url == "http://127.0.0.1:15173"
-    heartbeat = next(command for command in calls if "mongosh" in command)
-    assert "quoted-db" in heartbeat[-1] and "config-worker" in heartbeat[-1]
+    heartbeat = next(command for command in calls if command[-4:-1] == ["worker", "python", "-c"])
+    assert "config-worker" in heartbeat[-1] and "settings.mongo_uri" in heartbeat[-1]
     assert any(command[-1] == "frontend" for command in calls)
     compose_calls = [command for command in calls if command[:2] == ["docker", "compose"]]
     assert compose_calls and all("--env-file" in command for command in compose_calls)
@@ -142,7 +186,10 @@ def _deployment_copy(tmp_path):
     (app / "deploy").mkdir()
     for name in ("deploy.sh",):
         shutil.copy2(root / name, app / name)
-    for name in ("configure_nfs_export.py", "deploy_env.py", "deploy_docker.sh", "deploy_health.py"):
+    for name in (
+        "configure_nfs_export.py", "deploy_env.py", "deploy_docker.sh", "deploy_health.py",
+        "deploy_cluster.py", "deploy_component.py",
+    ):
         shutil.copy2(root / "scripts" / name, app / "scripts" / name)
     (app / "deploy" / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     return app

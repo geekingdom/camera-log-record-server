@@ -239,18 +239,35 @@ def test_network_authentication_previews_write_sanitized_audit_events(resource_c
         "model": "DS-2CD", "subSerialNumber": "AUDIT-SN", "version": 1,
     })
     assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 200
+    manual = resource_client.portal.call(repo.db.authentication_records.find_one, {"resourceId": "audit-resource", "source": "MANUAL"})
+    assert manual["result"] == "SUCCESS" and manual["identityChanged"] is False
 
     async def denied(**kwargs):
         raise PermissionError("设备凭据错误")
 
     monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", denied)
     assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 401
+    failed = resource_client.portal.call(repo.db.authentication_records.find_one, {"resourceId": "audit-resource", "result": "AUTH_FAILED"})
+    assert failed["modelBefore"] == failed["modelAfter"] == "DS-2CD"
 
     async def unavailable(**kwargs):
         raise RuntimeError("设备异常")
 
     monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", unavailable)
     assert resource_client.post("/api/v1/resources/authenticate", json=body).status_code == 502
+
+    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 502
+    assert resource_client.portal.call(repo.db.authentication_records.find_one,
+                                       {"resourceId": "audit-resource", "source": "MANUAL", "result": "ERROR"})
+
+    async def offline(**kwargs):
+        from camera_logs.resources.authentication import DeviceOfflineError
+        raise DeviceOfflineError("device offline")
+
+    monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", offline)
+    assert resource_client.post("/api/v1/resources/audit-resource/authenticate", json=body).status_code == 503
+    assert resource_client.portal.call(repo.db.authentication_records.find_one,
+                                       {"resourceId": "audit-resource", "source": "MANUAL", "result": "OFFLINE"})
 
     resource_client.portal.call(repo.db.resources.insert_one, {
         "id": "audit-serial", "name": "串口服务器", "kind": "SERIAL_SERVER", "ip": "192.0.2.67", "version": 1,
@@ -272,9 +289,11 @@ def test_network_authentication_previews_write_sanitized_audit_events(resource_c
     assert [(item["actor"], item["action"], item["targetId"]) for item in events] == [
         ("bootstrap", "authenticate_resource_succeeded", "ip:192.0.2.66"),
         ("bootstrap", "authenticate_resource_succeeded", "audit-resource"),
-        ("bootstrap", "authenticate_resource_credentials_rejected", "audit-resource"),
-        ("bootstrap", "authenticate_resource_device_error", "ip:192.0.2.66"),
-        ("bootstrap", "authenticate_resource_succeeded", "audit-resource"),
+            ("bootstrap", "authenticate_resource_credentials_rejected", "audit-resource"),
+            ("bootstrap", "authenticate_resource_device_error", "ip:192.0.2.66"),
+            ("bootstrap", "authenticate_resource_device_error", "audit-resource"),
+            ("bootstrap", "authenticate_resource_device_error", "audit-resource"),
+            ("bootstrap", "authenticate_resource_succeeded", "audit-resource"),
     ]
     assert "audit-secret" not in str(events)
     assert "audit-admin" not in str(events)
@@ -355,6 +374,50 @@ def test_network_resource_patch_reauthenticates_and_allows_identity_change(resou
     assert calls[-1]["password"] == "old"
     assert resource_client.patch(f"/api/v1/resources/{created['id']}", json=patched_body | {"version": 1}).status_code == 409
     assert resource_client.patch(f"/api/v1/resources/{created['id']}", json=patched_body | {"version": 2, "ip": "192.0.2.31"}).status_code == 422
+
+
+def test_resource_task_summary_distinguishes_collecting_from_unsettled_tasks(resource_client):
+    """资源列表只将实际采集计为采集中，删除确认仍保留未收束任务风险。"""
+    repo = resource_client.app.state.repo
+    states = [
+        ("COLLECTING", "RUNNING", 1, 1),
+        ("BLOCKED", "RUNNING", 0, 1),
+        ("BLOCKED", "STOPPED", 0, 1),
+        ("STOPPED", "STOPPED", 0, 0),
+        ("PAUSED", "PAUSED", 0, 1),
+    ]
+    for index, (status, desired_state, active, unsettled) in enumerate(states, start=39):
+        resource = resource_client.post(
+            "/api/v1/resources", headers={"Idempotency-Key": f"task-summary-{index}"},
+            json={"name": f"摘要串口{index}", "kind": "SERIAL_SERVER", "ip": f"192.0.2.{index}"},
+        ).json()
+        resource_client.portal.call(repo.db.tasks.insert_one, {
+            "id": f"summary-{index}", "resourceId": resource["id"], "status": status,
+            "desiredState": desired_state,
+        })
+
+        summary = resource_client.get(f"/api/v1/resources/{resource['id']}")
+
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["taskCount"] == 1
+        assert summary.json()["activeTaskCount"] == active
+        assert summary.json()["unsettledTaskCount"] == unsettled
+
+
+def test_task_creation_rejects_coredump_monitor_on_serial_server_resource(resource_client):
+    """SSH 语法合法也不能把 Coredump 监控绑定到非海康网络资源。"""
+    resource = resource_client.post(
+        "/api/v1/resources", headers={"Idempotency-Key": "serial-coredump-resource"},
+        json={"name": "串口服务器", "kind": "SERIAL_SERVER", "ip": "192.0.2.99"},
+    ).json()
+
+    response = resource_client.post("/api/v1/tasks", headers={"Idempotency-Key": "serial-coredump-task"}, json={
+        "name": "串口错误监控", "protocol": "SSH", "ip": "192.0.2.99", "port": 22,
+        "resourceId": resource["id"], "username": "root", "password": "secret", "enableCoredumpMonitor": True,
+    })
+
+    assert response.status_code == 422
+    assert "coredump" in response.text.lower()
 
 
 def test_soft_delete_stops_linked_tasks_and_keeps_deleted_resource_readable(resource_client):

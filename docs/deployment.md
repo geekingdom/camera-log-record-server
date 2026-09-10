@@ -37,11 +37,48 @@
 
 首次单独数据库部署会随机生成管理员密码及成员认证密钥。API 和采集节点的 `MONGO_URI` 使用 `.env.database` 中的数据库用户名、密码及三成员地址，格式参见后端配置示例；密码中的 URI 保留字符必须进行 URL 编码。数据库使用固定副本集名 `rs0`，并启用认证。三个成员部署在同一主机，可提供事务与副本一致性，但不代表多主机容灾。
 
-完整单机入口保留既有的内部 Compose 网络数据库配置，不发布 MongoDB 宿主机端口，未启用数据库用户认证；不要把该网络开放给非平台容器。上文带认证的数据库配置用于独立部署入口。需要从其它主机访问数据库时使用独立数据库入口，不能直接给完整入口的无认证 MongoDB 增加端口发布。
+完整单机入口始终使用认证 MongoDB、副本集成员密钥及内部认证 URI，不发布 MongoDB 宿主机端口。部署器从 `.env` 的 `MONGO_ROOT_USERNAME`、`MONGO_ROOT_PASSWORD` 和 `DATABASE_NAME` 生成容器内部 URI；密码中的 URI 保留字符会自动编码。需要从其它主机访问数据库时使用下文的跨机入口，不能直接给完整入口增加端口发布。
 
-`ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN`、`INTERNAL_TOKEN` 在同一平台的后端与所有采集节点之间必须一致。独立节点配置故意不自动生成另一套密钥。若连接已有数据库，后端也必须使用原平台密钥。首次生成的新密钥仅适用于新平台，不能解密原平台任务密码。
+`ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN`、`INTERNAL_TOKEN` 在同一平台的后端与所有采集节点之间必须一致。独立节点配置故意不自动生成另一套密钥。
 
 独立后端默认只监听 `127.0.0.1:8000`；分机部署将 `API_BIND_IP` 改为内网 IP 或 `0.0.0.0`。`FORWARDED_ALLOW_IPS` 填前端代理实际来源 IP/CIDR，支持逗号分隔。前端容器中的 `127.0.0.1` 指向自身，`BACKEND_UPSTREAM` 应使用后端可达地址。平台白名单限制浏览器/API 客户端来源，不限制设备或串口目标。
+
+## 服务器 A 平台与服务器 B Worker
+
+跨机 Docker 仍只使用既有入口：服务器 A 使用 `deploy-all.sh` 部署数据库、API、本机 Worker 和前端；服务器 B 使用 `deploy-worker.sh` 部署独立 Worker。A 的三成员仍位于同一台主机，用于副本集事务与一致性，不能当作跨主机数据库容灾。
+
+```sh
+# 在服务器 A：首次选择跨机拓扑，编辑生成的0600配置后部署完整平台。
+sudo install -d -m 700 /etc/camera-logs
+sudo ./deploy-all.sh --multi-host --env-file /etc/camera-logs/platform-a.env --init
+sudo editor /etc/camera-logs/platform-a.env
+sudo ./deploy-all.sh --env-file /etc/camera-logs/platform-a.env
+
+# 在服务器 B：首次生成独立Worker配置，复制A的四项共享值并填写B的节点地址和日志目录。
+sudo install -d -m 700 /etc/camera-logs
+sudo ./deploy-worker.sh --multi-host --env-file /etc/camera-logs/worker-b.env --init
+sudo editor /etc/camera-logs/worker-b.env
+sudo ./deploy-worker.sh --env-file /etc/camera-logs/worker-b.env
+```
+
+首次 A 配置带有 `DEPLOY_TOPOLOGY=multi-host`；以后正常执行 `deploy-all.sh --env-file ...` 会自动识别。填写 A 的 `DATABASE_HOST`、`DATABASE_BIND_IP`、三个端口、`MONGO_ROOT_USERNAME` 和 `MONGO_ROOT_PASSWORD`。部署器会从这些实际值生成认证 `MONGO_URI` 并写回同一配置：密码与用户名中的 `@:/?#$!` 等 URI 保留字符会安全 URL 编码，不能手工拼接。密码含 `$` 时必须在 dotenv 中使用单引号，例如 `MONGO_ROOT_PASSWORD='p@:/?#$VALUE'`，这样 Compose 不会把 `$VALUE` 解释为宿主机变量。
+
+`DATABASE_HOST` 必须是 A 对 B 可达的 IPv4 或 DNS 名称，`DATABASE_BIND_IP` 不得只为 `127.0.0.1`。初始化脚本将公布地址和 `MONGO_PORT_1/2/3` 写入 `rs.conf()`，因此 A、B 和 API 都必须能访问同一地址及三个端口。A 的防火墙应只允许 B、A 本机和需要访问数据库的受控内网来源连接 27017、27018、27019；不要将 MongoDB 无约束暴露到公网。B 也可接入已有原生 A 的单成员 `rs0` URI，不必重建数据库，但成员地址仍必须为 B 可达的非回环地址。
+
+两份带 `DEPLOY_TOPOLOGY=multi-host` 的配置都会自动进行跨机预检，也可显式附加 `--multi-host`。预检拒绝 `mongo1`、`mongo2`、`mongo3`、`api`、`worker` 等 Compose 私网名称。B 的 `NODE_URL` 必须是 API 从 A 主动访问 B 的稳定 HTTP 地址，并与 `NODE_PORT` 一致；它不能填写 `http://worker:8001`。B 的 `HOST_LOG_ROOT` 必须是 B 本机的非根绝对路径，不能与 A 或另一台 Worker 共用。B 入口只启动已有的 `worker.yml`，不启动数据库、API 或前端。
+
+四个共享值 `MONGO_URI`、`ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN`、`INTERNAL_TOKEN` 必须在 A 的 API 与每个 Worker 上逐字相同。Worker 初始化刻意不会生成这四项，避免节点接入时产生无法解密既有设备密码的新密钥。`DATABASE_NAME` 必须与 `MONGO_URI` 路径中的库名逐字相同，预检会拒绝不一致的 B 配置。
+
+部署后分别使用组件项目名诊断，避免将 B 的日志与 A 的服务混淆：
+
+```sh
+# A 数据库、API 和前端
+docker compose --env-file /etc/camera-logs/platform-a.env --project-name camera-log-record-server-database --file deploy/database.yml logs --tail 100
+docker compose --env-file /etc/camera-logs/platform-a.env --project-name camera-log-record-server-backend --file deploy/backend.yml logs --tail 100
+
+# B Worker
+docker compose --env-file /etc/camera-logs/worker-b.env --project-name camera-log-record-server-worker --file deploy/worker.yml logs --tail 100 worker
+```
 
 ## 自定义日志与数据目录
 
@@ -77,7 +114,7 @@
 docker compose --env-file .env.worker --project-name camera-log-record-server-worker --file deploy/worker.yml logs --tail 100
 ```
 
-完整部署的详细兼容说明如下。
+完整部署的运行说明如下。
 
 在仓库根目录执行：
 

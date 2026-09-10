@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import asyncssh
 import pytest
 from camera_logs.collection.collector import Collector, LogChunk
+from camera_logs.collection.coredump_lease import bound_coredump_cleanup_guard
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
@@ -198,6 +199,109 @@ def test_coredump_guard_rejects_non_collecting_or_unhealthy_resource(tmp_path):
         await database.resources.update_one({"id": "resource-a"}, {"$set": {"healthStatus": "ONLINE"}})
         await database.tasks.update_one({"id": "task-a"}, {"$set": {"status": "STOPPING"}})
         assert await runtime.coredump_guard() is False
+    asyncio.run(scenario())
+
+
+def test_coredump_cleanup_guard_keeps_current_owner_during_stopping(tmp_path):
+    """暂停收尾可短续当前租约；离线或软删不应阻断既有会话卸载。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                             log_root=tmp_path, node_id="node-a"))
+        task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                "resourceId": "resource-a", "desiredState": "PAUSED", "status": "PAUSING"}
+        collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
+        await database.tasks.insert_one(task)
+        await database.resources.insert_one({
+            "id": "resource-a", "deletedAt": datetime.now(UTC), "healthStatus": "OFFLINE",
+            "coredumpLeaseTaskId": task["id"], "coredumpLeaseRunId": task["runId"],
+            "coredumpLeaseGeneration": task["generation"], "coredumpLeaseNodeId": task["nodeId"],
+            "coredumpLeaseUntil": datetime.now(UTC) + timedelta(seconds=5),
+        })
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo, runtime.task, runtime.collector = repo, task, collector
+        runtime.stopping, runtime.retired = True, False
+
+        assert await bound_coredump_cleanup_guard(runtime, collector)() is True
+        resource = await database.resources.find_one({"id": "resource-a"})
+        assert resource["coredumpLeaseUntil"].replace(tzinfo=UTC) > datetime.now(UTC) + timedelta(seconds=10)
+
+    asyncio.run(scenario())
+
+
+def test_coredump_cleanup_guard_rejects_successor_expired_or_retired_session(tmp_path):
+    """旧会话、过期租约或已退休运行均不能在关闭时卸载设备目录。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                             log_root=tmp_path, node_id="node-a"))
+        task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                "resourceId": "resource-a", "desiredState": "STOPPED", "status": "STOPPING"}
+        collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
+        await database.tasks.insert_one(task)
+        await database.resources.insert_one({
+            "id": "resource-a", "coredumpLeaseTaskId": "task-b", "coredumpLeaseRunId": "run-b",
+            "coredumpLeaseGeneration": 4, "coredumpLeaseNodeId": "node-b",
+            "coredumpLeaseUntil": datetime.now(UTC) + timedelta(seconds=60),
+        })
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo, runtime.task, runtime.collector = repo, task, collector
+        runtime.stopping, runtime.retired = True, False
+        guard = bound_coredump_cleanup_guard(runtime, collector)
+
+        assert await guard() is False
+        await database.resources.update_one({"id": "resource-a"}, {"$set": {
+            "coredumpLeaseTaskId": task["id"], "coredumpLeaseRunId": task["runId"],
+            "coredumpLeaseGeneration": task["generation"], "coredumpLeaseNodeId": task["nodeId"],
+            "coredumpLeaseUntil": datetime.now(UTC) - timedelta(seconds=1),
+        }})
+        assert await guard() is False
+        await database.resources.update_one({"id": "resource-a"}, {"$set": {
+            "coredumpLeaseUntil": datetime.now(UTC) + timedelta(seconds=60),
+        }})
+        runtime.retired = True
+        assert await guard() is False
+        runtime.retired = False
+        runtime.collector = SimpleNamespace(session_id="session-b", _closed=SimpleNamespace(is_set=lambda: False))
+        assert await guard() is False
+
+    asyncio.run(scenario())
+
+
+def test_coredump_cleanup_guard_rechecks_session_after_lease_cas(tmp_path):
+    """租约 CAS 等待期间会话退休时，成功短续也不能授权发送卸载命令。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                             log_root=tmp_path, node_id="node-a"))
+        task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                "resourceId": "resource-a", "desiredState": "STOPPED", "status": "STOPPING"}
+        collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
+        await database.tasks.insert_one(task)
+        await database.resources.insert_one({
+            "id": "resource-a", "coredumpLeaseTaskId": task["id"], "coredumpLeaseRunId": task["runId"],
+            "coredumpLeaseGeneration": task["generation"], "coredumpLeaseNodeId": task["nodeId"],
+            "coredumpLeaseUntil": datetime.now(UTC) + timedelta(seconds=60),
+        })
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo, runtime.task, runtime.collector = repo, task, collector
+        runtime.stopping, runtime.retired = True, False
+        resources = database.resources
+        original_claim = resources.find_one_and_update
+
+        async def retire_after_claim(*args, **kwargs):
+            result = await original_claim(*args, **kwargs)
+            runtime.retired = True
+            return result
+
+        repo.db = SimpleNamespace(
+            tasks=database.tasks,
+            resources=SimpleNamespace(find_one=resources.find_one, find_one_and_update=retire_after_claim),
+        )
+        assert await bound_coredump_cleanup_guard(runtime, collector)() is False
+        resource = await resources.find_one({"id": "resource-a"})
+        assert resource["coredumpLeaseUntil"].replace(tzinfo=UTC) > datetime.now(UTC) + timedelta(seconds=50)
+
     asyncio.run(scenario())
 
 

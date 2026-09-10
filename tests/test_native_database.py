@@ -75,6 +75,11 @@ class _Admin:
                 raise OperationFailure("already initialized", code=23)
             self.server.replica = command["replSetInitiate"]
             return {"ok": 1}
+        if name == "replSetReconfig":
+            if not authenticated:
+                raise OperationFailure("Authentication failed", code=18)
+            self.server.replica = command["replSetReconfig"]
+            return {"ok": 1}
         if name == "hello":
             return {"isWritablePrimary": True}
         if name == "createUser":
@@ -178,6 +183,34 @@ def test_ipv6_advertised_host_is_not_supported_in_first_native_release(monkeypat
 
     with pytest.raises(ValueError, match="IPv4 或 DNS"):
         module.initialize(_values(MONGO_ADVERTISED_HOST="::1"), _Server().client, timeout_seconds=0)
+
+
+def test_authenticated_loopback_member_can_migrate_to_reachable_advertised_host(monkeypatch):
+    """跨主机Worker接入只替换受管回环成员地址，不创建用户或清空业务库。"""
+    module, server = _module(monkeypatch), _Server()
+    module.initialize(_values(), server.client, allow_initialize=True, timeout_seconds=0)
+    server.commands.clear()
+
+    result = module.reconfigure_advertised_host(
+        _values(MONGO_ADVERTISED_HOST="10.42.0.10"), server.client, timeout_seconds=0,
+    )
+
+    assert result == {"changed": True, "host": "10.42.0.10", "port": 27017}
+    assert server.replica["members"][0]["host"] == "10.42.0.10:27017"
+    assert [name for name, _ in server.commands] == ["connectionStatus", "replSetGetConfig", "replSetReconfig", "hello", "replSetGetConfig"]
+    assert not any(name == "createUser" for name, _ in server.commands)
+
+
+def test_non_loopback_member_is_never_reconfigured_automatically(monkeypatch):
+    """已有非回环公告地址可能属于外部拓扑，迁移工具必须拒绝覆盖。"""
+    module = _module(monkeypatch)
+    server = _Server(replica={"_id": "rs0", "members": [{"_id": 0, "host": "10.42.0.9:27017"}]},
+                     administrator=("camera_admin", "correct-password"))
+
+    with pytest.raises(RuntimeError, match="不是回环地址"):
+        module.reconfigure_advertised_host(_values(MONGO_ADVERTISED_HOST="10.42.0.10"), server.client, timeout_seconds=0)
+
+    assert [name for name, _ in server.commands] == ["connectionStatus", "replSetGetConfig"]
 
 
 def test_cli_failure_never_prints_configured_password(monkeypatch, capsys, tmp_path):

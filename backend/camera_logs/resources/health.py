@@ -8,6 +8,7 @@ from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
+from camera_logs.resources.authentication_records import record_authentication
 from camera_logs.resources.lifecycle import task_resource_query
 from camera_logs.tasks.resource_binding import storage_identity
 
@@ -64,6 +65,8 @@ async def _apply_failure(repo, snapshot, status):
         )
         if changed is None:
             return False
+        await record_authentication(repo, snapshot, source="PERIODIC", result=status, before=snapshot,
+                                    after=snapshot, message=status, completed_at=timestamp, session=session)
         query = task_resource_query(snapshot["id"])
         async for task in repo.db.tasks.find(query, session=session):
             # 用户暂停意图一经落库即由 Worker 自行收尾，周期离线不能覆盖预算、会话或控制操作。
@@ -130,6 +133,8 @@ async def _apply_success(repo, snapshot, metadata):
         )
         if changed is None:
             return False
+        await record_authentication(repo, snapshot, source="PERIODIC", result="SUCCESS", before=snapshot,
+                                    after=snapshot | metadata, completed_at=timestamp, session=session)
         if storage_identity(snapshot) != storage_identity(snapshot | metadata):
             identity = storage_identity(snapshot | metadata)
             async for task in repo.db.tasks.find(task_resource_query(snapshot["id"]), session=session):

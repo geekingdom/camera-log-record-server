@@ -15,6 +15,8 @@ async def bind_resource(repo, task):
     network = resource["kind"] == "HIKVISION_NETWORK"
     if network and not resource.get("authenticatedAt"):
         raise HTTPException(409, "海康网络设备资源尚未通过认证")
+    if task.enableCoredumpMonitor and not network:
+        raise HTTPException(422, "coredump 监控仅支持海康网络设备资源")
     if not network and task.protocol != "TELNET_SERIAL":
         raise HTTPException(422, "串口服务器只能创建 Telnet 串口任务")
     if not network or task.protocol != "TELNET_SERIAL":

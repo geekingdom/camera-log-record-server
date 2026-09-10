@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from configure_nfs_export import configure as configure_nfs_export
@@ -47,7 +48,79 @@ def atomic_write(path, content, mode=0o600):
         temporary.unlink(missing_ok=True)
 
 
-def preflight(values, components):
+def read_published_environment(path):
+    """按native_units的JSON字面量格式读取环境文件，绝不执行其中内容。"""
+    result = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as error:
+        raise ValueError(f"缺少已发布受保护配置 {path}，不能自动迁移Mongo公告地址") from error
+    for number, line in enumerate(lines, 1):
+        key, separator, literal = line.partition("=")
+        if not separator or not key or key in result:
+            raise ValueError(f"已发布环境文件第{number}行无效，不能自动迁移Mongo公告地址")
+        try:
+            value = json.loads(literal)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"已发布环境文件第{number}行不是受支持的字面量，不能自动迁移Mongo公告地址") from error
+        if not isinstance(value, str):
+            raise TypeError(f"已发布环境文件第{number}行值无效，不能自动迁移Mongo公告地址")
+        result[key] = value
+    return result
+
+
+def mongo_uri_parts(uri):
+    """拆分单主机Mongo URI，公告地址迁移不接受多主机或无法明确解析的URI。"""
+    parsed = urlsplit(uri)
+    if parsed.scheme not in {"mongodb", "mongodb+srv"} or not parsed.netloc or "," in parsed.netloc:
+        raise ValueError("Mongo连接地址不是可自动迁移的单主机URI，请按文档手工协调迁移")
+    try:
+        host, port = parsed.hostname, parsed.port
+    except ValueError as error:
+        raise ValueError("Mongo连接地址端口无效，请按文档手工协调迁移") from error
+    if not host:
+        raise ValueError("Mongo连接地址缺少主机名，请按文档手工协调迁移")
+    return parsed, host, port
+
+
+def validate_mongo_advertised_host_migration(values, root):
+    """仅允许公告地址相关变更，并以已发布受保护配置锁定其它跨组件合同。"""
+    etc = Path(root) / "etc"
+    published = read_published_environment(etc / "api.env")
+    allowed_changes = {"MONGO_URI", "MONGO_BIND_IP", "MONGO_ADVERTISED_HOST"}
+    required = tuple(key for key in CONTRACT_KEYS if key not in allowed_changes)
+    required += ("MONGO_URI",)
+    if any(key not in published for key in required):
+        raise ValueError("已发布api.env缺少受保护合同字段，不能自动迁移Mongo公告地址")
+    for key in CONTRACT_KEYS:
+        if key in allowed_changes:
+            continue
+        if values[key] != published[key]:
+            raise ValueError(f"{key}与已发布受保护配置不一致，不能自动迁移Mongo公告地址")
+    previous, _previous_host, previous_port = mongo_uri_parts(published["MONGO_URI"])
+    candidate, candidate_host, candidate_port = mongo_uri_parts(values["MONGO_URI"])
+    if (previous.scheme, previous.username, previous.password, previous.path, previous.query, previous.fragment, previous_port) != (
+        candidate.scheme, candidate.username, candidate.password, candidate.path, candidate.query, candidate.fragment, candidate_port
+    ):
+        raise ValueError("MONGO_URI仅允许修改公告主机名，不能自动迁移其它连接或凭据")
+    if candidate_host != values["MONGO_ADVERTISED_HOST"]:
+        raise ValueError("MONGO_URI主机名必须与MONGO_ADVERTISED_HOST一致")
+    try:
+        mongod = json.loads((etc / "mongod.conf").read_text())
+        replica_key = (etc / "mongo.key").read_text()
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("缺少或无法解析已发布Mongo受保护配置，不能自动迁移公告地址") from error
+    expected_security = {"authorization": "enabled", "keyFile": f"{root}/etc/mongo.key"}
+    if (mongod.get("net", {}).get("port") != int(values["MONGO_PORT"]) or
+            previous_port != int(values["MONGO_PORT"]) or
+            mongod.get("replication", {}).get("replSetName") != values["MONGO_REPLICA_SET"] or
+            mongod.get("security") != expected_security):
+        raise ValueError("Mongo端口、副本集或安全配置与已发布配置不一致，不能自动迁移公告地址")
+    if replica_key != values["MONGO_REPLICA_KEY"] + "\n":
+        raise ValueError("Mongo成员密钥与已发布受保护配置不一致，不能自动迁移公告地址")
+
+
+def preflight(values, components, *, allow_mongo_advertised_host_migration=False):
     """拒绝覆盖未知安装或占用端口；现有受管实例可重复部署。"""
     root = Path(values["INSTALL_ROOT"])
     marker = root / ".native-managed.json"
@@ -61,7 +134,10 @@ def preflight(values, components):
         if known.get("encryptionKeyHash") != hashlib.sha256(values["ENCRYPTION_KEY"].encode()).hexdigest():
             raise ValueError("ENCRYPTION_KEY与受管安装不一致，拒绝覆盖已有设备密码加密密钥")
         if known.get("contractHash") != contract_hash(values):
-            raise ValueError("跨组件连接或凭据配置已变化，请按协调迁移流程处理，拒绝先停止现有服务")
+            if allow_mongo_advertised_host_migration and components == ("database",):
+                validate_mongo_advertised_host_migration(values, root)
+            else:
+                raise ValueError("跨组件连接或凭据配置已变化，请按协调迁移流程处理，拒绝先停止现有服务")
     for component in components:
         service = f"camera-logs-{SERVICES[component]}.service"
         unit = Path("/etc/systemd/system") / service
@@ -112,6 +188,14 @@ def prepare_directories(values):
     return account
 
 
+def refresh_contract_marker(values):
+    """仅在受认证数据库地址迁移成功后更新本机合同摘要，不写入任何明文密钥。"""
+    marker = Path(values["INSTALL_ROOT"]) / ".native-managed.json"
+    known = json.loads(marker.read_text())
+    known["contractHash"] = contract_hash(values)
+    atomic_write(marker, json.dumps(known), 0o600)
+
+
 def publish(values, component, files, account):
     """只发布选定组件的配置；成员key由Mongo运行账号独占读取。"""
     root = Path(values["INSTALL_ROOT"])
@@ -154,10 +238,13 @@ def wait_http(url, *, allow_auth=False, timeout=90):
     raise RuntimeError("服务HTTP健康检查超时，请查看对应systemd日志")
 
 
-def deploy(values, component, config, source):
+def deploy(values, component, config, source, *, reconfigure_mongo_advertised_host=False):
     """按数据库、API、节点、前端顺序安装；更新一个组件不停止其它组件。"""
     components = COMPONENTS if component == "all" else (component,)
-    preflight(values, components)
+    if reconfigure_mongo_advertised_host:
+        preflight(values, components, allow_mongo_advertised_host_migration=True)
+    else:
+        preflight(values, components)
     if values["INSTALL_PACKAGES"] == "true":
         install_packages(component)
     account = prepare_directories(values)
@@ -172,7 +259,7 @@ def deploy(values, component, config, source):
     for selected in components:
         service = f"camera-logs-{SERVICES[selected]}"
         database_pending = Path(values["INSTALL_ROOT"]) / "etc/mongo-initializing"
-        if selected == "database" and not any(Path(values["MONGO_DATA_ROOT"]).iterdir()):
+        if selected == "database" and not reconfigure_mongo_advertised_host and not any(Path(values["MONGO_DATA_ROOT"]).iterdir()):
             # 在mongod首次写数据前记录来源；中断后只允许相同配置继续创建首个账号。
             fingerprint = hashlib.sha256(config.read_bytes()).hexdigest()
             if not database_pending.exists():
@@ -193,8 +280,11 @@ def deploy(values, component, config, source):
                 if database_pending.read_text() != hashlib.sha256(config.read_bytes()).hexdigest():
                     raise ValueError("数据库首次初始化中断后配置改变，请恢复原配置再重试")
                 options.append("--allow-initialize")
-            run([executable, source / "scripts/native_database.py", "--config", config, *options])
+            migration = ["--reconfigure-advertised-host"] if reconfigure_mongo_advertised_host else []
+            run([executable, source / "scripts/native_database.py", "--config", config, *options, *migration])
             database_pending.unlink(missing_ok=True)
+            if reconfigure_mongo_advertised_host:
+                refresh_contract_marker(values)
         elif selected in {"backend", "worker"}:
             key = "API_PORT" if selected == "backend" else "NODE_PORT"
             bind = values["API_BIND_IP" if selected == "backend" else "NODE_BIND_IP"]
@@ -216,6 +306,8 @@ def main(argv=None):
     parser.add_argument("component", nargs="?", choices=("all", *COMPONENTS), default="all")
     parser.add_argument("--config", type=Path, default=Path("/etc/camera-logs/native.env"))
     parser.add_argument("--init", action="store_true", help="仅生成配置供自定义日志路径、端口等")
+    parser.add_argument("--reconfigure-mongo-advertised-host", action="store_true",
+                        help="仅database：受认证地将单成员Mongo公告地址从127.0.0.1迁移至配置地址")
     args = parser.parse_args(argv)
     if not args.config.is_absolute():
         raise ValueError("--config必须是绝对路径")
@@ -229,13 +321,16 @@ def main(argv=None):
         print(f"已创建0600配置：{config}，未输出任何密码或令牌")
     if args.init:
         return 0
+    if args.reconfigure_mongo_advertised_host and args.component != "database":
+        raise ValueError("--reconfigure-mongo-advertised-host 只能与database组件一起使用")
     if sys.platform != "linux" or os.geteuid() != 0 or not Path("/run/systemd/system").is_dir():
         raise ValueError("请在使用systemd的Linux主机以sudo/root运行")
     if config.stat().st_mode & 0o077:
         raise ValueError("配置含凭据，请先将文件权限设置为0600")
     values = read_config(config)
     validate(values, args.component)
-    deploy(values, args.component, config, Path(__file__).resolve().parents[1])
+    deploy(values, args.component, config, Path(__file__).resolve().parents[1],
+           reconfigure_mongo_advertised_host=args.reconfigure_mongo_advertised_host)
     return 0
 
 

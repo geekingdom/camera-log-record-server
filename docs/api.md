@@ -37,7 +37,7 @@ Authorization: Bearer <SERVICE_TOKEN>
 
 每项资源及单资源详情均包含 `tasks` 摘要（任务 ID、名称、协议、目标、当前与期望状态、资源关联）、`taskCount`、`activeTaskCount`、`tasksTruncated` 和 `tasksUrl`。摘要默认最多 100 条，`taskLimit` 可设 1 至 500；截断时通过 `tasksUrl` 继续分页。具备 `tasks:read` 的有效用户可读取全部资源与任务，不含设备密码；不再使用资源或任务 ID 白名单限制可见性。
 
-按任务 ID 的启动、停止、暂停、恢复、实时订阅、命令与下载接口见下文。暂停/恢复保留原有 SSH 专属语义，Telnet 不支持暂停。
+按任务 ID 的启动、停止、暂停、恢复、实时订阅、命令与下载接口见下文。SSH 和 Telnet 设备支持暂停/恢复，Telnet 串口不支持。
 
 ## 无关键词时间查询
 
@@ -117,14 +117,14 @@ POST /api/v1/tasks/{taskId}/stop
 
 两者返回操作对象；可通过 `GET /api/v1/operations/{operationId}` 查询状态。
 
-SSH 任务还可暂停和恢复：
+SSH 和 Telnet 设备任务还可暂停和恢复：
 
 ```http
 POST /api/v1/tasks/{taskId}/pause
 POST /api/v1/tasks/{taskId}/resume
 ```
 
-暂停仅适用于正在运行的 SSH 任务。Telnet 设备和串口任务调用 pause 会返回 `409`。
+暂停适用于正在运行的 SSH 或 Telnet 设备任务；Telnet 串口调用 pause/resume 返回 `409`。暂停保留运行与定时预算，关闭连接；恢复重新连接并执行初始化。两种网络设备任务均可启用 `enableCoredumpMonitor`，共享同一资源的唯一监控负责人，暂停或停止时使用 `umount -l` 卸载，恢复后重新挂载。
 
 ### 控制操作与事务边界
 
@@ -136,11 +136,23 @@ POST /api/v1/tasks/{taskId}/resume
 
 控制意图并不等于设备连接已经建立、暂停或关闭。Worker 仍负责实际连接和物理收尾；客户端应查询 `GET /api/v1/operations/{operationId}` 及任务状态。事务提交结果无法确认时接口返回 `503`，客户端应先查询任务和操作，不能把该响应当作可以无条件重发控制请求的承诺。
 
-无节点的排队任务暂停会先确认任务没有运行锁，随后直接进入 PAUSED 并清除陈旧 `runId`、`sessionId`。无节点且已暂停的任务停止会在同一事务中按 `taskId + runId` 释放匹配锁、结束该 run，并保留该 run 的既有命令预算。恢复要求 SSH 任务已完成暂停、`desiredState=PAUSED` 且不再归属节点；状态不满足时返回 `409`。
+无节点的排队任务暂停会先确认任务没有运行锁，随后直接进入 PAUSED 并清除陈旧 `runId`、`sessionId`。无节点且已暂停的任务停止会在同一事务中按 `taskId + runId` 释放匹配锁、结束该 run，并保留该 run 的既有命令预算。恢复要求 SSH 或 Telnet 设备任务已完成暂停、`desiredState=PAUSED` 且不再归属节点；状态不满足时返回 `409`。
+
+### 等待隔离恢复
+
+`POST /api/v1/tasks/{taskId}/restart`，正文 `{"confirmIsolation": false}`，请求旧运行关闭并收尾后建立新运行。返回 `202` 与 `PENDING` 操作，直到新运行实际 `COLLECTING` 才完成。旧节点不可达时返回 `409` 和 `ISOLATION_REQUIRED`；在线但没有可靠关闭证明时，操作 `phase=ISOLATION_REQUIRED`。管理员核实目标任务旧实例实际停止或隔离后，可提交 `{"confirmIsolation": true, "evidence": "旧实例已停止并核验连接关闭的具体依据"}`。此确认仅作用于目标任务，不修改整个节点隔离状态。普通停止会撤销重启意图，关闭证据不足时仍保留阻塞及待收尾提示。
+
+资源响应 `activeTaskCount` 只统计 `COLLECTING/RUNNING` 任务，`unsettledTaskCount` 表示删除前仍需处理的任务数量。
 
 资源删除与启动、暂停或恢复使用同一资源文档的控制声明写入来产生事务冲突。删除先提交时，后到控制请求返回 `409`；控制先提交时，删除扫尾会写入 STOPPED、标记 `resourceDeleted` 并取消不再适用的 PENDING 操作。资源删除不会删除既有日志。
 
+## 设备认证记录
+
+`GET /api/v1/resources/{resourceId}/authentication-records` 使用 `tasks:read` 权限。可同时传 `result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR`、`start/end` 带时区 ISO 8601 时间范围及 `identityChanged=true|false`；省略对应参数表示不限制该条件，时间范围为左闭右开。响应采用标准 `items/total/page/pageSize`，每项含认证时间、触发来源、结果和型号/序列号前后值；首次认证 `initialAuthentication=true` 且不计为设备更换，认证失败不修改身份。软删除不删除认证记录；部署前未保存的逐次认证结果不推测补造。
+
 ## 命令与模板
+
+`GET /api/v1/tasks/{taskId}/command-executions` 支持 `commandId` 按定时配置筛选、`kind=MANUAL|SCHEDULED` 按来源筛选及 `page/pageSize` 分页。记录的 `command`、`totalExecutions`、`intervalSeconds` 是发送预留时的配置快照，`attempt` 是本运行第几次占用发送预算。响应额外提供当前 `runId` 和 `scheduledCommands`，每项包含配置 ID、正文、总次数、间隔及当前运行 `attempts`；不会按相同正文合并。`commandSource=SNAPSHOT` 表示保存的正文，`CURRENT_CONFIGURATION` 表示旧记录依精确配置 ID 恢复，`UNAVAILABLE` 表示已无法还原。任务编辑会重新生成定时配置 ID，不能用编辑后的命令猜测已删除配置的历史正文。发送次数不等同于设备执行成功次数。
 
 `POST /api/v1/command-templates` 创建命令模板，`GET/PATCH/DELETE /api/v1/command-templates/{templateId}` 管理模板。向正在采集的任务发送手动命令：
 
@@ -170,6 +182,8 @@ GET /api/v1/tasks/{taskId}/command-executions?page=1&pageSize=50
 PSH 调试失败只影响当次命令，不停止日志采集。后续定时或手动 `debug`、重连后的初始化 `debug` 均可独立执行；单次握手失败不重复提交口令。采集器先发送 Ctrl-C，确认新的普通提示符且无 Password 提示后才用 `ls` 恢复命令通道。恢复未确认时普通命令不会写入设备，后续 `debug` 可重新尝试恢复再执行。已阻断的定时普通命令不占用预算，也不生成执行记录；已开始的定时 `debug` 失败保留已占用的一次预算，记录为 `FAILED`。
 
 ## 后台配置与节点
+
+服务节点的 `telemetry`、`health` 以及最佳节点分配规则见[节点健康与动态分配](node-health-scheduling.md)。`GET /api/v1/nodes` 返回这些新增字段；旧 Worker 未上报的指标为未知。
 
 以下接口要求 `admin` 作用域。平台设置的保留期是数据库中的版本化配置；修改必须携带当前版本，避免两个管理员互相覆盖。节点登记与 worker 心跳分离：登记不会启动 worker，也不会把节点标记为在线。
 

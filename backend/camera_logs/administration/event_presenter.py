@@ -18,6 +18,9 @@ ACTION_SUMMARIES = {
     "cancel_download": "取消日志下载作业", "cancel_search": "取消日志检索作业",
     "update_platform_settings": "修改平台设置", "update_ip_policy": "修改来源访问规则",
     "confirm_node_isolation": "确认节点外部隔离",
+    "restart_blocked": "请求重新启动等待隔离任务",
+    "restart_blocked_receipt": "核实原连接关闭并请求重新启动",
+    "confirm_task_isolation": "确认单任务旧实例隔离并请求重新启动",
     "login": "用户登录", "login_failed": "用户登录失败", "logout": "用户退出登录",
     "change_password": "修改账户密码", "create_user": "创建用户", "edit_user": "修改用户",
     "delete_user": "删除用户", "register_node": "登记节点", "edit_node": "修改节点配置", "delete_node": "删除节点",
@@ -42,6 +45,16 @@ EVENT_SUMMARIES = {
     "CLOCK_ROLLBACK": "服务器时间回拨",
     "COREDUMP_MOUNT": "核心转储挂载状态变化",
 }
+COREDUMP_MOUNT_SUMMARIES = {
+    "UNMOUNTED": "核心转储 NFS 已卸载",
+    "UNMOUNT_SKIPPED": "核心转储 NFS 跳过卸载，结果未确认",
+    "UNMOUNT_FAILED": "核心转储 NFS 卸载失败",
+}
+COREDUMP_MOUNT_OUTCOMES = {
+    "UNMOUNTED": "SUCCEEDED",
+    "UNMOUNT_SKIPPED": "UNKNOWN",
+    "UNMOUNT_FAILED": "FAILED",
+}
 _PRESSURE_EVENTS = {"DISK_PRESSURE_CHANGED", "WRITE_PRESSURE_CHANGED"}
 _TERMINAL_OUTCOMES = {"PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"}
 ACTION_OUTCOMES = {"login_failed": "FAILED", "coredump_export_failed": "FAILED",
@@ -63,6 +76,8 @@ def event_outcome(item: dict) -> str:
         return item["outcome"]
     if item.get("action") in ACTION_OUTCOMES:
         return ACTION_OUTCOMES[item["action"]]
+    if item.get("type") == "COREDUMP_MOUNT" and item.get("status") in COREDUMP_MOUNT_OUTCOMES:
+        return COREDUMP_MOUNT_OUTCOMES[item["status"]]
     if item.get("responseComplete") is False:
         return "UNKNOWN"
     if item.get("status") in _TERMINAL_OUTCOMES:
@@ -103,6 +118,8 @@ def _summary(item: dict) -> str:
         return redact_text(str(item["summary"]))
     if item.get("action"):
         return ACTION_SUMMARIES.get(item["action"], "执行管理操作")
+    if item.get("type") == "COREDUMP_MOUNT" and item.get("status") in COREDUMP_MOUNT_SUMMARIES:
+        return COREDUMP_MOUNT_SUMMARIES[item["status"]]
     if item.get("type"):
         return EVENT_SUMMARIES.get(item["type"], "记录运行事件")
     if item.get("route"):

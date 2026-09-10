@@ -5,14 +5,15 @@
 """
 from typing import Annotated
 
-from fastapi import Depends, Query, Request
+from fastapi import Depends, HTTPException, Query, Request
 
 from camera_logs.common.database import public
-from camera_logs.common.models import TaskCreate, TaskPatch, new_id
+from camera_logs.common.models import BlockedRestart, TaskCreate, TaskPatch, new_id
 from camera_logs.common.security import actor, authorize
 from camera_logs.tasks.control import request_control
 from camera_logs.tasks.creation import create_task as create_task_atomic
 from camera_logs.tasks.editing import edit_task as edit_task_atomic
+from camera_logs.tasks.recovery import request_blocked_restart
 from camera_logs.tasks.resource_binding import bind_resource
 
 
@@ -96,6 +97,17 @@ def install_task_routes(app, repo, listing):
         """提交启动意图，不在 API 内建立或重复建立设备连接。"""
         return public(await request_control(repo(), task_id, "RUNNING", user))
 
+    @app.post("/api/v1/tasks/{task_id}/restart", status_code=202)
+    async def restart(task_id: str, user: User, body: BlockedRestart | None = None):
+        """恢复 BLOCKED 任务；外部隔离确认由管理员专用路径处理。"""
+        body = body or BlockedRestart()
+        if body.confirmIsolation:
+            from camera_logs.node.recovery import confirm_task_isolation
+            if body.evidence is None:
+                raise HTTPException(422, "确认隔离必须提供证据")
+            return public(await confirm_task_isolation(repo(), task_id, user, body.evidence))
+        return public(await request_blocked_restart(repo(), task_id, user))
+
     @app.post("/api/v1/tasks/{task_id}/stop", status_code=202)
     async def stop(task_id: str, user: User):
         """提交停止意图，资源已删除仍允许停止和回收原运行。"""
@@ -103,7 +115,7 @@ def install_task_routes(app, repo, listing):
 
     @app.post("/api/v1/tasks/{task_id}/pause", status_code=202)
     async def pause(task_id: str, user: User):
-        """请求 SSH 连接关闭并保留运行预算，连接关闭前返回待完成操作。"""
+        """请求 SSH 或 Telnet 设备关闭连接并保留预算，串口不支持暂停。"""
         return public(await request_control(repo(), task_id, "PAUSED", user))
 
     @app.post("/api/v1/tasks/{task_id}/resume", status_code=202)
