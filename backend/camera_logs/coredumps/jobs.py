@@ -22,6 +22,32 @@ from camera_logs.logs.naming import safe_filename_component
 _io_slots = asyncio.Semaphore(2)
 
 
+async def _begin_execution(repo: Any, job: dict[str, Any]) -> bool:
+    """只有领取该作业的实例可声明写入中，取消在启动前到达时不创建文件。"""
+    changed = await repo.db.coredump_exports.update_one(
+        {"id": job["id"], "status": "RUNNING", "workerInstanceId": job.get("workerInstanceId")},
+        {"$set": {"executionState": "WRITING", "executionLeaseUntil": now() + timedelta(seconds=90)}},
+    )
+    return changed.matched_count == 1
+
+
+async def _finish_execution(repo: Any, job: dict[str, Any]) -> None:
+    """在所有后台文件线程完成后确认物理写入结束，维护才可回收目录。"""
+    await repo.db.coredump_exports.update_one(
+        {"id": job["id"], "workerInstanceId": job.get("workerInstanceId"), "executionState": "WRITING"},
+        {"$set": {"executionState": "FINISHED", "executionFinishedAt": now()}},
+    )
+
+
+async def _renew_execution_lease(repo: Any, job: dict[str, Any]) -> bool:
+    """物理写入租约独立于业务取消状态，直到所有线程和目录收尾结束才停止。"""
+    renewed = await repo.db.coredump_exports.update_one(
+        {"id": job["id"], "workerInstanceId": job.get("workerInstanceId"), "executionState": "WRITING"},
+        {"$set": {"executionLeaseUntil": now() + timedelta(seconds=90), "leaseUntil": now() + timedelta(seconds=90)}},
+    )
+    return renewed.matched_count == 1
+
+
 async def _cancelled(repo: Any, job: dict[str, Any]) -> bool:
     """每个文件阶段重新读取取消状态，避免取消后继续创建 ZIP 或发布产物。"""
     current = await repo.db.coredump_exports.find_one({"id": job["id"], "workerInstanceId": job.get("workerInstanceId")}, {"status": 1})
@@ -124,7 +150,10 @@ async def cleanup_expired_exports(repo: Any) -> int:
             continue
         document = await repo.db.coredump_exports.find_one({"id": identifier})
         expires = document.get("expiresAt") if document else None
-        active = bool(document and document.get("status") in {"QUEUED", "RUNNING"}) or bool(document and document.get("status") == "SUCCEEDED" and expires and
+        execution_until = document.get("executionLeaseUntil") if document else None
+        writing = bool(document and document.get("executionState") == "WRITING" and execution_until and
+                       (execution_until.replace(tzinfo=UTC) if execution_until.tzinfo is None else execution_until.astimezone(UTC)) > datetime.now(UTC))
+        active = writing or bool(document and document.get("status") in {"QUEUED", "RUNNING"}) or bool(document and document.get("status") == "SUCCEEDED" and expires and
                       (expires.replace(tzinfo=UTC) if expires.tzinfo is None else expires.astimezone(UTC)) > datetime.now(UTC))
         if not active:
             # 目录名只能来自已登记 UUID；仍限定到受控 roots，不能使用数据库路径字段。
@@ -214,12 +243,17 @@ async def run_export(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     limit = int(repo.settings.coredump_export_max_bytes)
     reserved = 0
     heartbeat = None
+    if not await _begin_execution(repo, job):
+        current = await repo.db.coredump_exports.find_one({"id": job["id"], "workerInstanceId": job.get("workerInstanceId")})
+        if current and current.get("status") == "CANCELLED" and current.get("executionState") != "WRITING":
+            await _release(repo, job["id"])
+        return {"status": current.get("status", "CANCELLED") if current else "CANCELLED"}
     try:
         reserved = await _reserve(repo, job)
         async def renew_lease():
             while True:
                 await asyncio.sleep(20)
-                if await _cancelled(repo, job):
+                if not await _renew_execution_lease(repo, job):
                     return
         heartbeat = asyncio.create_task(renew_lease())
         await job_thread(scratch.mkdir, parents=True, exist_ok=True)
@@ -256,13 +290,16 @@ async def run_export(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     except Exception as error:  # noqa: BLE001 - 文件、节点和压缩错误统一持久化为作业失败。
         update = {"status": "FAILED", "error": type(error).__name__}
     finally:
-        if heartbeat:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-        await job_thread(_remove_directory, scratch)
-        if "update" in locals() and update["status"] != "SUCCEEDED":
-            await job_thread(_remove_directory, output)
-            await _release(repo, job["id"])
+        try:
+            await job_thread(_remove_directory, scratch)
+            if "update" in locals() and update["status"] != "SUCCEEDED":
+                await job_thread(_remove_directory, output)
+                await _release(repo, job["id"])
+            await _finish_execution(repo, job)
+        finally:
+            if heartbeat:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
     actual = await _complete(repo, job, update)
     if actual["status"] == "CANCELLED" and update["status"] == "SUCCEEDED":
         # 事务已确认取消，才在事务外回收尚未发布的成功产物。

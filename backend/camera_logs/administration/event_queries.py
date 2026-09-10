@@ -2,7 +2,7 @@
 
 import inspect
 
-from camera_logs.administration.event_presenter import present_events
+from camera_logs.administration.event_presenter import ACTION_OUTCOMES, present_events
 from camera_logs.common.database import public
 
 
@@ -21,7 +21,7 @@ def _derived_fields() -> dict:
     """构造与展示器相同的 Mongo 结果和级别表达式，避免旧记录筛选语义漂移。"""
     outcome = {"$switch": {"branches": [
         {"case": {"$in": ["$outcome", _OUTCOMES]}, "then": "$outcome"},
-        {"case": {"$eq": ["$action", "login_failed"]}, "then": "FAILED"},
+        *[{"case": {"$eq": ["$action", action]}, "then": result} for action, result in ACTION_OUTCOMES.items()],
         {"case": {"$eq": ["$responseComplete", False]}, "then": "UNKNOWN"},
         {"case": {"$in": ["$status", _OUTCOMES]}, "then": "$status"},
         {"case": {"$eq": ["$httpStatus", 202]}, "then": "PENDING"},

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
-from camera_logs.coredumps.jobs import cleanup_expired_exports, run_export
+from camera_logs.coredumps.jobs import _reserve, cleanup_expired_exports, run_export
 from camera_logs.coredumps.scanner import CoredumpScanner
 from cryptography.fernet import Fernet
 from pymongo import AsyncMongoClient
@@ -79,6 +79,7 @@ async def verify() -> None:
                 assert sorted(archive.read(name) for name in members) == sorted(payloads.values())
 
             cancelled = await insert_job(repo, uuid4().hex, files)
+            await _reserve(repo, cancelled)
             await repo.db.coredump_exports.update_one({"id": cancelled["id"]}, {"$set": {"status": "CANCELLED"}})
             assert (await run_export(repo, cancelled))["status"] == "CANCELLED"
             claim = await repo.db.coredump_export_reservation_claims.find_one({"id": cancelled["id"]})

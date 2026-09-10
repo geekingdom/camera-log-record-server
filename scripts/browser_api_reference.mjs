@@ -45,8 +45,11 @@ try {
     assert.equal(await page.getByRole("tab", { name: "API 文档", exact: true }).count(), 1, "普通用户必须能访问 API 文档");
     adminMode = true;
     await page.reload();
+    // reload 只等待文档加载；会话恢复异步完成后才会渲染管理员导航。
+    await page.getByRole("tab", { name: "后台配置", exact: true }).waitFor();
     const administratorTabs = await page.getByRole("tablist", { name: "工作空间导航" }).getByRole("tab").allTextContents();
     const settingsIndex = administratorTabs.indexOf("后台配置");
+    assert.notEqual(settingsIndex, -1, "管理员导航必须包含后台配置");
     assert.equal(administratorTabs[settingsIndex + 1], "API 文档", "管理员导航中 API 文档必须紧随后台配置");
     await page.screenshot({ path: `${screenshots}/api-reference-navigation-admin-${width}.png`, fullPage: true, animations: "disabled" });
     adminMode = false;

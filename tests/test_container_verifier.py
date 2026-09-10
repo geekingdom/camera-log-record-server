@@ -1,5 +1,6 @@
 """验收器自身需识别摘要损坏，并接受合法的跨小时半行与文件轮转。"""
 
+import asyncio
 import hashlib
 import io
 import runpy
@@ -58,3 +59,39 @@ def test_realtime_verifier_waits_for_remaining_line_bytes():
     assert verifier["realtime_lines"](chunks) == []
     chunks[("file", "session")][len(first)] = b"st\n"
     assert verifier["realtime_lines"](chunks) == [b"first\n"]
+
+
+def test_resource_cleanup_uses_current_version_and_waits_for_async_deletion(monkeypatch):
+    """验收资源必须在任务收尾后软删除，不能遗留地址占用给后续压测。"""
+    calls = []
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.body
+
+    class Client:
+        async def get(self, path):
+            calls.append(("GET", path))
+            return Response({"version": 4})
+
+        async def delete(self, path):
+            calls.append(("DELETE", path))
+            return Response({"deletionState": "PENDING"})
+
+    async def waited(client, path, predicate, label, timeout):
+        calls.append(("WAIT", path, label, timeout))
+        assert predicate({"deletionState": "DONE", "activeTaskCount": 0})
+
+    monkeypatch.setitem(verifier["delete_resource"].__globals__, "wait_for", waited)
+    asyncio.run(verifier["delete_resource"](Client(), "resource-a", timeout=12))
+    assert calls == [
+        ("GET", "/api/v1/resources/resource-a"),
+        ("DELETE", "/api/v1/resources/resource-a?version=4"),
+        ("WAIT", "/api/v1/resources/resource-a", "资源删除", 12),
+    ]

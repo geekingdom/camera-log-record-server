@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from camera_logs.administration.event_queries import runtime_event_page
+from camera_logs.administration.event_queries import event_page, runtime_event_page
 from camera_logs.common.config import Settings
 from pymongo import AsyncMongoClient
 
@@ -44,6 +44,16 @@ async def main() -> None:
         check(second_page["total"] == 1001 and len(second_page["items"]) == 20, "派生筛选分页或计数不正确")
         empty = next(item for item in debug_items["items"] if item["id"] == "debug-empty")
         check(empty["outcome"] == "SUCCEEDED", "空调试错误被误判为失败")
+        await db.audit.insert_many([
+            {"action": "coredump_export_failed", "targetId": "core-failed", "createdAt": stamp},
+            {"action": "coredump_export_cancelled", "targetId": "core-cancelled", "createdAt": stamp},
+        ])
+        failures = await event_page(db, "audit", {"outcome": "FAILED", "level": "ERROR"}, 1, 10)
+        cancellations = await event_page(db, "audit", {"outcome": "CANCELLED"}, 1, 10)
+        check(failures["total"] == 1 and failures["items"][0]["summary"] == "核心转储导出失败",
+              "核心转储失败的Mongo筛选与展示不一致")
+        check(cancellations["total"] == 1 and cancellations["items"][0]["summary"] == "核心转储导出已取消",
+              "核心转储取消的Mongo筛选与展示不一致")
         print("事件聚合验证通过：随机数据库已完成派生筛选、分页和优先级检查")
     finally:
         await client.drop_database(database_name)

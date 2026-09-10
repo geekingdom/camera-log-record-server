@@ -229,9 +229,25 @@ async def stop_task(client: httpx.AsyncClient, task_id: str, timeout: float = 90
     await wait_for(client, f"/api/v1/operations/{response.json()['id']}", lambda item: item["status"] == "SUCCEEDED", "停止操作", timeout)
 
 
+async def delete_resource(client: httpx.AsyncClient, resource_id: str, timeout: float = 90) -> None:
+    """删除本验收创建的资源并等待异步收尾，避免占用后续合成服务地址。"""
+    response = await client.get(f"/api/v1/resources/{resource_id}")
+    response.raise_for_status()
+    version = response.json()["version"]
+    response = await client.delete(f"/api/v1/resources/{resource_id}?version={version}")
+    response.raise_for_status()
+    await wait_for(
+        client,
+        f"/api/v1/resources/{resource_id}",
+        lambda item: item.get("deletionState") == "DONE" and item.get("activeTaskCount") == 0,
+        "资源删除",
+        timeout,
+    )
+
+
 async def execute(args: argparse.Namespace) -> dict[str, Any]:
     """执行完整验收并在 finally 回收模拟端和通过 API 创建的任务。"""
-    token, task_id, socket = token_from(args.env_file), None, None
+    token, task_id, resource_id, socket = token_from(args.env_file), None, None, None
     simulator = SerialSimulator(args.bind_host)
     await simulator.start()
     headers = {"Authorization": "Bearer " + token}
@@ -261,9 +277,10 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "name": f"容器验收串口资源-{suffix}", "kind": "SERIAL_SERVER", "ip": args.device_host,
             }, headers={"Idempotency-Key": f"container-resource-{suffix}"})
             resource.raise_for_status()
+            resource_id = resource.json()["id"]
             body = {"name": f"容器验收串口-{suffix}", "description": "脚本自动清理的合成任务",
                     "protocol": "TELNET_SERIAL", "ip": args.device_host, "port": simulator.port,
-                    "resourceId": resource.json()["id"], "initialCommands": [{"command": command} for command in INITIAL],
+                    "resourceId": resource_id, "initialCommands": [{"command": command} for command in INITIAL],
                     "scheduledCommands": [{"command": SCHEDULED, "totalExecutions": 2, "intervalSeconds": 1}],
                     "autoStart": True}
             response = await client.post("/api/v1/tasks", json=body, headers={"Idempotency-Key": f"container-verify-{suffix}"})
@@ -355,6 +372,12 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
             except Exception:
                 # 清理失败应保留原始异常；任务 ID 会在结果或异常上下文中供人工处理。
                 logger.exception("验收任务清理失败 task=%s", task_id)
+        if resource_id:
+            try:
+                async with httpx.AsyncClient(base_url=args.url.rstrip("/"), headers=headers, timeout=15) as client:
+                    await delete_resource(client, resource_id, timeout=30)
+            except Exception:
+                logger.exception("验收资源清理失败 resource=%s", resource_id)
         await simulator.close()
 
 

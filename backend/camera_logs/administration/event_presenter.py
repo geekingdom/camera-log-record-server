@@ -23,21 +23,37 @@ ACTION_SUMMARIES = {
     "delete_user": "删除用户", "register_node": "登记节点", "edit_node": "修改节点配置", "delete_node": "删除节点",
     "browser_download_authorization": "授权浏览器下载", "download_content": "下载日志内容",
     "live_subscribe": "订阅实时日志", "job_succeeded": "日志作业完成", "job_failed": "日志作业失败",
+    "create_coredump_export": "创建核心转储导出",
+    "cancel_coredump_export": "取消核心转储导出",
+    "coredump_export_succeeded": "核心转储导出完成",
+    "coredump_export_failed": "核心转储导出失败",
+    "coredump_export_cancelled": "核心转储导出已取消",
+    "download_coredump": "下载核心转储文件",
+    "download_coredump_export": "下载核心转储导出产物",
+    "list_coredumps": "查询核心转储文件",
+    "resource_health_stop:AUTH_FAILED": "设备认证失败，系统停止关联采集",
+    "resource_health_stop:OFFLINE": "设备离线，系统停止关联采集",
+    "resource_health_stop:ERROR": "设备认证检查异常，系统停止关联采集",
 }
 EVENT_SUMMARIES = {
     "CONNECTION_GAP": "采集连接中断", "USER_PAUSED": "任务已暂停",
     "DISK_PRESSURE_CHANGED": "节点磁盘压力变化", "WRITE_PRESSURE_CHANGED": "节点写入压力变化",
     "EXTERNAL_FENCING_CONFIRMED": "确认节点外部隔离", "DEBUG_MODE": "调试模式状态变化",
     "CLOCK_ROLLBACK": "服务器时间回拨",
+    "COREDUMP_MOUNT": "核心转储挂载状态变化",
 }
 _PRESSURE_EVENTS = {"DISK_PRESSURE_CHANGED", "WRITE_PRESSURE_CHANGED"}
 _TERMINAL_OUTCOMES = {"PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"}
+ACTION_OUTCOMES = {"login_failed": "FAILED", "coredump_export_failed": "FAILED",
+                   "coredump_export_cancelled": "CANCELLED"}
 _TARGET_COLLECTIONS = {
     "tasks": {"id": 1, "name": 1, "ip": 1}, "resources": {"id": 1, "name": 1, "ip": 1},
     "templates": {"id": 1, "name": 1}, "users": {"id": 1, "username": 1, "displayName": 1},
     "tokens": {"id": 1, "name": 1},
     "nodes": {"id": 1, "name": 1}, "node_configs": {"id": 1, "name": 1},
     "jobs": {"id": 1, "name": 1, "taskId": 1}, "commands": {"id": 1, "taskId": 1, "kind": 1},
+    "coredump_files": {"id": 1, "name": 1, "resourceId": 1},
+    "coredump_exports": {"id": 1, "filename": 1},
 }
 
 
@@ -45,8 +61,8 @@ def event_outcome(item: dict) -> str:
     """按事件本身的语义推导结果，兼容未持久化展示字段的历史记录。"""
     if item.get("outcome") in _TERMINAL_OUTCOMES:
         return item["outcome"]
-    if item.get("action") == "login_failed":
-        return "FAILED"
+    if item.get("action") in ACTION_OUTCOMES:
+        return ACTION_OUTCOMES[item["action"]]
     if item.get("responseComplete") is False:
         return "UNKNOWN"
     if item.get("status") in _TERMINAL_OUTCOMES:
@@ -149,10 +165,13 @@ async def present_events(db, items: Iterable[dict]) -> list[dict]:
         target_id = str(item.get("targetId") or "")
         if target_id:
             target = next((group[target_id] for group in documents.values() if target_id in group), None)
-            target_name = target.get("name") if target else None
+            target_name = target.get("name") or target.get("filename") if target else None
             if target and target_id in users:
                 target_name = target.get("displayName") or target.get("username") or target_id
             item["targetName"] = item.get("targetName") or target_name or target_id
+            if target and target_id in documents["resources"]:
+                item["resourceId"] = target_id
+                item["deviceIp"] = target.get("ip")
             if target and target.get("taskId") and not item.get("taskName"):
                 linked_task = documents["tasks"].get(str(target["taskId"]))
                 if linked_task:

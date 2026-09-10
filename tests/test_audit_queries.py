@@ -12,6 +12,36 @@ from camera_logs.common.database import now
 pytest_plugins = ("test_api",)
 
 
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+def test_coredump_failure_summary_target_and_filter_agree(client):
+    """核心转储失败审计的中文摘要、导出名称和数据库失败筛选一致。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.coredump_exports.insert_one, {
+        "id": "core-export", "filename": "device-core.zip", "resultPath": "/private/path",
+    })
+    client.portal.call(repo.db.audit.insert_one, {
+        "actor": "bootstrap", "action": "coredump_export_failed", "targetId": "core-export", "createdAt": now(),
+    })
+    response = client.get("/api/v1/audit-events", params={"outcome": "FAILED", "level": "ERROR"})
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["summary"] == "核心转储导出失败"
+    assert item["targetName"] == "device-core.zip"
+    assert "/private/path" not in response.text
+
+
+def test_resource_offline_audit_identifies_device(client):
+    """系统停止动作展示资源名称/IP，成功执行停止与设备离线原因分别表达。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.insert_one, {"id": "offline", "name": "离线设备", "ip": "192.0.2.4"})
+    client.portal.call(repo.db.audit.insert_one, {
+        "actor": "system", "action": "resource_health_stop:OFFLINE", "targetId": "offline", "createdAt": now(),
+    })
+    item = client.get("/api/v1/audit-events").json()["items"][0]
+    assert item["summary"] == "设备离线，系统停止关联采集"
+    assert item["targetName"] == "离线设备" and item["deviceIp"] == "192.0.2.4"
+
+
 @pytest.mark.parametrize("action,summary", [("reveal_token", "查看服务账号口令"), ("rotate_token", "重新生成服务账号口令")])
 def test_service_credential_audit_names_target_without_secret(client, action, summary):
     """口令操作可定位对应账号，但目标补充查询不能把摘要或加密口令带入审计页面。"""

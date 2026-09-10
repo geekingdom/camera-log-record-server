@@ -93,7 +93,7 @@ def test_coredump_guard_claims_resource_once_and_rejects_stale_runtime(tmp_path)
     """真实数据库条件保证首次领取、资源健康与运行代次都在发送前复核。"""
     async def scenario():
         database = AsyncMongoMockClient().camera_logs
-        settings = Settings(log_root=tmp_path, node_id="node-a")
+        settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node-a")
         repo = Repository(database, settings)
         task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
                 "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"}
@@ -119,7 +119,7 @@ def test_coredump_guard_rejects_non_collecting_or_unhealthy_resource(tmp_path):
     """停止中的任务和离线资源均不得刷新租约或进入设备控制队列。"""
     async def scenario():
         database = AsyncMongoMockClient().camera_logs
-        repo = Repository(database, Settings(log_root=tmp_path, node_id="node-a"))
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node-a"))
         task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
                 "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"}
         await database.tasks.insert_one(task)
