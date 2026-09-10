@@ -105,6 +105,8 @@ class Repository:
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
         await self.db.resources.create_index("deletionState")
+        # 健康循环短周期只检索网络资源中已到期的候选项，避免扫描全部资源。
+        await self.db.resources.create_index([("kind", 1), ("deletedAt", 1), ("nextHealthCheckAt", 1)])
         await self.db.authentication_records.create_index("id", unique=True)
         await self.db.authentication_records.create_index(
             [("resourceId", 1), ("result", 1), ("identityChanged", 1), ("createdAt", -1)]

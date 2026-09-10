@@ -58,3 +58,14 @@ async def test_initialize_replaces_legacy_template_name_index_with_owner_name_in
     await database.templates.insert_one({"id": "other-owner-template", "name": "同名", "createdBy": "owner-b"})
     with pytest.raises(DuplicateKeyError):
         await database.templates.insert_one({"id": "duplicate-owner-template", "name": "同名", "createdBy": "owner-a"})
+
+
+async def test_initialize_creates_due_network_health_index(tmp_path):
+    """短周期健康扫描只需按资源类别、软删除状态和到期时间读取候选资源。"""
+    database = AsyncMongoMockClient().db
+    repo = Repository(database, Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+
+    await repo.initialize()
+
+    index = (await database.resources.index_information())["kind_1_deletedAt_1_nextHealthCheckAt_1"]
+    assert index["key"] == [("kind", 1), ("deletedAt", 1), ("nextHealthCheckAt", 1)]

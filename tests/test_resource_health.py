@@ -1,16 +1,19 @@
 """资源周期认证、系统停止标记与目录身份更新的隔离回归。"""
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, timedelta
 
+import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.resources.health import (
     check_resource,
     grant_after_user_authentication,
+    health_loop,
     health_once,
     reconcile_authorized_recoveries,
 )
+from camera_logs.tasks.control import request_control
 from mongomock_motor import AsyncMongoMockClient
 
 
@@ -307,6 +310,123 @@ def test_health_once_limits_parallel_authentication(tmp_path, monkeypatch):
         monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", slow)
         await health_once(repo, concurrency=1)
         assert maximum == 1
+    asyncio.run(scenario())
+
+
+def test_health_loop_rechecks_control_requested_resource_within_short_scan_interval(tmp_path, monkeypatch):
+    """继续操作将资源置为到期后，后台短扫描应立即发现而不等待下一分钟认证周期。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.60",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "deletedAt": None, "nextHealthCheckAt": now() + timedelta(seconds=60),
+        })
+        authenticated = []
+
+        async def verified(**_kwargs):
+            authenticated.append(True)
+            return {"model": "", "subSerialNumber": "", "softwareVersion": "V"}
+
+        sleeps = []
+
+        async def advance(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 1:
+                await repo.db.resources.update_one({"id": "camera"}, {"$set": {"nextHealthCheckAt": now()}})
+                return
+            if len(sleeps) == 3:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", verified)
+        monkeypatch.setattr("camera_logs.resources.health.asyncio.sleep", advance)
+        with pytest.raises(asyncio.CancelledError):
+            await health_loop(repo)
+        assert authenticated == [True]
+        assert sleeps == [1, 1, 1]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("result", ["SUCCESS", "AUTH_FAILED", "OFFLINE"])
+def test_resume_preserves_due_health_check_when_claimed_probe_finishes_later(tmp_path, monkeypatch, result):
+    """恢复后的旧探测无论成败都只释放原租约，不能推迟新的探测请求。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        started_at = now() - timedelta(seconds=2)
+        lease_until = now() + timedelta(seconds=18)
+        await repo.db.resources.insert_one({
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.61",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "deletedAt": None, "healthRevision": 1, "healthLeaseToken": "old-probe",
+            "healthLeaseStartedAt": started_at, "healthLeaseUntil": lease_until,
+            "nextHealthCheckAt": started_at,
+        })
+        await repo.db.tasks.insert_one({
+            "id": "task", "resourceId": "camera", "protocol": "SSH", "status": "PAUSED",
+            "desiredState": "PAUSED", "nodeId": None, "runId": "paused-run", "generation": 3,
+        })
+        await repo.db.runs.insert_one({"id": "paused-run"})
+        await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "paused-run"})
+        snapshot = await repo.db.resources.find_one({"id": "camera"})
+
+        operation = await request_control(
+            repo, "task", "RUNNING", {"id": "bootstrap", "scopes": ["*"], "isAdmin": True},
+            require_paused=True,
+        )
+
+        waiting = await repo.db.tasks.find_one({"id": "task"})
+        requested = await repo.db.resources.find_one({"id": "camera"})
+        assert (operation["action"], waiting["status"], waiting["desiredState"]) == (
+            "resume-wait-device", "WAITING_DEVICE", "RUNNING",
+        )
+        assert requested["nextHealthCheckAt"].replace(tzinfo=UTC) <= now()
+        assert requested["healthLeaseToken"] == "old-probe"
+        assert requested["healthLeaseUntil"].replace(tzinfo=UTC) > now()
+
+        async def verified(**_kwargs):
+            if result == "AUTH_FAILED":
+                raise PermissionError("credentials rejected")
+            if result == "OFFLINE":
+                from camera_logs.resources.authentication import DeviceOfflineError
+                raise DeviceOfflineError("device disconnected")
+            return {"model": "", "subSerialNumber": "", "softwareVersion": "V"}
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", verified)
+        await check_resource(repo, snapshot)
+
+        committed = await repo.db.resources.find_one({"id": "camera"})
+        assert committed["nextHealthCheckAt"].replace(tzinfo=UTC) <= now()
+        assert "healthLeaseToken" not in committed and "healthLeaseUntil" not in committed
+
+    asyncio.run(scenario())
+
+
+def test_late_probe_cannot_release_a_newer_probe_lease(tmp_path, monkeypatch):
+    """旧令牌迟到时必须保留新令牌的租约，避免误开同设备并发认证。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.62",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "deletedAt": None, "healthRevision": 2, "healthLeaseToken": "new-probe",
+            "healthLeaseStartedAt": now(), "healthLeaseUntil": now() + timedelta(seconds=20),
+            "nextHealthCheckAt": now(),
+        })
+        stale = (await repo.db.resources.find_one({"id": "camera"})) | {
+            "healthRevision": 1, "healthLeaseToken": "old-probe",
+        }
+
+        monkeypatch.setattr(
+            "camera_logs.resources.health.authenticate_network_resource",
+            lambda **_kwargs: asyncio.sleep(0, result={"model": "", "subSerialNumber": "", "softwareVersion": "V"}),
+        )
+        await check_resource(repo, stale)
+
+        current = await repo.db.resources.find_one({"id": "camera"})
+        assert (current["healthRevision"], current["healthLeaseToken"]) == (2, "new-probe")
+        assert "healthLeaseUntil" in current
+
     asyncio.run(scenario())
 
 

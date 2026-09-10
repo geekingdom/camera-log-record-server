@@ -124,7 +124,7 @@ POST /api/v1/tasks/{taskId}/pause
 POST /api/v1/tasks/{taskId}/resume
 ```
 
-暂停适用于正在运行的 SSH 或 Telnet 设备任务；Telnet 串口调用 pause/resume 返回 `409`。暂停保留运行与定时预算，关闭连接；恢复重新连接并执行初始化。两种网络设备任务均可启用 `enableCoredumpMonitor`，共享同一资源的唯一监控负责人，暂停或停止时使用 `umount -l` 卸载，恢复后重新挂载。
+暂停适用于正在运行的 SSH 或 Telnet 设备任务；Telnet 串口调用 pause/resume 返回 `409`。暂停保留运行与定时预算，关闭连接；恢复重新连接并执行初始化。海康设备恢复会使下一次新探测成为候选，恢复不主动释放已在途认证的租约；该认证结束后归还自己的租约，再由下一次短周期扫描领取。正常资源仍按 60 秒认证周期检查。两种网络设备任务均可启用 `enableCoredumpMonitor`，共享同一资源的唯一监控负责人，暂停或停止时使用 `umount -l` 卸载，恢复后重新挂载。
 
 ### 控制操作与事务边界
 

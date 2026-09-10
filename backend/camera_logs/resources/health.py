@@ -14,6 +14,8 @@ from camera_logs.tasks.resource_binding import storage_identity
 
 logger = logging.getLogger(__name__)
 HEALTH_INTERVAL_SECONDS = 60
+# 上一轮到期认证完成后，最多等待本间隔再次读取到期项；慢认证批次会顺延下一轮扫描。
+HEALTH_SCAN_INTERVAL_SECONDS = 1
 HEALTH_CONCURRENCY = 8
 
 
@@ -32,6 +34,38 @@ def _result_filter(snapshot):
     if "healthLeaseToken" in snapshot:
         query.update(healthRevision=snapshot["healthRevision"], healthLeaseToken=snapshot["healthLeaseToken"])
     return query
+
+
+async def _resume_requested_after_probe(repo, snapshot, resource, session):
+    """识别探测开始后写入的恢复请求，保留其立即到期语义供下一次认证使用。"""
+    started_at = snapshot.get("healthLeaseStartedAt")
+    next_check_at = resource.get("nextHealthCheckAt")
+    previous_next_check_at = snapshot.get("nextHealthCheckAt")
+    if not started_at or not next_check_at or next_check_at == previous_next_check_at \
+            or _not_after(next_check_at, started_at):
+        return False
+    async for task in repo.db.tasks.find(
+            {"resourceId": snapshot["id"], "status": "WAITING_DEVICE", "desiredState": "RUNNING"},
+            session=session):
+        requested_at = (task.get("resumeWaiting") or {}).get("requestedAt")
+        if requested_at and _not_after(started_at, requested_at):
+            return True
+    return False
+
+
+async def _commit_health_result(repo, snapshot, changes, session):
+    """按租约令牌提交结果；恢复后来到的旧结果只释放自身租约并保留到期请求。"""
+    current = await repo.db.resources.find_one(_result_filter(snapshot), session=session)
+    if current is None:
+        return False
+    if await _resume_requested_after_probe(repo, snapshot, current, session):
+        changes.pop("nextHealthCheckAt", None)
+    update = {"$set": changes, "$inc": {"healthRevision": 1}}
+    if "healthLeaseToken" in snapshot:
+        # 网络请求已经完成，且查询条件仍匹配原令牌时才可交还领取权。
+        update["$unset"] = {"healthLeaseUntil": "", "healthLeaseStartedAt": "", "healthLeaseToken": ""}
+    changed = await repo.db.resources.find_one_and_update(_result_filter(snapshot), update, session=session)
+    return changed is not None
 
 
 async def check_resource(repo, snapshot):
@@ -57,13 +91,13 @@ async def _apply_failure(repo, snapshot, status):
     timestamp = now()
 
     async def commit(session):
-        changed = await repo.db.resources.find_one_and_update(
-            _result_filter(snapshot),
-            {"$set": {"healthStatus": status, "healthCheckedAt": timestamp,
-                      "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS)},
-             "$inc": {"healthRevision": 1}}, session=session,
+        changed = await _commit_health_result(
+            repo, snapshot,
+            {"healthStatus": status, "healthCheckedAt": timestamp,
+             "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS)},
+            session,
         )
-        if changed is None:
+        if not changed:
             return False
         await record_authentication(repo, snapshot, source="PERIODIC", result=status, before=snapshot,
                                     after=snapshot, message=status, completed_at=timestamp, session=session)
@@ -122,16 +156,15 @@ async def _apply_success(repo, snapshot, metadata):
     """认证成功更新健康；仅 OFFLINE 后的同设备系统停止可自动取得恢复资格。"""
     timestamp = now()
     async def commit(session):
-        changed = await repo.db.resources.find_one_and_update(
-            _result_filter(snapshot),
-            {"$set": {"healthStatus": "ONLINE", "healthCheckedAt": timestamp,
-                      "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS),
-                      **({**metadata, "authenticatedAt": timestamp, "updatedAt": timestamp}
-                         if any(snapshot.get(key) != value for key, value in metadata.items()) else {})},
-             "$inc": {"healthRevision": 1}},
-            session=session,
+        changed = await _commit_health_result(
+            repo, snapshot,
+            {"healthStatus": "ONLINE", "healthCheckedAt": timestamp,
+             "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS),
+             **({**metadata, "authenticatedAt": timestamp, "updatedAt": timestamp}
+                if any(snapshot.get(key) != value for key, value in metadata.items()) else {})},
+            session,
         )
-        if changed is None:
+        if not changed:
             return False
         await record_authentication(repo, snapshot, source="PERIODIC", result="SUCCESS", before=snapshot,
                                     after=snapshot | metadata, completed_at=timestamp, session=session)
@@ -292,7 +325,7 @@ async def health_once(repo, *, concurrency=HEALTH_CONCURRENCY):
 
 
 async def health_loop(repo):
-    """独立后台循环；异常仅记录本轮，调度器不会因设备 HTTP 慢请求被阻塞。"""
+    """短周期扫描到期资源；单个资源仍按认证周期和租约控制实际网络请求。"""
     while True:
         try:
             await health_once(repo)
@@ -300,4 +333,4 @@ async def health_loop(repo):
             raise
         except Exception:
             logger.exception("资源周期认证轮次失败")
-        await asyncio.sleep(HEALTH_INTERVAL_SECONDS)
+        await asyncio.sleep(HEALTH_SCAN_INTERVAL_SECONDS)
