@@ -34,7 +34,7 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 
 历史无catalog引用的过期RESERVED/PUBLISHED声明已由`coredumps/snapshot_orphans.py`回收：RECLAIMING保留失败进度，确认无引用后仅删除当前节点fileId/version/token能证明归属的私有core/partial，再幂等归还配额；异常单项记录日志，其它孤儿继续。新版声明保存version直查两个路径，旧声明流式扫描严格匹配；非法标识和符号链接保留不释放。节点/状态/到期及catalog token引用索引避免历史数据全扫描。此改进真实Mongo及远端CI `34442294566`均已通过。
 
-当前补充独立Ubuntu NFS验收：`scripts/verify_nfs_service.py`复用生产导出配置，使用本次专属临时路径，校验NFSv3/v4挂载、双路64MiB内容摘要、UID/GID映射和清理。CI新增`nfs-smoke`，真实Linux执行尚待新提交验证；本机不安装NFS，也不清理真实采集数据。双挂载点位于同一Linux主机，不能替代海康固件、跨服务器或持续大文件容量验收。
+独立Ubuntu NFS验收：`66c3dec`的CI `34443227583`中`nfs-smoke`已成功；主代理收取JSON确认NFSv3/v4父目录挂载、双路各67108864字节摘要一致、10001:10001映射、重复配置及重挂成功，清理`rootRemoved/exportRemoved/exportsRefreshed=true`、`preservedPaths/errors=[]`。`scripts/verify_nfs_service.py`正补齐与设备一致的直接IP子目录挂载，待新提交复验。本机不安装NFS、不清理真实采集数据；同机双挂载不能替代海康固件、跨服务器或持续大文件容量验收。
 
 历史验收补齐：`e60b85b` 的 Linux CI 34346496395 已核实六作业全部成功，中文截图已收取。该结果不代替本轮新界面测试。
 
@@ -52,7 +52,7 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 
 | ID / 最终需求 | 实现位置与状态 | 验证证据 | 未完成部分 | 下一步 |
 | --- | --- | --- | --- | --- |
-| R42 海康 SSH 可选 coredump、自动 ASH/NFS 挂载及每分钟检查 | `collection/coredump_monitor.py`、`collector.py`、`runtime.py`，原发送队列/会话取消；同资源运行租约、缺节点NFS配置独立报错；TaskEditor开关；Docker/原生宿主机NFS脚本固定星号导出 | 主代理856项全量通过；部署/监控定向24项通过，旧CIDR忽略、星号导出及同路径bind均覆盖 | 真实Linux安装/设备mount输出、跨节点物理隔离及大文件NFS接收未验收 | 目标Linux验证自动挂载、丢失恢复及采集不受失败影响 |
+| R42 海康 SSH 可选 coredump、自动 ASH/NFS 挂载及每分钟检查 | `collection/coredump_monitor.py`、`collector.py`、`runtime.py`，原发送队列/会话取消；同资源运行租约、缺节点NFS配置独立报错；TaskEditor开关；Docker/原生宿主机NFS脚本固定星号导出 | 主代理890项全量；Ubuntu CI34443227583真实内核NFS安装、v3/v4父目录挂载、UID映射及清理通过；旧CIDR忽略及同路径bind测试通过 | 直接IP子目录挂载待补验；真实海康mount输出、跨节点物理隔离及大文件持续接收未验收 | 先补设备式挂载，再验证真实设备自动挂载、丢失恢复及采集不受失败影响 |
 | R43 coredump多设备大文件接收、查询、批量下载；日志多人稳定下载 | `coredumps/`扫描、冻结、配额、导出；`snapshot_readers.py`读者委托、`snapshot_lifecycle.py`清理恢复、`snapshot_orphans.py`历史无引用声明回收；平台/节点Range与原生票据 | 主代理878项全量；真实Mongo孤儿回收/新token及源保护/配额一次释放、1000历史记录仅读2候选；读者12轮竞争复验。前一提交CI六作业通过；此前2GiB×2 HTTP+8路Range证据保留 | 真实NFS并发写入、跨机大文件导出、全部崩溃/断电窗口未验收；损坏声明保持不自动删除；接收时间为首次扫描观测时间 | 跟进新CI，在目标Linux验证NFS及跨节点长时间混合负载 |
 | R44 海康资源周期认证、设备变更后更新身份及目录，失败停止采集/NFS | `resources/health.py`、资源API及调度：60秒/8并发、资源探测租约与revision；失败标记系统恢复资格，只有用户保存认证可授权恢复；换身份受控新运行 | 主代理856项全量含相关分支；独立Mongo恢复消费与手动STOP竞争通过并清理 | 多API进程长期运行及真实换机/离线/节点收尾联调未验收 | 在目标设备验证 |
 | R45 资源编辑回填、类型/IP只读，名称/HTTP认证可编辑 | `ResourceEditor.vue`首次挂载immediate回填，类型/IP只读，空密码保留 | `browser_resource_prefill.mjs`桌面1440及手机390字段/宽度断言通过；主代理已查看390稳定截图，无超宽 | 真实设备编辑认证与任务恢复端到端未验收 | 目标设备联调 |

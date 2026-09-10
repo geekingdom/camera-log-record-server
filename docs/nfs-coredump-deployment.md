@@ -27,7 +27,7 @@ sudo exportfs -v
 find /srv/camera-logs/nfs-coredump -maxdepth 2 -type d
 ```
 
-设备设置中的 NFS 地址填写 `NFS_SERVER_IP`，远端路径填写 `NFS_ROOT`。Worker 运行时创建的是 `NFS_ROOT/<设备IP>/`，不需要把容器内路径换算成其它路径。NFS 挂载、设备网络路由和真实设备写入未在自动化测试中执行；上线前应验证一台设备的 coredump，再确认目录属主、容量与文件保留策略。
+部署导出的是父目录 `NFS_ROOT`；Worker 运行时创建 `NFS_ROOT/<设备IP>/`，并将 `NFS_SERVER_IP:NFS_ROOT/<设备IP>` 作为 `gdbcfg --nfsmount` 的目标。手工核对设备挂载时也应使用完整设备子目录，不需要把容器内路径换算成其它路径。隔离Ubuntu已通过真实内核NFS父目录挂载和双路写入；设备子目录直接挂载的补充验证见下文。实际海康设备网络路由和固件写入仍需上线前验证，再确认目录属主、容量与文件保留策略。
 
 ## 下载期间的副本保留
 

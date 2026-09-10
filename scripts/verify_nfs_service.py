@@ -212,9 +212,18 @@ def cleanup(state: VerificationState) -> dict[str, object]:
             "rootRemoved": root_removed, "preservedPaths": preserved_paths, "errors": errors}
 
 
-def mount_export(server_ip: str, root: Path, mount: MountPoint) -> None:
-    """用指定 NFS 协议版本挂载本机导出，成功后立即登记清理责任。"""
-    run(["mount", "-t", "nfs", "-o", f"vers={mount.version}", f"{server_ip}:{root}", str(mount.path)])
+def prepare_device_directories(root: Path, device_ips: list[str]) -> None:
+    """预建 Worker 所有的设备目录，使 all_squash 客户端可直接挂载并写入自身目录。"""
+    for device_ip in device_ips:
+        directory = root / device_ip
+        directory.mkdir(exist_ok=True)
+        os.chown(directory, 10001, 10001)
+
+
+def mount_export(server_ip: str, root: Path, device_ip: str, mount: MountPoint) -> None:
+    """用指定协议直接挂载设备 IP 子目录，保持与 Worker 的单设备目录契约一致。"""
+    export_path = root / device_ip
+    run(["mount", "-t", "nfs", "-o", f"vers={mount.version}", f"{server_ip}:{export_path}", str(mount.path)])
     mount.mounted = True
 
 
@@ -285,7 +294,7 @@ def write_payload(path: Path, size_bytes: int, device_ip: str) -> str:
 
 def verify_payload(mount: MountPoint, root: Path, device_ip: str, size_bytes: int) -> dict[str, object]:
     """对客户端写入、宿主路径和客户端回读三处逐项比较内容、长度及所有权。"""
-    client_path = mount.path / device_ip / "payload.bin"
+    client_path = mount.path / "payload.bin"
     server_path = root / device_ip / "payload.bin"
     client_digest = write_payload(client_path, size_bytes, device_ip)
     server_stat = server_path.stat()
@@ -295,7 +304,7 @@ def verify_payload(mount: MountPoint, root: Path, device_ip: str, size_bytes: in
             or len({client_digest, server_digest, read_digest}) != 1):
         raise RuntimeError(f"NFS 内容、长度或 UID/GID 校验失败: {device_ip}")
     return {"deviceIp": device_ip, "bytes": size_bytes, "uid": server_stat.st_uid, "gid": server_stat.st_gid,
-            "sha256": client_digest, "nfsVersion": mount.version}
+            "sha256": client_digest, "nfsVersion": mount.version, "mountTarget": str(root / device_ip)}
 
 
 def execute(server_ip: str, size_bytes: int) -> dict[str, object]:
@@ -313,10 +322,11 @@ def execute(server_ip: str, size_bytes: int) -> dict[str, object]:
     failure: Exception | None = None
     try:
         configure_export(root, server_ip, state.export_file)
-        for mount in mounts:
-            mount_export(server_ip, root, mount)
-            verify_mount_protocol(mount)
         devices = [(mounts[0], "192.0.2.101"), (mounts[1], "192.0.2.102")]
+        prepare_device_directories(root, [device_ip for _mount, device_ip in devices])
+        for mount, device_ip in devices:
+            mount_export(server_ip, root, device_ip, mount)
+            verify_mount_protocol(mount)
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             payloads = list(pool.map(lambda pair: verify_payload(pair[0], root, pair[1], size_bytes), devices))
         for mount in mounts:
@@ -330,9 +340,9 @@ def execute(server_ip: str, size_bytes: int) -> dict[str, object]:
             if mount.mounted:
                 raise RuntimeError(f"重配前客户端目录仍处于挂载状态: {mount.path}")
         configure_export(root, server_ip, state.export_file)
-        mount_export(server_ip, root, mounts[0])
+        mount_export(server_ip, root, "192.0.2.101", mounts[0])
         verify_mount_protocol(mounts[0])
-        if sha256_file(mounts[0].path / "192.0.2.101" / "payload.bin") != payloads[0]["sha256"]:
+        if sha256_file(mounts[0].path / "payload.bin") != payloads[0]["sha256"]:
             raise RuntimeError("重复配置后的 NFSv3 挂载读取摘要不一致")
         result.update({"passed": True, "payloads": payloads, "reconfigureMount": "NFSv3"})
     except Exception as error:  # noqa: BLE001 - 必须在 finally 后携带清理状态报告原始失败。

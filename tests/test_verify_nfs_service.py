@@ -63,6 +63,36 @@ def test_parse_args_accepts_explicit_server_and_human_bytes():
     assert verify.parse_args([]).bytes == 64 * 1024 * 1024
 
 
+def test_mount_export_uses_the_device_subdirectory(monkeypatch, tmp_path):
+    """验证客户端必须直接挂载设备 IP 子目录，与 Worker 的 NFS 契约一致。"""
+    commands = []
+    mount = verify.MountPoint(tmp_path / "client", 3)
+    monkeypatch.setattr(verify, "run", lambda command, **_kwargs: commands.append(command))
+
+    verify.mount_export("192.0.2.40", Path("/var/tmp/camera-logs-nfs-verify-root"), "192.0.2.101", mount)
+
+    assert commands == [[
+        "mount", "-t", "nfs", "-o", "vers=3",
+        "192.0.2.40:/var/tmp/camera-logs-nfs-verify-root/192.0.2.101", str(mount.path),
+    ]]
+    assert mount.mounted
+
+
+def test_prepare_device_directories_creates_worker_owned_ip_directories(tmp_path, monkeypatch):
+    """服务端先创建并赋权设备 IP 目录，保证 all_squash 客户端可以直接写入。"""
+    ownership = []
+    monkeypatch.setattr(verify.os, "chown", lambda path, uid, gid: ownership.append((path, uid, gid)))
+    root = tmp_path / "camera-logs-nfs-verify-root"
+    root.mkdir()
+
+    verify.prepare_device_directories(root, ["192.0.2.101", "192.0.2.102"])
+
+    assert (root / "192.0.2.101").is_dir() and (root / "192.0.2.102").is_dir()
+    assert ownership == [
+        (root / "192.0.2.101", 10001, 10001), (root / "192.0.2.102", 10001, 10001),
+    ]
+
+
 def test_cleanup_unmounts_before_removing_export_and_roots(tmp_path, monkeypatch):
     """正常收尾先卸载所有客户端，再刷新导出并删除本次临时目录。"""
     root = tmp_path / "camera-logs-nfs-verify-root"
