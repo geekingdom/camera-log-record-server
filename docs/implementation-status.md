@@ -6,11 +6,13 @@
 
 测试环境纠正：项目 .venv 已安装 pytest，前几轮仅使用系统 Python 的失败不能作为无法测试的依据。新增目录测试原本有错误预期，运行后已修正并完成定向回归。
 
-最新主代理业务回归938 passed（77.96秒）及新增core验证器15项单独回归通过，合计953项；Ruff全量通过。前端85项及生产构建沿用本轮此前结果，后续未修改前端。R51已在35真实reboot中验证OFFLINE后自动恢复COLLECTING，新运行/会话、合法多任务socket和专用任务收尾均通过。35真实core经本机Docker NFSv3接收，首轮页面稳定状态/隐藏flag/导出及并发下载通过；第二轮默认10秒扫描预先接入后发现增长中的新core，完整下载和64KiB Range源摘要一致。该单设备约6.73MB实测不替代长时间大文件容量验收。
+最新主代理后端全量957 passed（100.00秒），包含第三方core权限、Telnet重连和分包前缀新增回归；Ruff全量通过。前端85项及生产构建沿用本轮此前结果，后续未修改前端。R51已在35真实reboot中验证OFFLINE后自动恢复COLLECTING，新运行/会话、合法多任务socket和专用任务收尾均通过。35真实core经本机Docker NFSv3接收，首轮页面稳定状态/隐藏flag/导出及并发下载通过；第二轮默认10秒扫描预先接入后发现增长中的新core，完整下载和64KiB Range源摘要一致。该单设备约6.73MB实测不替代长时间大文件容量验收。
 
-核对日期：2026-09-10；最新已核实远端验收基线 `aa86ce6`，CI `34460799565`七作业成功（含原生部署、Docker部署、NFS及前端浏览器）；主代理收取并查看桌面工作台和390宽普通用户服务账号截图。R51已在无活动采集/作业时加载本机API/Worker，健康200；包含既有导出清理和R49/R50修复。目标生产服务器仍需更新，不能把本机生效当作目标部署完成。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
+核对日期：2026-09-10；最新已核实远端验收基线 `19e5041`，CI `34462650272`七作业成功（含原生部署、Docker部署、NFS及前端浏览器）；此前`aa86ce6`七作业也已通过，主代理收取并查看其桌面工作台和390宽普通用户服务账号截图。R51已在无活动采集/作业时加载本机API/Worker，健康200；包含既有导出清理和R49/R50修复。目标生产服务器仍需更新，不能把本机生效当作目标部署完成。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
 
 ## 当前任务与恢复
+
+当前连接及分包回归：新增`test_telnet_runtime_reconnect.py`，真实本地TCP/Telnet在默认十秒无正文后关闭旧客户端、重连并再次初始化；两会话各发送一次定时命令，同run预算恰为2，最终两条服务端连接均收到EOF。新增`test_line_prefix.py`的ANSI CSI/OSC和CRLF跨包用例，精确比对字节、重复正文及每行一个上海时间前缀。主代理连接/存储/归档联合43项通过，Ruff全量通过；未修改生产代码、未操作真实设备。该Telnet测试不覆盖登录认证，预算使用MongoMock事务回调，仅证明运行内续计，不替代真实Mongo原子事务证据；保活drain故障的运行时集成验证仍待补充。
 
 最新R52：Coredump查询与下载明确纳入第三方服务账号默认权限。已核实`users/sessions.py`的默认logs:read/logs:download经绑定用户实时继承，现有普通账号无需迁移或重新创建；资源页面入口无管理员/创建者限制。本次明确权限标签、新建服务账号提示和站内API指南，并新增普通Bearer及浏览器票据ASGI鉴权回归，节点下载使用替身，仅证明权限与Range参数转发，不替代真实文件下载摘要证据。相关28项、前端85项及生产构建通过；开发页面mock浏览器1440/390新建账号说明与溢出断言通过，主代理已查看截图。无设备或真实用户操作；既有开发服务保持运行，后端新指南需下次加载源码生效，权限本身已可用。
 
@@ -79,9 +81,9 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 | R04 相同设备身份同父目录；软删除保留日志 | `tasks/resource_binding.py`、`resources/lifecycle.py`、`logs/storage.py`，已实现 | 资源/存储测试 | 跨节点仅相对路径一致，非共享物理盘 | 跨节点目录验证 |
 | R05 表单、初始化排序、正整数定时参数、IME、密码保留 | `common/models.py`、`TaskEditor.vue`、`CommandEditor.vue`，已实现 | 模型/表单测试，历史浏览器冒烟 | 二次确认见 R16 | 统一交互验收 |
 | R06 模板 CRUD/版本/独立副本与计数 | 模板模块、命令编辑器，已实现 | 模板/任务测试 | 目标服务器待部署；软删同创建者名称继续占用 | 等待手动继续后验证目标部署 |
-| R07 逐路隔离、有序写入、重复正文保留 | `collection/collector.py`、`collection/runtime.py`、`logs/storage.py`，部分验收 | 存储/故障测试，短时摘要报告 | 500 路全天未证明；SSH PTY 不证明跨独立流时序 | 独立源序号验收 |
-| R08 SSH 按凭据连接、不以变化指纹拦截、保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`；`verify_ssh_lifecycle.py`显式ID、端点分页预检及finally停止 | 本地真实AsyncSSH仅响应保活，默认10秒IDLE_TIMEOUT且服务端确认连接关闭；34实机暂停12秒socket保持0，恢复同run新session/socket1，最终STOPPED且socket0；35用户任务保持COLLECTING | 35暂停恢复及真实设备空闲故障、集群迁移未验收；不得为验收打断用户正在运行的35任务 | 继续故障与集群验收，35生命周期在空闲窗口验证 |
-| R09 初始化/定时队列、断线续计、重启归零、发送预算 | `commands/reservation.py`、`collection/runtime.py`，数据库原子性已实现 | 本轮重读事务源码；祖先提交 `92e01d6`；真实 Mongo 验证脚本 | socket 不属于数据库事务，设备执行结果仍可未知 | 保持 UNKNOWN、不补发；勿重复实现预算事务 |
+| R07 逐路隔离、有序写入、重复正文保留及行首上海时间 | `collection/collector.py`、`collection/runtime.py`、`logs/storage.py`、`collection/line_prefix.py`，部分验收 | 存储/故障测试及短时摘要报告；ANSI CSI/OSC、CRLF跨包精确字节与重复正文回归，连接/存储/归档联合43项通过 | 500 路全天未证明；SSH PTY 不证明跨独立流时序 | 独立源序号验收 |
+| R08 SSH 按凭据连接、不以变化指纹拦截，各协议保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`；`verify_ssh_lifecycle.py`显式ID、端点分页预检及finally停止 | 本地真实AsyncSSH仅保活时触发默认10秒IDLE_TIMEOUT；真实TCP/Telnet NOP不算正文，旧客户端关闭后重连初始化，停止后两连接EOF；34实机暂停12秒socket保持0，恢复同run新session/socket1，最终STOPPED且socket0 | 保活drain故障运行时集成、35暂停恢复及真实设备空闲故障、集群迁移未验收；Telnet用例未覆盖登录认证 | 补保活故障集成，继续集群验收；实机生命周期仅在空闲窗口验证 |
+| R09 初始化/定时队列、断线续计、重启归零、发送预算 | `commands/reservation.py`、`collection/runtime.py`，数据库原子性已实现 | 祖先提交`92e01d6`及真实Mongo验证；新增真实Telnet重连测试同run两session各执行一次、预算2，MongoMock回调仅证明续计语义 | socket 不属于数据库事务，设备执行结果仍可未知 | 保持 UNKNOWN、不补发；勿重复实现预算事务 |
 | R10 手动优先、不跨会话、断线拒绝与审计 | `commands/manual_submission.py` 将入队、幂等映射和审计同事务提交；已加载本机API | 历史真实副本集证明审计失败/取消整体回滚、同键并发返回同一命令、提交确认丢失后只读恢复、停止后同键重放；临时数据已清理 | 最终 DB 检查至 socket 写入仍需物理隔离；历史 PENDING 仅重放，不补造审计 | 继续 R11 接管隔离 |
 | R11 幂等启停、受控重启、租约/代次隔离 | `tasks/editing.py` 编辑、资源声明、停止操作、审计同事务，安全排队编辑保留RUNNING；Worker已知失败保持STOPPED | `175b938` Linux CI 34328314712通过；真实副本集回滚/竞争/确认丢失与排队调度验证；本机API/Worker已更新，34实机暂停恢复停止通过 | 跨节点物理隔离未证明 | 继续旧实例接管隔离，目标Worker部署需受控维护 |
 | R12 PSH 密文、ls 探测、模拟口令、失败仅影响当次 | `collection/psh_*.py`、`collector.py`，已部署本机 | 恢复/预算测试及历史实机记录；本轮未发送真实debug | 设备仍处于 Password 时不能发送业务命令；真实解密接口与 10003 切换未验证 | 在具备有效挑战码与接口条件后专门验证，不反复试错 |
