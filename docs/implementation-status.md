@@ -1,6 +1,6 @@
 # 当前状态总表
 
-核对日期：2026-09-10。本阶段基于 `879796b` 实现，交付提交以包含本表的最新 Git 提交为准；以下源码和测试结论只代表注明的验证范围，不代表目标生产服务器已部署。先前阶段与实验描述已移至 [本轮前历史快照](history/2026-09-10-before-node-dashboard.md)。
+核对日期：2026-09-10。本阶段代码已提交为 `e496efb`，其Linux CI七项作业全部通过；后续总表更新以Git记录为准。以下源码和测试结论只代表注明的验证范围，不代表目标生产服务器已部署。先前阶段与实验描述已移至 [本轮前历史快照](history/2026-09-10-before-node-dashboard.md)。
 
 ## 当前目标
 
@@ -14,7 +14,7 @@
 - R58 已实现CREATE、EDIT、MANUAL、PERIODIC认证历史，支持结果、带时区时间范围、身份变更组合筛选。首次认证不算更换，失败不算变更；手动探测历史保存实际返回身份但不直接修改资源。部署前未记录的历史不推测补造。
 - R59 默认扫描5秒已改，10秒源文件稳定观察窗口保留；已完成源码默认值检查。此前真实设备10秒扫描报告保持原口径，不当作5秒实机证据。
 - R60–R61 已接入真实CPU/内存/网卡差分遥测、健康原因、动态节点成本排序及响应式看板。首样本/异常/过期值为未知。压力只限制新任务，不主动迁移已有采集。Docker只读主机proc挂载已配置；Docker Desktop主机范围为Linux虚拟机。
-- 本机两节点误显示失联已定位为NodeList固定创建时间，卡片互换由heartbeat排序造成。已改每秒刷新判断时间和稳定ID排序，浏览器模拟驻留后新心跳及反序响应均通过。只读核验两Worker心跳均不足1秒，接口健康200；NFS验证节点accepting=false为预期配置。
+- 清理前本机两节点误显示失联已定位为NodeList固定创建时间，卡片互换由heartbeat排序造成。已改每秒刷新判断时间和稳定ID排序，浏览器模拟驻留后新心跳及反序响应均通过。清理前只读核验两Worker心跳均不足1秒，接口健康200；当时NFS验证节点accepting=false为预期配置。
 - 本机清理前，两节点真实Mongo/API均验证HOST/OK及非空CPU、内存、上下行，1440/390看板通过。随后用户明确授权删除旧服务和旧数据：旧开发库、日志、实验产物、两个NFS验证容器与专属卷已删除，API/Worker与认证Mongo重新初始化。当前仅`local-dev`节点，HEALTHY且指标非空；8000/8001健康200，5173代理管理员登录200，业务资源/任务为空。清理归属与范围见[开发环境重建记录](history/2026-09-10-development-reset.md)。标准Dockerfile基础镜像拉取仍遇Docker Hub EOF，本机缓存镜像验证不代表标准完整镜像构建成功。
 - R62 已实现：A使用`deploy-all.sh --multi-host --init`生成跨机配置，正常重跑仍用`deploy-all.sh`；B使用`deploy-worker.sh`，只启动独立Worker。普通完整部署统一为认证Mongo，`.env`可自定义`MONGO_ROOT_PASSWORD`，用户名和密码自动URL编码；不保留旧无认证分支或独立公开cluster入口。密码与持久副本集密钥不会被重跑重置，密钥不一致拒绝。原生单成员公告地址迁移也有定向测试。真实Linux双机网络尚待验收。
 - R63 已实现默认资源页、URL hash保留当前工作区、退出重置资源页及无权限页面回退；12项生产浏览器脚本联合通过，含刷新后任务页保留、资源页第2页按钮刷新、无权限回退与1440/390截图。
@@ -22,6 +22,8 @@
 ## 验证与边界
 
 最终后端全量1050项通过（106.60秒），部署专项57项通过；Ruff、Bash语法和diff检查通过。前端91项与生产构建通过，导航变更后的12项生产浏览器联合回归通过。清理前真实本机节点接口驱动的1440/390看板截图已检查，驻留10秒和两次刷新均保持在线及稳定顺序，无水平溢出；此只读浏览器验证仅替换会话身份恢复接口，节点数据全部来自真实API。清理后独立验证真实管理员经5173代理登录成功。
+
+提交`e496efb`的[CI 34479515360](https://github.com/geekingdom/camera-log-record-server/actions/runs/34479515360)已于2026-09-10完成：backend、frontend、container-smoke、component-smoke、native-smoke、nfs-smoke、commit-messages七项全部成功。真实Linux标准镜像构建、认证完整部署及重复部署、独立组件和Ubuntu原生部署通过；正式代理采集、管理员/会话、真实副本集事务、Coredump与12项生产浏览器联合验证通过。8路60秒协议采集的逐路归档校验全部verified，`cleanupVerified=true`、`passed=true`，隔离容器与测试卷清理成功。此短时测试不证明500路全天容量或独立两台服务器的路由、防火墙和持续运行。
 
 隔离Docker缓存`mongo:7`实测三成员空卷认证初始化、特殊字符密码、错误密码拒绝、重复初始化、候选副本集key不一致拒绝均通过；最终统一基础Compose配置展开通过。临时容器、网络与专属卷已回收。构建上下文5项必需文件、19项敏感排除通过。此证据不代表Linux完整平台A和Worker B的防火墙、路由与跨机持续运行验收。
 
@@ -38,7 +40,7 @@
 | ID / 最终需求 | 实现位置与状态 | 验证证据 | 未完成部分 | 下一步 |
 | --- | --- | --- | --- | --- |
 | R63 登录默认资源页、刷新保留原页 | `app/App.vue`hash导航与会话权限回退，已实现 | `browser_default_resource_navigation.mjs`及12项生产浏览器联合通过；1440/390截图 | 目标静态页面待部署 | 更新前端后刷新一次加载新版本 |
-| R62 A完整平台/B独立Worker跨主机部署，自定义Mongo密码 | `deploy-all.sh`、`deploy-worker.sh`、`scripts/deploy_cluster.py`内部预检、基础Compose默认认证及原生公告地址迁移，已实现 | 部署57项；既有入口真实初始化；容器字面密码、三成员认证与重复运行/错误key拒绝；原生43项 | 完整Linux双机网络、防火墙与持续运行未验收 | 按部署文档在A/B配置可达IP、同库名及共享凭据后验收 |
+| R62 A完整平台/B独立Worker跨主机部署，自定义Mongo密码 | `deploy-all.sh`、`deploy-worker.sh`、`scripts/deploy_cluster.py`内部预检、基础Compose默认认证及原生公告地址迁移，已实现 | 部署57项；字面密码、三成员认证与错误key拒绝；原生43项；CI34479515360真实Linux完整/重复/独立组件/原生部署通过 | 独立Linux双机网络、防火墙与持续运行未验收 | 按部署文档在A/B配置可达IP、同库名及共享凭据后验收 |
 | R61 新任务按最佳Worker动态分配 | `node/health.py`、`tasks/scheduler.py`、`tasks/claim.py`，已实现 | rank/claim/schedule_once回归；真实Mongo 500任务/8节点3532.817ms、每节点最多63 | 真实跨机持续混合负载未验收 | 更新API/Worker后目标集群验收 |
 | R60 节点CPU/内存/上下行/健康看板及稳定显示 | `node/telemetry.py`、`node/worker.py`、`commands/api.py`、`nodes/NodeList.vue`、Docker只读proc，已实现并加载本机服务 | 61项相邻回归；1440/390模拟及真实节点API看板；清理前两节点、清理后local-dev均HOST/OK且指标非空；驻留刷新顺序稳定 | 目标Linux指标范围待验收；Docker Desktop展示Linux虚拟机指标 | 更新目标API/Worker和前端后核对指标 |
 | R59 Coredump默认5秒扫描 | `common/config.py:coredump_scan_interval_seconds`默认5，Worker单扫描任务 | 默认值5/显式覆盖12核验；相邻扫描回归 | 5秒真实设备发现延迟未实测 | 目标Worker更新；保持10秒源稳定观察 |
