@@ -12,7 +12,7 @@
 
 ## 当前任务与恢复
 
-当前连接及分包回归：新增`test_telnet_runtime_reconnect.py`，真实本地TCP/Telnet在默认十秒无正文后关闭旧客户端、重连并再次初始化；两会话各发送一次定时命令，同run预算恰为2，最终两条服务端连接均收到EOF。新增`test_line_prefix.py`的ANSI CSI/OSC和CRLF跨包用例，精确比对字节、重复正文及每行一个上海时间前缀。主代理连接/存储/归档联合43项通过，Ruff全量通过；未修改生产代码、未操作真实设备。该Telnet测试不覆盖登录认证，预算使用MongoMock事务回调，仅证明运行内续计，不替代真实Mongo原子事务证据；保活drain故障的运行时集成验证仍待补充。
+当前连接及分包回归：新增`test_telnet_runtime_reconnect.py`，真实本地TCP/Telnet在默认十秒无正文后关闭旧客户端、重连并再次初始化；两会话各发送一次定时命令，同run预算恰为2，最终两条服务端连接均收到EOF。新增`test_line_prefix.py`的ANSI CSI/OSC和CRLF跨包用例，精确比对字节、重复正文及每行一个上海时间前缀。主代理连接/存储/归档联合43项及全量957项通过，已提交`d2f5897`。随后新增`test_telnet_heartbeat_failures.py`两项：保活已阻塞于drain时可取消关闭；首个真实Telnet连接注入drain异常后记录错误与CONNECTION_GAP，状态经RECONNECTING进入第二次COLLECTING，停止后两连接EOF。相邻连接16项通过，Ruff全量通过，独立审查无阻塞问题。未修改生产代码、未操作真实设备。该Telnet测试不覆盖登录认证，故障由注入模拟，预算使用MongoMock事务回调，仅证明运行内续计，不替代真实Mongo原子事务、真实网络长期背压或集群容量证据。
 
 最新R52：Coredump查询与下载明确纳入第三方服务账号默认权限。已核实`users/sessions.py`的默认logs:read/logs:download经绑定用户实时继承，现有普通账号无需迁移或重新创建；资源页面入口无管理员/创建者限制。本次明确权限标签、新建服务账号提示和站内API指南，并新增普通Bearer及浏览器票据ASGI鉴权回归，节点下载使用替身，仅证明权限与Range参数转发，不替代真实文件下载摘要证据。相关28项、前端85项及生产构建通过；开发页面mock浏览器1440/390新建账号说明与溢出断言通过，主代理已查看截图。无设备或真实用户操作；既有开发服务保持运行，后端新指南需下次加载源码生效，权限本身已可用。
 
@@ -82,7 +82,7 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 | R05 表单、初始化排序、正整数定时参数、IME、密码保留 | `common/models.py`、`TaskEditor.vue`、`CommandEditor.vue`，已实现 | 模型/表单测试，历史浏览器冒烟 | 二次确认见 R16 | 统一交互验收 |
 | R06 模板 CRUD/版本/独立副本与计数 | 模板模块、命令编辑器，已实现 | 模板/任务测试 | 目标服务器待部署；软删同创建者名称继续占用 | 等待手动继续后验证目标部署 |
 | R07 逐路隔离、有序写入、重复正文保留及行首上海时间 | `collection/collector.py`、`collection/runtime.py`、`logs/storage.py`、`collection/line_prefix.py`，部分验收 | 存储/故障测试及短时摘要报告；ANSI CSI/OSC、CRLF跨包精确字节与重复正文回归，连接/存储/归档联合43项通过 | 500 路全天未证明；SSH PTY 不证明跨独立流时序 | 独立源序号验收 |
-| R08 SSH 按凭据连接、不以变化指纹拦截，各协议保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`；`verify_ssh_lifecycle.py`显式ID、端点分页预检及finally停止 | 本地真实AsyncSSH仅保活时触发默认10秒IDLE_TIMEOUT；真实TCP/Telnet NOP不算正文，旧客户端关闭后重连初始化，停止后两连接EOF；34实机暂停12秒socket保持0，恢复同run新session/socket1，最终STOPPED且socket0 | 保活drain故障运行时集成、35暂停恢复及真实设备空闲故障、集群迁移未验收；Telnet用例未覆盖登录认证 | 补保活故障集成，继续集群验收；实机生命周期仅在空闲窗口验证 |
+| R08 SSH 按凭据连接、不以变化指纹拦截，各协议保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`；`verify_ssh_lifecycle.py`显式ID、端点分页预检及finally停止 | 本地真实AsyncSSH仅保活时触发默认10秒IDLE_TIMEOUT；真实TCP/Telnet NOP不算正文，旧客户端关闭后重连初始化；drain阻塞取消与注入异常后的错误日志、gap、二次COLLECTING及两连接EOF，相邻16项通过；34实机暂停12秒socket保持0，恢复同run新session/socket1，最终STOPPED且socket0 | 35暂停恢复及真实设备空闲故障、长期背压、集群迁移未验收；Telnet用例未覆盖登录认证 | 继续集群与真实网络故障验收；实机生命周期仅在空闲窗口验证 |
 | R09 初始化/定时队列、断线续计、重启归零、发送预算 | `commands/reservation.py`、`collection/runtime.py`，数据库原子性已实现 | 祖先提交`92e01d6`及真实Mongo验证；新增真实Telnet重连测试同run两session各执行一次、预算2，MongoMock回调仅证明续计语义 | socket 不属于数据库事务，设备执行结果仍可未知 | 保持 UNKNOWN、不补发；勿重复实现预算事务 |
 | R10 手动优先、不跨会话、断线拒绝与审计 | `commands/manual_submission.py` 将入队、幂等映射和审计同事务提交；已加载本机API | 历史真实副本集证明审计失败/取消整体回滚、同键并发返回同一命令、提交确认丢失后只读恢复、停止后同键重放；临时数据已清理 | 最终 DB 检查至 socket 写入仍需物理隔离；历史 PENDING 仅重放，不补造审计 | 继续 R11 接管隔离 |
 | R11 幂等启停、受控重启、租约/代次隔离 | `tasks/editing.py` 编辑、资源声明、停止操作、审计同事务，安全排队编辑保留RUNNING；Worker已知失败保持STOPPED | `175b938` Linux CI 34328314712通过；真实副本集回滚/竞争/确认丢失与排队调度验证；本机API/Worker已更新，34实机暂停恢复停止通过 | 跨节点物理隔离未证明 | 继续旧实例接管隔离，目标Worker部署需受控维护 |
