@@ -1,26 +1,30 @@
 # 当前状态总表
 
-本轮（2026-09-10）交付 coredump/NFS、浅层日志目录、资源周期认证及暂停后恢复的源码阶段。NFS 部署固定允许所有来源（`*`），Docker 与原生部署使用各 Worker 的 `NFS_ROOT/NFS_SERVER_IP`；无效的平台 `nfsRoot` 设置接口已移除，防止保存成功被误认为主机导出生效。本表与阶段代码一起提交，目标Linux/真实设备验收尚未完成。
+本轮（2026-09-10）交付 coredump/NFS、浅层日志目录、资源周期认证及暂停后恢复的源码阶段。NFS 部署固定允许所有来源（`*`），Docker 与原生部署使用各 Worker 的 `NFS_ROOT/NFS_SERVER_IP`；无效的平台 `nfsRoot` 设置接口已移除，防止保存成功被误认为主机导出生效。隔离Ubuntu真实内核NFS安装、设备IP子目录直挂及双路传输已通过；目标生产服务器和真实设备验收尚未完成。
 
 型号/序列号允许缺失或为空；身份将缺失、null、空白统一为空字符串，目录以 unknown 展示。目录组件最多80字节，截断展示部分后追加摘要。同IP且两项身份均空时无法识别物理设备更换。浅层目录已实现；coredump文件接收目录、查询及导出已接入，真实NFS接收容量尚未验证。
 
 测试环境纠正：项目 .venv 已安装 pytest，前几轮仅使用系统 Python 的失败不能作为无法测试的依据。新增目录测试原本有错误预期，运行后已修正并完成定向回归。
 
-最近一次主代理全量回归890 passed（66.52秒），Ruff全量通过，含新增NFS验证器12项。本次真实Mongo孤立副本回收及读者保护复验通过；1000条已释放历史声明的到期查询实际读取2条候选，自建库/文件已删除。前端本次未变，上一提交的73项、构建及浏览器已由远端CI确认通过。此前2GiB双客户端下载等证据见[本轮集成验证](history/2026-09-10-coredump-integration.md)，不等同于真实NFS接收验收。
+最近一次主代理全量回归904 passed（67.35秒）、Ruff全量、前端78项及生产构建通过；完整生产页面浏览器覆盖工作台、API、账号、模板、批量操作和共享Coredump开关。真实Mongo监控互斥独立复跑通过；隔离真实API/Worker/WS/小时下载通过并清理随机库与日志。此前2GiB双客户端下载及孤立副本回收证据见[本轮集成验证](history/2026-09-10-coredump-integration.md)，不能替代长时间真实设备NFS容量验收。
 
-核对日期：2026-09-10；当前源码基线 `72ae569`，对应CI `34442294566`六作业全部成功，包含真实Mongo孤立副本回收。R32–R41 属于此前交付阶段，R42–R46 已交付源码及本地验证，目标环境验收未完成。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
+核对日期：2026-09-10；当前已验收源码基线 `204f9ee`，对应CI `34443638369`七作业全部成功，后端892项通过，包含真实Mongo、设备IP子目录NFS直挂及实验清理。R32–R41 属于此前交付阶段，R42–R46 已交付源码及局部实机验证，目标生产设备验收未完成；R47正在实施。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
 
 ## 当前任务与恢复
 
 当前阶段：用户已于2026-09-10明确恢复开发，正在实施 NFS/coredump、可读浅层目录和大文件并发下载要求。R32–R41为此前已交付阶段；后文旧验证仅代表原对应提交。
 
+最新确认R47：同一海康设备仅一路正在COLLECTING的SSH任务负责NFS监控；新建其它SSH任务时共享显示“已开启”、禁用重复开关并标明负责任务，不给新任务保存第二份启用配置。复用资源单文档运行租约，新增资源级状态接口与表单轮询；停止、暂停、过期和非本运行状态不得被显示为当前负责人。主代理负责契约/审核/总表，后端与前端子代理分别实现，独立子代理验证真实Mongo互斥。
+
+最新追加R48：修复站内API文档搜索框下方接口分类横向滚动条遮挡分类文字。与R47一起继续完成；只调整该导航滚动区域，保留横向浏览所有分类的能力，并验证桌面/手机滚动后的布局。
+
 协作职责（2026-09-10用户明确）：主代理负责设计、契约、审核、协调调度、集成验收及本总表；子代理负责具体实现。resource_health负责资源认证生命周期和资源前端，api_verify负责NFS部署及挂载会话，task_picker负责coredump目录/固定副本/下载。各模块交付须经过主审与集成测试；不得仅根据子代理报告标记完成。CodeGraph用于修改前索引和影响检查，测试使用项目`.venv`。
 
-资源健康已按审核修正：后台成功不自动恢复系统停止的任务，用户编辑认证成功才授权恢复且等待旧运行收尾；手动暂停与显式resume另有等待新认证路径。本轮没有真实设备命令或NFS安装操作。
+资源健康已按审核修正：后台成功不自动恢复系统停止的任务，用户编辑认证成功才授权恢复且等待旧运行收尾；手动暂停与显式resume另有等待新认证路径。本轮没有真实设备命令或本机NFS安装操作；NFS实机验证仅在隔离Ubuntu CI运行。
 
 本轮已覆盖目录后段轮转、服务端观测时间、非导出目录副本、取消线程收尾、事务配额及异步导出。本地源目录模拟不能替代真实NFS传输；跨节点高负载和进程故障的完整矩阵仍需验证。
 
-NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设备CIDR，不使用平台IP白名单。旧`NFS_DEVICE_NETWORK`忽略，新环境不生成、Compose不传递。`scripts/configure_nfs_export.py`保留安全绝对目录、服务器IP及实际Worker UID/GID映射；重新部署只覆盖项目专属exports。主代理独立复跑NFS/native/Docker部署测试70项通过（4.27秒），相关Ruff及`bash -n deploy.sh`通过；没有实际安装或挂载Linux NFS。
+NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设备CIDR，不使用平台IP白名单。旧`NFS_DEVICE_NETWORK`忽略，新环境不生成、Compose不传递。`scripts/configure_nfs_export.py`保留安全绝对目录、服务器IP及实际Worker UID/GID映射；重新部署只覆盖项目专属exports。此前部署定向70项通过；最新监控/NFS部署/验证器31项通过，Ubuntu真实NFS证据见下文。
 
 目录浅层化已在`logs/storage.py`实现为`<root>/<storageIdentity>/<安全任务名>-<完整任务ID>/<YYYY-MM-DD>/<HH>`；`collection/runtime.py`兼容新旧小时路径。主代理独立复跑storage/runtime/maintenance/jobs 63项通过（11.56秒）。旧目录不搬迁；设备身份变更后的实际任务重启目录切换仍须与资源健康联调。
 
@@ -34,7 +38,7 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 
 历史无catalog引用的过期RESERVED/PUBLISHED声明已由`coredumps/snapshot_orphans.py`回收：RECLAIMING保留失败进度，确认无引用后仅删除当前节点fileId/version/token能证明归属的私有core/partial，再幂等归还配额；异常单项记录日志，其它孤儿继续。新版声明保存version直查两个路径，旧声明流式扫描严格匹配；非法标识和符号链接保留不释放。节点/状态/到期及catalog token引用索引避免历史数据全扫描。此改进真实Mongo及远端CI `34442294566`均已通过。
 
-独立Ubuntu NFS验收：`66c3dec`的CI `34443227583`中`nfs-smoke`已成功；主代理收取JSON确认NFSv3/v4父目录挂载、双路各67108864字节摘要一致、10001:10001映射、重复配置及重挂成功，清理`rootRemoved/exportRemoved/exportsRefreshed=true`、`preservedPaths/errors=[]`。`scripts/verify_nfs_service.py`正补齐与设备一致的直接IP子目录挂载，待新提交复验。本机不安装NFS、不清理真实采集数据；同机双挂载不能替代海康固件、跨服务器或持续大文件容量验收。
+独立Ubuntu NFS验收：`204f9ee`的CI `34443638369`中`nfs-smoke`已成功；主代理收取JSON确认NFSv3/v4直接挂载两个设备IP子目录，双路各67108864字节摘要一致、10001:10001映射、重复配置及重挂成功，清理`rootRemoved/exportRemoved/exportsRefreshed=true`、`preservedPaths/errors=[]`。前一提交`66c3dec`的CI `34443227583`七作业全部成功。本机不安装NFS、不清理真实采集数据；同机双挂载不能替代海康固件、跨服务器或持续大文件容量验收。
 
 历史验收补齐：`e60b85b` 的 Linux CI 34346496395 已核实六作业全部成功，中文截图已收取。该结果不代替本轮新界面测试。
 
@@ -52,8 +56,10 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 
 | ID / 最终需求 | 实现位置与状态 | 验证证据 | 未完成部分 | 下一步 |
 | --- | --- | --- | --- | --- |
-| R42 海康 SSH 可选 coredump、自动 ASH/NFS 挂载及每分钟检查 | `collection/coredump_monitor.py`、`collector.py`、`runtime.py`，原发送队列/会话取消；同资源运行租约、缺节点NFS配置独立报错；TaskEditor开关；Docker/原生宿主机NFS脚本固定星号导出 | 主代理890项全量；Ubuntu CI34443227583真实内核NFS安装、v3/v4父目录挂载、UID映射及清理通过；旧CIDR忽略及同路径bind测试通过 | 直接IP子目录挂载待补验；真实海康mount输出、跨节点物理隔离及大文件持续接收未验收 | 先补设备式挂载，再验证真实设备自动挂载、丢失恢复及采集不受失败影响 |
-| R43 coredump多设备大文件接收、查询、批量下载；日志多人稳定下载 | `coredumps/`扫描、冻结、配额、导出；`snapshot_readers.py`读者委托、`snapshot_lifecycle.py`清理恢复、`snapshot_orphans.py`历史无引用声明回收；平台/节点Range与原生票据 | 主代理878项全量；真实Mongo孤儿回收/新token及源保护/配额一次释放、1000历史记录仅读2候选；读者12轮竞争复验。前一提交CI六作业通过；此前2GiB×2 HTTP+8路Range证据保留 | 真实NFS并发写入、跨机大文件导出、全部崩溃/断电窗口未验收；损坏声明保持不自动删除；接收时间为首次扫描观测时间 | 跟进新CI，在目标Linux验证NFS及跨节点长时间混合负载 |
+| R47 同资源单路采集SSH负责NFS，其它新建SSH共享只读开启并显示负责人 | `resources/api.py:coredump-monitor`状态接口；`runtime.py`资源CAS含run/generation/node；`CoredumpMonitorControl.vue`与独立轮询组件，展示不写成新任务配置，站内API已更新 | 主代理后端904项、前端78项/构建；真实Mongo单资源竞争/不同资源独立/失属停止拒绝/过期释放接管通过并清库；隔离真实Worker/WS/小时下载通过并清日志；整套生产浏览器及共享组件1440/390通过并查看截图 | 新提交CI待运行；真实设备/跨节点故障矩阵未验收；当前本机API/Worker未重启 | 跟踪CI并更新目标API/Worker及前端 |
+| R48 API文档接口分类横向滚动条不遮挡文字 | `ApiReferenceWorkspace.vue:.api-groups`禁止Flex收缩、稳定滚动槽并保留横向滚动 | 1440旧样式高度16px/按钮底部留白6.28px失败，新样式39px/client留白12px通过；主代理全生产浏览器1440/390/320，首尾分类可见、查看截图 | 当前本机overlay已验证；Linux传统滚动条待CI复核 | 跟踪Linux浏览器验证 |
+| R42 海康 SSH 可选 coredump、自动 ASH/NFS 挂载及每分钟检查 | `collection/coredump_monitor.py`、`collector.py`、`runtime.py`，原发送队列/会话取消；同资源运行租约、缺节点NFS配置独立报错；TaskEditor开关；Docker/原生宿主机NFS脚本固定星号导出 | 主代理890项全量及最新31项定向；Ubuntu CI34443638369真实内核NFS安装、v3/v4设备IP子目录直挂、UID映射及清理通过；旧CIDR忽略及同路径bind测试通过 | 真实海康mount输出、跨节点物理隔离及大文件持续接收未验收 | 验证真实设备自动挂载、丢失恢复及采集不受失败影响 |
+| R43 coredump多设备大文件接收、查询、批量下载；日志多人稳定下载 | `coredumps/`扫描、冻结、配额、导出；`snapshot_readers.py`读者委托、`snapshot_lifecycle.py`清理恢复、`snapshot_orphans.py`历史无引用声明回收；平台/节点Range与原生票据 | 真实Mongo孤儿回收/新token及源保护/配额一次释放、1000历史记录仅读2候选；读者12轮竞争。Ubuntu NFSv3/v4各64MiB并行接收摘要一致、实验清理完成；此前2GiB×2 HTTP+8路Range证据保留 | 跨机大文件导出、长时间NFS混合负载、全部崩溃/断电窗口未验收；损坏声明保持不自动删除；接收时间为首次扫描观测时间 | 目标Linux跨节点长时间混合负载及真实设备coredump验收 |
 | R44 海康资源周期认证、设备变更后更新身份及目录，失败停止采集/NFS | `resources/health.py`、资源API及调度：60秒/8并发、资源探测租约与revision；失败标记系统恢复资格，只有用户保存认证可授权恢复；换身份受控新运行 | 主代理856项全量含相关分支；独立Mongo恢复消费与手动STOP竞争通过并清理 | 多API进程长期运行及真实换机/离线/节点收尾联调未验收 | 在目标设备验证 |
 | R45 资源编辑回填、类型/IP只读，名称/HTTP认证可编辑 | `ResourceEditor.vue`首次挂载immediate回填，类型/IP只读，空密码保留 | `browser_resource_prefill.mjs`桌面1440及手机390字段/宽度断言通过；主代理已查看390稳定截图，无超宽 | 真实设备编辑认证与任务恢复端到端未验收 | 目标设备联调 |
 | R46 第三方暂停设备重启超过一分钟，离线缓存不阻止显式恢复 | `tasks/control.py`、`resources/health.py`：WAITING_DEVICE与新探测；手动暂停意图即使尚未收尾也保留；换机结束旧run但仍可resume；旧探测不能解除新等待；前端状态/操作及站内API指南已接入 | 后端状态机用例包含旧探测后新探测、重复失败不重复操作、暂停收尾中离线；主代理856项全量通过 | 真实重启>60秒的第三方全链路仍待验收 | 目标设备验证实际恢复至COLLECTING才成功 |

@@ -173,7 +173,7 @@ onMounted(() => void reload());
 .api-reference-directory { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid #e2e9e8; }
 .api-search { display: flex; align-items: center; gap: 8px; margin: 14px; padding: 0 10px; height: 36px; color: #7a898b; background: #fff; border: 1px solid #dce5e4; border-radius: 5px; }
 .api-search input { width: 100%; min-width: 0; color: #334446; border: 0; outline: 0; background: transparent; }
-.api-groups { display: flex; gap: 5px; overflow-x: auto; padding: 0 14px 12px; border-bottom: 1px solid #e8eeee; }
+.api-groups { display: flex; flex: 0 0 auto; gap: 5px; overflow-x: auto; padding: 0 14px 12px; scrollbar-gutter: stable; border-bottom: 1px solid #e8eeee; }
 .api-groups button { display: flex; gap: 7px; align-items: center; flex: 0 0 auto; padding: 5px 7px; color: #657477; border: 0; border-radius: 4px; background: transparent; font-size: 11px; cursor: pointer; }
 .api-groups button:hover, .api-groups button.active { color: #08756a; background: #eaf5f1; }
 .api-groups small { color: inherit; font-variant-numeric: tabular-nums; }

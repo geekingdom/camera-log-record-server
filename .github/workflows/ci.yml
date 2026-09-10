@@ -131,6 +131,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_event_queries.py
       - name: 验证核心转储读者与到期回收互斥
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_coredump_readers.py
+      - name: 验证同资源核心转储监控单路归属
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_coredump_monitor_ownership.py
       - name: 验证核心转储导出与配额清理
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_coredump_export_workflow.py
       - name: 验证孤立核心转储副本回收与源文件保护

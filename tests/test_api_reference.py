@@ -112,6 +112,10 @@ def test_reference_coredumps_describe_binary_downloads_and_real_permissions(clie
     assert listing["group"] == "Coredump文件"
     assert listing["permission"] == "logs:read"
     assert listing["responseExample"]["items"][0]["receivedAt"]
+    monitor = operations["GET /api/v1/resources/{identifier}/coredump-monitor"]
+    assert monitor["responseExample"] == {
+        "active": True, "ownerTask": {"id": "task-example", "name": "值守采集"}, "mountStatus": "MOUNTED",
+    }
     create = operations["POST /api/v1/coredump-exports"]
     assert create["requestExample"] == {"fileIds": ["coredump-example"]}
     assert "Idempotency-Key" in create["headers"]

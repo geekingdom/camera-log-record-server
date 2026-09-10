@@ -1,6 +1,7 @@
 """提供设备资源的认证预览、保存和受限读取接口。"""
 
 import re
+from datetime import UTC, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
@@ -14,12 +15,21 @@ from camera_logs.resources.address_claim import claim_address, release_address
 from camera_logs.resources.authentication import authenticate_network_resource
 from camera_logs.resources.health import grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
-from camera_logs.resources.models import ResourceInput, ResourcePatch
+from camera_logs.resources.models import CoredumpMonitorStatus, ResourceInput, ResourcePatch
 
 
 def _resource_public(document):
     """统一移除连接密文和内部认证时间以外的敏感资源字段。"""
     return public(document)
+
+
+def _lease_expired(value, timestamp) -> bool:
+    """兼容测试替身返回的 naive UTC 时间；正式 Mongo 客户端始终返回带时区时间。"""
+    if value is None:
+        return True
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value <= timestamp
 
 
 async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100):
@@ -105,6 +115,34 @@ def install_resource_routes(app, repo, listing):
         """所有有效用户共享资源详情，写权限单独按创建者判断。"""
         authorize(user, "tasks:read")
         return await _resource_view(repo, await repo().get("resources", identifier), user, taskLimit)
+
+    @app.get("/api/v1/resources/{identifier}/coredump-monitor", response_model=CoredumpMonitorStatus)
+    async def coredump_monitor_status(identifier: str, user: User):
+        """返回当前有效的资源级 Coredump owner，不把任务配置变成永久资源占用。"""
+        authorize(user, "tasks:read")
+        resource = await repo().get("resources", identifier)
+        timestamp = now()
+        inactive = {"active": False, "ownerTask": None, "mountStatus": None}
+        if (resource.get("kind") != "HIKVISION_NETWORK" or resource.get("deletedAt") is not None
+                or resource.get("healthStatus") != "ONLINE"
+                or _lease_expired(resource.get("coredumpLeaseUntil"), timestamp)):
+            return inactive
+        owner = await repo().db.tasks.find_one({
+            "id": resource.get("coredumpLeaseTaskId"), "resourceId": identifier,
+            "runId": resource.get("coredumpLeaseRunId"), "generation": resource.get("coredumpLeaseGeneration"),
+            "nodeId": resource.get("coredumpLeaseNodeId"), "protocol": "SSH", "enableCoredumpMonitor": True,
+            "desiredState": "RUNNING", "status": "COLLECTING", "resourceDeleted": {"$ne": True},
+        }, {"id": 1, "name": 1, "coredumpMountStatus": 1, "coredumpMountRunId": 1})
+        if owner is None:
+            return inactive
+        node = await repo().db.nodes.find_one({
+            "id": resource.get("coredumpLeaseNodeId"), "heartbeat": {"$gte": timestamp - timedelta(seconds=15)},
+        }, {"id": 1})
+        if node is None:
+            return inactive
+        return {"active": True, "ownerTask": {"id": owner["id"], "name": owner.get("name", "")},
+                "mountStatus": owner.get("coredumpMountStatus")
+                if owner.get("coredumpMountRunId") == resource.get("coredumpLeaseRunId") else None}
 
     @app.post("/api/v1/resources/authenticate")
     async def authenticate_resource(body: ResourceInput, user: User):

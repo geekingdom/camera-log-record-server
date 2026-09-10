@@ -81,6 +81,8 @@ def response_example(path, method, status):
         return {"status": "ok"}
     if path == "/metrics":
         return "# TYPE camera_tasks gauge\ncamera_tasks 2\n"
+    if path.endswith("/coredump-monitor"):
+        return {"active": True, "ownerTask": {"id": "task-example", "name": "值守采集"}, "mountStatus": "MOUNTED"}
     if "coredump" in path:
         if path.endswith("/browser-session"):
             return {"url": path.removesuffix("/browser-session") + "/content", "expiresInSeconds": 300}

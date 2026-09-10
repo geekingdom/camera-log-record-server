@@ -27,6 +27,7 @@ try {
       if (path === "/api/v1/auth/me") body = { user: { id: allowCreate ? "admin" : "viewer", username: "fixture", displayName: allowCreate ? "模拟管理员" : "只读操作员", scopes: allowCreate ? ["*"] : ["tasks:read", "tasks:write", "tasks:control", "resources:write", "logs:read", "commands:send"], isAdmin: allowCreate, mustChangePassword: false } };
       else if (path === "/api/v1/tasks" && route.request().method() === "POST") { created.push(route.request().postDataJSON()); body = { ...task, ...created.at(-1) }; }
       else if (path === "/api/v1/resources") body = pageOf(resources);
+      else if (path.endsWith("/coredump-monitor")) body = { active: false, ownerTask: null, mountStatus: null };
       else if (path.startsWith("/api/v1/resources/")) body = resources.find(resource => path.endsWith(resource.id));
       else if (path === "/api/v1/tasks") {
         taskQueries.push(Object.fromEntries(url.searchParams));

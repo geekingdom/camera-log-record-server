@@ -3,6 +3,7 @@ import type {
   CommandExecution,
   CoredumpExport,
   CoredumpFile,
+  CoredumpMonitorStatus,
   InitialCommand,
   LogHour,
   Node,
@@ -175,6 +176,9 @@ export const api = {
   coredumps: (resourceId: string, page = 1, pageSize = 50, filters?: {
     name?: string; receivedFrom?: string; receivedTo?: string;
   }) => request<Page<CoredumpFile>>(`/resources/${encodeURIComponent(resourceId)}/coredumps${query(page, pageSize, filters)}`),
+  coredumpMonitor: (resourceId: string) => request<CoredumpMonitorStatus>(
+    `/resources/${encodeURIComponent(resourceId)}/coredump-monitor`,
+  ),
   createCoredumpExport: (fileIds: string[]) => request<CoredumpExport>("/coredump-exports", {
     method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: JSON.stringify({ fileIds }),
   }),

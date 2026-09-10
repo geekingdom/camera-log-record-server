@@ -115,6 +115,40 @@ def test_coredump_guard_claims_resource_once_and_rejects_stale_runtime(tmp_path)
     asyncio.run(scenario())
 
 
+def test_coredump_guard_allows_only_one_collecting_runtime_per_resource(tmp_path):
+    """并发采集运行竞争同一资源时，Mongo CAS 只能给一个 owner 发送设备挂载命令。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                             log_root=tmp_path, node_id="node-a"))
+        tasks = [
+            {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+             "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"},
+            {"id": "task-b", "runId": "run-b", "nodeId": "node-b", "generation": 7,
+             "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"},
+        ]
+        await database.tasks.insert_many(tasks)
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE"})
+        runtimes = []
+        for task in tasks:
+            runtime = object.__new__(SessionRuntime)
+            runtime.repo, runtime.task = repo, task
+            runtime.stopping = runtime.retired = False
+            runtime.collector = SimpleNamespace(session_id=task["id"], _closed=SimpleNamespace(is_set=lambda: False))
+            runtimes.append(runtime)
+
+        claimed = await asyncio.gather(*(runtime.coredump_guard() for runtime in runtimes))
+
+        assert claimed.count(True) == 1 and claimed.count(None) == 1
+        owner = tasks[claimed.index(True)]
+        resource = await database.resources.find_one({"id": "resource-a"})
+        assert resource["coredumpLeaseTaskId"] == owner["id"]
+        assert resource["coredumpLeaseRunId"] == owner["runId"]
+        assert resource["coredumpLeaseGeneration"] == owner["generation"]
+        assert resource["coredumpLeaseNodeId"] == owner["nodeId"]
+    asyncio.run(scenario())
+
+
 def test_coredump_guard_rejects_non_collecting_or_unhealthy_resource(tmp_path):
     """停止中的任务和离线资源均不得刷新租约或进入设备控制队列。"""
     async def scenario():

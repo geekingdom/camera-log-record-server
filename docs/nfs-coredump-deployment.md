@@ -27,7 +27,7 @@ sudo exportfs -v
 find /srv/camera-logs/nfs-coredump -maxdepth 2 -type d
 ```
 
-部署导出的是父目录 `NFS_ROOT`；Worker 运行时创建 `NFS_ROOT/<设备IP>/`，并将 `NFS_SERVER_IP:NFS_ROOT/<设备IP>` 作为 `gdbcfg --nfsmount` 的目标。手工核对设备挂载时也应使用完整设备子目录，不需要把容器内路径换算成其它路径。隔离Ubuntu已通过真实内核NFS父目录挂载和双路写入；设备子目录直接挂载的补充验证见下文。实际海康设备网络路由和固件写入仍需上线前验证，再确认目录属主、容量与文件保留策略。
+部署导出的是父目录 `NFS_ROOT`；Worker 运行时创建 `NFS_ROOT/<设备IP>/`，并将 `NFS_SERVER_IP:NFS_ROOT/<设备IP>` 作为 `gdbcfg --nfsmount` 的目标。手工核对设备挂载时也应使用完整设备子目录，不需要把容器内路径换算成其它路径。隔离Ubuntu已通过真实内核NFS设备子目录直接挂载和双路写入，证据见下文。实际海康设备网络路由和固件写入仍需上线前验证，再确认目录属主、容量与文件保留策略。
 
 ## 下载期间的副本保留
 
@@ -39,7 +39,9 @@ find /srv/camera-logs/nfs-coredump -maxdepth 2 -type d
 
 ## 独立 Linux 验证
 
-CI的`nfs-smoke`作业在临时Ubuntu主机安装真实`nfs-kernel-server`及`nfs-common`，运行`scripts/verify_nfs_service.py`。脚本使用独立临时目录和专属exports文件，验证NFSv3/v4双挂载点并行写入、客户端和服务端SHA-256、UID/GID映射、重复配置后的重新挂载以及测试文件清理。默认每路64MiB，结果保存为JSONL构件。
+CI的`nfs-smoke`作业在临时Ubuntu主机安装真实`nfs-kernel-server`及`nfs-common`，运行`scripts/verify_nfs_service.py`。脚本使用独立临时目录和专属exports文件，验证NFSv3/v4直接挂载不同设备IP子目录并行写入、客户端和服务端SHA-256、UID/GID映射、重复配置后的重新挂载以及测试文件清理。默认每路64MiB，结果保存为JSONL构件。
+
+2026-09-10，提交`204f9ee`的CI `34443638369`中NFS作业已通过：两路各67108864字节、摘要一致、属主10001:10001；重配重挂成功，专属导出与临时数据删除完成，清理错误及保留路径均为空。
 
 仅在隔离的Linux测试主机手动运行：
 
@@ -49,3 +51,11 @@ sudo python3 scripts/verify_nfs_service.py
 ```
 
 该验证会启用并启动主机NFS服务；结束时清理自己的挂载、导出及文件，不停止主机NFS服务。挂载或清理失败会保留相应路径并报告失败。两个客户端挂载点位于同一主机，此验证不代表真实海康设备、跨服务器网络或长时间大文件并发容量已验收。
+
+## 同设备共享监控
+
+同一个海康网络设备资源最多由一路正在采集的SSH任务负责NFS挂载监控，控制命令继续复用该任务的SSH连接。资源运行租约按任务、运行实例、代次和节点标识竞争及释放；同时启用的其他候选任务等待，不重复下发挂载命令。
+
+新建其它SSH任务时，若资源已有有效负责人，页面显示只读的“已由同资源任务启用 Coredump 监控”，并显示负责任务及挂载状态。这个共享展示不会给新任务保存`enableCoredumpMonitor=true`。编辑负责的任务本身仍可修改原配置；负责人停止、暂停、重连、租约到期或节点失去心跳后，共享状态随轮询更新。共享显示不意味着新任务自动接管原负责人的监控。
+
+第三方可调用`GET /api/v1/resources/{resource_id}/coredump-monitor`获取`active`、`ownerTask`及`mountStatus`，要求`tasks:read`权限。`active=true`表示当前有正常采集的负责运行，不等于设备挂载成功，挂载结果单独查看`mountStatus`。无法读取状态时页面明确报错，不将查询失败显示为未启用。

@@ -60,6 +60,42 @@ try {
     await page.locator(".api-reference-grid").waitFor();
     assert.equal(referenceRequests, 2, "加载失败后必须仅重试接口目录读取");
 
+    // 分类横向滚动条必须占用独立槽位，不能覆盖“全部接口”等分类文字。
+    const groupMetrics = await page.locator(".api-groups").evaluate(element => {
+      const groups = element.getBoundingClientRect();
+      const first = element.querySelector("button");
+      const last = element.querySelector("button:last-of-type");
+      if (!first || !last) throw new Error("接口分类为空");
+      const firstBounds = first.getBoundingClientRect();
+      const scrollbarHeight = element.offsetHeight - element.clientHeight;
+      return {
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        scrollbarHeight,
+        firstBottom: firstBounds.bottom - groups.top,
+        reservedBottom: groups.height - 12,
+        scrollLeft: element.scrollLeft,
+      };
+    });
+    assert.ok(groupMetrics.firstBottom <= groupMetrics.reservedBottom + 1,
+      `分类文字不能进入横向滚动条槽位：${JSON.stringify({ width, groupMetrics })}`);
+    const groups = page.locator(".api-groups");
+    await groups.evaluate(element => { element.scrollLeft = element.scrollWidth; });
+    const finalGroupVisible = await groups.evaluate(element => {
+      const groupBounds = element.getBoundingClientRect();
+      const finalButton = element.querySelector("button:last-of-type")?.getBoundingClientRect();
+      return Boolean(finalButton && finalButton.left >= groupBounds.left && finalButton.right <= groupBounds.right + 1);
+    });
+    assert.equal(finalGroupVisible, true, "横向滚动后末尾分类必须完整进入滚动容器视口");
+    await groups.evaluate(element => { element.scrollLeft = 0; });
+    const firstGroupVisible = await groups.evaluate(element => {
+      const groupBounds = element.getBoundingClientRect();
+      const firstButton = element.querySelector("button")?.getBoundingClientRect();
+      return Boolean(firstButton && firstButton.left >= groupBounds.left && firstButton.right <= groupBounds.right + 1);
+    });
+    assert.equal(firstGroupVisible, true, "复位后全部接口必须完整进入滚动容器视口");
+    await page.screenshot({ path: `${screenshots}/api-reference-directory-${width}.png`, fullPage: true, animations: "disabled" });
+
     const search = page.getByRole("searchbox", { name: "搜索接口目录" });
     await search.fill("resources");
     await page.locator(".api-operation-list > button").first().click();

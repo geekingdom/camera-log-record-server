@@ -75,3 +75,18 @@ class ResourcePatch(Model):
         if self.kind == "SERIAL_SERVER" and (self.username or self.password):
             raise ValueError("串口服务器不支持用户名或密码")
         return self
+
+
+class CoredumpMonitorOwner(Model):
+    """资源共享监控的当前负责采集任务；只公开前端展示所需的稳定身份。"""
+
+    id: str
+    name: str
+
+
+class CoredumpMonitorStatus(Model):
+    """资源级 Coredump 监控共享状态，不把短租约或设备控制配置回写给调用方。"""
+
+    active: bool
+    ownerTask: CoredumpMonitorOwner | None = None
+    mountStatus: str | None = None

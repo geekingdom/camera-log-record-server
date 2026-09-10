@@ -24,6 +24,12 @@ export interface Resource extends ResourceAuthentication {
   createdBy?: string;
   createdByName?: string;
 }
+/** 同一资源当前实际执行 NFS Coredump 监控的采集任务。 */
+export interface CoredumpMonitorStatus {
+  active: boolean;
+  ownerTask: { id: string; name: string } | null;
+  mountStatus: string | null;
+}
 export type TaskActualStatus =
   | "STOPPED"
   | "CONNECTING"

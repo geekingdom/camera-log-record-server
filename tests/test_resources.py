@@ -1,11 +1,13 @@
 """设备资源 API 与海康认证探测的隔离回归测试。"""
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from camera_logs.common.config import Settings
+from camera_logs.common.database import now
 from camera_logs.main import create_app
 from camera_logs.resources.authentication import MAX_DEVICE_INFO_BYTES, authenticate_network_resource
 from camera_logs.resources.lifecycle import reconcile_resource_deletion
@@ -33,6 +35,60 @@ def resource_client(tmp_path):
     with TestClient(create_app(settings, AsyncMongoMockClient().camera_logs)) as result:
         result.headers["Authorization"] = "Bearer resource-admin"
         yield result
+
+
+def test_coredump_monitor_status_exposes_only_a_current_resource_lease(resource_client):
+    """资源级状态只承认同资源、同运行、同节点且未过期的实际采集 owner。"""
+    repo = resource_client.app.state.repo
+    stamp = now()
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "camera", "name": "大厅相机", "kind": "HIKVISION_NETWORK", "deletedAt": None,
+        "healthStatus": "ONLINE", "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a",
+        "coredumpLeaseGeneration": 4, "coredumpLeaseNodeId": "node-a",
+        "coredumpLeaseUntil": stamp + timedelta(seconds=60),
+    })
+    resource_client.portal.call(repo.db.tasks.insert_one, {
+        "id": "owner", "name": "值守采集", "resourceId": "camera", "runId": "run-a", "generation": 4,
+        "nodeId": "node-a", "protocol": "SSH", "enableCoredumpMonitor": True,
+        "desiredState": "RUNNING", "status": "COLLECTING", "coredumpMountStatus": "MOUNTED",
+        "coredumpMountRunId": "run-a",
+    })
+    resource_client.portal.call(repo.db.nodes.insert_one, {"id": "node-a", "heartbeat": stamp})
+
+    active = resource_client.get("/api/v1/resources/camera/coredump-monitor")
+
+    assert active.status_code == 200, active.text
+    assert active.json() == {
+        "active": True, "ownerTask": {"id": "owner", "name": "值守采集"}, "mountStatus": "MOUNTED",
+    }
+
+    resource_client.portal.call(repo.db.tasks.update_one, {"id": "owner"}, {"$set": {"status": "RECONNECTING"}})
+    inactive = resource_client.get("/api/v1/resources/camera/coredump-monitor")
+    assert inactive.json() == {"active": False, "ownerTask": None, "mountStatus": None}
+
+
+def test_coredump_monitor_status_hides_mount_status_from_an_old_run(resource_client):
+    """租约 owner 可有效，但任务上次运行留下的 MOUNTED 不得被当作当前运行状态。"""
+    repo = resource_client.app.state.repo
+    stamp = now()
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None, "healthStatus": "ONLINE",
+        "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-current", "coredumpLeaseGeneration": 2,
+        "coredumpLeaseNodeId": "node-a", "coredumpLeaseUntil": stamp + timedelta(seconds=60),
+    })
+    resource_client.portal.call(repo.db.tasks.insert_one, {
+        "id": "owner", "name": "当前采集", "resourceId": "camera", "runId": "run-current", "generation": 2,
+        "nodeId": "node-a", "protocol": "SSH", "enableCoredumpMonitor": True,
+        "desiredState": "RUNNING", "status": "COLLECTING", "coredumpMountStatus": "MOUNTED",
+        "coredumpMountRunId": "run-old",
+    })
+    resource_client.portal.call(repo.db.nodes.insert_one, {"id": "node-a", "heartbeat": stamp})
+
+    result = resource_client.get("/api/v1/resources/camera/coredump-monitor")
+
+    assert result.json() == {
+        "active": True, "ownerTask": {"id": "owner", "name": "当前采集"}, "mountStatus": None,
+    }
 
 
 @pytest.mark.asyncio

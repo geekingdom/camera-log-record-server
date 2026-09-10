@@ -73,7 +73,8 @@ class SessionRuntime:
                 "runId": self.task["runId"], "sessionId": self.collector.session_id,
                 "nodeId": self.repo.settings.node_id, "status": status, "error": error, "createdAt": now()})
             await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {
-                "coredumpMountStatus": status, "coredumpMountError": error, "coredumpCheckedAt": now()}})
+                "coredumpMountStatus": status, "coredumpMountError": error,
+                "coredumpMountRunId": self.task["runId"], "coredumpCheckedAt": now()}})
         except Exception:
             # coredump 状态记录不可反向中断日志接收或挂载重试。
             logger.exception("coredump 状态记录失败 task=%s", self.task["id"])
@@ -99,9 +100,13 @@ class SessionRuntime:
             {"id": resource_id, "deletedAt": None, "healthStatus": "ONLINE", "$or": [
                 {"coredumpLeaseUntil": {"$exists": False}},
                 {"coredumpLeaseUntil": {"$lte": timestamp}},
-                {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"]},
+                {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"],
+                 "coredumpLeaseGeneration": self.task.get("generation"),
+                 "coredumpLeaseNodeId": self.task.get("nodeId")},
             ]},
             {"$set": {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"],
+                      "coredumpLeaseGeneration": self.task.get("generation"),
+                      "coredumpLeaseNodeId": self.task.get("nodeId"),
                       "coredumpLeaseUntil": timestamp + timedelta(seconds=70)}},
             return_document=ReturnDocument.AFTER,
         )
@@ -404,7 +409,9 @@ class SessionRuntime:
                 config["verifyHostKey"] = self.repo.settings.ssh_verify_host_key
                 config["pshSerialCharacterInterval"] = self.repo.settings.psh_serial_character_interval
                 self.started_at = now()
-                reset = {"shellMode": "UNKNOWN", "debugPhase": None, "commandBlocked": False, "debugError": None}
+                reset = {"shellMode": "UNKNOWN", "debugPhase": None, "commandBlocked": False, "debugError": None,
+                         "coredumpMountStatus": None, "coredumpMountError": None, "coredumpMountRunId": None,
+                         "coredumpCheckedAt": None}
                 admitted = await self.repo.db.tasks.update_one(
                     {**owner_filter(self.task), "status": {"$ne": "BLOCKED"}},
                     {"$set": reset})
@@ -457,7 +464,9 @@ class SessionRuntime:
                     try:
                         await self.repo.db.resources.update_one(
                             {"id": self.task.get("resourceId"), "coredumpLeaseTaskId": self.task["id"],
-                             "coredumpLeaseRunId": self.task["runId"]},
+                             "coredumpLeaseRunId": self.task["runId"],
+                             "coredumpLeaseGeneration": self.task.get("generation"),
+                             "coredumpLeaseNodeId": self.task.get("nodeId")},
                             {"$set": {"coredumpLeaseUntil": now()}},
                         )
                     except Exception:
