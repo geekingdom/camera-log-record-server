@@ -8,8 +8,8 @@ import { ApiError, usersApi, type SessionUser } from "../../shared/api";
 const baseScopes = ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"];
 const baseScopeLabels: Record<string, string> = {
   "tasks:read": "查看设备与任务",
-  "logs:read": "查看实时与历史日志",
-  "logs:download": "下载日志",
+  "logs:read": "查看日志与 Coredump",
+  "logs:download": "下载日志与 Coredump",
   "templates:read": "查看命令模板",
   "templates:write": "创建命令模板",
   "service-tokens:read": "查看我的服务账号",

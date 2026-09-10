@@ -107,6 +107,10 @@ def test_reference_guides_document_inherited_permissions_owner_contract_and_temp
 def test_reference_coredumps_describe_binary_downloads_and_real_permissions(client):
     """coredump 不得继承资源编辑权限或被错误描述成日志 Base64 读取接口。"""
     reference = client.get("/api/v1/api-reference").json()
+    default_access = next(item["text"] for item in reference["guides"] if item["title"] == "Coredump默认访问权限")
+    assert "默认允许Coredump查询、导出和下载" in default_access
+    assert "logs:read" in default_access and "logs:download" in default_access
+    assert "来源IP策略" in default_access and "绑定用户禁用" in default_access
     operations = {item["id"]: item for item in reference["operations"]}
     listing = operations["GET /api/v1/resources/{resource_id}/coredumps"]
     assert listing["group"] == "Coredump文件"

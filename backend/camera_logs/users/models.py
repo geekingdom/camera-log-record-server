@@ -8,8 +8,8 @@ PERMISSIONS = {
     "tasks:read": "查看设备与任务", "tasks:write": "编辑采集任务",
     "resources:create": "新增设备资源", "resources:write": "编辑和删除设备资源",
     "tasks:create": "新增采集任务",
-    "tasks:control": "启停采集任务", "logs:read": "查看实时与历史日志",
-    "logs:download": "下载日志", "commands:send": "发送设备命令",
+    "tasks:control": "启停采集任务", "logs:read": "查看日志与 Coredump",
+    "logs:download": "下载日志与 Coredump", "commands:send": "发送设备命令",
     "templates:read": "查看命令模板", "templates:write": "管理命令模板",
     "service-tokens:read": "查看本人服务账号",
 }

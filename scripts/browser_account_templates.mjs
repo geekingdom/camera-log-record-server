@@ -85,6 +85,15 @@ try {
     await page.getByRole("tab", { name: "第三方服务账号", exact: true }).click();
     await page.getByRole("button", { name: "新建服务账号", exact: true }).click();
     const tokenDialog = page.getByRole("dialog", { name: "新建第三方服务账号" });
+    await tokenDialog.getByText("默认包含日志与 Coredump 查询、导出和下载。令牌实时继承该用户权限，仍受来源 IP 策略约束；停用用户会立即使令牌失效。", { exact: true }).waitFor();
+    const tokenDialogLayout = await tokenDialog.locator(".el-dialog__body").evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    assert.ok(tokenDialogLayout.scrollWidth <= tokenDialogLayout.clientWidth + 1, `服务账号说明不应在弹窗正文横向溢出：${JSON.stringify({ width, ...tokenDialogLayout })}`);
+    const pageLayout = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
+    assert.ok(pageLayout.scrollWidth <= pageLayout.clientWidth + 1, `服务账号弹窗不应导致页面横向溢出：${JSON.stringify({ width, ...pageLayout })}`);
+    await page.screenshot({ path: `${screenshots}/account-token-create-${width}.png`, fullPage: true, animations: "disabled" });
     await tokenDialog.getByLabel("账号名称", { exact: true }).fill("浏览器令牌");
     await tokenDialog.locator(".el-switch").click();
     await tokenDialog.locator(".el-select").click();

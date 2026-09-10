@@ -269,7 +269,7 @@ onBeforeUnmount(() => {
       <el-form label-position="top">
         <el-form-item label="账号名称" required><el-input v-model="form.name" maxlength="128" /></el-form-item>
         <el-form-item label="有效期"><el-switch v-model="permanent" active-text="永久有效" /><template v-if="!permanent"><el-input-number v-model="form.expiresInDays" :min="1" :max="365" controls-position="right" /><span class="access-suffix">天</span></template></el-form-item>
-        <el-form-item label="所属用户" required><el-select v-model="form.userId" filterable placeholder="选择有效用户" style="width: 100%"><el-option v-for="user in eligibleUsers" :key="user.id" :label="`${user.displayName} · ${user.username}`" :value="user.id" /></el-select><p class="access-muted">令牌实时继承该用户的权限；停用用户会立即使令牌失效。</p></el-form-item>
+        <el-form-item label="所属用户" required><el-select v-model="form.userId" filterable placeholder="选择有效用户" style="width: 100%"><el-option v-for="user in eligibleUsers" :key="user.id" :label="`${user.displayName} · ${user.username}`" :value="user.id" /></el-select><p class="access-muted">默认包含日志与 Coredump 查询、导出和下载。令牌实时继承该用户权限，仍受来源 IP 策略约束；停用用户会立即使令牌失效。</p></el-form-item>
       </el-form>
       <template #footer><el-button @click="formOpen = false">取消</el-button><el-button type="primary" :loading="creating" :disabled="creating" :icon="KeyRound" @click="create">创建并显示口令</el-button></template>
     </el-dialog>
