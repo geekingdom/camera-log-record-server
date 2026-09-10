@@ -81,6 +81,31 @@ def test_task_resource_identity_cannot_be_reassigned_or_forged(client):
                         json={"version": 1, "resourceId": "other"}).status_code == 422
 
 
+@pytest.mark.parametrize("metadata", [{}, {"model": None, "subSerialNumber": None},
+                                     {"model": "", "subSerialNumber": ""}])
+def test_empty_device_identity_can_create_task(client, metadata):
+    """设备身份可缺失，任务仍可创建且文件夹不含 Python 空值文本。"""
+    resource = seed_resource(client)
+    client.portal.call(client.app.state.repo.db.resources.replace_one, {"id": "network"},
+                       {key: value for key, value in resource.items() if key not in {"model", "subSerialNumber"}} | metadata)
+    response = create(client)
+    assert response.status_code == 201
+    identity = response.json()["storageIdentity"]
+    assert identity.startswith("127.0.0.1-unknown-unknown-")
+    assert "None" not in identity
+
+
+def test_long_device_identity_keeps_discriminator_after_storage_sanitizing(client):
+    """两个长型号共享前缀时，存储层截断不能丢失最终身份区分信息。"""
+    from camera_logs.logs.naming import safe_filename_component
+    seed_resource(client, model="x" * 512, subSerialNumber="y" * 512)
+    seed_resource(client, "other", model="x" * 512, subSerialNumber="y" * 511 + "z")
+    first = create(client).json()["storageIdentity"]
+    second = create(client, resourceId="other").json()["storageIdentity"]
+    assert len(first.encode()) <= 80
+    assert safe_filename_component(first) != safe_filename_component(second)
+
+
 def test_soft_deleted_resource_blocks_new_tasks_and_restart_but_preserves_logs(client, tmp_path):
     seed_resource(client, version=1)
     task = create(client).json()

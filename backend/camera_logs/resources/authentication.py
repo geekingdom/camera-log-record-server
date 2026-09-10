@@ -24,11 +24,11 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _required_text(root: Element, name: str) -> str:
+def _required_text(root: Element, name: str, *, allow_empty: bool = False) -> str:
     """只读取 DeviceInfo 的直接子字段，拒绝嵌套伪造字段和超长文本。"""
     node = next((child for child in root if _local_name(child.tag) == name), None)
     value = node.text.strip() if node is not None and node.text else ""
-    if not value or len(value) > MAX_DEVICE_FIELD_LENGTH:
+    if (not value and not allow_empty) or len(value) > MAX_DEVICE_FIELD_LENGTH:
         raise ValueError("设备信息格式无效")
     return value
 
@@ -39,8 +39,9 @@ def _parse_device_info(payload: bytes) -> dict[str, str]:
         root = ElementTree.fromstring(payload)
         if _local_name(root.tag) != "DeviceInfo":
             raise ValueError("设备信息格式无效")
-        model = _required_text(root, "model")
-        serial = _required_text(root, "subSerialNumber")
+        # 型号和序列号并非所有固件均提供，缺失不代表登录认证失败。
+        model = _required_text(root, "model", allow_empty=True)
+        serial = _required_text(root, "subSerialNumber", allow_empty=True)
         firmware = _required_text(root, "firmwareVersion")
         released = _required_text(root, "firmwareReleasedDate")
     except (DefusedXmlException, ElementTree.ParseError, ValueError) as exc:

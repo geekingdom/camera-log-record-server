@@ -110,8 +110,15 @@ async def test_network_authentication_rejects_invalid_xml_and_maps_device_errors
     missing_serial = httpx.MockTransport(lambda _: httpx.Response(200, text="""
         <DeviceInfo><model>DS-2CD</model><firmwareVersion>V5</firmwareVersion>
         <firmwareReleasedDate>20240101</firmwareReleasedDate></DeviceInfo>"""))
-    with pytest.raises(ValueError, match="设备信息格式无效"):
-        await authenticate_network_resource(ip="192.0.2.9", username="a", password="b", auth_type="BASIC", transport=missing_serial)
+    result = await authenticate_network_resource(ip="192.0.2.9", username="a", password="b", auth_type="BASIC", transport=missing_serial)
+    assert result["subSerialNumber"] == ""
+    empty_identity = httpx.MockTransport(lambda _: httpx.Response(200, text="""
+        <DeviceInfo><model> </model><subSerialNumber/>
+        <firmwareVersion>V5</firmwareVersion><firmwareReleasedDate>20240101</firmwareReleasedDate>
+        </DeviceInfo>"""))
+    result = await authenticate_network_resource(ip="192.0.2.9", username="a", password="b",
+                                                 auth_type="BASIC", transport=empty_identity)
+    assert result["model"] == result["subSerialNumber"] == ""
 
     entity = httpx.MockTransport(lambda _: httpx.Response(200, text="<!DOCTYPE foo [<!ENTITY x 'x'>]><DeviceInfo/>"))
     with pytest.raises(ValueError, match="设备信息格式无效"):
