@@ -341,15 +341,41 @@ async def get_retention_days(repo: Any) -> int:
 
 
 async def cleanup_exports(repo: Any) -> int:
-    exports = _root(repo) / "exports"
-    cutoff = datetime.now(UTC).timestamp() - 24 * 60 * 60
+    """清理已到期的本节点终态下载目录，不以目录 mtime 推断是否仍在执行。
+
+    目录名必须精确对应作业 ID；缺少、损坏、远端、取消或活跃作业都保留。
+    物理路径只允许是 exports 目录的直系真实子目录，避免清理软链接或根外路径。
+    """
+    configured_root = Path(repo.settings.log_root)
+    if configured_root.is_symlink():
+        logger.warning("拒绝清理软链接日志根 path=%s", configured_root)
+        return 0
+    exports = configured_root / "exports"
     removed = 0
-    if not exports.is_dir():
+    if exports.is_symlink() or not exports.is_dir():
+        if exports.is_symlink():
+            logger.warning("拒绝清理软链接导出根 path=%s", exports)
         return removed
+    exports_root = exports.resolve()
     for path in exports.iterdir():
-        if path.name == ".tmp" or path.stat().st_mtime >= cutoff:
-            continue
         try:
+            if path.name == ".tmp" or path.is_symlink() or not path.is_dir():
+                continue
+            resolved = path.resolve()
+            if resolved.parent != exports_root:
+                logger.warning("拒绝清理非直系导出目录 path=%s", path)
+                continue
+            job = await repo.db.jobs.find_one({"id": path.name})
+            if not job or job.get("nodeId") != repo.settings.node_id or job.get("kind") != "DOWNLOAD":
+                continue
+            if job.get("status") not in {"SUCCEEDED", "FAILED", "EXPIRED"}:
+                continue
+            expires_at, completed_at = job.get("expiresAt"), job.get("completedAt")
+            if not isinstance(expires_at, datetime) or not isinstance(completed_at, datetime):
+                continue
+            expires_at = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
+            if expires_at > now():
+                continue
             await asyncio.to_thread(shutil.rmtree, path)
             removed += 1
         except Exception:

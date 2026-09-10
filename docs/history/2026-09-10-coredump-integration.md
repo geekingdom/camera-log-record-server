@@ -4,6 +4,8 @@
 
 ## SSH 实机生命周期及归档验证
 
+后续远端CI `34449963133`（`8c65ce8`）七作业全部成功；Linux后端918项/164.37秒，日志明确包含真实SSH保活测试。另只读核对实机任务审计，启动/暂停/恢复/停止四项均有独立requestId，时间为07:21:08、07:21:12、07:21:26、07:21:41 UTC。
+
 2026-09-10通过当前API/Worker验证34联调任务`3a80edb2bc3d49e7836ef0f594e07a50`。测试前确认SSH22、STOPPED、无节点、无定时/coredump配置，初始化为四条独立命令：`outputClose`、`outputOpen`、`setDebug -m all -l 7 -d 111`、`prtHardInfo`，每条延时0.3秒。未发送debug或解密口令。
 
 正式API启动、暂停、等待12秒、恢复、finally停止全部成功：暂停后和等待结束时socket均为0；恢复沿用runId并产生新sessionId，socket为1；最终STOPPED、nodeId为空且socket为0。运行ID为`9affaf0cddb34d288650e969536ee1dd`。用户新建35任务`39b00799af9144208c63b3f11b772db1`始终不属于本次控制范围，验证后仍为RUNNING/COLLECTING。
@@ -13,6 +15,14 @@
 验证脚本由按名称/第一页选择改为显式任务ID、按IP分页检查端点占用；启动前完整验证，finally逐项stop、等待操作、检查STOPPED/无节点/socket0，收尾失败将passed置false。本地真实AsyncSSH测试仅响应保活而无stdout，在默认10秒后触发IDLE_TIMEOUT并由服务端确认关闭，测试仅将已建立连接保活间隔缩短至0.2秒，生产默认不变。主代理新增回归14项通过；此前连接/暂停/前缀/存储29项、runtime/关闭/Telnet24项通过。
 
 本次不能证明35暂停恢复、真实断网/重启、全天并发容量或跨节点物理隔离；这些仍在总表保留。
+
+## 普通日志导出清理保护
+
+审查发现`cleanup_exports`仅按目录mtime超过24小时删除，未核对作业仍在执行；长时间写文件不一定更新父目录mtime。新增回归复现该误删条件，修复为核对同名jobs记录：同节点、DOWNLOAD、SUCCEEDED/FAILED/EXPIRED、有效completedAt且expiresAt到期才删除。QUEUED/RUNNING/CANCELLED、缺记录或损坏记录一律保留；拒绝根及子目录软链接。单项DB/删除异常记录后继续其它候选。主代理相关46项通过，Ruff通过。
+
+普通作业终态没有重排队入口，因此本修复不引入执行接管。Worker崩溃遗留RUNNING仍是独立缺口；不能直接重新排队，也不能仅凭新进程启动就删除旧实例产物。后续须补实例归属、租约及物理执行收尾。本轮没有运行维护脚本清理实际目录，也未重启正在采集的Worker。
+
+模块规模只读统计发现生产源码超过建议500行的文件为App.vue（577）和runtime.py（544），其它模块均未超过；后续按列表协调与资源级租约边界拆分，不为压行数破坏单连接状态机。
 
 ## 当前开发服务更新
 
