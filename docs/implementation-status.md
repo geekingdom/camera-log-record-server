@@ -6,9 +6,9 @@
 
 测试环境纠正：项目 .venv 已安装 pytest，前几轮仅使用系统 Python 的失败不能作为无法测试的依据。新增目录测试原本有错误预期，运行后已修正并完成定向回归。
 
-最近一次主代理全量回归878 passed（66.62秒），Ruff全量通过。本次真实Mongo孤立副本回收及读者保护复验通过；1000条已释放历史声明的到期查询实际读取2条候选，自建库/文件已删除。前端本次未变，上一提交的73项、构建及浏览器已由远端CI确认通过。此前2GiB双客户端下载等证据见[本轮集成验证](history/2026-09-10-coredump-integration.md)，不等同于真实NFS接收验收。
+最近一次主代理全量回归890 passed（66.52秒），Ruff全量通过，含新增NFS验证器12项。本次真实Mongo孤立副本回收及读者保护复验通过；1000条已释放历史声明的到期查询实际读取2条候选，自建库/文件已删除。前端本次未变，上一提交的73项、构建及浏览器已由远端CI确认通过。此前2GiB双客户端下载等证据见[本轮集成验证](history/2026-09-10-coredump-integration.md)，不等同于真实NFS接收验收。
 
-核对日期：2026-09-10；本次孤立快照回收基线 `872c02b`。R32–R41 属于此前交付阶段，R42–R46 已交付源码及本地验证，目标环境验收未完成。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
+核对日期：2026-09-10；当前源码基线 `72ae569`，对应CI `34442294566`六作业全部成功，包含真实Mongo孤立副本回收。R32–R41 属于此前交付阶段，R42–R46 已交付源码及本地验证，目标环境验收未完成。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
 
 ## 当前任务与恢复
 
@@ -32,7 +32,9 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 
 快照读者保护已在独立`coredumps/snapshot_readers.py`和`snapshot_lifecycle.py`实现：同catalog行CAS协调读者与清理，RETIRING等待已有读者，DELETING保留路径/令牌直到unlink和配额收尾成功；错误中断后可重试。跨节点导出经受鉴权内部header委托子读者，父退出不影响已授权子读者续传；每块读取检查租约并保留既有限流及完整写入。读者及导出真实Mongo验证已通过容器CI，真实网络长时间故障与主机断电仍未验收。
 
-历史无catalog引用的过期RESERVED/PUBLISHED声明已由`coredumps/snapshot_orphans.py`回收：RECLAIMING保留失败进度，确认无引用后仅删除当前节点fileId/version/token能证明归属的私有core/partial，再幂等归还配额；异常单项记录日志，其它孤儿继续。新版声明保存version直查两个路径，旧声明流式扫描严格匹配；非法标识和符号链接保留不释放。节点/状态/到期及catalog token引用索引避免历史数据全扫描。此改进真实Mongo已通过，远端CI待新提交复验。
+历史无catalog引用的过期RESERVED/PUBLISHED声明已由`coredumps/snapshot_orphans.py`回收：RECLAIMING保留失败进度，确认无引用后仅删除当前节点fileId/version/token能证明归属的私有core/partial，再幂等归还配额；异常单项记录日志，其它孤儿继续。新版声明保存version直查两个路径，旧声明流式扫描严格匹配；非法标识和符号链接保留不释放。节点/状态/到期及catalog token引用索引避免历史数据全扫描。此改进真实Mongo及远端CI `34442294566`均已通过。
+
+当前补充独立Ubuntu NFS验收：`scripts/verify_nfs_service.py`复用生产导出配置，使用本次专属临时路径，校验NFSv3/v4挂载、双路64MiB内容摘要、UID/GID映射和清理。CI新增`nfs-smoke`，真实Linux执行尚待新提交验证；本机不安装NFS，也不清理真实采集数据。双挂载点位于同一Linux主机，不能替代海康固件、跨服务器或持续大文件容量验收。
 
 历史验收补齐：`e60b85b` 的 Linux CI 34346496395 已核实六作业全部成功，中文截图已收取。该结果不代替本轮新界面测试。
 

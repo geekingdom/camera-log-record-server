@@ -167,3 +167,26 @@ jobs:
           python-version: '3.12'
       - name: 验证 Ubuntu 无 Docker 原生服务部署
         run: sudo --preserve-env=PATH bash scripts/verify_native_deployment.sh --timeout 300
+  nfs-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装 Linux 内核 NFS 服务及客户端
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nfs-kernel-server nfs-common
+      - name: 验证真实 NFS 挂载和并行文件传输
+        run: |
+          set -o pipefail
+          sudo "$(command -v python)" scripts/verify_nfs_service.py | tee nfs-verification.jsonl
+      - name: 保存 NFS 验证结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfs-verification
+          path: nfs-verification.jsonl
+          if-no-files-found: ignore
