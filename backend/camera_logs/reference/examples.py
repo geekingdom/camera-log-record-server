@@ -91,7 +91,9 @@ def response_example(path, method, status):
         if path.endswith("/coredumps"):
             return page({"id": "coredump-example", "resourceId": "resource-example", "nodeId": "collector-01",
                          "name": "core-example", "status": "RECEIVING", "size": 1048576,
-                         "receivedAt": STAMP, "sourceModifiedAt": STAMP, "version": 1})
+                         "receivedAt": STAMP, "firstSeenAt": STAMP, "sourceModifiedAt": STAMP,
+                         "sourceState": "OBSERVING", "sourceObservedAt": STAMP,
+                         "sourceUnchangedSince": STAMP, "sourceStableAt": None, "version": 1})
         return {"id": "coredump-export-example", "kind": "COREDUMP_EXPORT", "status": "QUEUED",
                 "createdAt": STAMP, "expiresAt": "2026-09-10T10:00:00+00:00"}
     if path.endswith("/browser-session"):

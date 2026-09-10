@@ -102,8 +102,8 @@ export function usePlatformSession(options: SessionOptions) {
   async function changePassword(currentPassword: string, nextPassword: string) {
     if (passwordSaving.value) return false;
     const current = generation.value;
-    if (nextPassword.length < 12 || nextPassword.length > 128) {
-      ElMessage.warning("新密码长度须为 12 至 128 位");
+    if (nextPassword.length < 8 || nextPassword.length > 128) {
+      ElMessage.warning("新密码长度须为 8 至 128 位");
       return false;
     }
     if (

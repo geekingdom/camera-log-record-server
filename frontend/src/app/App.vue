@@ -3,22 +3,13 @@
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import {
   RefreshCw,
-  Terminal,
   Plus,
-  Radio,
-  FileCode2,
-  Server,
   Search,
-  ShieldCheck,
-  ScrollText,
-  Settings2,
-  HardDrive,
-  BookOpen,
 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { api } from "../shared/api";
-import type { Node, Resource, Task, Template } from "../shared/types";
+import type { Resource, Task, Template } from "../shared/types";
 import { taskStatusLabels } from "../features/tasks/taskStatus";
 import AsyncView from "../shared/AsyncView.vue";
 import { permissionKey } from "../shared/permissions";
@@ -27,41 +18,21 @@ import LoginPanel from "../features/auth/LoginPanel.vue";
 import PasswordChangeDialog from "../features/auth/PasswordChangeDialog.vue";
 import { usePlatformSession } from "../features/auth/usePlatformSession";
 import AppNavigation from "./AppNavigation.vue";
+import { useWorkspaceCollections } from "./useWorkspaceCollections";
+import { workspaceNavigation } from "./workspaceNavigation";
 
 const loadTaskOverview = () => import("../features/tasks/TaskOverview.vue");
 const loadTaskList = () => import("../features/tasks/TaskList.vue");
 const loadTaskEditor = () => import("../features/tasks/TaskEditor.vue");
 const loadTemplateList = () => import("../features/templates/TemplateList.vue");
-const loadTemplateEditor = () =>
-  import("../features/templates/TemplateEditor.vue");
+const loadTemplateEditor = () => import("../features/templates/TemplateEditor.vue");
 const loadNodeList = () => import("../features/nodes/NodeList.vue");
 const loadLogsWorkspace = () => import("../features/logs/LogsWorkspace.vue");
-const loadAccessManager = () =>
-  import("../features/access/AccountWorkspace.vue");
+const loadAccessManager = () => import("../features/access/AccountWorkspace.vue");
 const loadAuditWorkspace = () => import("../features/audit/AuditWorkspace.vue");
-const loadSettingsManager = () =>
-  import("../features/settings/SettingsManager.vue");
-const loadResourceWorkspace = () =>
-  import("../features/resources/ResourceWorkspace.vue");
-const loadApiReferenceWorkspace = () =>
-  import("../features/api/ApiReferenceWorkspace.vue");
-const navigation = [
-  { key: "resources", label: "设备资源", icon: HardDrive, scope: "tasks:read" },
-  { key: "tasks", label: "采集任务", icon: Radio, scope: "tasks:read" },
-  { key: "logs", label: "日志工作台", icon: Terminal, scope: "logs:read" },
-  {
-    key: "templates",
-    label: "命令模板",
-    icon: FileCode2,
-    scope: "templates:read",
-  },
-  { key: "nodes", label: "服务节点", icon: Server, admin: true },
-  { key: "access", label: "账号管理", icon: ShieldCheck, scope: "service-tokens:read" },
-  { key: "audit", label: "审计与事件", icon: ScrollText, admin: true },
-  { key: "settings", label: "后台配置", icon: Settings2, admin: true },
-  { key: "api-reference", label: "API 文档", icon: BookOpen },
-];
-const lastUpdated = ref("");
+const loadSettingsManager = () => import("../features/settings/SettingsManager.vue");
+const loadResourceWorkspace = () => import("../features/resources/ResourceWorkspace.vue");
+const loadApiReferenceWorkspace = () => import("../features/api/ApiReferenceWorkspace.vue");
 const sidebarCollapsed = ref(
   localStorage.getItem("camera-log-sidebar-collapsed") === "true",
 );
@@ -76,7 +47,6 @@ function toggleSidebar() {
     /* 浏览器禁用存储时本次布局切换仍然有效。 */
   }
 }
-const templatePage = ref(1);
 const selectedWorkspace = ref("config");
 const selectedLogTask = ref("");
 const activeTab = ref("resources"),
@@ -105,10 +75,7 @@ const {
     ]);
   },
   clearWorkspace: () => {
-    ++taskGeneration;
-    tasks.value = [];
-    templates.value = [];
-    nodes.value = [];
+    collections.clear();
     taskEditorOpen.value = false;
     templateEditorOpen.value = false;
     selectedTemplate.value = undefined;
@@ -124,13 +91,45 @@ const hasScope = (scope?: string) =>
   Boolean(
     user.value?.scopes.includes("*") || user.value?.scopes.includes(scope),
   );
+const error = (value: unknown) =>
+  ElMessage.error(value instanceof Error ? value.message : "请求失败");
+const collections = useWorkspaceCollections({
+  user,
+  sessionGeneration,
+  can: hasScope,
+  api,
+  onError: error,
+});
+const {
+  tasks,
+  templates,
+  nodes,
+  totals,
+  page,
+  pageSize,
+  templatePage,
+  taskSearch,
+  taskStatus,
+  taskCreatedBy,
+  taskShowAll,
+  taskSelectionKey,
+  templateCreatedBy,
+  templateShowAll,
+  templateIncludeDeleted,
+  templateSelectionKey,
+  selectedResource,
+  lastUpdated,
+  loadTasks,
+  loadTemplates,
+  loadNodes,
+} = collections;
 provide(permissionKey, {
   can: (scope: string) => Boolean(user.value && hasScope(scope)),
   resource: () => Boolean(user.value),
   allResources: () => Boolean(user.value),
 });
 const visibleNavigation = computed(() =>
-  navigation.filter(
+  workspaceNavigation.filter(
     (item) => (!item.admin || user.value?.isAdmin) && hasScope(item.scope),
   ).map(item => item.key === "access" && !user.value?.isAdmin ? { ...item, label: "我的服务账号" } : item),
 );
@@ -141,79 +140,9 @@ watch(visibleNavigation, (items) => {
   if (!items.some((item) => item.key === activeTab.value))
     activeTab.value = items[0]?.key ?? "empty";
 });
-const tasks = ref<Task[]>([]),
-  templates = ref<Template[]>([]),
-  nodes = ref<Node[]>([]);
-const totals = ref({ tasks: 0, templates: 0, nodes: 0 }),
-  page = ref(1),
-  pageSize = ref(20);
-const taskSearch = ref(""),
-  taskStatus = ref("");
-const taskCreatedBy = ref(""), taskShowAll = ref(false);
-const taskSelectionKey = computed(() => [
-  page.value,
-  taskSearch.value,
-  taskStatus.value,
-  selectedResource.value?.id ?? "",
-  taskShowAll.value,
-  taskCreatedBy.value,
-  user.value?.id ?? "",
-].join("\u0000"));
-const templateCreatedBy = ref(""), templateShowAll = ref(false), templateIncludeDeleted = ref(false);
-const templateSelectionKey = computed(() => [
-  templatePage.value,
-  templateShowAll.value,
-  templateCreatedBy.value,
-  templateIncludeDeleted.value,
-  user.value?.id ?? "",
-].join("\u0000"));
 const selectedTask = ref<Task>(),
-  selectedResource = ref<Resource>(),
   selectedTemplate = ref<Template>();
 const resourceWorkspace = ref<InstanceType<typeof AsyncView>>();
-let taskGeneration = 0;
-const error = (value: unknown) =>
-  ElMessage.error(value instanceof Error ? value.message : "请求失败");
-async function loadTasks() {
-  if (!hasScope("tasks:read")) return;
-  const current = ++taskGeneration;
-  const data = await api.tasks(page.value, pageSize.value, {
-    search: taskSearch.value.trim() || undefined,
-    status: taskStatus.value || undefined,
-    resourceId: selectedResource.value?.id,
-    createdBy: taskShowAll.value ? taskCreatedBy.value || undefined : user.value?.id,
-  });
-  if (current !== taskGeneration) return;
-  tasks.value = data.items;
-  totals.value.tasks = data.total;
-  lastUpdated.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-}
-async function loadTemplates() {
-  if (!hasScope("templates:read")) return;
-  const currentSession = sessionGeneration.value;
-  const requestedPage = templatePage.value;
-  const requestedSelection = templateSelectionKey.value;
-  const data = await api.templates(requestedPage, 100, {
-    createdBy: templateShowAll.value ? templateCreatedBy.value || undefined : user.value?.id,
-    includeDeleted: templateIncludeDeleted.value ? "true" : undefined,
-  });
-  if (
-    requestedPage !== templatePage.value ||
-    requestedSelection !== templateSelectionKey.value ||
-    currentSession !== sessionGeneration.value
-  )
-    return;
-  templates.value = data.items;
-  totals.value.templates = data.total;
-}
-async function loadNodes() {
-  if (!user.value?.isAdmin) return;
-  const currentSession = sessionGeneration.value;
-  const data = await api.nodes();
-  if (currentSession !== sessionGeneration.value) return;
-  nodes.value = data.items;
-  totals.value.nodes = data.total;
-}
 // 静默刷新供轮询使用，避免网络暂态在用户未操作时反复弹出错误消息。
 async function refresh(quiet = false) {
   if (!authenticated.value || busy.value || user.value?.mustChangePassword)
@@ -303,13 +232,6 @@ watch(activeTab, () => {
   void refresh();
 });
 watch([page, pageSize], () => void refresh());
-watch(templatePage, () => void loadTemplates().catch(error));
-watch(() => [user.value?.id, user.value?.isAdmin], () => {
-  templateShowAll.value = Boolean(user.value?.isAdmin);
-  templateCreatedBy.value = "";
-  templateIncludeDeleted.value = false;
-  templatePage.value = 1;
-}, { immediate: true });
 let timer: ReturnType<typeof setInterval>;
 onMounted(() => {
   startSession();

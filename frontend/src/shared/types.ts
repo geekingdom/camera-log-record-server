@@ -156,6 +156,10 @@ export interface CoredumpFile {
   receivedAt: string;
   firstSeenAt?: string;
   sourceModifiedAt?: string;
+  sourceState?: "OBSERVING" | "CHANGING" | "STABLE";
+  sourceStableAt?: string;
+  sourceObservedAt?: string;
+  sourceUnchangedSince?: string;
   updatedAt?: string;
   status: CoredumpStatus;
   version?: number;

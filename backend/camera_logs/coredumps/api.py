@@ -16,8 +16,9 @@ from camera_logs.logs.download_sessions import download_actor_for, issue_downloa
 def _view(document: dict[str, Any]) -> dict[str, Any]:
     """输出 catalog 事实，显式屏蔽源、NFS 目录、inode 和快照内部路径。"""
     allowed = {"id", "kind", "status", "resourceId", "nodeId", "name", "size", "receivedAt", "firstSeenAt",
-               "sourceModifiedAt", "updatedAt", "version", "createdAt", "expiresAt", "startedAt", "completedAt",
-               "filename", "bytes", "etag", "error"}
+               "sourceModifiedAt", "sourceState", "sourceStableAt", "sourceObservedAt", "sourceUnchangedSince",
+               "updatedAt", "version", "createdAt", "expiresAt", "startedAt", "completedAt", "filename", "bytes",
+               "etag", "error"}
     return {key: value for key, value in public(document).items() if key in allowed}
 
 
@@ -48,9 +49,13 @@ def install_coredump_routes(app):
     @app.get("/api/v1/resources/{resource_id}/coredumps")
     async def list_coredumps(resource_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
                              receivedFrom: str | None = None, receivedTo: str | None = None, name: str | None = Query(None, max_length=256)):
-        """按资源、接收时间和字面文件名分页；未冻结项明确显示为接收中。"""
+        """按资源、首次发现时间和字面文件名分页；源稳定性与下载快照状态分别返回。"""
         await _resource(repo(), user, resource_id)
-        query: dict[str, Any] = {"resourceId": resource_id}
+        # 历史设备会写入同名标志文件；catalog 保留原记录，列表不把它当作可导出的 coredump。
+        query: dict[str, Any] = {
+            "resourceId": resource_id,
+            "$nor": [{"name": {"$regex": r"(^|/)coredump_flag[.]cdf$", "$options": "i"}}],
+        }
         if name:
             import re
             query["name"] = {"$regex": re.escape(name), "$options": "i"}
@@ -62,9 +67,9 @@ def install_coredump_routes(app):
             start = start_value.astimezone(UTC) if start_value else None
             end = end_value.astimezone(UTC) if end_value else None
         except ValueError as error:
-            raise HTTPException(422, "接收时间必须包含时区") from error
+            raise HTTPException(422, "首次发现时间必须包含时区") from error
         if start and end and start > end:
-            raise HTTPException(422, "接收时间范围无效")
+            raise HTTPException(422, "首次发现时间范围无效")
         if start or end:
             query["receivedAt"] = {key: value for key, value in (("$gte", start), ("$lte", end)) if value}
         cursor = repo().db.coredump_files.find(query).sort([("receivedAt", -1), ("id", 1)]).skip((page - 1) * pageSize).limit(pageSize)

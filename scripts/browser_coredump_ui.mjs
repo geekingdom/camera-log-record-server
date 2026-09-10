@@ -15,7 +15,8 @@ const files = {
     { id: "core-frozen", resourceId: "camera-a", nodeId: "node-a", name: "core-frozen.bin", size: 8192,
       receivedAt: "2026-09-10T01:00:00+00:00", status: "FROZEN", version: 1 },
     { id: "core-receiving", resourceId: "camera-a", nodeId: "node-a", name: "core-receiving.bin", size: 4096,
-      receivedAt: "2026-09-10T00:00:00+00:00", status: "RECEIVING", version: 1 },
+      receivedAt: "2026-09-10T00:00:00+00:00", sourceModifiedAt: "2026-09-10T00:00:06+00:00",
+      status: "RECEIVING", sourceState: "CHANGING", version: 1 },
   ],
   "camera-b": [{ id: "core-b", resourceId: "camera-b", nodeId: "node-b", name: "core-b.bin", size: 1024,
     receivedAt: "2026-09-10T02:00:00+00:00", status: "FROZEN", version: 1 }],
@@ -37,6 +38,26 @@ page.on("download", download => downloads.push(download.url()));
 
 function json(route, value, status = 200, headers = {}) {
   return route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
+}
+async function waitForStableStatusTags(drawer, expected) {
+  const tags = drawer.locator(".coredump-table .el-tag");
+  await Promise.all(expected.map(text => drawer.getByText(text, { exact: true }).waitFor()));
+  // 连续两帧读取同一批标签，避免 Element Plus 表格完成布局前截到临时空白单元格。
+  const snapshot = async () => tags.evaluateAll(elements => elements.map(element => {
+    const style = getComputedStyle(element), box = element.getBoundingClientRect();
+    return { text: element.textContent?.trim(), visible: Boolean(box.width && box.height) && style.visibility !== "hidden" && style.display !== "none", opacity: style.opacity, box: { x: box.x, y: box.y, width: box.width, height: box.height } };
+  }));
+  const valid = values => values.length === expected.length
+    && expected.every(text => values.some(tag => tag.text === text && tag.visible && Number(tag.opacity) >= 0.99));
+  let first = [], second = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    first = await snapshot();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    second = await snapshot();
+    if (valid(first) && valid(second)) return second;
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`coredump 状态标签未稳定渲染：${JSON.stringify({ first, second })}`);
 }
 await page.route("**/api/v1/**", async route => {
   const request = route.request(), url = new URL(request.url()), { pathname, searchParams } = url;
@@ -88,12 +109,21 @@ await page.getByRole("tab", { name: "设备资源", exact: true }).click();
 await page.getByLabel("查看 coredump 文件").first().click();
 const drawer = page.getByRole("dialog", { name: /验收网络设备 A.*Coredump 文件/ });
 await drawer.waitFor();
+await drawer.getByText("首次发现时间（北京时间）", { exact: true }).waitFor();
+await drawer.getByText("文件修改时间（北京时间）", { exact: true }).waitFor();
+await drawer.getByText("文件更新中", { exact: true }).waitFor();
 await drawer.getByPlaceholder("按文件名筛选").fill("frozen");
 await drawer.getByRole("button", { name: "筛选", exact: true }).click();
 if (!calls.list.some(call => call.resourceId === "camera-a" && call.name === "frozen")) throw new Error("coredump 文件名筛选未发出正确请求");
+const desktopStatuses = await waitForStableStatusTags(drawer, ["副本可下载", "文件更新中"]);
+console.log(`桌面状态标签：${JSON.stringify(desktopStatuses)}`);
 await page.screenshot({ path: `${screenshots}/coredump-desktop.png`, fullPage: true });
 const frozenRow = drawer.getByRole("row").filter({ hasText: "core-frozen.bin" });
 await frozenRow.locator(".el-checkbox").first().click();
+// 模拟设备写入停止：无需用户手动刷新，下一轮列表更新应显示稳定且保持多选。
+files["camera-a"][1].sourceState = "STABLE";
+await drawer.getByText("文件已稳定", { exact: true }).waitFor({ timeout: 9000 });
+if (!(await frozenRow.locator('input[type="checkbox"]').isChecked())) throw new Error("自动刷新清除了文件选择");
 await drawer.getByRole("button", { name: "导出所选", exact: true }).click();
 await page.getByRole("dialog", { name: "确认导出 coredump", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
 await drawer.getByRole("button", { name: "取消导出", exact: true }).click();
@@ -112,6 +142,15 @@ await drawer.getByText("导出完成", { exact: false }).waitFor();
 await page.waitForTimeout(1000);
 await page.setViewportSize({ width: 390, height: 844 });
 await page.screenshot({ path: `${screenshots}/coredump-mobile.png`, fullPage: true });
+const tableScroller = drawer.locator(".coredump-table .el-scrollbar__wrap").first();
+await tableScroller.evaluate(element => { element.scrollLeft = element.scrollWidth; });
+await page.waitForTimeout(100);
+const mobileStatuses = await waitForStableStatusTags(drawer, ["副本可下载", "文件已稳定"]);
+if (!mobileStatuses.every(tag => tag.box.x >= 0 && tag.box.x + tag.box.width <= 390)) {
+  throw new Error(`移动端横向滚动后状态标签未进入视口：${JSON.stringify(mobileStatuses)}`);
+}
+console.log(`移动端状态标签：${JSON.stringify(mobileStatuses)}`);
+await page.screenshot({ path: `${screenshots}/coredump-mobile-status.png`, fullPage: true });
 // 单文件票据和轮询中的旧导出在关闭并切换资源后返回，均不能触发下载。
 const downloadsBeforeSwitch = downloads.length;
 const singleClick = frozenRow.getByLabel("下载 coredump 文件").click();

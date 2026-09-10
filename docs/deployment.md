@@ -87,7 +87,7 @@ docker compose --env-file .env.worker --project-name camera-log-record-server-wo
 
 脚本仅在 Linux 运行。Ubuntu 和 Debian 缺少 Docker Engine 或 Compose 插件时，会使用 Docker 官方 APT 源安装所需组件；其他发行版需要预先安装可用的 `docker compose`。
 
-首次运行会独占创建根目录 `.env`，权限为 `0600`。其中包含 Fernet 加密密钥、服务令牌和初始管理员账号：用户名固定为 `admin`，初始密码为 `asdf!234`，脚本不会输出密码或令牌。首次登录必须改为至少 12 位的新密码；已部署数据库中的管理员密码不会被后续 `.env` 默认值覆盖。随后按组织要求轮换管理员凭据和服务令牌。
+首次运行会独占创建根目录 `.env`，权限为 `0600`。其中包含 Fernet 加密密钥、服务令牌和初始管理员账号：用户名固定为 `admin`，初始密码为 `asdf!234`，脚本不会输出密码或令牌。首次登录修改密码时新密码须为 8 至 128 位；已部署数据库中的管理员密码不会被后续 `.env` 默认值覆盖。随后按组织要求轮换管理员凭据和服务令牌。
 
 默认会话有效期为 8 小时。`SESSION_COOKIE_SECURE=false` 适用于 HTTP 初始部署；在 HTTPS 请求下服务会自动使用 Secure Cookie。生产 HTTPS 部署可在首次启动前或完成凭据轮换后按站点策略更新 `.env`。
 

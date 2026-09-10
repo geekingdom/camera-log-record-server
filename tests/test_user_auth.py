@@ -122,7 +122,7 @@ def test_csrf_duplicate_username_builtin_protection_and_password_policy(client):
         "username": "OPERATOR", "displayName": "重复", "password": "operator-password",
     }, headers=CSRF).status_code == 409
     assert client.post("/api/v1/users", json={
-        "username": "tiny", "displayName": "短密码", "password": "too-short",
+        "username": "tiny", "displayName": "短密码", "password": "seven77",
     }, headers=CSRF).status_code == 422
     builtin = client.get("/api/v1/users").json()["items"]
     builtin_id = next(item["id"] for item in builtin if item["builtin"])
@@ -132,6 +132,32 @@ def test_csrf_duplicate_username_builtin_protection_and_password_policy(client):
     }, headers=CSRF).status_code == 403
     assert client.delete(f"/api/v1/users/{builtin_id}?version=1", headers=CSRF).status_code == 403
     assert "password" not in created and "passwordHash" not in created and "authVersion" not in created
+
+
+def test_user_password_policy_accepts_eight_characters_for_create_reset_and_change(client):
+    """平台用户创建、管理员重置与本人改密共享 8 至 128 位下限。"""
+    assert client.post("/api/v1/auth/login", json={"username": "root.admin", "password": ADMIN_PASSWORD}).status_code == 403
+    current = change_initial_password(client, "initial8")
+    assert client.post("/api/v1/users", json={
+        "username": "seven", "displayName": "七位密码", "password": "seven77",
+    }, headers=CSRF).status_code == 422
+    created = client.post("/api/v1/users", json={
+        "username": "eight", "displayName": "八位密码", "password": "eight888",
+    }, headers=CSRF)
+    assert created.status_code == 201, created.text
+    assert client.post(f"/api/v1/users/{created.json()['id']}/reset-password", json={
+        "version": created.json()["version"], "password": "seven77",
+    }, headers=CSRF).status_code == 422
+    assert client.post(f"/api/v1/users/{created.json()['id']}/reset-password", json={
+        "version": created.json()["version"], "password": "reset888",
+    }, headers=CSRF).status_code == 200
+    assert client.post("/api/v1/auth/password", json={
+        "currentPassword": current, "newPassword": "seven77",
+    }, headers=CSRF).status_code == 422
+    changed = client.post("/api/v1/auth/password", json={
+        "currentPassword": current, "newPassword": "changed8",
+    }, headers=CSRF)
+    assert changed.status_code == 200, changed.text
 
 
 def test_login_and_password_change_return_current_effective_base_scopes(client):

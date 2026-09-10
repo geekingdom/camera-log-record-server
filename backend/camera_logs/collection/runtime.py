@@ -10,14 +10,18 @@ import logging
 import re
 import time
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pymongo import ReturnDocument
 from pymongo.errors import ConnectionFailure, ExecutionTimeout, PyMongoError
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
+from camera_logs.collection.coredump_lease import (
+    guard_coredump_monitor,
+    record_coredump_status,
+    release_coredump_lease,
+)
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
@@ -68,50 +72,17 @@ class SessionRuntime:
 
     async def on_coredump(self, status, error):
         """单独登记挂载事件，不覆盖采集状态或把敏感挂载命令写入审计。"""
-        try:
-            await self.repo.db.events.insert_one({"type": "COREDUMP_MOUNT", "taskId": self.task["id"],
-                "runId": self.task["runId"], "sessionId": self.collector.session_id,
-                "nodeId": self.repo.settings.node_id, "status": status, "error": error, "createdAt": now()})
-            await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {
-                "coredumpMountStatus": status, "coredumpMountError": error,
-                "coredumpMountRunId": self.task["runId"], "coredumpCheckedAt": now()}})
-        except Exception:
-            # coredump 状态记录不可反向中断日志接收或挂载重试。
-            logger.exception("coredump 状态记录失败 task=%s", self.task["id"])
+        await record_coredump_status(self.repo, self.task, self.collector, status, error, logger)
 
     async def coredump_guard(self):
         """在每次可选设备控制前续租资源，并确认本运行仍拥有任务及健康资源。"""
-        if self.stopping or self.retired or self.collector is None or self.collector._closed.is_set():
-            return False
-        task = await self.repo.db.tasks.find_one({**owner_filter(self.task), "resourceDeleted": {"$ne": True},
-                                                   "desiredState": "RUNNING", "status": "COLLECTING"}, {"id": 1})
-        if not task:
-            return False
-        resource_id = self.task.get("resourceId")
-        if not resource_id:
-            return False
-        resource = await self.repo.db.resources.find_one({"id": resource_id}, {"deletedAt": 1, "healthStatus": 1})
-        if not resource or resource.get("deletedAt") is not None or resource.get("healthStatus") != "ONLINE":
-            # None 专用于健康资源被其它运行租用；设备已不可用则终止监控并留下可见原因。
-            await self.on_coredump("FAILED", "设备资源不可用，已停止 Coredump 监控")
-            return False
-        timestamp = now()
-        lease = await self.repo.db.resources.find_one_and_update(
-            {"id": resource_id, "deletedAt": None, "healthStatus": "ONLINE", "$or": [
-                {"coredumpLeaseUntil": {"$exists": False}},
-                {"coredumpLeaseUntil": {"$lte": timestamp}},
-                {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"],
-                 "coredumpLeaseGeneration": self.task.get("generation"),
-                 "coredumpLeaseNodeId": self.task.get("nodeId")},
-            ]},
-            {"$set": {"coredumpLeaseTaskId": self.task["id"], "coredumpLeaseRunId": self.task["runId"],
-                      "coredumpLeaseGeneration": self.task.get("generation"),
-                      "coredumpLeaseNodeId": self.task.get("nodeId"),
-                      "coredumpLeaseUntil": timestamp + timedelta(seconds=70)}},
-            return_document=ReturnDocument.AFTER,
+        return await guard_coredump_monitor(
+            self.repo,
+            self.task,
+            session_active=lambda: not (self.stopping or self.retired or self.collector is None
+                                        or self.collector._closed.is_set()),
+            report_status=self.on_coredump,
         )
-        # None 表示同资源另一会话仍持有租约；监控等待而不以重复 gdbcfg 打断对方。
-        return True if lease is not None else None
 
     def file_id(self, path):
         """以不可变原始分卷路径生成逻辑 ID，多个成员可共享一个小时归档。"""
@@ -462,13 +433,7 @@ class SessionRuntime:
                 finally:
                     # 只释放仍属于本运行的资源租约，避免旧会话清掉后继接管者的控制权。
                     try:
-                        await self.repo.db.resources.update_one(
-                            {"id": self.task.get("resourceId"), "coredumpLeaseTaskId": self.task["id"],
-                             "coredumpLeaseRunId": self.task["runId"],
-                             "coredumpLeaseGeneration": self.task.get("generation"),
-                             "coredumpLeaseNodeId": self.task.get("nodeId")},
-                            {"$set": {"coredumpLeaseUntil": now()}},
-                        )
+                        await release_coredump_lease(self.repo, self.task)
                     except Exception:
                         logger.exception("coredump 租约释放失败 task=%s", self.task["id"])
                     # 连接或归档收尾报错仍需结束本会话命令；不能跳过并遗留 SENDING。

@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     # 设备可达的宿主机 IP，不能使用 Docker 服务名或容器内回环地址。
     nfs_server_ip: str = ""
     # NFS coredump 扫描/冻结独立于采集会话；接收源文件默认不自动删除。
-    coredump_scan_interval_seconds: int = Field(default=60, ge=1, le=3600)
+    # 十秒轮询及时发现设备子目录文件；稳定判定独立于设备端 mtime 时钟。
+    coredump_scan_interval_seconds: int = Field(default=10, ge=1, le=3600)
     coredump_scan_max_files: int = Field(default=500, ge=1, le=10000)
     coredump_snapshot_max_bytes: int = Field(default=20_000_000_000, ge=1)
     coredump_snapshot_quota_bytes: int = Field(default=100_000_000_000, ge=1)

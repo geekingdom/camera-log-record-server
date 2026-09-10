@@ -6,17 +6,21 @@ import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { CoredumpFile, Resource } from "../../shared/types";
+import { coredumpFileStatus } from "./coredumpStatus";
 
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ resource?: Resource }>();
 const files = ref<CoredumpFile[]>([]);
 const selected = ref<string[]>([]);
+const selectionGeneration = ref(0);
 const page = ref(1), total = ref(0), loading = ref(false), exporting = ref(false);
 const name = ref(""), range = ref<[Date, Date]>();
 const exportStatus = ref(""), exportProgress = ref("");
 let lifecycleGeneration = 0;
 let listGeneration = 0;
 let activeExport: string | undefined;
+let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let listPending = false;
 
 const statusLabels: Record<string, string> = {
   RECEIVING: "正在接收", FREEZING: "正在冻结", FROZEN: "已冻结",
@@ -44,12 +48,12 @@ function fail(error: unknown) { ElMessage.error(error instanceof Error ? error.m
 function currentLifecycle(generation: number, resourceId: string) {
   return generation === lifecycleGeneration && open.value && props.resource?.id === resourceId;
 }
-async function load() {
+async function load(quiet = false) {
   const resourceId = props.resource?.id;
-  if (!resourceId) return;
+  if (!resourceId || (quiet && listPending)) return;
   const current = ++listGeneration, lifecycle = lifecycleGeneration;
-  loading.value = true;
-  selected.value = [];
+  listPending = true;
+  if (!quiet) { loading.value = true; selected.value = []; selectionGeneration.value++; }
   try {
     const result = await api.coredumps(resourceId, page.value, 50, {
       name: name.value.trim() || undefined,
@@ -58,8 +62,8 @@ async function load() {
     if (current === listGeneration && currentLifecycle(lifecycle, resourceId)) {
       files.value = result.items; total.value = result.total;
     }
-  } catch (error) { if (current === listGeneration && currentLifecycle(lifecycle, resourceId)) fail(error); }
-  finally { if (current === listGeneration) loading.value = false; }
+  } catch (error) { if (!quiet && current === listGeneration && currentLifecycle(lifecycle, resourceId)) fail(error); }
+  finally { if (current === listGeneration) { loading.value = false; listPending = false; } }
 }
 function filter() { if (page.value === 1) void load(); else page.value = 1; }
 async function download(file: CoredumpFile) {
@@ -116,31 +120,37 @@ async function cancelExport() {
 watch(page, () => void load());
 watch(() => [open.value, props.resource?.id] as const, ([visible]) => {
   lifecycleGeneration++;
+  clearInterval(refreshTimer);
+  ++listGeneration; listPending = false; loading.value = false;
   files.value = []; selected.value = []; total.value = 0; exportStatus.value = exportProgress.value = "";
   activeExport = undefined; exporting.value = false;
-  if (visible) { page.value = 1; void load(); }
+  if (visible) {
+    page.value = 1; void load();
+    // 仅在文件窗口打开时轮询；后台刷新保留所选文件，不允许旧资源响应回写。
+    refreshTimer = setInterval(() => void load(true), 5000);
+  }
 }, { immediate: true });
-onBeforeUnmount(() => { lifecycleGeneration++; activeExport = undefined; });
+onBeforeUnmount(() => { clearInterval(refreshTimer); lifecycleGeneration++; activeExport = undefined; });
 </script>
 
 <template>
   <el-drawer v-model="open" :title="`${props.resource?.name ?? '设备资源'} · Coredump 文件`" size="min(1180px, 96vw)" destroy-on-close>
     <div class="coredump-toolbar">
       <el-input v-model="name" aria-label="按文件名筛选 coredump" placeholder="按文件名筛选" clearable @keyup.enter="filter" />
-      <el-date-picker v-model="range" type="datetimerange" range-separator="至" start-placeholder="接收开始时间" end-placeholder="接收结束时间" />
+      <el-date-picker v-model="range" type="datetimerange" range-separator="至" start-placeholder="首次发现起始时间" end-placeholder="首次发现截止时间" />
       <el-button @click="filter">筛选</el-button>
-      <el-tooltip content="刷新 coredump 文件"><el-button :icon="RefreshCw" aria-label="刷新 coredump 文件" @click="load" /></el-tooltip>
+      <el-tooltip content="刷新 coredump 文件"><el-button :icon="RefreshCw" aria-label="刷新 coredump 文件" @click="load()" /></el-tooltip>
       <el-button type="primary" :icon="Download" :loading="exporting" @click="exportFiles">导出所选</el-button>
       <el-button v-if="activeExport" text type="danger" :icon="X" @click="cancelExport">取消导出</el-button>
     </div>
     <p v-if="exportStatus" class="coredump-export-status">{{ exportStatus }}<template v-if="exportProgress"> · {{ exportProgress }}</template></p>
-    <el-table :data="files" v-loading="loading" row-key="id" class="data-table coredump-table" @selection-change="(items: CoredumpFile[]) => selected = items.map(item => item.id)">
-      <el-table-column type="selection" width="48" />
+    <el-table :key="selectionGeneration" :data="files" v-loading="loading" row-key="id" class="data-table coredump-table" @selection-change="(items: CoredumpFile[]) => selected = items.map(item => item.id)">
+      <el-table-column type="selection" width="48" :reserve-selection="true" />
       <el-table-column label="文件名" min-width="260"><template #default="{ row }"><strong class="coredump-name">{{ row.name }}</strong><small>{{ row.nodeId }}</small></template></el-table-column>
-      <el-table-column label="接收时间（北京时间）" min-width="190"><template #default="{ row }">{{ time(row.receivedAt) }}</template></el-table-column>
-      <el-table-column label="来源修改时间（北京时间）" min-width="190"><template #default="{ row }">{{ time(row.sourceModifiedAt) }}</template></el-table-column>
+      <el-table-column label="首次发现时间（北京时间）" min-width="210"><template #header><el-tooltip content="服务器首次扫描到文件的时间，不是传输完成时间。"><span>首次发现时间（北京时间）</span></el-tooltip></template><template #default="{ row }">{{ time(row.firstSeenAt || row.receivedAt) }}</template></el-table-column>
+      <el-table-column label="文件修改时间（北京时间）" min-width="210"><template #header><el-tooltip content="NFS 文件的最后修改时间。传输过程中会更新，也可能由设备设置，因此可能晚于首次发现时间。"><span>文件修改时间（北京时间）</span></el-tooltip></template><template #default="{ row }">{{ time(row.sourceModifiedAt) }}</template></el-table-column>
       <el-table-column label="大小" width="130" align="right"><template #default="{ row }">{{ bytes(row.size) }} 字节</template></el-table-column>
-      <el-table-column label="状态" width="120"><template #default="{ row }"><el-tag :type="statusTone(row.status)">{{ statusLabel(row.status) }}</el-tag></template></el-table-column>
+      <el-table-column label="状态" width="145"><template #default="{ row }"><el-tooltip content="文件已稳定表示连续扫描至少10秒未发现变化，不是设备发送的完成确认；导出时仍会校验并创建固定副本。"><el-tag :type="row.sourceState === 'STABLE' && row.status === 'RECEIVING' ? 'success' : statusTone(row.status)">{{ coredumpFileStatus(row) }}</el-tag></el-tooltip></template></el-table-column>
       <el-table-column label="操作" width="92" fixed="right"><template #default="{ row }"><el-tooltip :disabled="row.status === 'FROZEN'" :content="row.status === 'FROZEN' ? '' : '文件冻结后才能下载'"><el-button text :icon="Download" aria-label="下载 coredump 文件" :disabled="row.status !== 'FROZEN'" @click="download(row)" /></el-tooltip></template></el-table-column>
     </el-table>
     <el-pagination v-model:current-page="page" :page-size="50" :total="total" layout="total, prev, pager, next" />

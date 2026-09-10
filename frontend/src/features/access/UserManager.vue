@@ -102,10 +102,10 @@ async function save() {
   if (
     !editing.value &&
     (form.value.username.trim().length < 1 ||
-      form.value.password.length < 12 ||
+      form.value.password.length < 8 ||
       form.value.password.length > 128)
   )
-    return ElMessage.warning("请填写用户名，初始密码需为 12 至 128 位");
+    return ElMessage.warning("请填写用户名，初始密码需为 8 至 128 位");
   saving.value = true;
   try {
     if (editing.value)
@@ -165,8 +165,8 @@ function openReset(user: SessionUser) {
 }
 // 密码重置后立即清空值，关闭弹窗同样清空，避免密码残留在组件状态中。
 async function reset(user: SessionUser) {
-  if (resetPassword.value.length < 12 || resetPassword.value.length > 128)
-    return ElMessage.warning("新密码需为 12 至 128 位");
+  if (resetPassword.value.length < 8 || resetPassword.value.length > 128)
+    return ElMessage.warning("新密码需为 8 至 128 位");
   resetting.value = true;
   try {
     await usersApi.resetPassword(

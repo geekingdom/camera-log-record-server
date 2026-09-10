@@ -71,6 +71,33 @@ def test_auth_and_invalid_commands(client):
         json={"name": "bad", "protocol": "SSH", "ip": "x", "port": 0}).status_code == 422
 
 
+def test_coredump_listing_hides_historical_flag_files_and_exposes_source_stability(client):
+    """历史标志文件不参与搜索或分页，采集器观测到的稳定状态仍可供排障读取。"""
+    repo = client.app.state.repo
+    observed = "2026-09-10T01:02:03+00:00"
+    client.portal.call(repo.db.coredump_files.insert_many, [
+        {"id": "flag-root", "resourceId": "fixture-device", "nodeId": "test", "name": "coredump_flag.cdf",
+         "receivedAt": observed},
+        {"id": "flag-none", "resourceId": "fixture-device", "nodeId": "test", "name": "文件(none)/coredump_flag.cdf",
+         "receivedAt": observed},
+        {"id": "core", "resourceId": "fixture-device", "nodeId": "test", "name": "文件(none)/core-001.gz",
+         "receivedAt": observed, "sourceState": "STABLE", "sourceObservedAt": observed,
+         "sourceUnchangedSince": observed, "sourceStableAt": observed},
+    ])
+
+    response = client.get("/api/v1/resources/fixture-device/coredumps?name=core&pageSize=1")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "items": [{"id": "core", "resourceId": "fixture-device", "nodeId": "test",
+                   "name": "文件(none)/core-001.gz", "receivedAt": observed, "sourceState": "STABLE",
+                   "sourceObservedAt": observed, "sourceUnchangedSince": observed, "sourceStableAt": observed}],
+        "total": 1, "page": 1, "pageSize": 1,
+    }
+    assert client.portal.call(repo.db.coredump_files.count_documents, {"name": "coredump_flag.cdf"}) == 1
+    assert client.get("/api/v1/resources/fixture-device/coredumps?name=coredump_flag.cdf").json()["total"] == 0
+
+
 def test_task_list_combines_creator_filters_and_resource_deletion_time(client):
     """任务列表组合筛选创建者和既有条件，只把关联资源的删除时间投影给已删除资源任务。"""
     repo = client.app.state.repo

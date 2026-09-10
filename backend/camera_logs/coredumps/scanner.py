@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import heapq
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +54,9 @@ def _scan_directory(
             continue
         path = Path(entry.path)
         relative = path.relative_to(root).as_posix()
+        # 设备会在任意子目录写同名标志，catalog 不应把它当作可下载 coredump。
+        if path.name.lower() == "coredump_flag.cdf":
+            continue
         if relative <= after:
             continue
         try:
@@ -103,6 +106,7 @@ class CoredumpScanner:
             ordered = sorted(resources, key=lambda item: item["id"])
             cursor_resource, _, cursor_name = cursor.partition("\x00")
             pivot = next((index for index, item in enumerate(ordered) if item["id"] >= cursor_resource), 0)
+            cursor_resource_has_entries = False
             for resource in ordered[pivot:] + ordered[:pivot]:
                 if remaining <= 0:
                     break
@@ -112,12 +116,15 @@ class CoredumpScanner:
                 )
                 discovered.extend((resource, name, info) for name, info in entries)
                 remaining -= len(entries)
-            # 当前资源在本轮末尾才回绕，保证游标后的其它资源至少有一次机会。
+                if resource["id"] == cursor_resource and entries:
+                    cursor_resource_has_entries = True
+            # 当前资源已没有游标后的项才回绕，先保证其它资源有一次扫描机会。
+            # 否则一个持续增长的大目录会在同一轮反复占满配额，延迟后续资源。
             if (
                 remaining
-                and len(ordered) > 1
                 and cursor_resource
                 and cursor_resource in {item["id"] for item in ordered}
+                and not cursor_resource_has_entries
             ):
                 resource = next(item for item in ordered if item["id"] == cursor_resource)
                 entries = await asyncio.to_thread(
@@ -166,6 +173,7 @@ class CoredumpScanner:
             )
             version = int(previous.get("version", 0)) + 1
             identifier = hashlib.sha256(f"{source_key}\x00{version}".encode()).hexdigest()[:32]
+            timestamp = now()
             document = {
                 "id": identifier,
                 "nodeId": self.repo.settings.node_id,
@@ -177,13 +185,30 @@ class CoredumpScanner:
                 "version": version,
                 "status": "RECEIVING",
                 "size": info.st_size,
-                "receivedAt": now(),
-                "firstSeenAt": now(),
+                "receivedAt": timestamp,
+                "firstSeenAt": timestamp,
                 "sourceModifiedAt": datetime.fromtimestamp(info.st_mtime_ns / 1_000_000_000, UTC),
-                "updatedAt": now(),
+                "sourceState": "OBSERVING",
+                "sourceObservedAt": timestamp,
+                "sourceUnchangedSince": timestamp,
+                "sourceStableAt": None,
+                "updatedAt": timestamp,
             }
             await self.repo.db.coredump_files.insert_one(document)
             return
+        timestamp = now()
+        unchanged_since = current.get("sourceUnchangedSince")
+        if current.get("source") != fingerprint:
+            source_state, unchanged_since, stable_at = "CHANGING", timestamp, None
+        else:
+            unchanged_since = unchanged_since if isinstance(unchanged_since, datetime) else timestamp
+            unchanged_since = unchanged_since.replace(tzinfo=UTC) if unchanged_since.tzinfo is None else unchanged_since
+            if timestamp - unchanged_since >= timedelta(seconds=10):
+                source_state = "STABLE"
+                stable_at = current.get("sourceStableAt") or timestamp
+            else:
+                source_state = current.get("sourceState") if current.get("sourceState") in {"OBSERVING", "CHANGING"} else "OBSERVING"
+                stable_at = None
         await self.repo.db.coredump_files.update_one(
             {"id": current["id"], "status": "RECEIVING", "snapshot": {"$exists": False}},
             {
@@ -191,7 +216,11 @@ class CoredumpScanner:
                     "source": fingerprint,
                     "size": info.st_size,
                     "sourceModifiedAt": datetime.fromtimestamp(info.st_mtime_ns / 1_000_000_000, UTC),
-                    "updatedAt": now(),
+                    "sourceState": source_state,
+                    "sourceObservedAt": timestamp,
+                    "sourceUnchangedSince": unchanged_since,
+                    "sourceStableAt": stable_at,
+                    "updatedAt": timestamp,
                     "status": "RECEIVING",
                 },
             },

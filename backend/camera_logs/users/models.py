@@ -28,7 +28,7 @@ class Login(Input):
 class UserCreate(Input):
     username: str = Field(pattern=r"^[a-zA-Z0-9_.-]{3,64}$")
     displayName: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     isAdmin: Literal[False] = False
     scopes: list[str] = Field(default_factory=list, max_length=32)
     enabled: bool = True
@@ -65,9 +65,9 @@ class UserPatch(Input):
 
 class PasswordChange(Input):
     currentPassword: str = Field(min_length=1, max_length=128)
-    newPassword: str = Field(min_length=12, max_length=128)
+    newPassword: str = Field(min_length=8, max_length=128)
 
 
 class PasswordReset(Input):
     version: int = Field(ge=1)
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=8, max_length=128)

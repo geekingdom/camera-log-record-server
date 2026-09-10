@@ -112,6 +112,8 @@ def test_reference_coredumps_describe_binary_downloads_and_real_permissions(clie
     assert listing["group"] == "Coredump文件"
     assert listing["permission"] == "logs:read"
     assert listing["responseExample"]["items"][0]["receivedAt"]
+    assert listing["responseExample"]["items"][0]["sourceState"] == "OBSERVING"
+    assert listing["responseExample"]["items"][0]["sourceStableAt"] is None
     monitor = operations["GET /api/v1/resources/{identifier}/coredump-monitor"]
     assert monitor["responseExample"] == {
         "active": True, "ownerTask": {"id": "task-example", "name": "值守采集"}, "mountStatus": "MOUNTED",
@@ -125,4 +127,5 @@ def test_reference_coredumps_describe_binary_downloads_and_real_permissions(clie
         assert "download_access" in content["headers"]["Authorization"]
         assert "二进制" in content["responseExample"]
     guides = "\n".join(item["text"] for item in reference["guides"])
-    assert "WAITING_DEVICE" in guides and "新认证" in guides
+    for text in ("WAITING_DEVICE", "新认证", "coredump_flag.cdf", "首次扫描观测时间", "sourceState", "设备时间影响"):
+        assert text in guides

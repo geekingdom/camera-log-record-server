@@ -65,6 +65,26 @@ afterEach(() => {
 });
 
 describe("usePlatformSession", () => {
+  it("拒绝少于八位的新密码且不请求服务端", async () => {
+    const session = usePlatformSession({
+      loadInitial: async () => {}, clearWorkspace: () => {}, refreshWorkspace: async () => {},
+    });
+
+    await expect(session.changePassword("current", "seven77")).resolves.toBe(false);
+    expect(authApi.password).not.toHaveBeenCalled();
+  });
+
+  it("允许八位新密码进入服务端改密流程", async () => {
+    const session = usePlatformSession({
+      loadInitial: async () => {}, clearWorkspace: () => {}, refreshWorkspace: async () => {},
+    });
+    vi.mocked(authApi.password).mockResolvedValue({ user: account });
+    vi.mocked(confirmAction).mockResolvedValue(true);
+
+    await expect(session.changePassword("current", "eight888")).resolves.toBe(true);
+    expect(authApi.password).toHaveBeenCalledWith("current", "eight888");
+  });
+
   it("退出后忽略恢复流程中迟到的初始加载", async () => {
     const initial = deferred<void>();
     const { session, loadInitial, clearWorkspace } = createSession(
