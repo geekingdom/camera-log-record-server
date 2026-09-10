@@ -4,8 +4,38 @@ import asyncio
 import logging
 
 from camera_logs.common import audited_mutations
+from camera_logs.common.database import now
 
 logger = logging.getLogger(__name__)
+
+
+def _lost_execution_ownership():
+    """返回本执行器已失去作业归属的稳定终态，不写数据库或审计。"""
+    return {"status": "FAILED", "error": "EXECUTION_OWNERSHIP_LOST"}
+
+
+def _running_execution_filter(job, current, timestamp):
+    """构造终态 CAS 条件，旧执行器不能覆盖新 token 或到期租约。
+
+    未引入 token 的历史调用仍可完成未引入 token 的作业。只要数据库当前
+    作业已有 token，即使调用方未携带 token 也必须拒绝，避免旧 Worker 迟到
+    写入。token 所在运行还必须保持同一节点和有效租约。
+    """
+    current_token = current.get("executionToken")
+    submitted_token = job.get("executionToken")
+    if current_token is None and submitted_token is None:
+        return {"id": job["id"], "status": "RUNNING", "executionToken": None}
+    if (not current_token or current_token != submitted_token
+            or current.get("nodeId") != job.get("nodeId")
+            or current.get("leaseUntil") is None):
+        return None
+    return {
+        "id": job["id"],
+        "status": "RUNNING",
+        "executionToken": submitted_token,
+        "nodeId": job.get("nodeId"),
+        "leaseUntil": {"$gt": timestamp},
+    }
 
 
 async def complete_job(repo, job, update):
@@ -23,8 +53,12 @@ async def complete_job(repo, job, update):
             if current["status"] == "SUCCEEDED":
                 return {key: current[key] for key in update if key in current}
             return {"status": current["status"]}
-        await repo.db.jobs.update_one({"id": job["id"], "status": "RUNNING"},
-                                      {"$set": update}, session=session)
+        execution_filter = _running_execution_filter(job, current, now())
+        if execution_filter is None:
+            return _lost_execution_ownership()
+        changed = await repo.db.jobs.update_one(execution_filter, {"$set": update}, session=session)
+        if changed.matched_count != 1:
+            return _lost_execution_ownership()
         await repo.audit(job.get("actor", "system"), "job_" + update["status"].lower(),
                          job["id"], session=session)
         return update

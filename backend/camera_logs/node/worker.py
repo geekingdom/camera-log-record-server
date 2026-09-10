@@ -8,16 +8,12 @@ import logging
 import shutil
 import time
 import uuid
-from contextlib import asynccontextmanager
 from datetime import timedelta
 
-import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from pymongo import AsyncMongoClient, ReturnDocument
+from pymongo import ReturnDocument
 
 from camera_logs.collection.runtime import SessionRuntime
-from camera_logs.common.config import Settings
-from camera_logs.common.database import Repository, now
+from camera_logs.common.database import now
 from camera_logs.common.ownership import owner_filter
 from camera_logs.node.health import resource_pressure
 from camera_logs.node.manual_queue import next_manual_command
@@ -421,11 +417,11 @@ class Worker:
                         self.manual_jobs[task["id"]] = asyncio.create_task(runtime.manual(command))
         self.jobs = {job for job in self.jobs if not job.done()}
         if len(self.jobs) < 2:
-            job = await self.repo.db.jobs.find_one_and_update({"nodeId": self.repo.settings.node_id, "status": "QUEUED"},
-                {"$set": {"status": "RUNNING", "startedAt": now()}}, return_document=ReturnDocument.AFTER)
+            from camera_logs.logs.job_lease import claim_job
+            job = await claim_job(self.repo, self.instance_id)
             if job:
-                from camera_logs.logs.jobs import run_job
-                self.track_background(asyncio.create_task(run_job(self.repo, job)), "日志导出")
+                from camera_logs.logs.job_execution import run_leased_job
+                self.track_background(asyncio.create_task(run_leased_job(self.repo, job)), "日志查询与导出")
         if len(self.jobs) < 2:
             export = await self.repo.db.coredump_exports.find_one_and_update(
                 {"coordinatorNodeId": self.repo.settings.node_id, "status": "QUEUED"},
@@ -443,8 +439,10 @@ class Worker:
     async def _maintain(self):
         """执行低频清理；无 NFS 功能节点保留既有快照且跳过其专属回收。"""
         from camera_logs.coredumps.jobs import cleanup_expired_exports
+        from camera_logs.logs.job_lease import recover_expired_jobs
         from camera_logs.logs.maintenance import maintain
 
+        await recover_expired_jobs(self.repo)
         await maintain(self.repo)
         await cleanup_expired_exports(self.repo)
         if not self.repo.settings.nfs_server_ip:
@@ -495,52 +493,11 @@ class Worker:
 
 
 def create_worker_app(settings=None):
-    """创建节点内部服务；数据库和运行日志资源与 ASGI 生命周期绑定。"""
-    settings = settings or Settings()
-    @asynccontextmanager
-    async def lifespan(app):
-        from camera_logs.common.observability import setup_logging
-        listener = setup_logging(settings.log_root.parent / "service-logs" / settings.node_id)
-        client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True,
-                                  w="majority", journal=True)
-        repo = Repository(client[settings.database_name], settings)
-        await repo.initialize()
-        worker = Worker(repo)
-        # coredump 导出没有可安全重放的源复制阶段；Worker 重启后把遗留运行项明确标失败，
-        # 用户可重新请求当前 catalog 版本，不能无限显示 RUNNING。
-        await repo.db.coredump_exports.update_many(
-            {"coordinatorNodeId": settings.node_id, "status": "RUNNING", "leaseUntil": {"$lt": now()}},
-            {"$set": {"status": "FAILED", "error": "WORKER_RESTART", "updatedAt": now()}},
-        )
-        from camera_logs.logs.maintenance import recover_orphan_archives
-        await recover_orphan_archives(repo)
-        app.state.repo, app.state.worker = repo, worker
-        from camera_logs.node.files import install_node_routes
-        reads = install_node_routes(app, repo, worker)
-        task = asyncio.create_task(worker.run())
-        yield
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        await worker.close()
-        await reads.close()
-        from camera_logs.logs.compression import shutdown_compression
-        await shutdown_compression()
-        await client.close()
-        listener.stop()
-
-    app = FastAPI(title="采集节点内部服务", lifespan=lifespan)
-    @app.get("/health")
-    async def health():
-        return {"status": "ok"}
-    @app.get("/internal/tail/{task_id}")
-    async def tail(task_id: str, request: Request, cursor: str = ""):
-        import secrets
-        if not settings.internal_token or not secrets.compare_digest(request.headers.get("authorization", ""), "Bearer "+settings.internal_token):
-            raise HTTPException(401)
-        runtime = app.state.worker.active.get(task_id)
-        return runtime.tail(cursor) if runtime else {"frames": [], "gap": False}
-    return app
+    """兼容原节点入口；内部服务装配已迁至独立 app 模块。"""
+    from camera_logs.node.app import create_worker_app as build_worker_app
+    return build_worker_app(settings)
 
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(create_worker_app(), host="0.0.0.0", port=8001)

@@ -213,8 +213,14 @@ class JobProgress:
         candidate = min(99, self.completed * 100 // self.total)
         if candidate <= self.persisted:
             return
+        query = {"id": self.job["id"], "status": "RUNNING"}
+        if self.job.get("executionToken"):
+            query.update(executionToken=self.job["executionToken"], nodeId=self.job["nodeId"],
+                         leaseUntil={"$gt": datetime.now(UTC)})
+        else:
+            query["executionToken"] = {"$exists": False}
         changed = await self.repo.db.jobs.update_one(
-            {"id": self.job["id"], "status": "RUNNING"},
+            query,
             {"$set": {"progress": candidate}},
         )
         if changed.modified_count:
@@ -403,7 +409,8 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                     result = await (_download(repo, job) if job["kind"] == "DOWNLOAD" else _search(repo, job))
                     update = result | {"status": "SUCCEEDED", "progress": 100}
             except asyncio.CancelledError:
-                update = {"status": "CANCELLED"}
+                update = ({"status": "FAILED", "error": "WORKER_EXECUTION_LOST"}
+                          if job.get("_execution_lost") else {"status": "CANCELLED"})
             except Exception as error:  # noqa: BLE001 - 所有执行异常记录原因并尝试原子收尾
                 _log.exception("job failed id=%s kind=%s", job.get("id"), job.get("kind"))
                 update = {"status": "FAILED", "error": type(error).__name__}

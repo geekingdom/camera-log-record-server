@@ -42,9 +42,11 @@ def create_app(settings=None, db=None):
             async with NodeHttpPool() as node_http:
                 app.state.node_http = node_http
                 if settings.start_background:
+                    from camera_logs.logs.job_lease import recovery_loop
                     from camera_logs.resources.health import health_loop
                     from camera_logs.tasks.scheduler import scheduler_loop
-                    background = [asyncio.create_task(scheduler_loop(repo)), asyncio.create_task(health_loop(repo))]
+                    background = [asyncio.create_task(scheduler_loop(repo)), asyncio.create_task(health_loop(repo)),
+                                  asyncio.create_task(recovery_loop(repo))]
                 try:
                     yield
                 finally:

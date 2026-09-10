@@ -3,7 +3,7 @@
 import uvicorn
 
 from camera_logs.common.config import Settings
-from camera_logs.node.worker import create_worker_app
+from camera_logs.node.app import create_worker_app
 
 if __name__ == "__main__":
     settings = Settings()

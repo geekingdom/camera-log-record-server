@@ -317,6 +317,8 @@ Content-Type: application/json
 
 通过 `GET /api/v1/log-searches/{jobId}/results?page=1&pageSize=100` 读取结果。每条记录包含 `fileId`、`offset`、`text`；`truncated=true` 表示已达到服务端匹配上限。
 
+日志搜索和下载作业的执行者失联且租约到期后，状态查询返回 `status=FAILED`、`error=WORKER_EXECUTION_LOST` 和中文 `errorMessage`。服务不会自动重做不确定的文件操作，调用方可使用新的幂等键重新提交；原幂等键仍返回原作业。旧执行租约、令牌和实例ID不公开。该行为只适用于带执行租约的日志作业，详情见[作业恢复说明](log-job-recovery.md)。
+
 ## 错误格式
 
 实时接口路径为 `/api/v1/tasks/{taskId}/logs`：HTTP 部署使用 `ws://<host>/api/v1/tasks/{taskId}/logs`，HTTPS 部署使用 `wss://<host>/api/v1/tasks/{taskId}/logs`。连接后十秒内发送首帧 `{"token":"<access-token>","cursor":null}`，后续消息包含 `fileId`、`sessionId`、`offset`、`endOffset`、Base64 `data` 及 `cursor`。重连传回最后游标；收到 `gap` 表示实时缓冲过期，需要从文件接口补读，原始文件并未因此丢失。服务端会持续检查令牌有效性。

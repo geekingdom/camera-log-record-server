@@ -4,6 +4,7 @@ import asyncio
 import time
 
 import pytest
+import telnetlib3
 from camera_logs.collection.connections import _connect_telnet
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
@@ -22,19 +23,27 @@ def _command_lines(payload):
 async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(tmp_path):
     """协议 NOP 不算正文；旧 Telnet 关闭完成后才建新会话，预算按运行累计。"""
     handlers, server_eof, received, server_eofs = set(), asyncio.Event(), [], set()
+    logins = []
     client_close_finished, second_factory = asyncio.Event(), asyncio.Event()
     second_initialised, scheduled_twice = asyncio.Event(), asyncio.Event()
     client_close_elapsed, states = {}, []
 
     async def serve(reader, writer):
-        """只发送 Telnet 控制 NOP，记录客户端命令但绝不回显为设备正文。"""
+        """以真实 Telnet 协商后逐次要求账号口令，只发送协议 NOP 而不回显正文。"""
         received.append(bytearray())
         connection_number = len(received)
         payload = received[-1]
         handlers.add(asyncio.current_task())
         try:
+            writer.write(b"login:")
+            await writer.drain()
+            username = (await reader.readuntil(b"\n")).rstrip(b"\r\n")
+            writer.write(b"Password:")
+            await writer.drain()
+            password = (await reader.readuntil(b"\n")).rstrip(b"\r\n")
+            logins.append((connection_number, username, password))
             while True:
-                writer.write(b"\xff\xf1")
+                writer.send_iac(b"\xff\xf1")
                 await writer.drain()
                 try:
                     chunk = await asyncio.wait_for(reader.read(65536), .1)
@@ -57,7 +66,9 @@ async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(t
             await writer.wait_closed()
             handlers.discard(asyncio.current_task())
 
-    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    server = await telnetlib3.create_server(
+        host="127.0.0.1", port=0, shell=serve, encoding=False, connect_maxwait=.05,
+    )
     runtime = None
     try:
         settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
@@ -68,7 +79,8 @@ async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(t
         task = {
             "id": "telnet-reconnect", "runId": "preserved-run", "nodeId": settings.node_id, "generation": 1,
             "status": "PENDING", "desiredState": "RUNNING", "protocol": "TELNET_DEVICE", "ip": "127.0.0.1",
-            "port": port, "passwordEncrypted": "", "storageIdentity": "telnetdevice", "initialCommands": [
+            "port": port, "username": "operator", "passwordEncrypted": repo.encrypt("secret"),
+            "storageIdentity": "telnetdevice", "initialCommands": [
                 {"command": "initialise"},
             ], "scheduledCommands": [
                 {"id": "periodic", "command": "probe", "totalExecutions": 2, "intervalSeconds": 6},
@@ -120,6 +132,7 @@ async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(t
         assert "IDLE_TIMEOUT" in states
         assert [_command_lines(payload).count(b"initialise") for payload in payloads] == [1, 1]
         assert [_command_lines(payload).count(b"probe") for payload in payloads] == [1, 1]
+        assert logins == [(1, b"operator", b"secret"), (2, b"operator", b"secret")]
         assert budget["attempts"] == 2
         assert len({item["sessionId"] for item in commands}) == 2
         assert [item["attempt"] for item in sorted(commands, key=lambda item: item["attempt"])] == [1, 2]
