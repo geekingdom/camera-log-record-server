@@ -12,6 +12,7 @@ import os
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import BinaryIO
@@ -106,11 +107,22 @@ def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None =
     return target
 
 
-def copy_limited(source: Path, target: Path, *, max_output_bytes: int | None = None) -> int:
-    """分块复制归档并计费读取预算，避免大型导出驻留内存。"""
+def copy_limited(
+    source: Path,
+    target: Path,
+    *,
+    max_output_bytes: int | None = None,
+    before_read: Callable[[], None] | None = None,
+) -> int:
+    """分块复制归档并计费读取预算；可在每块读取前确认外部租约仍有效。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     with source.open("rb") as reader, target.open("wb") as destination:
         writer = LimitedWriter(destination, max_output_bytes, "export output exceeds size limit")
-        while data := reader.read(1024 * 1024):
+        while True:
+            if before_read is not None:
+                before_read()
+            data = reader.read(1024 * 1024)
+            if not data:
+                break
             read_limiter.consume(len(data)); writer.write(data)
     return target.stat().st_size

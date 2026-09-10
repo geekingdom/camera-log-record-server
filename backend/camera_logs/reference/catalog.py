@@ -3,6 +3,7 @@
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
+    {"title": "Coredump副本到期", "text": "固定副本到期后进入RETIRING（等待读取结束），已有下载或导出继续使用其固定版本，新请求可能返回409。全部读者退出后进入DELETING（清理副本），完成后回到RECEIVING。该清理不删除设备写入的NFS源文件；源文件仍存在时可重新创建导出。大文件下载应流式写盘，续传时携带上次ETag作为If-Range，不能把不同固定版本的响应直接拼接。"},
     {"title": "设备重启与暂停恢复", "text": "SSH暂停释放连接并保留运行预算。设备重启期间，周期认证可以显示离线，但不会把用户暂停改成停止。显式resume返回202和操作ID，任务进入WAITING_DEVICE并等待新认证；即使缓存显示ONLINE也会重新探测。等待时可暂停或停止取消；同一设备恢复沿用预算，身份变更后建立新运行。操作到COLLECTING才完成。因认证失败被系统停止的其他任务，需用户编辑并成功认证后才恢复，手动停止任务不自动启动。"},
     {"title": "Coredump接收与下载", "text": "海康网络资源的SSH任务可设置enableCoredumpMonitor=true；节点部署需配置NFS_ROOT和NFS_SERVER_IP，NFS允许所有网络可达来源，不使用平台IP白名单筛选设备。GET /api/v1/resources/{resource_id}/coredumps按name字面文件名及receivedFrom/receivedTo接收时间查询。RECEIVING代表已观测文件，FROZEN代表服务器固定副本，并非设备完成崩溃文件的证明。POST /api/v1/coredump-exports提交fileIds并携带Idempotency-Key，轮询返回ID的状态；单文件导出原文件，多文件ZIP STORE。成功后GET /api/v1/coredump-exports/{identifier}/content支持Range和If-Range，适合流式或断点下载；不得把大文件整体装入客户端内存。"},
     {"title": "查看服务账号口令", "text": "管理员可查看全部服务账号，普通用户只可查看绑定给本人的账号。GET /api/v1/service-tokens和POST /api/v1/service-tokens/{id}/reveal要求service-tokens:read；列表不含口令，reveal返回token并记录无敏感内容的审计。新口令加密保存可重复查看，旧版仅保存摘要的口令无法还原。管理员可用POST /api/v1/service-tokens/{id}/rotate携带version重新生成，旧口令立即失效；普通用户不能新增、编辑、撤销或重新生成。永久有效不绕过用户禁用、删除和来源IP限制。"},

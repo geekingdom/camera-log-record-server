@@ -148,6 +148,7 @@ async def test_releasing_published_snapshot_returns_file_to_receiving(tmp_path):
 
     assert await release_snapshot(repo, frozen)
     assert not await release_snapshot(repo, frozen)
+    assert await reconcile_snapshots(repo) == 0
 
     current = await repo.db.coredump_files.find_one({"id": entry["id"]})
     aggregate = await repo.db.coredump_snapshot_reservations.find_one({"id": "node-a"})

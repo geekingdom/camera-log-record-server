@@ -20,6 +20,7 @@ let activeExport: string | undefined;
 
 const statusLabels: Record<string, string> = {
   RECEIVING: "正在接收", FREEZING: "正在冻结", FROZEN: "已冻结",
+  RETIRING: "等待读取结束", DELETING: "正在清理副本",
   QUEUED: "等待导出", RUNNING: "正在导出", SUCCEEDED: "导出完成",
   FAILED: "导出失败", CANCELLED: "已取消",
 };

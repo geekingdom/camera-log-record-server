@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import shutil
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from pymongo.errors import DuplicateKeyError
 
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
+from camera_logs.coredumps.snapshot_readers import SnapshotReader
 from camera_logs.coredumps.snapshots import freeze, write_zip
 from camera_logs.logs.archive_access import copy_limited
 from camera_logs.logs.job_threads import job_thread
@@ -196,11 +198,14 @@ async def _freeze(repo: Any, file: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-async def _fetch(repo: Any, file: dict[str, Any], target: Path, limit: int) -> Path:
+async def _fetch(repo: Any, file: dict[str, Any], target: Path, limit: int, reader: SnapshotReader | None = None) -> Path:
     """仅按固定副本内部接口跨节点取回，逐块写盘并限制总导出大小。"""
     if file["nodeId"] == repo.settings.node_id:
         source = Path(file["snapshot"]["path"])
-        await job_thread(copy_limited, source, target, max_output_bytes=limit)
+        if reader is None:
+            await job_thread(copy_limited, source, target, max_output_bytes=limit)
+        else:
+            await job_thread(copy_limited, source, target, max_output_bytes=limit, before_read=reader.assert_active)
         digest = await job_thread(_digest, target)
         if digest != file["snapshot"]["sha256"]:
             target.unlink(missing_ok=True)
@@ -208,11 +213,17 @@ async def _fetch(repo: Any, file: dict[str, Any], target: Path, limit: int) -> P
         return target
     node = await repo.get("nodes", file["nodeId"])
     written, digest = 0, hashlib.sha256()
-    async with httpx.AsyncClient(timeout=300) as client, client.stream("GET", node["url"] + f"/internal/coredumps/{file['id']}/content",
-        headers={"Authorization": "Bearer " + repo.settings.internal_token}) as response:
+    headers = {"Authorization": "Bearer " + repo.settings.internal_token}
+    if reader is not None:
+        headers["X-Coredump-Reader"] = reader.identifier
+    async with httpx.AsyncClient(timeout=300) as client, client.stream(
+        "GET", node["url"] + f"/internal/coredumps/{file['id']}/content", headers=headers,
+    ) as response:
         response.raise_for_status()
         with target.open("xb") as output:
             async for chunk in response.aiter_bytes(1024 * 1024):
+                if reader is not None:
+                    reader.assert_active()
                 written += len(chunk)
                 if written > limit:
                     raise OverflowError("coredump 导出超过产物上限")
@@ -257,19 +268,24 @@ async def run_export(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                     return
         heartbeat = asyncio.create_task(renew_lease())
         await job_thread(scratch.mkdir, parents=True, exist_ok=True)
-        frozen = []
-        for source in job["sources"]:
-            if await _cancelled(repo, job):
-                raise asyncio.CancelledError()
-            file = await repo.get("coredump_files", source["id"])
-            if any(file.get(key) != source.get(key) for key in ("nodeId", "resourceId", "version", "source")):
-                raise RuntimeError("coredump 目录版本已变化")
-            frozen.append(await _freeze(repo, file))
-        staged = []
-        for index, file in enumerate(frozen):
-            if await _cancelled(repo, job):
-                raise asyncio.CancelledError()
-            staged.append((file["name"], await _fetch(repo, file, scratch / f"{index}.core", limit)))
+        frozen, staged, snapshot_readers = [], [], {}
+        async with AsyncExitStack() as readers:
+            for source in job["sources"]:
+                if await _cancelled(repo, job):
+                    raise asyncio.CancelledError()
+                file = await repo.get("coredump_files", source["id"])
+                if any(file.get(key) != source.get(key) for key in ("nodeId", "resourceId", "version", "source")):
+                    raise RuntimeError("coredump 目录版本已变化")
+                frozen_file = await _freeze(repo, file)
+                reader = await readers.enter_async_context(SnapshotReader(repo, frozen_file))
+                snapshot_readers[frozen_file["id"]] = reader
+                frozen.append(frozen_file)
+            for index, file in enumerate(frozen):
+                if await _cancelled(repo, job):
+                    raise asyncio.CancelledError()
+                staged.append((file["name"], await _fetch(
+                    repo, file, scratch / f"{index}.core", limit, snapshot_readers[file["id"]],
+                )))
         if await _cancelled(repo, job):
             raise asyncio.CancelledError()
         await job_thread(output.mkdir, parents=True, exist_ok=True)

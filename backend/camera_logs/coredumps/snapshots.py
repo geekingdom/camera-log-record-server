@@ -442,25 +442,14 @@ async def reconcile_snapshots(repo: Any, *, timestamp: datetime | None = None) -
         claim = await repo.db.coredump_snapshot_claims.find_one({"id": token, "state": "PUBLISHED"})
         if claim and claim.get("expiresAt") and _expired(claim["expiresAt"], stamp):
             await release_snapshot(repo, document)
-    return recovered
+    from camera_logs.coredumps.snapshot_lifecycle import reconcile_snapshots as reconcile_lifecycle
+    return recovered + await reconcile_lifecycle(repo, timestamp=stamp)
 
 
 async def release_snapshot(repo: Any, document: dict[str, Any]) -> bool:
-    """过期删除已发布副本并回到 RECEIVING，源仍存在时可重新冻结。"""
-    snapshot, token = document.get("snapshot") or {}, (document.get("snapshot") or {}).get("reservationToken")
-    if document.get("nodeId") != repo.settings.node_id or document.get("status") != "FROZEN" or not token:
-        return False
-    changed = await repo.db.coredump_files.update_one(
-        {"id": document["id"], "status": "FROZEN", "snapshot.reservationToken": token},
-        {"$set": {"status": "RECEIVING", "updatedAt": now()}, "$unset": {"snapshot": ""}},
-    )
-    if not changed.modified_count:
-        return False
-    path = Path(snapshot["path"])
-    if path.parent == snapshots_root(repo.settings):
-        path.unlink(missing_ok=True)
-    await _release(repo, token)
-    return True
+    """兼容既有入口，实际退休状态机在独立 lifecycle 模块中实现。"""
+    from camera_logs.coredumps.snapshot_lifecycle import release_snapshot as retire
+    return await retire(repo, document)
 
 
 def write_zip(destination: Path, files: list[tuple[str, Path]], limit: int) -> int:

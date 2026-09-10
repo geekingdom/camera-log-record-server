@@ -10,6 +10,7 @@ import base64
 import hmac
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
@@ -59,7 +60,17 @@ def _read_watermark(runtime: Any, file: dict[str, Any]) -> int | None:
     return max(registered or 0, confirmed) if confirmed is not None else registered
 
 
-async def _limited_response(reads: FileReads, downloads: Any, path: Path, request: Request, *, filename: str, etag: str | None = None):
+async def _limited_response(
+    reads: FileReads,
+    downloads: Any,
+    path: Path,
+    request: Request,
+    *,
+    filename: str,
+    etag: str | None = None,
+    on_close: Callable[[], Awaitable[None]] | None = None,
+    before_read: Callable[[], None] | None = None,
+):
     """以有界读取池和全局读预算流式提供固定文件，断流 finally 必定关闭 fd。"""
     try:
         size = (await reads.run(path.stat)).st_size
@@ -104,12 +115,18 @@ async def _limited_response(reads: FileReads, downloads: Any, path: Path, reques
     released = False
 
     async def close_descriptor() -> None:
-        """响应尚未进入正文或已进入正文时都只释放一次 fd 与下载槽。"""
+        """响应尚未进入正文或已进入正文时都只释放 fd、下载槽和外部租约一次。"""
         nonlocal released
         if not released:
             released = True
-            await reads.run(os.close, descriptor)
-            downloads.release()
+            try:
+                try:
+                    await reads.run(os.close, descriptor)
+                finally:
+                    downloads.release()
+            finally:
+                if on_close is not None:
+                    await on_close()
     def read_chunk():
         data = os.read(descriptor, min(262144, remaining))
         read_limiter.consume(len(data))
@@ -118,6 +135,8 @@ async def _limited_response(reads: FileReads, downloads: Any, path: Path, reques
         nonlocal remaining
         try:
             while remaining:
+                if before_read is not None:
+                    before_read()
                 data = await reads.run(read_chunk)
                 if not data:
                     raise RuntimeError("冻结副本长度变化")
@@ -235,20 +254,43 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
                 "etag": result["snapshot"]["etag"]}
 
     @app.get("/internal/coredumps/{identifier}/content")
-    async def coredump_content(identifier: str, request: Request, _: None = Depends(internal)):
+    async def coredump_content(
+        identifier: str,
+        request: Request,
+        _: None = Depends(internal),
+        parent_reader: str | None = Header(default=None, alias="X-Coredump-Reader"),
+    ):
         """只响应节点已发布的固定副本；If-Range 不匹配时返回完整固定版本。"""
+        from camera_logs.coredumps.snapshot_readers import SnapshotReader
+
         document = await repo.db.coredump_files.find_one({"id": identifier, "nodeId": repo.settings.node_id})
         snapshot = document.get("snapshot") if document else None
-        if not snapshot or document.get("status") != "FROZEN":
+        retiring_with_parent = document and document.get("status") == "RETIRING" and parent_reader
+        if not snapshot or (document.get("status") != "FROZEN" and not retiring_with_parent):
             raise HTTPException(409, "coredump 尚未冻结")
-        path = Path(snapshot["path"])
+        reader = SnapshotReader(repo, document, parent_id=parent_reader)
         try:
+            await reader.acquire()
+            path = Path(snapshot["path"])
             root = Path(repo.settings.log_root).resolve().parent / "coredump-snapshots"
             if root not in path.resolve().parents or not path.is_file():
                 raise ValueError()
-        except (FileNotFoundError, ValueError):
+            return await _limited_response(
+                reads,
+                downloads,
+                path,
+                request,
+                filename=document["name"],
+                etag=snapshot["etag"],
+                on_close=reader.close,
+                before_read=reader.assert_active,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError):
+            await reader.close()
             raise HTTPException(404, "coredump 快照已过期") from None
-        return await _limited_response(reads, downloads, path, request, filename=document["name"], etag=snapshot["etag"])
+        except BaseException:
+            await reader.close()
+            raise
 
     @app.get("/internal/coredump-exports/{identifier}/content")
     async def coredump_export_content(identifier: str, request: Request, _: None = Depends(internal)):
