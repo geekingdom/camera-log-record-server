@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 
 from fastapi import HTTPException
 
@@ -32,9 +33,15 @@ async def bind_resource(repo, task):
     if network:
         identity = [resource["ip"], resource["model"], resource["subSerialNumber"]]
         # 使用可读目录名，同时保留身份摘要防止名称变化导致不同设备混写。
-        readable = "-".join(str(value).replace("/", "_") for value in identity)
+        readable = "-".join(_safe_component(value) for value in identity)
         digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()[:16]
         storage = f"{readable}-{digest}"
     else:
         storage = resource["id"]
     return {"resourceId": resource["id"], "storageIdentity": storage}
+
+
+def _safe_component(value: object) -> str:
+    """将设备身份转换为安全可读的目录片段，避免型号特殊字符逃逸路径。"""
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
+    return (text or "unknown")[:96]
