@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import asyncssh
+
 from camera_logs.common.write_metrics import WriteLatency
 from camera_logs.logs.storage import HourlyWriter
 
@@ -346,6 +348,14 @@ class Collector:
                     continue
                 except (ConnectionError, OSError) as error:
                     # 网络读失败是可恢复会话故障；不把它升级为终止任务错误。
+                    await _call(
+                        self._on_state,
+                        "READ_ERROR",
+                        {"taskId": self.task_id, "sessionId": self.session_id, "error": str(error)},
+                    )
+                    break
+                except asyncssh.DisconnectError as error:
+                    # AsyncSSH 的断线异常不是 OSError；传输已在 finally 关闭，允许运行时重连。
                     await _call(
                         self._on_state,
                         "READ_ERROR",

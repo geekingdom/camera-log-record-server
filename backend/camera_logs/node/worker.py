@@ -38,6 +38,8 @@ class Worker:
         self.last_maintenance = 0.0
         self.maintenance_task = None
         self.releases = {}
+        # 仅记录本实例亲自关闭过、但持久化收尾失败的运行；不能把任意 BLOCKED 当成可自动释放。
+        self.failed_cleanups = {}
         self.disk_level = "NORMAL"
         self.write_pressure = WritePressure()
         self.coredump_scanner = None
@@ -50,6 +52,8 @@ class Worker:
         task_id = runtime.task["id"]
         if self.active.get(task_id) is runtime:
             self.active.pop(task_id)
+        if self.failed_cleanups.get(task_id, (None,))[0] is runtime:
+            self.failed_cleanups.pop(task_id, None)
 
     def track_background(self, task, label):
         """记录后台扫描/导出异常，已完成任务必须取回异常而不能静默丢失。"""
@@ -82,11 +86,30 @@ class Worker:
                     "status": "BLOCKED", "error": "连接或日志关闭未完成，禁止重新连接",
                 }})
                 if changed.matched_count:
+                    # 当前控制请求的关闭结果已无法确认；即使本进程后续补齐资源收尾，
+                    # 也不能把这次失败的用户操作改写为成功，更不能跨进程留下 PENDING。
                     await self.repo.db.operations.update_many(
                         {"taskId": ownership["id"], "status": "PENDING"},
                         {"$set": {"status": "FAILED", "completedAt": now()}},
                     )
+                    # 物理关闭可能已成功，只是日志或数据库后续步骤失败。下一轮只允许
+                    # 同一运行以原动作续做收尾，归属变化后会由重试前的 CAS 拒绝。
+                    self.failed_cleanups[runtime.task["id"]] = (runtime, action)
             raise
+
+    async def retry_blocked_cleanup(self, runtime):
+        """重试本 Worker 已知失败的收尾；未知隔离状态绝不在此路径释放。"""
+        task_id = runtime.task["id"]
+        pending = self.failed_cleanups.get(task_id)
+        if pending is None or pending[0] is not runtime:
+            return False
+        current = await self.repo.db.tasks.find_one(owner_filter(runtime.task))
+        if current is None or current.get("status") != "BLOCKED":
+            if self.failed_cleanups.get(task_id) == pending:
+                self.failed_cleanups.pop(task_id, None)
+            return False
+        await self.finish_runtime(runtime, pending[1])
+        return True
 
     def write_latency(self):
         """汇总活动会话的最近写入快照；最慢会话决定新会话准入。"""
@@ -271,6 +294,18 @@ class Worker:
         # 仅成功取得数据库快照后核对归属；读取失败不能被解释成任务已经消失。
         for task_id, runtime in list(self.active.items()):
             current = assigned.get(task_id)
+            retry = self.failed_cleanups.get(task_id)
+            if (
+                task_id not in self.releases
+                and retry is not None
+                and retry[0] is runtime
+                and current is not None
+                and owner_filter(runtime.task) == owner_filter(current)
+                and current["status"] == "BLOCKED"
+                and not reported.get("isolated", False)
+            ):
+                self.releases[task_id] = asyncio.create_task(self.retry_blocked_cleanup(runtime))
+                continue
             if task_id not in self.releases and (
                 current is None or owner_filter(runtime.task) != owner_filter(current)
                 or current["status"] == "BLOCKED" or reported.get("isolated", False)

@@ -9,8 +9,9 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import asyncssh
 import pytest
-from camera_logs.collection.collector import LogChunk
+from camera_logs.collection.collector import Collector, LogChunk
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
@@ -87,6 +88,37 @@ def runtime_for_callbacks(tmp_path):
     runtime.started_at = datetime(2026, 9, 8, tzinfo=UTC)
     runtime.stopping = False
     return runtime
+
+
+def test_runtime_stop_collector_accepts_closed_asyncssh_read_disconnect(tmp_path):
+    """真实 AsyncSSH 读断线已完成连接关闭时，运行停止不能把它写成收尾失败。"""
+    class Connection:
+        def __init__(self):
+            self.closed = False
+
+        async def read(self, _size=65536):
+            raise asyncssh.ConnectionLost("synthetic SSH disconnect")
+
+        async def write(self, _data):
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    async def scenario():
+        connection = Connection()
+        runtime = object.__new__(SessionRuntime)
+        runtime.error = None
+        runtime.collector = Collector(
+            {"id": "task", "runId": "run", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
+            connection_factory=lambda _task: connection,
+        )
+        await runtime.collector.start()
+        await asyncio.wait_for(runtime.collector.wait_closed(), .5)
+        await runtime._stop_collector()
+        assert connection.closed and runtime.error is None
+
+    asyncio.run(scenario())
 
 
 def test_coredump_guard_claims_resource_once_and_rejects_stale_runtime(tmp_path):

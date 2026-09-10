@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import asyncssh
 import camera_logs.collection.collector as collector_module
 import pytest
 from camera_logs.collection.collector import Collector
@@ -36,6 +37,12 @@ class FakeConnection:
 class FailingReadConnection(FakeConnection):
     async def read(self, _: int = 65536) -> bytes:
         raise OSError("read failed")
+
+
+class AsyncSshDisconnectedReadConnection(FakeConnection):
+    """使用 AsyncSSH 的真实断线异常，避免测试替身误走 OSError 分支。"""
+    async def read(self, _: int = 65536) -> bytes:
+        raise asyncssh.ConnectionLost("synthetic SSH disconnect")
 
 
 async def test_pending_batch_read_wait_ends_at_original_flush_deadline(tmp_path, monkeypatch):
@@ -276,6 +283,25 @@ def test_stop_allows_reconnect_after_network_reader_error(tmp_path):
         await collector.stop()
 
     asyncio.run(scenario())
+
+
+def test_stop_does_not_rethrow_asyncssh_disconnect_after_reader_closed(tmp_path):
+    """真实 SSH 读断线已关闭传输后是可重连会话结束，不能粘成停止错误。"""
+    async def scenario():
+        connection = AsyncSshDisconnectedReadConnection()
+        states = []
+        collector = Collector(
+            {"id": "task-a", "runId": "run-a", "storageIdentity": "testingdevice", "initialCommands": []}, tmp_path,
+            connection_factory=lambda _: connection, on_state=lambda state, _details: states.append(state),
+        )
+        await collector.start()
+        await asyncio.wait_for(collector.wait_closed(), .5)
+        await collector.stop()
+        return connection.closed, states
+
+    closed, states = asyncio.run(scenario())
+    assert closed
+    assert "READ_ERROR" in states and "CLOSED" in states
 
 
 def test_storage_failure_is_not_retried_during_stop(tmp_path):

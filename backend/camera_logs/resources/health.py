@@ -75,12 +75,24 @@ async def _apply_failure(repo, snapshot, status):
             previous_state = task.get("desiredState")
             if previous_state not in {"RUNNING", "PAUSED"}:
                 # 已停止任务没有连接可回收；重复离线不应覆盖手动控制操作或制造无限系统操作。
+                marker = task.get("resourceHealthRecovery")
+                if marker and marker.get("resourceId") == snapshot["id"] and (
+                        marker.get("reason") != status or marker.get("authorizedAt") is not None):
+                    # 凭据或认证协议失败必须等待用户更新；后续离线不能降低这项恢复门槛。
+                    reason = marker.get("reason") if marker.get("reason") in {"AUTH_FAILED", "ERROR"} else status
+                    new_marker = marker | {"reason": reason, "observedAt": timestamp}
+                    new_marker.pop("authorizedAt", None)
+                    await repo.db.tasks.update_one(
+                        {"id": task["id"], "resourceHealthRecovery": marker},
+                        {"$set": {"resourceHealthRecovery": new_marker}},
+                        session=session,
+                    )
                 continue
             recovery = previous_state in {"RUNNING", "PAUSED"}
             update = {"desiredState": "STOPPED", "restartRequested": False, "updatedAt": timestamp}
             if recovery:
                 update["resourceHealthRecovery"] = {"resourceId": snapshot["id"], "stoppedAt": timestamp,
-                                                     "desiredState": previous_state}
+                                                     "desiredState": previous_state, "reason": status}
             await repo.db.tasks.update_one(
                 {"id": task["id"], "controlClaimVersion": task.get("controlClaimVersion")},
                 {"$set": update}, session=session,
@@ -104,7 +116,7 @@ async def _apply_failure(repo, snapshot, status):
 
 
 async def _apply_success(repo, snapshot, metadata):
-    """后台成功只更新健康和身份，恢复资格只能由用户保存认证的事务消费。"""
+    """认证成功更新健康；仅 OFFLINE 后的同设备系统停止可自动取得恢复资格。"""
     timestamp = now()
     async def commit(session):
         changed = await repo.db.resources.find_one_and_update(
@@ -122,6 +134,8 @@ async def _apply_success(repo, snapshot, metadata):
             identity = storage_identity(snapshot | metadata)
             async for task in repo.db.tasks.find(task_resource_query(snapshot["id"]), session=session):
                 await _transition_identity_task(repo, task, snapshot["id"], identity, timestamp, session)
+        if snapshot.get("healthStatus") == "OFFLINE":
+            await _authorize_offline_recoveries(repo, snapshot["id"], timestamp, session)
         # 显式 resume 的设备探测成功，只把同一暂停运行恢复至 PAUSED，领取层再沿用 runId。
         async for task in repo.db.tasks.find({"resourceId": snapshot["id"], "status": "WAITING_DEVICE",
                                               "desiredState": "RUNNING"}, session=session):
@@ -138,8 +152,21 @@ async def _apply_success(repo, snapshot, metadata):
     await audited_mutations.mutation_transaction(repo, commit)
 
 
+async def _authorize_offline_recoveries(repo, resource_id, timestamp, session):
+    """仅为本资源 OFFLINE 产生的系统停止标记授权，实际恢复仍等待收尾确认。"""
+    async for task in repo.db.tasks.find(task_resource_query(resource_id), session=session):
+        marker = task.get("resourceHealthRecovery")
+        if not marker or marker.get("resourceId") != resource_id or marker.get("reason") != "OFFLINE" \
+                or task.get("desiredState") != "STOPPED":
+            continue
+        await repo.db.tasks.update_one(
+            {"id": task["id"], "desiredState": "STOPPED", "resourceHealthRecovery": marker},
+            {"$set": {"resourceHealthRecovery": marker | {"authorizedAt": timestamp}}}, session=session,
+        )
+
+
 async def grant_after_user_authentication(repo, resource, session, *, identity_changed=False):
-    """用户保存已认证凭据后才恢复系统停止任务，旧节点、锁或运行未收尾时保留标记。"""
+    """用户保存并验证凭据后授权系统停止任务，旧节点、锁或运行未收尾时保留标记。"""
     timestamp = now()
     identity = storage_identity(resource)
     async for task in repo.db.tasks.find(task_resource_query(resource["id"]), session=session):
@@ -198,6 +225,7 @@ async def _consume_authorized_recovery(repo, resource_id, task_id):
         if resource is None:
             return False
         task = await repo.db.tasks.find_one({"id": task_id, "desiredState": "STOPPED",
+                                             "resourceHealthRecovery.resourceId": resource_id,
                                              "resourceHealthRecovery.authorizedAt": {"$exists": True}}, session=session)
         if task is None or task.get("nodeId") is not None or await repo.db.endpoint_locks.find_one({"taskId": task_id}, session=session):
             return False
@@ -212,6 +240,9 @@ async def _consume_authorized_recovery(repo, resource_id, task_id):
         if target == "PAUSED":
             update["status"] = "PAUSED"
             unset.update(runId="", sessionId="")
+        elif task.get("status") == "BLOCKED":
+            # 仅在无 owner/lock 且旧运行已确认结束后，才解除隔离阻塞供调度器领取。
+            update.update(status="STOPPED", error=None)
         changed = await repo.db.tasks.update_one({"id": task_id, "desiredState": "STOPPED",
                                                    "resourceHealthRecovery": task["resourceHealthRecovery"]},
                                                   {"$set": update, "$unset": unset}, session=session)

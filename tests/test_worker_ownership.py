@@ -1,5 +1,6 @@
 """节点收尾归属测试：过期实例必须释放连接而不能结束后继运行。"""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -135,3 +136,95 @@ async def test_release_database_failure_preserves_owner_until_retry(tmp_path, mo
     assert stored["nodeId"] is None and stored["status"] == "STOPPED"
     assert await repo.db.endpoint_locks.count_documents({}) == 0
     assert "task" not in worker.active
+
+
+async def test_worker_retries_its_own_blocked_release_after_connection_closed(tmp_path):
+    """收尾首次报错即使连接已关闭，也只允许原 Worker 以相同归属补齐释放。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+            "desiredState": "STOPPED", "status": "COLLECTING"}
+    await repo.db.tasks.insert_one(task)
+    await repo.db.runs.insert_one({"id": "run"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "run"})
+    await repo.db.operations.insert_one({"id": "system-stop", "taskId": "task", "desiredState": "STOPPED",
+                                         "status": "PENDING"})
+
+    class ClosedButUnreportedRuntime:
+        """首次关闭已完成传输层动作，但报告异常模拟日志收尾失败。"""
+        def __init__(self):
+            self.task = task
+            self.closed = False
+            self.attempts = 0
+            self.error = None
+            self.input_bytes = 0
+
+        async def stop(self):
+            self.attempts += 1
+            self.closed = True
+            if self.attempts == 1:
+                raise OSError("日志关闭结果未确认")
+
+        def background_failure(self):
+            return None
+
+    runtime = ClosedButUnreportedRuntime()
+    worker = Worker(repo)
+    worker.active[task["id"]] = runtime
+
+    with pytest.raises(OSError, match="日志关闭结果未确认"):
+        await worker.finish_runtime(runtime, "release")
+
+    blocked = await repo.db.tasks.find_one({"id": "task"})
+    assert runtime.closed and blocked["status"] == "BLOCKED"
+    assert blocked["nodeId"] == "node"
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 1
+    assert (await repo.db.operations.find_one({"id": "system-stop"}))["status"] == "FAILED"
+
+    worker.last_coredump_scan = time.monotonic()
+    worker.last_maintenance = time.monotonic()
+    await worker.tick()
+    await worker.releases[task["id"]]
+
+    released = await repo.db.tasks.find_one({"id": "task"})
+    assert released["status"] == "STOPPED" and released["nodeId"] is None
+    assert (await repo.db.runs.find_one({"id": "run"}))["endedAt"]
+    assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 0
+    # 原控制请求已在首次关闭异常时失败，后台补齐资源收尾不得回写为成功。
+    assert (await repo.db.operations.find_one({"id": "system-stop"}))["status"] == "FAILED"
+    assert "task" not in worker.active
+
+
+async def test_blocked_cleanup_retry_does_not_release_successor_owner(tmp_path):
+    """已记录的本机失败收尾在归属变更后只能丢弃，不能删除后继锁。"""
+    repo = isolated_repository(tmp_path)
+    old = {"id": "task", "runId": "old-run", "nodeId": "node-old", "generation": 1,
+           "desiredState": "STOPPED", "status": "COLLECTING"}
+    await repo.db.tasks.insert_one(old)
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "old-run"})
+
+    class FailingRuntime:
+        """模拟关闭后首次报告失败的旧实例。"""
+        def __init__(self):
+            self.task = old
+            self.error = None
+
+        async def stop(self):
+            raise OSError("旧实例关闭报告失败")
+
+        def background_failure(self):
+            return None
+
+    runtime = FailingRuntime()
+    worker = Worker(repo)
+    worker.active["task"] = runtime
+    with pytest.raises(OSError, match="旧实例关闭报告失败"):
+        await worker.finish_runtime(runtime, "release")
+
+    successor = old | {"runId": "new-run", "nodeId": "node-new", "generation": 2, "status": "BLOCKED"}
+    await repo.db.tasks.replace_one({"id": "task"}, successor)
+    await repo.db.endpoint_locks.delete_many({"taskId": "task"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "task", "runId": "new-run"})
+
+    assert not await worker.retry_blocked_cleanup(runtime)
+    assert await repo.db.tasks.find_one({"id": "task"}) == successor
+    assert await repo.db.endpoint_locks.find_one({"taskId": "task", "runId": "new-run"}) is not None
