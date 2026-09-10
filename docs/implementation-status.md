@@ -8,7 +8,7 @@
 
 最近一次主代理全量回归904 passed（67.35秒）、Ruff全量、前端78项及生产构建通过；完整生产页面浏览器覆盖工作台、API、账号、模板、批量操作和共享Coredump开关。真实Mongo监控互斥独立复跑通过；隔离真实API/Worker/WS/小时下载通过并清理随机库与日志。此前2GiB双客户端下载及孤立副本回收证据见[本轮集成验证](history/2026-09-10-coredump-integration.md)，不能替代长时间真实设备NFS容量验收。
 
-核对日期：2026-09-10；当前已验收源码基线 `204f9ee`，对应CI `34443638369`七作业全部成功，后端892项通过，包含真实Mongo、设备IP子目录NFS直挂及实验清理。R32–R41 属于此前交付阶段，R42–R46 已交付源码及局部实机验证，目标生产设备验收未完成；R47正在实施。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
+核对日期：2026-09-10；当前已验收源码基线 `9e45c2c`，对应CI `34447026933`七作业全部成功，包含真实Mongo单路监控归属、设备IP子目录NFS直挂、Linux浏览器及实验清理。R32–R41 属于此前交付阶段，R42–R48 已交付源码及对应局部验证，目标生产设备验收未完成。总表只记录当前结论；此前恢复段落见[历史快照](history/2026-09-09-status-before-open-api.md)。用 `git log -1 -- docs/implementation-status.md` 定位总表版本。
 
 ## 当前任务与恢复
 
@@ -56,8 +56,8 @@ NFS来源规则以最新用户要求为准：固定导出至`*`，不要求设�
 
 | ID / 最终需求 | 实现位置与状态 | 验证证据 | 未完成部分 | 下一步 |
 | --- | --- | --- | --- | --- |
-| R47 同资源单路采集SSH负责NFS，其它新建SSH共享只读开启并显示负责人 | `resources/api.py:coredump-monitor`状态接口；`runtime.py`资源CAS含run/generation/node；`CoredumpMonitorControl.vue`与独立轮询组件，展示不写成新任务配置，站内API已更新 | 主代理后端904项、前端78项/构建；真实Mongo单资源竞争/不同资源独立/失属停止拒绝/过期释放接管通过并清库；隔离真实Worker/WS/小时下载通过并清日志；整套生产浏览器及共享组件1440/390通过并查看截图 | 新提交CI待运行；真实设备/跨节点故障矩阵未验收；当前本机API/Worker未重启 | 跟踪CI并更新目标API/Worker及前端 |
-| R48 API文档接口分类横向滚动条不遮挡文字 | `ApiReferenceWorkspace.vue:.api-groups`禁止Flex收缩、稳定滚动槽并保留横向滚动 | 1440旧样式高度16px/按钮底部留白6.28px失败，新样式39px/client留白12px通过；主代理全生产浏览器1440/390/320，首尾分类可见、查看截图 | 当前本机overlay已验证；Linux传统滚动条待CI复核 | 跟踪Linux浏览器验证 |
+| R47 同资源单路采集SSH负责NFS，其它新建SSH共享只读开启并显示负责人 | `resources/api.py:coredump-monitor`状态接口；`runtime.py`资源CAS含run/generation/node；`CoredumpMonitorControl.vue`与独立轮询组件，展示不写成新任务配置，站内API已更新 | 主代理后端904项、前端78项/构建；真实Mongo竞争和隔离真实Worker/WS/小时下载通过并清理；整套生产浏览器及共享组件1440/390通过并查看截图；CI34447026933七作业全部通过 | 真实设备/跨节点故障矩阵未验收；当前本机API/Worker未重启 | 更新目标API/Worker及前端，完成真实设备验证 |
+| R48 API文档接口分类横向滚动条不遮挡文字 | `ApiReferenceWorkspace.vue:.api-groups`禁止Flex收缩、稳定滚动槽并保留横向滚动 | 1440旧样式高度16px/按钮底部留白6.28px失败，新样式39px/client留白12px通过；主代理及Linux CI34447026933生产浏览器1440/390/320首尾分类可见、底部留白通过 | 目标服务器需更新前端静态文件，已打开页面需刷新 | 部署更新后保持该布局回归 |
 | R42 海康 SSH 可选 coredump、自动 ASH/NFS 挂载及每分钟检查 | `collection/coredump_monitor.py`、`collector.py`、`runtime.py`，原发送队列/会话取消；同资源运行租约、缺节点NFS配置独立报错；TaskEditor开关；Docker/原生宿主机NFS脚本固定星号导出 | 主代理890项全量及最新31项定向；Ubuntu CI34443638369真实内核NFS安装、v3/v4设备IP子目录直挂、UID映射及清理通过；旧CIDR忽略及同路径bind测试通过 | 真实海康mount输出、跨节点物理隔离及大文件持续接收未验收 | 验证真实设备自动挂载、丢失恢复及采集不受失败影响 |
 | R43 coredump多设备大文件接收、查询、批量下载；日志多人稳定下载 | `coredumps/`扫描、冻结、配额、导出；`snapshot_readers.py`读者委托、`snapshot_lifecycle.py`清理恢复、`snapshot_orphans.py`历史无引用声明回收；平台/节点Range与原生票据 | 真实Mongo孤儿回收/新token及源保护/配额一次释放、1000历史记录仅读2候选；读者12轮竞争。Ubuntu NFSv3/v4各64MiB并行接收摘要一致、实验清理完成；此前2GiB×2 HTTP+8路Range证据保留 | 跨机大文件导出、长时间NFS混合负载、全部崩溃/断电窗口未验收；损坏声明保持不自动删除；接收时间为首次扫描观测时间 | 目标Linux跨节点长时间混合负载及真实设备coredump验收 |
 | R44 海康资源周期认证、设备变更后更新身份及目录，失败停止采集/NFS | `resources/health.py`、资源API及调度：60秒/8并发、资源探测租约与revision；失败标记系统恢复资格，只有用户保存认证可授权恢复；换身份受控新运行 | 主代理856项全量含相关分支；独立Mongo恢复消费与手动STOP竞争通过并清理 | 多API进程长期运行及真实换机/离线/节点收尾联调未验收 | 在目标设备验证 |
