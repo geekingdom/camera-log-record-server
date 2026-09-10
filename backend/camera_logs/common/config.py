@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     node_bind_ip: str = "0.0.0.0"
     node_port: int = Field(default=8001, ge=1, le=65535)
     log_root: Path = Path("data/logs")
+    # 海康 SSH coredump 的 NFS 总挂载目录；Worker 部署时应配置为宿主机绝对路径。
+    nfs_root: Path = Path("data/nfs-coredump")
     known_hosts: str = ""
     ssh_verify_host_key: bool = False
     node_capacity: int = 100

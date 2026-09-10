@@ -36,6 +36,7 @@ class PlatformSettingsPatch(SettingsModel):
 
     retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True)
     version: int = Field(ge=1, strict=True)
+    nfsRoot: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class NodeRegistration(SettingsModel):
@@ -149,6 +150,7 @@ async def _platform_settings(repo, *, session=None) -> dict:
     return await repo.db.platform_settings.find_one_and_update(
         {"id": PLATFORM_SETTINGS_ID},
         {"$setOnInsert": {"id": PLATFORM_SETTINGS_ID, "retentionDays": retention_days,
+                           "nfsRoot": str(repo.settings.nfs_root),
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
@@ -165,7 +167,7 @@ def install_settings_routes(app):
         """返回版本化平台设置；首次读取建立可审计的默认配置记录。"""
         authorize(user, "admin")
         document = await _platform_settings(request.app.state.repo)
-        return {key: document[key] for key in ("retentionDays", "version", "updatedAt")}
+        return {key: document.get(key) for key in ("retentionDays", "nfsRoot", "version", "updatedAt")}
 
     @app.patch("/api/v1/platform-settings")
     async def update_platform_settings(body: PlatformSettingsPatch, request: Request, user: User):
@@ -178,7 +180,7 @@ def install_settings_routes(app):
             await _platform_settings(repo, session=session)
             document = await repo.db.platform_settings.find_one_and_update(
                 {"id": PLATFORM_SETTINGS_ID, "version": body.version},
-                {"$set": {"retentionDays": body.retentionDays, "updatedAt": now()}, "$inc": {"version": 1}},
+                {"$set": {"retentionDays": body.retentionDays, "nfsRoot": body.nfsRoot or str(repo.settings.nfs_root), "updatedAt": now()}, "$inc": {"version": 1}},
                 return_document=ReturnDocument.AFTER,
                 session=session,
             )
@@ -189,7 +191,7 @@ def install_settings_routes(app):
         document = await audited_mutation(
             repo, user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID, commit
         )
-        return {key: document[key] for key in ("retentionDays", "version", "updatedAt")}
+        return {key: document.get(key) for key in ("retentionDays", "nfsRoot", "version", "updatedAt")}
 
     @app.get("/api/v1/admin/nodes")
     async def node_configs(request: Request, user: User):

@@ -31,7 +31,10 @@ async def bind_resource(repo, task):
             raise HTTPException(422, "任务 IP 必须与所选串口服务器一致")
     if network:
         identity = [resource["ip"], resource["model"], resource["subSerialNumber"]]
-        storage = hashlib.sha256(json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
+        # 使用可读目录名，同时保留身份摘要防止名称变化导致不同设备混写。
+        readable = "-".join(str(value).replace("/", "_") for value in identity)
+        digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()[:16]
+        storage = f"{readable}-{digest}"
     else:
         storage = resource["id"]
     return {"resourceId": resource["id"], "storageIdentity": storage}
