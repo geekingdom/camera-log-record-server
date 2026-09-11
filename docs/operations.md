@@ -32,11 +32,11 @@ cp .env.example .env
 docker compose -f deploy/docker-compose.yml up --build
 ```
 
-前端默认发布到 `http://localhost:5173`，其 `/api/` 请求保留完整路径代理到 API，`/api/v1/tasks/{id}/logs` 保持 WebSocket Upgrade 头并禁用代理缓冲。容器 API 使用 `http://api:8000/health` 健康检查。
+前端默认发布到 `http://localhost:5175`，其 `/api/` 请求保留完整路径代理到 API，`/api/v1/tasks/{id}/logs` 保持 WebSocket Upgrade 头并禁用代理缓冲。正式容器 API 默认使用 `http://api:18080/health`，端口可通过 `.env` 的 `API_PORT` 覆盖。
 
 Compose 默认使用容器内三成员 MongoDB 地址，不读取本机开发环境的 `MONGO_URI` 覆盖该地址。需要外置数据库时显式设置 `COMPOSE_MONGO_URI`。默认 SSH 认证不使用 `KNOWN_HOSTS_FILE`；只有显式启用 `SSH_VERIFY_HOST_KEY=true` 的严格模式才需要挂载已确认的设备公钥文件。生产 HTTPS 和节点内部 TLS 由实际基础设施终止与管理。
 
-默认 Compose 的 worker 使用 `compose-worker-1`、`http://worker:8001` 和独立命名卷，重建容器时保持节点身份与日志。可以使用 `COLLECTOR_NODE_ID` 和 `COLLECTOR_NODE_URL` 显式覆盖。该配置只运行一个 worker，不能直接通过 `--scale worker` 让多个实例共享同一身份和日志卷。
+默认 Compose 的 worker 使用 `compose-worker-1`、`http://worker:18081` 和独立命名卷，重建容器时保持节点身份与日志。可以在 `.env` 使用 `NODE_PORT`、`COLLECTOR_NODE_ID` 和 `COLLECTOR_NODE_URL` 覆盖。该配置只运行一个 worker，不能直接通过 `--scale worker` 让多个实例共享同一身份和日志卷。
 
 多机扩容使用每台 Linux 主机的独立配置，先为该节点配置唯一的 `NODE_ID`、API 可访问的 `NODE_URL` 和外部副本集 `MONGO_URI`。默认模式不要求节点间共享或预置主机密钥；只有启用严格模式的节点才配置其本机有效的 `KNOWN_HOSTS` 文件。首次部署空日志目录时授予容器 UID/GID 10001 写权限：
 
