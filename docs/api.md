@@ -185,14 +185,14 @@ PSH 调试失败只影响当次命令，不停止日志采集。后续定时或�
 
 服务节点的 `telemetry`、`health` 以及最佳节点分配规则见[节点健康与动态分配](node-health-scheduling.md)。`GET /api/v1/nodes` 返回这些新增字段；旧 Worker 未上报的指标为未知。
 
-以下接口要求 `admin` 作用域。平台设置的保留期是数据库中的版本化配置；修改必须携带当前版本，避免两个管理员互相覆盖。节点登记与 worker 心跳分离：登记不会启动 worker，也不会把节点标记为在线。
+以下接口要求 `admin` 作用域。平台保留期和集群总容量是数据库中的版本化配置；修改必须携带当前版本，避免两个管理员互相覆盖。旧客户端只提交 `retentionDays` 时，集群容量保持原值。节点登记与 worker 心跳分离：登记不会启动 worker，也不会把节点标记为在线。
 
 ```http
 GET /api/v1/platform-settings
 PATCH /api/v1/platform-settings
 Content-Type: application/json
 
-{"retentionDays":14,"version":1}
+{"retentionDays":14,"clusterCapacity":1200,"version":1}
 ```
 
 `retentionDays` 范围为 1 到 3650 天。节点配置使用以下接口：
@@ -203,7 +203,7 @@ POST /api/v1/admin/nodes
 PATCH /api/v1/admin/nodes/{nodeId}
 ```
 
-登记请求包含 `id`、`url`、`capacity` 和可选的 `accepting`。`url` 支持 HTTP 和 HTTPS，包括 Docker 服务名、内网 IPv4/IPv6；不得包含用户信息、查询参数、片段、附加路径或通配监听地址。公布地址须从 API 所在容器或主机可达，且与同 ID worker 的上报地址一致。更新节点仅接受 `version`、`capacity` 和 `accepting`，当前版本不提供已登记节点地址修改接口。登记响应和节点列表会同时给出人工配置与 worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回，沿用原部署配置；登记后才由平台容量和准入设置约束。实际容量取平台配置、本机 `NODE_CAPACITY` 和 100 的最小值。登记不会启动 worker，也不能把不同 ID 的心跳合并。
+登记请求包含 `id`、`url`、`capacity` 和可选的 `accepting`。`url` 支持 HTTP 和 HTTPS，包括 Docker 服务名、内网 IPv4/IPv6；不得包含用户信息、查询参数、片段、附加路径或通配监听地址。公布地址须从 API 所在容器或主机可达，且与同 ID worker 的上报地址一致。更新节点仅接受 `version`、`capacity` 和 `accepting`，当前版本不提供已登记节点地址修改接口。登记响应和节点列表会同时给出人工配置与 worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回，沿用原部署配置；登记后才由平台容量和准入设置约束。实际容量取平台配置与本机 `NODE_CAPACITY` 的较小值。登记不会启动 worker，也不能把不同 ID 的心跳合并。
 
 ## 服务账号与审计
 

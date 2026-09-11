@@ -6,6 +6,7 @@ from pymongo import ReturnDocument
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
+from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.node.health import resource_pressure
@@ -76,7 +77,7 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             or node.get("isolated") or node.get("configurationMismatch")
             or resource_pressure(node, current_time)
             or node.get("writeLatencyMs", 0) > 200
-            or occupied >= node.get("capacity", 100)
+            or occupied >= node.get("capacity", DEFAULT_NODE_CAPACITY)
         ):
             return None
 

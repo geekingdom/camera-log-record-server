@@ -3,6 +3,7 @@ import { idempotencyKey, request } from "../../shared/api";
 
 export interface PlatformSettings {
   retentionDays: number;
+  clusterCapacity?: number;
   version: number;
   updatedAt: string;
 }
@@ -31,7 +32,7 @@ export interface NodeRegistration {
 
 export const settingsApi = {
   platform: () => request<PlatformSettings>("/platform-settings"),
-  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version">) =>
+  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number }) =>
     request<PlatformSettings>("/platform-settings", {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

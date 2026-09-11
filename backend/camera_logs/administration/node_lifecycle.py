@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from pymongo.errors import PyMongoError
 
 from camera_logs.common import audited_mutations
+from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 
 
@@ -37,7 +38,7 @@ async def delete_node(repo, actor_id, identifier, version):
             await db.node_configs.update_one({"id": identifier}, {"$set": changes}, session=session)
         else:
             await db.node_configs.insert_one({"id": identifier, "url": node["url"],
-                                              "capacity": node.get("capacity", 100),
+                                              "capacity": node.get("capacity", DEFAULT_NODE_CAPACITY),
                                               "createdAt": timestamp, **changes}, session=session)
         await repo.audit(actor_id, "delete_node", identifier, session=session)
 

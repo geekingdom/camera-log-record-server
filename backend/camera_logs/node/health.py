@@ -3,6 +3,7 @@
 import math
 from datetime import UTC, datetime
 
+from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 
 
@@ -66,7 +67,7 @@ def node_health(node, current=None):
         unknown.append("服务器指标未采样或已超过15秒")
     elif any(number(sample.get(key)) is None for key in ("networkUploadBytesPerSecond", "networkDownloadBytesPerSecond")):
         unknown.append("网络速率尚未形成连续采样")
-    capacity = number(node.get("capacity")) or 100
+    capacity = number(node.get("capacity")) or DEFAULT_NODE_CAPACITY
     if (number(node.get("activeTasks")) or 0) >= capacity:
         warnings.append("任务容量已满")
     if not node.get("accepting", False):
@@ -83,7 +84,7 @@ def rank_nodes(nodes, occupancy, task=None):
     """
     current, candidates = now(), []
     for node in nodes:
-        capacity = number(node.get("capacity", 100))
+        capacity = number(node.get("capacity", DEFAULT_NODE_CAPACITY))
         if capacity is None or capacity <= 0:
             continue
         count = occupancy.get(node["id"], 0)

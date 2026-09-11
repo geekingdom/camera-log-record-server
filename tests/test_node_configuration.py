@@ -3,11 +3,13 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
 from camera_logs.node.worker import Worker
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+from pydantic import ValidationError
 
 
 async def test_configured_admission_and_capacity_apply_before_connections(tmp_path):
@@ -31,6 +33,28 @@ async def test_configured_admission_and_capacity_apply_before_connections(tmp_pa
         factory.assert_called_once()
         assert len(worker.active) == 1
         assert (await repo.get("nodes", node_id))["capacity"] == 1
+
+
+async def test_worker_reports_configured_capacity_above_100(tmp_path):
+    """Worker 心跳应保留有效的大容量配置，不能被旧的 100 常量截断。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_capacity=500))
+    await repo.initialize()
+    node_id = repo.settings.node_id
+    await repo.db.node_configs.insert_one({"id": node_id, "capacity": 250, "accepting": True, "url": repo.settings.node_url})
+    worker = Worker(repo)
+    worker.last_maintenance = time.monotonic()
+    with patch("camera_logs.node.worker.shutil.disk_usage", return_value=SimpleNamespace(used=50, total=100, free=50)):
+        await worker.tick()
+    assert (await repo.get("nodes", node_id))["capacity"] == 250
+
+
+def test_capacity_settings_share_the_administration_upper_bound():
+    """进程配置与管理员配置使用同一上限，避免运行时静默截断或接受不可登记值。"""
+    with pytest.raises(ValidationError):
+        Settings(node_capacity=10_001)
+    with pytest.raises(ValidationError):
+        Settings(cluster_capacity=10_001)
 
 
 async def test_mismatched_registered_url_does_not_replace_reported_address(tmp_path):

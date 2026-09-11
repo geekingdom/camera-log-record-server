@@ -126,20 +126,22 @@ defineExpose({ validate });
   </div>
   <el-collapse v-if="initial.length"
     ><el-collapse-item title="初始化高级设置" name="advanced">
+      <div class="advanced-header" aria-hidden="true"><span>序号</span><span>提示符</span><span>发送后延时（秒）</span><span>等待超时（秒）</span></div>
+      <div class="advanced-help">提示符匹配后才继续；延时是命令写入后的等待时间；超时是等待提示符的最长时间。</div>
       <div v-for="(item, index) in initial" :key="index" class="advanced-row">
         <span>{{ index + 1 }}</span
-        ><el-input v-model="item.prompt" placeholder="提示符（可选）" />
+        ><el-input v-model="item.prompt" placeholder="提示符（可选）" :aria-label="`初始化命令 ${index + 1} 提示符`" />
         <el-input-number
           v-model="item.delaySeconds"
           :min="0"
           :max="3600"
-          aria-label="发送后延时秒数"
+          :aria-label="`初始化命令 ${index + 1} 发送后延时秒数`"
         />
         <el-input-number
           v-model="item.timeoutSeconds"
           :min="1"
           :max="3600"
-          aria-label="等待超时秒数"
+          :aria-label="`初始化命令 ${index + 1} 等待超时秒数`"
         />
       </div> </el-collapse-item
   ></el-collapse>
@@ -187,12 +189,15 @@ defineExpose({ validate });
 <style scoped>
 .initial-row,
 .command-entry,
-.advanced-row {
+.advanced-row,
+.advanced-header {
   display: flex;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
 }
+.advanced-header { color: #718084; font-size: 12px; }
+.advanced-help { color: #8a9699; font-size: 12px; margin: -2px 0 10px 28px; line-height: 1.5; }
 .initial-row .el-input,
 .command-entry .el-input {
   flex: 1;

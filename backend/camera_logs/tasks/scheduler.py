@@ -65,7 +65,10 @@ async def schedule_once(repo, lease=None):
         owner = assigned["nodeId"]
         occupancy[owner] = occupancy.get(owner, 0) + 1
     active = sum(occupancy.values())
-    if active >= repo.settings.cluster_capacity:
+    platform = await db.platform_settings.find_one({"id": "platform"})
+    configured_cluster = platform.get("clusterCapacity") if platform else None
+    cluster_capacity = configured_cluster or repo.settings.cluster_capacity
+    if active >= cluster_capacity:
         return
     async for task in db.tasks.find({"desiredState": "RUNNING", "nodeId": None,
                                     "resourceDeleted": {"$ne": True},
@@ -89,7 +92,7 @@ async def schedule_once(repo, lease=None):
         if claimed:
             occupancy[node_id] = occupancy.get(node_id, 0) + 1
             active += 1
-        if active >= repo.settings.cluster_capacity:
+        if active >= cluster_capacity:
             break
 
 

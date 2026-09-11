@@ -57,9 +57,23 @@ const requestFields = computed(() => {
   const schema = objectSchema(operation?.requestSchema, catalog.value?.schemas ?? {});
   return Object.entries(schema?.properties ?? {}).map(([name, field]) => {
     const detail = describeSchema(field, catalog.value?.schemas ?? {}, Boolean(schema.required?.includes(name)));
-    return { name, ...detail, description: objectSchema(field, catalog.value?.schemas ?? {}).description };
+    return { name, ...detail, description: objectSchema(field, catalog.value?.schemas ?? {}).description || fieldDescription(name) };
   });
 });
+
+const FIELD_DESCRIPTIONS: Record<string, string> = {
+  id: "资源或任务的唯一标识。", name: "用户可识别的名称。", description: "补充说明文字。",
+  ip: "设备或节点的 IPv4/IPv6 地址。", port: "连接服务监听端口（1-65535）。", username: "登录设备使用的用户名。",
+  password: "登录设备使用的密码。", protocol: "日志采集连接协议。", version: "当前配置版本，用于并发修改校验。",
+  retentionDays: "日志保留天数，超过后自动清理。", clusterCapacity: "平台允许同时运行的采集任务总数。",
+  capacity: "该采集节点允许承载的任务数量。", autoStart: "创建成功后是否立即启动任务。", command: "要发送给设备的命令正文。",
+  start: "查询时间范围的开始时间（含）。", end: "查询时间范围的结束时间（不含）。", keyword: "按字面匹配的搜索关键字。",
+  taskId: "目标日志采集任务标识。", resourceId: "目标设备资源标识。", hourIds: "需要下载的小时归档标识列表。",
+  allowPartial: "是否允许缺少片段时生成部分导出。", token: "登录会话或第三方服务账号令牌。",
+};
+function fieldDescription(name: string): string {
+  return FIELD_DESCRIPTIONS[name] || `${name} 字段的请求值。请参阅下方示例及约束。`;
+}
 
 function stringify(value: unknown) {
   return value === null || value === undefined ? "" : JSON.stringify(value, null, 2);

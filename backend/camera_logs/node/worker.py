@@ -305,7 +305,7 @@ class Worker:
         await self.report_disk_pressure(disk_percent)
         # 人工配置独立于心跳保存；变更只控制新建连接，不强制中断已有采集。
         config = await self.repo.db.node_configs.find_one({"id": self.repo.settings.node_id}) or {}
-        capacity = min(100, self.repo.settings.node_capacity, config.get("capacity", self.repo.settings.node_capacity))
+        capacity = min(self.repo.settings.node_capacity, config.get("capacity", self.repo.settings.node_capacity))
         mismatch = bool(config.get("url") and config["url"].rstrip("/") != self.repo.settings.node_url.rstrip("/"))
         reported = await self.repo.db.nodes.find_one({"id": self.repo.settings.node_id}) or {}
         write_latency = self.write_latency()

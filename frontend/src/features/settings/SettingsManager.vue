@@ -6,6 +6,7 @@ import { ElMessage } from "element-plus";
 import { ApiError } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { settingsApi, type NodeConfig, type NodeRegistration, type PlatformSettings } from "./api";
+import { MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, normalizeCapacity } from "./settingsForm";
 
 const loading = ref(false);
 const savingRetention = ref(false);
@@ -14,6 +15,7 @@ const deletingNode = ref<string>();
 const forbidden = ref(false);
 const settings = ref<PlatformSettings>();
 const retentionDays = ref(7);
+const clusterCapacity = ref(500);
 const nodes = ref<NodeConfig[]>([]);
 const nodeDialog = ref(false);
 const editingNode = ref<NodeConfig>();
@@ -26,6 +28,7 @@ async function load() {
     const [platform, nodeList] = await Promise.all([settingsApi.platform(), settingsApi.nodes()]);
     settings.value = platform;
     retentionDays.value = platform.retentionDays;
+    clusterCapacity.value = normalizeCapacity(platform.clusterCapacity ?? 500, MAX_CLUSTER_CAPACITY);
     nodes.value = nodeList.items;
   } catch (error) {
     if (error instanceof ApiError && error.status === 403) forbidden.value = true;
@@ -35,14 +38,15 @@ async function load() {
   }
 }
 
-async function saveRetention() {
+async function savePlatformSettings() {
   if (savingRetention.value || !settings.value) return;
-  if (!await confirmAction(`确认将日志保存天数设为 ${retentionDays.value} 天吗？`, "确认保存配置")) return;
+  if (!await confirmAction(`确认保存日志保留 ${retentionDays.value} 天、集群总并发上限 ${clusterCapacity.value} 个任务吗？`, "确认保存配置")) return;
   savingRetention.value = true;
   try {
-    settings.value = await settingsApi.updatePlatform({ retentionDays: retentionDays.value, version: settings.value.version });
+    settings.value = await settingsApi.updatePlatform({ retentionDays: retentionDays.value, clusterCapacity: clusterCapacity.value, version: settings.value.version });
     retentionDays.value = settings.value.retentionDays;
-    ElMessage.success("日志保留期已保存");
+    clusterCapacity.value = normalizeCapacity(settings.value.clusterCapacity ?? clusterCapacity.value, MAX_CLUSTER_CAPACITY);
+    ElMessage.success("平台配置已保存");
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) {
       ElMessage.warning("配置已被其他管理员修改，已刷新最新值");
@@ -56,7 +60,7 @@ async function saveRetention() {
 function openRegister(node?: NodeConfig) {
   editingNode.value = undefined;
   nodeForm.value = node
-    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: Math.min(100, Math.max(1, node.capacity)), accepting: node.accepting }
+    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting }
     : { id: "", url: "", capacity: 10, accepting: true };
   nodeDialog.value = true;
 }
@@ -123,7 +127,11 @@ onMounted(() => void load());
       <div class="settings-toolbar"><div><h2>后台配置</h2><p>平台设置和节点准入配置仅限管理员修改。</p></div><el-tooltip content="刷新后台配置"><el-button circle :icon="RefreshCw" aria-label="刷新后台配置" @click="load" /></el-tooltip></div>
       <section class="settings-band" v-loading="loading">
         <div><h3>日志保存天数</h3><p>已发布且未被下载任务保护的归档会由节点维护任务按此天数清理。</p></div>
-        <div class="retention-control"><el-input-number v-model="retentionDays" :min="1" :max="3650" controls-position="right" aria-label="日志保存天数" /><span>天</span><el-button type="primary" :loading="savingRetention" :disabled="savingRetention || !settings" :icon="Save" @click="saveRetention">保存</el-button></div>
+        <div class="retention-control"><el-input-number v-model="retentionDays" :min="1" :max="3650" controls-position="right" aria-label="日志保存天数" /><span>天</span><el-button type="primary" :loading="savingRetention" :disabled="savingRetention || !settings" :icon="Save" @click="savePlatformSettings">保存</el-button></div>
+      </section>
+      <section class="settings-band" v-loading="loading">
+        <div><h3>集群总并发上限</h3><p>所有节点同时运行的采集任务总数上限；节点容量仍会分别限制单节点并发。</p></div>
+        <div class="retention-control"><el-input-number v-model="clusterCapacity" :min="1" :max="MAX_CLUSTER_CAPACITY" controls-position="right" aria-label="集群总并发上限" /><span>个任务</span><el-button type="primary" :loading="savingRetention" :disabled="savingRetention || !settings" :icon="Save" @click="savePlatformSettings">保存</el-button></div>
       </section>
       <section class="settings-band node-heading"><div><h3>节点登记与准入</h3><p>已登记节点使用平台准入配置；未登记节点沿用部署配置。登记不会启动节点进程。</p></div><el-button type="primary" :icon="Plus" @click="openRegister">登记节点</el-button></section>
       <el-alert type="info" :closable="false" show-icon><template #title>在线状态由 worker 心跳计算。离线登记项需要使用相同节点 ID 部署并启动 worker。</template></el-alert>
@@ -138,7 +146,7 @@ onMounted(() => void load());
       </el-table>
     </template>
     <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" destroy-on-close>
-      <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="100" controls-position="right" /><p class="node-help">实际并发上限还受 worker 本机 NODE_CAPACITY 限制，系统采用两者较小值。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">单节点并发上限；实际值还受 worker 本机 NODE_CAPACITY 限制，系统采用两者较小值。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
       <template #footer><el-button @click="nodeDialog = false">取消</el-button><el-button type="primary" :loading="savingNode" :disabled="savingNode" :icon="ServerCog" @click="saveNode">保存配置</el-button></template>
     </el-dialog>
   </section>

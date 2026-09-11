@@ -206,6 +206,17 @@ async def test_schedule_once_counts_fresh_and_stale_ownership_against_cluster_ca
     assert stale_owned["status"] == "BLOCKED"
 
 
+async def test_schedule_once_prefers_saved_cluster_capacity_over_environment(tmp_path):
+    """调度器读取管理员保存的总容量，不能继续使用启动时环境默认值。"""
+    repo = await _repository(tmp_path, cluster_capacity=500)
+    await _insert_nodes(repo, 1, capacity=500)
+    await repo.db.platform_settings.insert_one({"id": "platform", "clusterCapacity": 1})
+    await repo.db.tasks.insert_one({"id": "occupied", "nodeId": "node-0", "desiredState": "RUNNING", "status": "COLLECTING"})
+    await _insert_pending_tasks(repo, 1)
+    await schedule_once(repo)
+    assert (await repo.db.tasks.find_one({"id": "task-0"}))["nodeId"] is None
+
+
 async def test_schedule_once_successful_claim_updates_capacity_budget(tmp_path):
     """领取成功后必须更新本周期容量预算，单节点容量不能被后续任务突破。"""
     repo = await _repository(tmp_path)

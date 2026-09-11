@@ -10,15 +10,32 @@ def test_platform_settings_have_default_version_and_detect_conflict(client):  # 
     initial = client.get("/api/v1/platform-settings")
     assert initial.status_code == 200, initial.text
     assert initial.json()["retentionDays"] == 7
+    assert initial.json()["clusterCapacity"] == 500
     assert initial.json()["version"] == 1
 
     updated = client.patch("/api/v1/platform-settings", json={"retentionDays": 14, "version": 1})
     assert updated.status_code == 200, updated.text
     assert updated.json()["retentionDays"] == 14
     assert updated.json()["version"] == 2
+    assert updated.json()["clusterCapacity"] == 500
     assert client.patch("/api/v1/platform-settings", json={"retentionDays": 30, "version": 1}).status_code == 409
     assert client.portal.call(client.app.state.repo.db.audit.count_documents,
                               {"action": "update_platform_settings", "targetId": "platform"}) == 1
+
+
+def test_platform_and_node_capacity_accept_values_above_100(client):  # noqa: F811
+    """节点和集群容量不再被历史 100 上限截断，保存值也会在调度配置中返回。"""
+    node = client.post("/api/v1/admin/nodes", json={
+        "id": "large-node", "url": "http://large-node:8001", "capacity": 250,
+    })
+    assert node.status_code == 201, node.text
+    assert node.json()["capacity"] == 250
+    updated = client.patch("/api/v1/platform-settings", json={
+        "retentionDays": 7, "clusterCapacity": 1200, "version": 1,
+    })
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["clusterCapacity"] == 1200
+    assert client.get("/api/v1/platform-settings").json()["clusterCapacity"] == 1200
 
 
 def test_retention_uses_stored_platform_configuration(client):  # noqa: F811

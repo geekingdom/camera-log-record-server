@@ -16,6 +16,11 @@ from pymongo.errors import DuplicateKeyError
 
 from camera_logs.administration.node_lifecycle import delete_node
 from camera_logs.common.audited_mutations import audited_mutation
+from camera_logs.common.config import (
+    DEFAULT_CLUSTER_CAPACITY,
+    MAX_CLUSTER_CAPACITY,
+    MAX_NODE_CAPACITY,
+)
 from camera_logs.common.database import now
 from camera_logs.common.security import actor, authorize
 
@@ -35,6 +40,7 @@ class PlatformSettingsPatch(SettingsModel):
     """平台保留期更新携带乐观锁版本，避免后写覆盖其他管理员修改。"""
 
     retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True)
+    clusterCapacity: int | None = Field(default=None, ge=1, le=MAX_CLUSTER_CAPACITY, strict=True)
     version: int = Field(ge=1, strict=True)
 
 
@@ -43,7 +49,7 @@ class NodeRegistration(SettingsModel):
 
     id: str = Field(min_length=1, max_length=128)
     url: str = Field(min_length=1, max_length=2048)
-    capacity: int = Field(ge=1, le=100, strict=True)
+    capacity: int = Field(ge=1, le=MAX_NODE_CAPACITY, strict=True)
     accepting: bool = True
 
     @field_validator("id")
@@ -86,7 +92,7 @@ class NodeConfigPatch(SettingsModel):
     """节点配置只允许调整准入开关和容量，地址需通过重新登记审核。"""
 
     version: int = Field(ge=1, strict=True)
-    capacity: int | None = Field(default=None, ge=1, le=100, strict=True)
+    capacity: int | None = Field(default=None, ge=1, le=MAX_NODE_CAPACITY, strict=True)
     accepting: bool | None = None
 
 
@@ -146,9 +152,13 @@ async def _platform_settings(repo, *, session=None) -> dict:
     timestamp = now()
     configured_default = int(getattr(repo.settings, "retention_days", DEFAULT_RETENTION_DAYS))
     retention_days = configured_default if 1 <= configured_default <= MAX_RETENTION_DAYS else DEFAULT_RETENTION_DAYS
+    configured_cluster = int(getattr(repo.settings, "cluster_capacity", 500))
+    cluster_capacity = (configured_cluster if 1 <= configured_cluster <= MAX_CLUSTER_CAPACITY
+                        else DEFAULT_CLUSTER_CAPACITY)
     return await repo.db.platform_settings.find_one_and_update(
         {"id": PLATFORM_SETTINGS_ID},
         {"$setOnInsert": {"id": PLATFORM_SETTINGS_ID, "retentionDays": retention_days,
+                           "clusterCapacity": cluster_capacity,
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
@@ -165,7 +175,9 @@ def install_settings_routes(app):
         """返回版本化平台设置；首次读取建立可审计的默认配置记录。"""
         authorize(user, "admin")
         document = await _platform_settings(request.app.state.repo)
-        return {key: document.get(key) for key in ("retentionDays", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "version", "updatedAt")}
+        result["clusterCapacity"] = result["clusterCapacity"] or request.app.state.repo.settings.cluster_capacity
+        return result
 
     @app.patch("/api/v1/platform-settings")
     async def update_platform_settings(body: PlatformSettingsPatch, request: Request, user: User):
@@ -178,7 +190,9 @@ def install_settings_routes(app):
             await _platform_settings(repo, session=session)
             document = await repo.db.platform_settings.find_one_and_update(
                 {"id": PLATFORM_SETTINGS_ID, "version": body.version},
-                {"$set": {"retentionDays": body.retentionDays, "updatedAt": now()}, "$inc": {"version": 1}},
+                {"$set": {"retentionDays": body.retentionDays, "updatedAt": now(),
+                           **({"clusterCapacity": body.clusterCapacity} if body.clusterCapacity is not None else {})},
+                 "$inc": {"version": 1}},
                 return_document=ReturnDocument.AFTER,
                 session=session,
             )
@@ -189,7 +203,9 @@ def install_settings_routes(app):
         document = await audited_mutation(
             repo, user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID, commit
         )
-        return {key: document.get(key) for key in ("retentionDays", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "version", "updatedAt")}
+        result["clusterCapacity"] = result["clusterCapacity"] or repo.settings.cluster_capacity
+        return result
 
     @app.get("/api/v1/admin/nodes")
     async def node_configs(request: Request, user: User):

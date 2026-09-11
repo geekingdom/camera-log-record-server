@@ -6,6 +6,11 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_NODE_CAPACITY = 100
+MAX_NODE_CAPACITY = 10_000
+DEFAULT_CLUSTER_CAPACITY = 500
+MAX_CLUSTER_CAPACITY = 10_000
+
 
 class Settings(BaseSettings):
     """从 `.env` 与进程环境读取 API、节点、存储和保留策略配置。"""
@@ -44,8 +49,9 @@ class Settings(BaseSettings):
     coredump_retention_hours: int = Field(default=24, ge=1, le=168)
     known_hosts: str = ""
     ssh_verify_host_key: bool = False
-    node_capacity: int = 100
-    cluster_capacity: int = 500
+    node_capacity: int = Field(default=DEFAULT_NODE_CAPACITY, ge=1, le=MAX_NODE_CAPACITY, strict=True)
+    # 0 保留为停用调度的开发/维护开关；平台持久化配置仍要求正整数。
+    cluster_capacity: int = Field(default=DEFAULT_CLUSTER_CAPACITY, ge=0, le=MAX_CLUSTER_CAPACITY, strict=True)
     retention_days: int = 7
     start_background: bool = True
     psh_mode: str = "disabled"
