@@ -136,7 +136,8 @@ def install_resource_routes(app, repo, listing):
         """分页读取认证历史；游标路径避免长期记录翻深页时扫描并丢弃前页结果。"""
         authorize(user, "tasks:read")
         await repo().get("resources", identifier)
-        if cursor and page != 1:
+        cursor_supplied = cursor is not None
+        if cursor_supplied and page != 1:
             raise HTTPException(422, "使用认证记录游标时 page 必须为 1")
         query = {"resourceId": identifier}
         if result:
@@ -161,13 +162,14 @@ def install_resource_routes(app, repo, listing):
         database_cursor = repo().db.authentication_records.find(query, {"_id": 0}).sort(
             [("createdAt", -1), ("id", -1)]
         )
-        if cursor:
+        if cursor_supplied:
             # 多取一条仅用于判断是否还有下一页，游标请求不执行全量 count_documents。
             records = [item async for item in database_cursor.limit(pageSize + 1)]
             has_more = len(records) > pageSize
             records = records[:pageSize]
             return {"items": [public(item) for item in records], "total": None, "page": 1,
-                    "pageSize": pageSize, "nextCursor": encode_cursor(records[-1]) if has_more else None}
+                    "pageSize": pageSize, "hasMore": has_more,
+                    "nextCursor": encode_cursor(records[-1]) if has_more else None}
         total = await repo().db.authentication_records.count_documents(query)
         records = [public(item) async for item in database_cursor.skip((page - 1) * pageSize).limit(pageSize)]
         return {"items": records, "total": total, "page": page, "pageSize": pageSize,
