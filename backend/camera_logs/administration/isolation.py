@@ -8,6 +8,7 @@ from pymongo.errors import PyMongoError
 from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 
+from camera_logs.collection.ssh_admission import release_task_slots
 from camera_logs.common.database import now
 from camera_logs.common.ownership import owner_filter
 
@@ -34,6 +35,10 @@ async def confirm_node_isolation(repo, node_id, actor, evidence):
         # 节点心跳与任务控制的并发写入会造成事务冲突；重试必须重新判断条件。
         await db.nodes.update_one({"id": node_id}, {"$set": {"accepting": False, "isolated": True}}, session=session)
         async for task in db.tasks.find({"nodeId": node_id, "status": "BLOCKED"}, session=session):
+            # 管理员已确认旧节点完成外部隔离，才能归还旧运行的SSH名额；
+            # 与节点/任务/审计共用事务，后续失败必须同时回滚，不能按失联时间释放。
+            if task.get("protocol") == "SSH":
+                await release_task_slots(repo, task, session=session)
             run_id = task.get("runId")
             stopped = task["desiredState"] == "STOPPED"
             restart = stopped and task.get("restartRequested") and not task.get("resourceDeleted")

@@ -27,13 +27,16 @@ async def documents(collection, query):
     return sorted(items, key=lambda item: json.dumps(item, default=str, sort_keys=True))
 
 
-def case_queries(node_id, task_ids, run_ids):
+def case_queries(node_id, task_ids, run_ids, slot_address):
     """返回单个隔离场景涉及的全部集合范围，供事务回滚和冲突后不变量比对。"""
     return {
         "nodes": {"id": node_id},
         "tasks": {"id": {"$in": list(task_ids.values())}},
         "runs": {"id": {"$in": list(run_ids.values())}},
         "endpoint_locks": {"taskId": {"$in": list(task_ids.values())}},
+        # 同一设备地址上的名额同时包含待隔离旧运行、后继代次和无关任务；事务必须
+        # 只删除明确隔离收据对应的 task/run/generation claim。
+        "ssh_connection_slots": {"_id": slot_address},
         "budgets": {"_id": {"$in": [f"{run_id}:scheduled" for run_id in run_ids.values()]}},
         "commands": {"taskId": {"$in": list(task_ids.values())}},
         "operations": {"taskId": {"$in": list(task_ids.values())}},
@@ -85,6 +88,13 @@ async def seed_case(repo, prefix):
         "stopped": f"{prefix}-stopped",
     }
     run_ids = {name: f"{task_id}-run" for name, task_id in task_ids.items()}
+    # 三个事务场景在同一临时库依次运行，地址必须隔离，避免前一场景留下的
+    # 无关/后继 claim 与下一场景发生主键冲突，从而掩盖回滚语义。
+    slot_address = {
+        "success": "192.0.2.91",
+        "rollback": "192.0.2.92",
+        "heartbeat": "192.0.2.93",
+    }[prefix]
     await repo.db.nodes.insert_one({
         "id": node_id,
         "heartbeat": now() - timedelta(seconds=31),
@@ -101,6 +111,8 @@ async def seed_case(repo, prefix):
             "status": "BLOCKED",
             "desiredState": desired_state,
             "error": "运行实例已丢失，等待隔离确认",
+            "protocol": "SSH",
+            "ip": slot_address,
         })
         await repo.db.runs.insert_one({"id": run_id, "taskId": task_id, "startedAt": now()})
         await repo.db.endpoint_locks.insert_one({
@@ -119,12 +131,24 @@ async def seed_case(repo, prefix):
             "desiredState": desired_state,
             "status": "PENDING",
         })
-    return node_id, task_ids, run_ids
+    claims = [
+        {"taskId": task_ids[name], "runId": run_ids[name], "generation": 1,
+         "nodeId": node_id, "token": f"old-{name}"}
+        for name in task_ids
+    ]
+    claims.extend([
+        {"taskId": "unrelated-task", "runId": "unrelated-run", "generation": 1,
+         "nodeId": "other-node", "token": "unrelated"},
+        {"taskId": task_ids["running"], "runId": "successor-run", "generation": 2,
+         "nodeId": "successor-node", "token": "successor"},
+    ])
+    await repo.db.ssh_connection_slots.insert_one({"_id": slot_address, "claims": claims})
+    return node_id, task_ids, run_ids, slot_address
 
 
 async def verify_success(repo):
     """验证隔离确认提交后任务、命令、锁、运行和审计事件的一致结果。"""
-    node_id, task_ids, run_ids = await seed_case(repo, "success")
+    node_id, task_ids, run_ids, slot_address = await seed_case(repo, "success")
     result = await confirm_node_isolation(repo, node_id, "verification", "temporary transaction check")
     check(result == {"nodeId": node_id, "status": "ISOLATED"}, "隔离确认返回结果不正确")
     node = await repo.db.nodes.find_one({"id": node_id})
@@ -158,12 +182,15 @@ async def verify_success(repo):
           "隔离审计未写入")
     check(await repo.db.events.count_documents({"nodeId": node_id, "type": "EXTERNAL_FENCING_CONFIRMED"}) == 1,
           "隔离事件未写入")
+    slot = await repo.db.ssh_connection_slots.find_one({"_id": slot_address})
+    remaining = {claim["token"] for claim in slot["claims"]}
+    check(remaining == {"unrelated", "successor"}, "隔离确认未精确释放目标旧代次 SSH 名额")
 
 
 async def verify_rollback(repo):
     """通过事务末尾审计异常验证所有此前的隔离写入都会被真实会话回滚。"""
-    node_id, task_ids, run_ids = await seed_case(repo, "rollback")
-    queries = case_queries(node_id, task_ids, run_ids)
+    node_id, task_ids, run_ids, slot_address = await seed_case(repo, "rollback")
+    queries = case_queries(node_id, task_ids, run_ids, slot_address)
     before = {name: deepcopy(await documents(repo.db[name], query)) for name, query in queries.items()}
 
     async def fail_final_audit(*_args, **_kwargs):
@@ -188,8 +215,8 @@ async def verify_rollback(repo):
 async def verify_heartbeat_conflict(repo):
     """验证事务重试会重读并拒绝刚恢复心跳的节点，且不会释放任何任务资源。"""
     original_database = repo.db
-    node_id, task_ids, run_ids = await seed_case(repo, "heartbeat")
-    queries = case_queries(node_id, task_ids, run_ids)
+    node_id, task_ids, run_ids, slot_address = await seed_case(repo, "heartbeat")
+    queries = case_queries(node_id, task_ids, run_ids, slot_address)
     before = {name: deepcopy(await documents(original_database[name], query)) for name, query in queries.items()}
     nodes = HeartbeatConflictNodes(original_database.nodes, node_id)
     repo.db = HeartbeatConflictDatabase(original_database, nodes)
@@ -226,7 +253,7 @@ async def main():
         await verify_rollback(repo)
         await verify_heartbeat_conflict(repo)
         print(json.dumps({"passed": True, "transactionRollbackVerified": True,
-                          "heartbeatConflictVerified": True}))
+                          "heartbeatConflictVerified": True, "sshSlotsVerified": True}))
     finally:
         await client.drop_database(temporary_database_name)
         await client.close()

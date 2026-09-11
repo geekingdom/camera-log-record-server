@@ -20,6 +20,8 @@ AsyncSSH的 `client_factory.connection_made` 在连接阶段捕获句柄，认�
 
 平台不能代替基础设施证明断电、网络隔离或进程终止。管理员必须先完成实际隔离，再提交隔离确认；不得直接删除数据库占位来绕开这一边界。Telnet不使用SSH名额。
 
+单任务隔离与整节点隔离都在原Mongo事务中调用同一精确释放函数。节点级确认只处理该节点的BLOCKED任务，覆盖RUNNING、PAUSED及STOPPED控制意图；任务/审计提交失败时SSH名额释放也回滚，节点心跳恢复导致事务重试时必须重新拒绝隔离。其他任务及后继代次的名额保持不变。
+
 ## 升级顺序
 
 1. 在维护窗口暂停或停止旧版本SSH任务，等待连接和日志收尾完成。
@@ -35,5 +37,6 @@ AsyncSSH的 `client_factory.connection_made` 在连接阶段捕获句柄，认�
 - `tests/test_ssh_admission_runtime.py`：未知占位不能生成关闭收据，Worker进入BLOCKED。
 - `scripts/verify_ssh_admission.py`：真实Mongo、两个独立进程竞争，跨端口同IP上限和旧运行清理隔离。
 - `scripts/verify_ssh_socket_admission.py`：真实回环SSH服务器与Mongo，五路实际shell、第六路拒绝、归还后重新接入、最终socket与占位归零。
+- `scripts/verify_isolation_transaction.py`：真实Mongo整节点隔离成功、审计失败回滚与心跳恢复冲突，同时核对旧SSH名额释放及其他任务/后继代次保护。
 
-两个脚本均只使用随机临时库，结束后清理，不访问实体设备或产生采集日志。此证据不等同于真实Linux多机故障隔离验收。
+以上脚本均只使用随机临时库，结束后清理，不访问实体设备或产生采集日志。此证据不等同于真实Linux多机故障隔离验收。
