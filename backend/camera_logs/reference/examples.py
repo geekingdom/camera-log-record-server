@@ -87,6 +87,7 @@ def response_example(path, method, status):
         return "# TYPE camera_tasks gauge\ncamera_tasks 2\n"
     if path.endswith("/authentication-records"):
         return page({"id": "authentication-example", "resourceId": "resource-example", "createdAt": STAMP,
+                     "latestAt": STAMP, "occurrenceCount": 12,
                      "source": "PERIODIC", "result": "SUCCESS", "modelBefore": "DS-2CD", "modelAfter": "DS-2CD",
                      "serialBefore": "SN-OLD", "serialAfter": "SN-NEW", "identityChanged": True,
                      "initialAuthentication": False, "message": "认证成功，设备身份已变化"})

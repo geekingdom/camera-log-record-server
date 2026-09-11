@@ -53,13 +53,11 @@ class Settings(BaseSettings):
     # 0 保留为停用调度的开发/维护开关；平台持久化配置仍要求正整数。
     cluster_capacity: int = Field(default=DEFAULT_CLUSTER_CAPACITY, ge=0, le=MAX_CLUSTER_CAPACITY, strict=True)
     retention_days: int = Field(default=7, ge=1, le=3650, strict=True)
-    # 增长型 MongoDB 记录默认永久保留（0）。管理员显式设置正数后，维护作业
-    # 才可按记录完成时间清理；这些开关不影响设备日志正文和 coredump 源文件。
+    # 认证历史默认90天并通过TTL清理；审计/运行事件的配置仅供预览计划使用。
+    # 这些策略不影响设备日志正文和 coredump 源文件。
     authentication_record_retention_days: int = Field(default=90, ge=0, le=3650, strict=True)
     audit_record_retention_days: int = Field(default=0, ge=0, le=3650, strict=True)
     runtime_event_retention_days: int = Field(default=0, ge=0, le=3650, strict=True)
-    command_history_retention_days: int = Field(default=0, ge=0, le=3650, strict=True)
-    operation_history_retention_days: int = Field(default=0, ge=0, le=3650, strict=True)
     start_background: bool = True
     psh_mode: str = "disabled"
     psh_serial_character_interval: float = Field(default=.1, ge=0, le=1)

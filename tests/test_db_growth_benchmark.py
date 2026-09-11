@@ -20,9 +20,20 @@ def test_summarize_explain_detects_ixscan_and_hides_plan_details():
         "executionStats": {"nReturned": 20, "totalKeysExamined": 20, "totalDocsExamined": 20,
                             "executionTimeMillis": 2},
     })
-    assert summary == {"plan": "IXSCAN", "nReturned": 20, "totalKeysExamined": 20,
-                       "totalDocsExamined": 20, "executionTimeMillis": 2, "selective": True}
+    assert summary == {"plan": "IXSCAN", "nReturned": 20, "cursorReturned": 20, "totalKeysExamined": 20,
+                       "totalDocsExamined": 20, "executionTimeMillis": 2, "sortStage": False,
+                       "selective": True}
     assert "winningPlan" not in summary
+
+
+def test_aggregate_reports_final_rows_separately_from_cursor_candidates():
+    summary = summarize_explain({"stages": [
+        {"$cursor": {"executionStats": {"nReturned": 2500, "totalDocsExamined": 2500}}},
+        {"$sort": {"sortKey": {"time": -1}}, "nReturned": 50},
+    ]})
+    assert summary["cursorReturned"] == 2500
+    assert summary["nReturned"] == 50
+    assert summary["selective"] is False
 
 
 def test_summarize_explain_classifies_collection_scan():

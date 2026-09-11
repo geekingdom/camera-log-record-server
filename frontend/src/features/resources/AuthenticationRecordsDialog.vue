@@ -33,6 +33,11 @@ function time(value?: string) {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
 }
+function latestTime(record: AuthenticationRecord) { return time(record.latestAt ?? record.createdAt); }
+function occurrenceCount(record: AuthenticationRecord) {
+  const count = record.occurrenceCount;
+  return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 1;
+}
 function label(record: AuthenticationRecord, labels: Record<string, string>) { return labels[String(record.result)] ?? record.result; }
 function source(record: AuthenticationRecord) { return sourceLabels[record.source ?? ""] ?? record.source ?? "未知来源"; }
 function resultTone(value?: string) {
@@ -105,7 +110,9 @@ onBeforeUnmount(() => { lifecycleGeneration += 1; listGeneration += 1; });
       <el-tooltip content="刷新认证记录"><el-button :icon="RefreshCw" aria-label="刷新认证记录" @click="load" /></el-tooltip>
     </div>
     <el-table :data="records" v-loading="loading" class="data-table authentication-table" empty-text="暂无认证记录">
-      <el-table-column label="认证时间（北京时间）" min-width="190"><template #default="{ row }">{{ time(row.createdAt) }}</template></el-table-column>
+      <el-table-column label="首次认证（北京时间）" min-width="190"><template #default="{ row }">{{ time(row.createdAt) }}</template></el-table-column>
+      <el-table-column label="最近认证（北京时间）" min-width="190"><template #default="{ row }">{{ latestTime(row) }}</template></el-table-column>
+      <el-table-column label="次数" width="86" align="right"><template #default="{ row }">{{ occurrenceCount(row) }}</template></el-table-column>
       <el-table-column label="来源" min-width="120"><template #default="{ row }"><el-tag size="small" effect="plain">{{ source(row) }}</el-tag></template></el-table-column>
       <el-table-column label="结果" min-width="120"><template #default="{ row }"><el-tag size="small" :type="resultTone(row.result)">{{ label(row, resultLabels) }}</el-tag></template></el-table-column>
       <el-table-column label="设备身份" min-width="310"><template #default="{ row }"><div class="identity-details"><strong :class="{ changed: row.identityChanged }">{{ identitySummary(row) }}</strong><template v-if="row.identityChanged"><span>型号：{{ value(row.modelBefore) }} → {{ value(row.modelAfter) }}</span><span>序列号：{{ value(row.serialBefore) }} → {{ value(row.serialAfter) }}</span></template><template v-else><span>型号：{{ value(row.modelAfter || row.modelBefore) }}</span><span>序列号：{{ value(row.serialAfter || row.serialBefore) }}</span></template></div></template></el-table-column>

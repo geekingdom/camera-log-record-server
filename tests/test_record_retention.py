@@ -16,15 +16,14 @@ def test_record_retention_defaults_to_three_month_auth_history():
     assert [item["collection"] for item in plan] == ["authentication_records"]
 
 
-def test_record_retention_only_emits_explicit_policies_and_terminal_statuses():
+def test_record_retention_only_emits_explicit_preview_policies():
     reference = datetime(2026, 9, 11, tzinfo=UTC)
     settings = Settings(_env_file=None, encryption_key="", audit_record_retention_days=30,
-                        command_history_retention_days=14, operation_history_retention_days=7)
+                        runtime_event_retention_days=7)
     plan = {item["collection"]: item for item in build_retention_plan(settings, reference=reference)}
-    assert set(plan) == {"authentication_records", "audit", "commands", "operations"}
+    assert set(plan) == {"authentication_records", "audit", "events"}
     assert plan["audit"]["query"] == {"createdAt": {"$lt": reference - timedelta(days=30)}}
-    assert plan["commands"]["query"]["status"]["$in"] == ["CANCELLED", "FAILED", "SUCCEEDED", "UNKNOWN"]
-    assert plan["operations"]["query"]["completedAt"]["$lt"] == reference - timedelta(days=7)
+    assert plan["events"]["query"] == {"createdAt": {"$lt": reference - timedelta(days=7)}}
 
 
 def test_invalid_or_zero_retention_is_not_a_cleanup_query():

@@ -30,7 +30,12 @@ export type AuthenticationRecordResult = "SUCCESS" | "AUTH_FAILED" | "OFFLINE" |
 /** 单次认证仅保存身份摘要和安全提示，不包含认证凭据或设备原始响应。 */
 export interface AuthenticationRecord {
   id: string;
+  /** 聚合区间首次认证时间；旧单次记录与 createdAt 相同。 */
   createdAt?: string;
+  /** 连续相同成功状态最后一次被认证观察到的时间。 */
+  latestAt?: string;
+  /** 连续相同成功状态合并后的观测次数；旧记录默认按 1 展示。 */
+  occurrenceCount?: number;
   source?: string;
   result: AuthenticationRecordResult | string;
   modelBefore?: string | null;

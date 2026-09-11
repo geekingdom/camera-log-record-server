@@ -146,6 +146,16 @@ def install_resource_routes(app, repo, listing):
             query["result"] = result
         if identityChanged is not None:
             query["identityChanged"] = identityChanged
+        retention_days = int(getattr(repo().settings, "authentication_record_retention_days", 90))
+        if retention_days > 0:
+            visible_after = now() - timedelta(days=retention_days)
+            # TTL 监控器异步删除。接口先排除已过期记录，旧记录未写 expiresAt 时按
+            # createdAt 回退，避免清理窗口内向用户短暂展示超过保留期的认证历史。
+            query = {"$and": [query, {"$or": [
+                {"expiresAt": {"$gte": now()}},
+                {"expiresAt": {"$exists": False}, "createdAt": {"$gte": visible_after}},
+                {"expiresAt": None, "createdAt": {"$gte": visible_after}},
+            ]}]}
         if start or end:
             if not start or not end:
                 raise HTTPException(422, "开始和结束时间必须同时提供")
@@ -155,11 +165,20 @@ def install_resource_routes(app, repo, listing):
                 raise HTTPException(422, "时间必须使用 ISO 8601") from error
             if lower.tzinfo is None or upper.tzinfo is None or upper <= lower:
                 raise HTTPException(422, "时间范围必须带时区且结束晚于开始")
-            query["createdAt"] = {"$gte": lower.astimezone(UTC), "$lt": upper.astimezone(UTC)}
+            lower, upper = lower.astimezone(UTC), upper.astimezone(UTC)
+            # 聚合记录覆盖 [createdAt, latestAt] 区间；区间与查询范围相交即返回。
+            # 历史未迁移记录没有 latestAt，按单次 createdAt 作为结束时间回退。
+            query = {"$and": [query, {"createdAt": {"$lt": upper}}, {"$or": [
+                {"latestAt": {"$gte": lower}},
+                {"latestAt": {"$exists": False}, "createdAt": {"$gte": lower}},
+                {"latestAt": None, "createdAt": {"$gte": lower}},
+            ]}]}
         if cursor:
             created_at, last_id = decode_cursor(cursor, identifier)
             query = {"$and": [query, after_cursor_clause(created_at, last_id)]}
-        database_cursor = repo().db.authentication_records.find(query, {"_id": 0}).sort(
+        database_cursor = repo().db.authentication_records.find(
+            query, {"_id": 0, "historyFirstRevision": 0, "historyLatestRevision": 0}
+        ).sort(
             [("createdAt", -1), ("id", -1)]
         )
         if cursor_supplied:

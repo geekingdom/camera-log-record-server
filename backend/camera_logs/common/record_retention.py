@@ -1,8 +1,9 @@
 """增长型 MongoDB 记录的保留策略。
 
 该模块只负责把配置转换为安全、可解释的批量清理计划。调用方必须在维护窗口
-显式执行计划；默认值 0 表示永久保留。活动中的命令、操作、租约和运行记录
-永远不进入清理候选，防止影响任务恢复和预算一致性。
+显式执行计划；默认值 0 表示永久保留。该模块只覆盖不参与任务恢复的认证、审计
+和运行事件；命令、操作、预算、幂等映射和运行记录的依赖关系尚未完成清理审计，
+不能依据终态字段自动删除。
 """
 
 from __future__ import annotations
@@ -19,20 +20,12 @@ class RecordRetentionPolicy:
     collection: str
     setting: str
     time_field: str = "createdAt"
-    terminal_statuses: frozenset[str] | None = None
 
 
 RECORD_RETENTION_POLICIES: tuple[RecordRetentionPolicy, ...] = (
     RecordRetentionPolicy("authentication_records", "authentication_record_retention_days"),
     RecordRetentionPolicy("audit", "audit_record_retention_days"),
     RecordRetentionPolicy("events", "runtime_event_retention_days"),
-    RecordRetentionPolicy(
-        "commands", "command_history_retention_days", terminal_statuses=frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"})
-    ),
-    RecordRetentionPolicy(
-        "operations", "operation_history_retention_days", time_field="completedAt",
-        terminal_statuses=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
-    ),
 )
 
 
@@ -50,15 +43,14 @@ def retention_cutoff(settings: Any, policy: RecordRetentionPolicy, *, reference:
 def cleanup_filter(settings: Any, policy: RecordRetentionPolicy, *, reference: datetime | None = None) -> dict[str, Any] | None:
     """构造只匹配过期且安全终态记录的查询条件。
 
-    返回值可直接传给 ``delete_many``，但不会在本模块内执行删除。活动命令和操作
-    没有终态时不返回候选；认证/审计/运行事件则按时间字段清理，默认不返回条件。
+    返回值仅供管理员预览或后续维护入口使用，本模块内绝不执行删除。认证、审计
+    和运行事件按时间字段生成候选；认证新记录的实际自动到期仍由 ``expiresAt`` TTL
+    索引执行。
     """
     cutoff = retention_cutoff(settings, policy, reference=reference)
     if cutoff is None:
         return None
     query: dict[str, Any] = {policy.time_field: {"$lt": cutoff}}
-    if policy.terminal_statuses is not None:
-        query["status"] = {"$in": sorted(policy.terminal_statuses)}
     return query
 
 

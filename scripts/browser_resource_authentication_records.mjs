@@ -43,6 +43,15 @@ async function assertViewport(page, width) {
   assert.ok(geometry.scrollWidth <= geometry.clientWidth + 1, `${width}px 出现横向溢出：${JSON.stringify(geometry)}`);
 }
 
+async function assertTableScrollsInsideDrawer(drawer, width) {
+  const geometry = await drawer.locator(".authentication-table .el-scrollbar__wrap").evaluate(element => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  assert.ok(geometry.scrollWidth > geometry.clientWidth,
+    `${width}px 认证表格列未在抽屉内形成横向滚动区域：${JSON.stringify(geometry)}`);
+}
+
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
 try {
   await mkdir(screenshots, { recursive: true });
@@ -107,6 +116,7 @@ try {
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 844 });
     await assertViewport(page, width);
+    await assertTableScrollsInsideDrawer(drawer, width);
     await page.screenshot({ path: `${screenshots}/resource-authentication-records-${width}.png`, fullPage: true });
   }
   assert.deepEqual(errors, []);

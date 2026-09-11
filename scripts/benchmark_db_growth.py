@@ -22,15 +22,14 @@ from pymongo import AsyncMongoClient
 from pymongo.errors import OperationFailure
 
 COLLECTIONS = ("authentication_records", "audit", "events", "request_events")
+BENCHMARK_START = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
 
-# 仅在随机基准库中创建的候选索引。生产库是否采用，需结合实际 Explain、
-# 写入成本和索引占用评审；脚本不会替线上数据库修改索引。
+# 仅在随机基准库中创建的候选索引。键顺序对齐正式事件稳定排序；生产库
+# 是否采用，仍需结合实际 Explain、写入成本和索引占用评审。
 CANDIDATE_INDEXES = {
-    # MongoDB 不允许把 _id 放入复合索引；稳定 _id 仅作为同一时间戳的
-    # 最后排序键，Explain 仍能测量过滤和时间排序的主要成本。
-    "audit": [("actor", 1), ("action", 1), ("createdAt", -1)],
-    "events": [("nodeId", 1), ("taskId", 1), ("createdAt", -1)],
-    "request_events": [("taskId", 1), ("createdAt", -1)],
+    "audit": [("actor", 1), ("action", 1), ("createdAt", -1), ("_id", -1)],
+    "events": [("nodeId", 1), ("taskId", 1), ("createdAt", -1), ("_id", -1)],
+    "request_events": [("taskId", 1), ("createdAt", -1), ("_id", -1)],
 }
 
 
@@ -38,7 +37,8 @@ def _contains_stage(plan: object, stage: str) -> bool:
     """递归判断 explain 计划是否包含指定阶段，兼容经典和 SBE 计划树。"""
     if isinstance(plan, dict):
         query_plan = plan.get("queryPlan")
-        if plan.get("stage") == stage or (isinstance(query_plan, dict) and query_plan.get("stage") == stage):
+        if (plan.get("stage") == stage or (stage == "SORT" and "$sort" in plan)
+                or (isinstance(query_plan, dict) and query_plan.get("stage") == stage)):
             return True
         return any(_contains_stage(value, stage) for value in plan.values())
     if isinstance(plan, list):
@@ -47,26 +47,51 @@ def _contains_stage(plan: object, stage: str) -> bool:
 
 
 def summarize_explain(explain: dict) -> dict[str, object]:
-    """提取安全的 Explain 摘要，不返回连接地址、查询正文或样本数据。"""
-    execution = explain.get("executionStats") or {}
-    winning = (explain.get("queryPlanner") or {}).get("winningPlan")
+    """提取安全的 Explain 摘要，并标注派生时间造成的聚合排序阶段。"""
+    execution = _execution_stats(explain)
+    winning = (explain.get("queryPlanner") or {}).get("winningPlan") or explain
     keys = int(execution.get("totalKeysExamined", 0))
     docs = int(execution.get("totalDocsExamined", 0))
-    returned = int(execution.get("nReturned", 0))
+    cursor_returned = int(execution.get("nReturned", 0))
+    returned = cursor_returned
+    # 聚合 $cursor 的 nReturned 是进入后续阶段的候选数，最终返回量以末阶段为准。
+    for stage in explain.get("stages", []):
+        if "nReturned" in stage:
+            returned = int(stage["nReturned"])
     return {
         "plan": "IXSCAN" if _contains_stage(winning, "IXSCAN") else (
             "COLLSCAN" if _contains_stage(winning, "COLLSCAN") else "OTHER"),
         "nReturned": returned,
+        "cursorReturned": cursor_returned,
         "totalKeysExamined": keys,
         "totalDocsExamined": docs,
         "executionTimeMillis": int(execution.get("executionTimeMillis", 0)),
+        "sortStage": _contains_stage(explain.get("stages") or winning, "SORT"),
         "selective": docs <= max(returned * 20, 100),
     }
 
 
+def _execution_stats(explain: object) -> dict:
+    """定位 find 或 aggregate Explain 中的实际执行统计节点。"""
+    if isinstance(explain, dict):
+        stats = explain.get("executionStats")
+        if isinstance(stats, dict):
+            return stats
+        for value in explain.values():
+            nested = _execution_stats(value)
+            if nested:
+                return nested
+    elif isinstance(explain, list):
+        for value in explain:
+            nested = _execution_stats(value)
+            if nested:
+                return nested
+    return {}
+
+
 def query_cases() -> dict[str, dict[str, object]]:
     """返回与生产接口一致的增长集合查询及稳定排序定义。"""
-    start = datetime(2026, 1, 1, tzinfo=UTC)
+    start = BENCHMARK_START
     end = start + timedelta(days=31)
     return {
         "authentication_recent": {
@@ -91,6 +116,9 @@ def query_cases() -> dict[str, dict[str, object]]:
             "filter": {"nodeId": "collector-01", "taskId": "task-0001",
                         "createdAt": {"$gte": start, "$lt": end}},
             "sort": {"createdAt": -1, "_id": -1}, "skip": 0, "limit": 50,
+            # 正式 runtime_event_page 对历史 detectedAt 兼容，排序键是派生
+            # _eventTime。索引可优化 match，但不能消除这个派生字段的排序。
+            "aggregate": True,
         },
         "request_filtered": {
             "collection": "request_events",
@@ -102,7 +130,7 @@ def query_cases() -> dict[str, dict[str, object]]:
 
 async def _seed(db, rows: int) -> None:
     """批量写入固定大小元数据，避免一次构造超大 Python 列表。"""
-    stamp = datetime(2026, 1, 1, tzinfo=UTC)
+    stamp = BENCHMARK_START
     for offset in range(0, rows, 1000):
         batch = []
         for index in range(offset, min(offset + 1000, rows)):
@@ -130,8 +158,15 @@ async def _explain_queries(repo: Repository) -> dict[str, dict[str, object]]:
     """执行所有声明的有限查询并提取 executionStats。"""
     results = {}
     for name, case in query_cases().items():
-        command = {"find": case["collection"], "filter": case["filter"], "sort": case["sort"],
-                   "skip": case["skip"], "limit": case["limit"]}
+        if case.get("aggregate"):
+            command = {"aggregate": case["collection"], "cursor": {}, "pipeline": [
+                {"$match": case["filter"]},
+                {"$addFields": {"_eventTime": {"$ifNull": ["$createdAt", "$detectedAt"]}}},
+                {"$sort": {"_eventTime": -1, "_id": -1}}, {"$skip": case["skip"]}, {"$limit": case["limit"]},
+            ]}
+        else:
+            command = {"find": case["collection"], "filter": case["filter"], "sort": case["sort"],
+                       "skip": case["skip"], "limit": case["limit"]}
         explain = await repo.db.command("explain", command, verbosity="executionStats")
         results[name] = summarize_explain(explain)
     return results

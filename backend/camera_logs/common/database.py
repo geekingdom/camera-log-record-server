@@ -9,6 +9,8 @@ from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
+from camera_logs.common.event_indexes import install_event_indexes
+
 
 def now():
     """返回统一的 UTC 时间，避免数据库记录混用本地时区。"""
@@ -155,10 +157,7 @@ class Repository:
         await self.db.ip_policy.create_index("id", unique=True)
         await self.db.download_sessions.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.download_sessions.create_index("tokenHash", unique=True)
-        # 排障访问记录不属于设备日志；30 天 TTL 控制其容量且不会触及采集与下载数据。
-        await self.db.request_events.create_index("createdAt", expireAfterSeconds=30 * 24 * 60 * 60)
-        await self.db.request_events.create_index("requestId")
-        await self.db.request_events.create_index([("taskId", 1), ("createdAt", -1)])
+        await install_event_indexes(self.db)
 
     def encrypt(self, password):
         """将设备密码加密后存储；空值保持为空以支持无密码串口。"""
