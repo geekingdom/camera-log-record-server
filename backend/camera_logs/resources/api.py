@@ -88,6 +88,26 @@ def install_resource_routes(app, repo, listing):
             await repo().audit(user["id"], action, target)
             raise
 
+    async def record_manual_authentication(resource: dict, user: dict, *, result: str,
+                                           before: dict, after: dict, message: str | None = None) -> None:
+        """将手动认证历史和操作审计作为一个提交单元保存。
+
+        设备 HTTP 请求已经在事务外完成。这里仅提交确定的认证结果；认证历史的头
+        记录、明细和审计事件必须共用会话，避免审计失败时留下不可追溯的认证结果。
+        """
+        action = "authenticate_resource_succeeded" if result == "SUCCESS" else (
+            "authenticate_resource_credentials_rejected" if result == "AUTH_FAILED"
+            else "authenticate_resource_device_error"
+        )
+
+        async def commit(session):
+            await record_authentication(
+                repo(), resource, source="MANUAL", result=result, before=before, after=after,
+                message=message, session=session,
+            )
+
+        await audited_mutation(repo(), user["id"], action, resource["id"], commit)
+
     @app.get("/api/v1/resources")
     async def resources(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
                         kind: str | None = None, search: str | None = Query(None, max_length=256),
@@ -271,13 +291,12 @@ def install_resource_routes(app, repo, listing):
         if old["kind"] == "SERIAL_SERVER":
             return {}
         try:
-            metadata = await authenticated_preview_metadata(body, user, identifier)
+            metadata = await _verified_metadata(body)
         except HTTPException as error:
             result = "AUTH_FAILED" if error.status_code == 401 else "OFFLINE" if error.status_code == 503 else "ERROR"
-            await record_authentication(repo(), old, source="MANUAL", result=result, before=old, after=old, message=result)
+            await record_manual_authentication(old, user, result=result, before=old, after=old, message=result)
             raise
-        await record_authentication(repo(), old, source="MANUAL", result="SUCCESS", before=old, after=old | metadata)
-        await repo().audit(user["id"], "authenticate_resource_succeeded", identifier)
+        await record_manual_authentication(old, user, result="SUCCESS", before=old, after=old | metadata)
         return metadata
 
     @app.patch("/api/v1/resources/{identifier}")
