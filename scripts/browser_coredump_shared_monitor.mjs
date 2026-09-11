@@ -1,181 +1,57 @@
-// 同资源 Coredump 负责人编辑器验收：全部 API 由浏览器路由模拟，不连接设备或 NFS。
+// Coredump 配置迁移验收：资源保存开关，任务编辑器不再显示或提交该配置。
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
-
 const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
-const baseUrl = process.env.BASE_URL || process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
-const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
-const resources = [
-  { id: "camera-a", name: "模拟海康 A", kind: "HIKVISION_NETWORK", ip: "192.0.2.10", version: 1 },
-  { id: "camera-b", name: "模拟海康 B", kind: "HIKVISION_NETWORK", ip: "192.0.2.11", version: 1 },
-];
-const ownTask = { id: "owner-self", name: "本人负责采集", resourceId: "camera-a", protocol: "SSH", ip: "192.0.2.10", port: 22,
-  username: "fixture", enableCoredumpMonitor: true, status: "COLLECTING", desiredState: "RUNNING", version: 1, initialCommands: [], scheduledCommands: [] };
-const pageOf = items => ({ items, total: items.length, page: 1, pageSize: 100 });
-const viewports = (process.env.COREDUMP_MONITOR_VIEWPORTS || "1440,390").split(",").map(Number);
-
-function monitor(active, ownerTask, mountStatus = null) { return { active, ownerTask, mountStatus }; }
-async function assertViewport(page, width, label) {
-  const geometry = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
-  assert.ok(geometry.scrollWidth <= geometry.clientWidth + 1, `${label} 在 ${width}px 出现横向溢出：${JSON.stringify(geometry)}`);
-}
-
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
+const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+await context.addInitScript(() => sessionStorage.setItem("camera-log-record-token", "resource-coredump-test-token"));
+const resources = [{ id: "camera-a", name: "模拟海康 A", kind: "HIKVISION_NETWORK", ip: "192.0.2.10", username: "http", authType: "DIGEST", version: 1, enableCoredumpMonitor: false, enableResourceMonitor: false }];
+const task = { id: "task-a", name: "模拟采集任务", resourceId: "camera-a", protocol: "SSH", ip: "192.0.2.10", port: 22, username: "ssh", status: "STOPPED", desiredState: "STOPPED", version: 1, initialCommands: [], scheduledCommands: [] };
+const mutations = [];
+async function json(route, body, status = 200) { await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) }); }
+await context.route("**/api/v1/**", async route => {
+  const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
+  if (path === "/api/v1/auth/me") return json(route, { user: { id: "admin", username: "admin", displayName: "验收管理员", isAdmin: true, enabled: true, mustChangePassword: false, scopes: ["*"] } });
+  if (method === "GET" && path === "/api/v1/resources") return json(route, { items: resources, total: 1, page: 1, pageSize: 20 });
+  if (method === "GET" && path === "/api/v1/resources/camera-a") return json(route, resources[0]);
+  if (method === "POST" && path === "/api/v1/resources/camera-a/authenticate") return json(route, { model: "DS-2CD", subSerialNumber: "fixture", softwareVersion: "V5" });
+  if (method === "PATCH" && path === "/api/v1/resources/camera-a") { const payload = request.postDataJSON(); mutations.push(payload); Object.assign(resources[0], payload); return json(route, resources[0]); }
+  if (method === "GET" && path === "/api/v1/tasks") return json(route, { items: [task], total: 1, page: 1, pageSize: 20 });
+  if (method === "GET" && path === "/api/v1/tasks/task-a") return json(route, task);
+  if (method === "GET" && path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
+  if (method === "GET" && ["/api/v1/command-templates", "/api/v1/nodes"].includes(path)) return json(route, { items: [], total: 0, page: 1, pageSize: 20 });
+  throw new Error(`未模拟请求：${method} ${path}`);
+});
+const page = await context.newPage(); page.setDefaultTimeout(12_000);
+const errors = []; page.on("pageerror", error => errors.push(error.message));
+async function confirm() { const dialog = page.locator(".el-message-box"); if (await dialog.isVisible().catch(() => false)) await dialog.getByRole("button", { name: "确认", exact: true }).click(); }
 try {
-  await mkdir(screenshots, { recursive: true });
-  for (const width of viewports) {
-    let cameraAReads = 0;
-    let cameraBFailure = false;
-    let cameraBMountStatus = "MOUNTED";
-    const created = [];
-    const context = await browser.newContext({ viewport: { width, height: 900 } });
-    await context.route("**/api/v1/**", async route => {
-      const request = route.request(), url = new URL(request.url()), path = url.pathname;
-      if (path === "/api/v1/auth/me") return route.fulfill({ json: { user: { id: "admin", username: "admin", displayName: "验收管理员", isAdmin: true, enabled: true, mustChangePassword: false, scopes: ["*"] } } });
-      if (path === "/api/v1/resources") return route.fulfill({ json: pageOf(resources) });
-      if (path === "/api/v1/resources/camera-a/coredump-monitor") {
-        cameraAReads += 1;
-        return route.fulfill({ json: cameraAReads <= 2 || process.env.COREDUMP_UNMOUNT_STATUS_ONLY
-          ? monitor(true, { id: "owner-other", name: "另一采集任务" }, "MOUNTED")
-          : cameraAReads === 3
-            ? monitor(true, { id: "owner-self", name: ownTask.name }, "MOUNTED")
-            : monitor(false, null) });
-      }
-      if (path === "/api/v1/resources/camera-b/coredump-monitor") {
-        if (cameraBFailure) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "模拟查询失败" }) });
-        return route.fulfill({ json: monitor(true, { id: "owner-b", name: "B 资源负责人" }, cameraBMountStatus) });
-      }
-      if (path === "/api/v1/tasks" && request.method() === "POST") {
-        created.push(request.postDataJSON());
-        return route.fulfill({ json: { ...ownTask, ...created.at(-1), id: `new-${created.length}` } });
-      }
-      if (path === "/api/v1/tasks") return route.fulfill({ json: pageOf([ownTask]) });
-      if (path === "/api/v1/tasks/owner-self") return route.fulfill({ json: ownTask });
-      if (path === "/api/v1/command-templates") return route.fulfill({ json: pageOf([]) });
-      return route.fulfill({ json: pageOf([]) });
-    });
-    const page = await context.newPage();
-    const errors = [];
-    page.on("pageerror", error => errors.push(error.message));
-    await page.goto(baseUrl, { waitUntil: "networkidle" });
-    await page.getByRole("tab", { name: "采集任务", exact: true }).click();
-    await page.getByRole("button", { name: "新建任务", exact: true }).click();
-    const drawer = page.getByRole("dialog", { name: "新建采集任务", exact: true });
-    await drawer.waitFor();
-    const resourceSelect = drawer.locator(".el-form-item").filter({ hasText: "设备资源" }).locator(".el-select");
-    await resourceSelect.click();
-    await page.getByRole("option", { name: /模拟海康 A/ }).click();
-    const monitorItem = drawer.locator(".el-form-item").filter({ hasText: "Coredump 监控" });
-    await monitorItem.getByText("另一采集任务", { exact: false }).waitFor();
-    const sharedSwitch = monitorItem.locator(".el-switch");
-    assert.ok((await sharedSwitch.getAttribute("class")).includes("is-disabled"), "新任务必须只读展示同资源负责人");
-    assert.ok((await sharedSwitch.getAttribute("class")).includes("is-checked"), "共享负责人存在时开关必须显示开启");
-    await page.getByRole("option", { name: /模拟海康 A/ }).waitFor({ state: "hidden" });
-    await monitorItem.scrollIntoViewIfNeeded();
-    await monitorItem.evaluate(async element => {
-      const first = element.getBoundingClientRect();
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const second = element.getBoundingClientRect();
-      if (first.x !== second.x || first.y !== second.y || first.width !== second.width) throw new Error("Coredump 共享状态布局尚未稳定");
-    });
-    assert.ok(await sharedSwitch.isVisible(), "共享开启开关必须出现在截图视口中");
-    assert.ok(await monitorItem.getByText("另一采集任务", { exact: false }).isVisible(), "负责人说明必须出现在截图视口中");
-    await page.screenshot({ path: `${screenshots}/coredump-shared-owner-${width}.png`, fullPage: true });
-    if (process.env.COREDUMP_UNMOUNT_STATUS_ONLY) for (const [status, label] of [["UNMOUNTED", "已卸载"], ["UNMOUNT_SKIPPED", "跳过卸载，结果未确认"], ["UNMOUNT_FAILED", "卸载失败"]]) {
-      cameraBMountStatus = status;
-      await resourceSelect.click();
-      await page.getByRole("option", { name: /模拟海康 B/ }).click();
-      await monitorItem.getByText(`挂载状态：${label}`, { exact: false }).waitFor();
-      await page.getByRole("option", { name: /模拟海康 B/ }).waitFor({ state: "hidden" });
-      await assertViewport(page, width, `Coredump ${status} 状态`);
-      if (status === "UNMOUNT_SKIPPED")
-        await page.screenshot({ path: `${screenshots}/coredump-unmount-skipped-${width}.png`, fullPage: true });
-      await resourceSelect.click();
-      await page.getByRole("option", { name: /模拟海康 A/ }).click();
-      await monitorItem.getByText("另一采集任务", { exact: false }).waitFor();
-    }
-    if (process.env.COREDUMP_UNMOUNT_STATUS_ONLY) {
-      await context.close();
-      continue;
-    }
-    await drawer.getByLabel("任务名称", { exact: true }).fill("共享状态新任务");
-    await drawer.getByLabel("用户名", { exact: true }).fill("fixture");
-    await drawer.getByLabel("密码", { exact: true }).fill("fixture-password");
-    await drawer.getByRole("button", { name: "保存任务", exact: true }).click();
-    await drawer.waitFor({ state: "hidden" });
-    assert.equal(created.at(-1).enableCoredumpMonitor, false, "共享显示不得保存为新任务启用状态");
-
-    await page.getByRole("row").filter({ hasText: ownTask.name }).getByRole("button", { name: "编辑任务" }).click();
-    const ownDrawer = page.getByRole("dialog", { name: `任务 · ${ownTask.name}`, exact: true });
-    await ownDrawer.waitFor();
-    // 编辑本人负责的任务时，状态接口返回同一任务，原开关保留可编辑性。
-    const ownSwitch = ownDrawer.locator(".el-form-item").filter({ hasText: "Coredump 监控" }).locator(".el-switch");
-    await ownDrawer.locator(".inline-option").filter({ hasText: ownTask.name }).waitFor();
-    assert.ok(!(await ownSwitch.getAttribute("class")).includes("is-disabled"), "本人负责的任务必须可编辑原开关");
-    await ownDrawer.getByRole("button", { name: "关闭", exact: true }).click();
-
-    // 重新打开新建表单，验证资源和协议切换会使先前负责人状态失效，而非迟到覆盖。
-    await page.getByRole("button", { name: "新建任务", exact: true }).click();
-    const switchingDrawer = page.getByRole("dialog", { name: "新建采集任务", exact: true });
-    const switchingResourceSelect = switchingDrawer.locator(".el-form-item").filter({ hasText: "设备资源" }).locator(".el-select");
-    await switchingResourceSelect.click();
-    await page.getByRole("option", { name: /模拟海康 A/ }).click();
-    const switchingItem = switchingDrawer.locator(".el-form-item").filter({ hasText: "Coredump 监控" });
-    await switchingItem.getByText("当前没有正在负责 Coredump NFS 挂载监控的任务", { exact: true }).waitFor();
-    await switchingItem.locator(".el-switch").click();
-    // 草稿已主动打开时切换到共享负责人资源，提交仍必须清除本任务配置。
-    await switchingResourceSelect.click();
-    await page.getByRole("option", { name: /模拟海康 B/ }).click();
-    await switchingItem.getByText("B 资源负责人", { exact: false }).waitFor();
-    assert.ok((await switchingItem.locator(".el-switch").getAttribute("class")).includes("is-disabled"), "切换到共享负责人后必须锁定展示开关");
-    await switchingDrawer.getByLabel("任务名称", { exact: true }).fill("草稿开启后切换共享资源");
-    await switchingDrawer.getByLabel("用户名", { exact: true }).fill("fixture");
-    await switchingDrawer.getByLabel("密码", { exact: true }).fill("fixture-password");
-    await switchingDrawer.getByRole("button", { name: "保存任务", exact: true }).click();
-    await switchingDrawer.waitFor({ state: "hidden" });
-    assert.equal(created.at(-1).enableCoredumpMonitor, false, "已开启草稿切换共享资源后不得提交 true");
-
-    await page.getByRole("button", { name: "新建任务", exact: true }).click();
-    const transitionDrawer = page.getByRole("dialog", { name: "新建采集任务", exact: true });
-    const transitionResourceSelect = transitionDrawer.locator(".el-form-item").filter({ hasText: "设备资源" }).locator(".el-select");
-    await transitionResourceSelect.click();
-    await page.getByRole("option", { name: /模拟海康 B/ }).click();
-    const transitionItem = transitionDrawer.locator(".el-form-item").filter({ hasText: "Coredump 监控" });
-    await transitionItem.getByText("B 资源负责人", { exact: false }).waitFor();
-    await transitionDrawer.locator(".el-form-item").filter({ hasText: "连接协议" }).locator(".el-select").click();
-    await page.getByRole("option", { name: "Telnet 设备", exact: true }).click();
-    await transitionItem.getByText("B 资源负责人", { exact: false }).waitFor();
-    assert.equal(await transitionItem.count(), 1, "Telnet 设备必须保留共享 Coredump 展示");
-    await transitionDrawer.locator(".el-form-item").filter({ hasText: "连接协议" }).locator(".el-select").click();
-    await page.getByRole("option", { name: "Telnet 串口", exact: true }).click();
-    assert.equal(await transitionItem.count(), 0, "Telnet 串口必须移除共享 Coredump 展示");
-    await transitionDrawer.locator(".el-form-item").filter({ hasText: "连接协议" }).locator(".el-select").click();
-    await page.getByRole("option", { name: "SSH", exact: true }).click();
-    for (const [status, label] of [["UNMOUNTED", "已卸载"], ["UNMOUNT_SKIPPED", "跳过卸载，结果未确认"], ["UNMOUNT_FAILED", "卸载失败"]]) {
-      cameraBMountStatus = status;
-      await transitionResourceSelect.click();
-      await page.getByRole("option", { name: /模拟海康 A/ }).click();
-      await transitionResourceSelect.click();
-      await page.getByRole("option", { name: /模拟海康 B/ }).click();
-      await transitionItem.getByText(`挂载状态：${label}`, { exact: false }).waitFor();
-      await page.getByRole("option", { name: /模拟海康 B/ }).waitFor({ state: "hidden" });
-      await assertViewport(page, width, `Coredump ${status} 状态`);
-      if (status === "UNMOUNT_SKIPPED")
-        await page.screenshot({ path: `${screenshots}/coredump-unmount-skipped-${width}.png`, fullPage: true });
-    }
-    cameraBFailure = true;
-    await transitionResourceSelect.click();
-    await page.getByRole("option", { name: /模拟海康 A/ }).click();
-    await transitionDrawer.getByText("当前没有正在负责 Coredump NFS 挂载监控的任务", { exact: true }).waitFor();
-    await transitionResourceSelect.click();
-    await page.getByRole("option", { name: /模拟海康 B/ }).click();
-    await transitionDrawer.getByText("无法确认共享 Coredump 监控状态", { exact: true }).waitFor();
-    await assertViewport(page, width, "Coredump 负责人编辑器");
-    assert.deepEqual(errors, []);
-    await context.close();
+  await mkdir("output/playwright", { recursive: true });
+  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
+  await page.getByRole("button", { name: "编辑资源", exact: true }).click();
+  const editor = page.getByRole("dialog", { name: "编辑设备资源", exact: true });
+  await editor.getByText("资源监控", { exact: true }).waitFor();
+  const switches = editor.locator(".resource-monitor-options .el-switch");
+  await switches.nth(0).scrollIntoViewIfNeeded(); await switches.nth(0).click();
+  await switches.nth(1).scrollIntoViewIfNeeded(); await switches.nth(1).click();
+  await editor.getByLabel("密码（留空保持原值）", { exact: true }).fill("http-password");
+  await editor.getByRole("button", { name: "点击认证", exact: true }).click();
+  await editor.getByRole("button", { name: "保存资源", exact: true }).click(); await confirm();
+  await editor.waitFor({ state: "hidden" });
+  assert.equal(mutations.at(-1).enableCoredumpMonitor, true, "Coredump 开关必须通过资源 PATCH 保存");
+  assert.equal(mutations.at(-1).enableResourceMonitor, true, "资源监控开关必须通过资源 PATCH 保存");
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
+  await page.getByRole("row").filter({ hasText: task.name }).getByRole("button", { name: "编辑任务" }).click();
+  const taskEditor = page.getByRole("dialog", { name: /模拟采集任务/ }); await taskEditor.waitFor();
+  assert.equal(await taskEditor.getByText("Coredump 监控", { exact: true }).count(), 0, "任务编辑器不得保留 Coredump 配置");
+  await taskEditor.getByRole("button", { name: "关闭", exact: true }).click();
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 844 }); await page.getByRole("tab", { name: "设备资源", exact: true }).click();
+    await page.getByRole("button", { name: "编辑资源", exact: true }).click();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, `${width}px 资源编辑器不得横向溢出`);
+    await page.screenshot({ path: `output/playwright/resource-coredump-monitor-${width}.png`, fullPage: true }); await page.getByRole("button", { name: "关闭", exact: true }).click();
   }
-  console.log("共享 Coredump 负责人浏览器验收通过，已检查 1440px 与 390px 截图");
-} finally {
-  await browser.close();
-}
+  assert.deepEqual(errors, []); console.log(JSON.stringify({ passed: true, screenshots: "output/playwright/resource-coredump-monitor-{1440,390}.png" }));
+} finally { await context.close(); await browser.close(); }

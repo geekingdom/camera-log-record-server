@@ -32,8 +32,11 @@ def unmount_command(target: str, marker: str, *, mounts_path: str | Path = "/pro
     left, right = shlex.quote(marker[:split]), shlex.quote(marker[split:])
     return f"""mount_target_present() {{
     : < {mounts_literal} || return 2
-    while IFS=' ' read -r source rest; do
-        [ \"$source\" = {target_literal} ] && return 0
+    while IFS=' ' read -r source mount_point rest; do
+        if [ \"$source\" = {target_literal} ]; then
+            mount_point=$(printf '%b' \"$mount_point\")
+            return 0
+        fi
     done < {mounts_literal}
     return 1
 }}
@@ -42,7 +45,7 @@ mount_status=$?
 case \"$mount_status\" in
     1) printf '%s%s\\n' {left} {right} ;;
     0)
-        if umount -l {target_literal}; then
+        if umount -l \"$mount_point\"; then
             mount_target_present
             [ \"$?\" -eq 1 ] && printf '%s%s\\n' {left} {right}
         fi
@@ -62,8 +65,8 @@ class CoredumpMountCleanup:
         self._lock = asyncio.Lock()
 
     def configure(self, target: str) -> None:
-        """记录本会话可能挂载的安全目标；同一控制器只允许首次配置。"""
-        if self._target is not None and self._target != target:
+        """记录将要挂载的来源；首次尝试前可随资源赢家切换，之后保持不可变。"""
+        if self._mount_attempted and self._target is not None and self._target != target:
             raise RuntimeError("核心转储清理目标不可在同一会话中变更")
         self._target = target
 
@@ -72,6 +75,12 @@ class CoredumpMountCleanup:
         if self._target is None:
             raise RuntimeError("核心转储清理目标尚未配置")
         self._mount_attempted = True
+
+    def reopen(self) -> None:
+        """资源在同一采集会话内重新启用时允许下一轮挂载再次登记清理。"""
+        if self._finished:
+            self._finished = False
+            self._mount_attempted = False
 
     async def run(self, send: Callback, report: Callback) -> None:
         """在仍可写当前会话时卸载目标；守卫拒绝和任何失败均不阻塞连接关闭。"""

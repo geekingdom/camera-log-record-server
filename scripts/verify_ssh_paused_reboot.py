@@ -43,6 +43,16 @@ def validate_arguments(args):
         raise ValueError("--timeout 必须在70至420秒之间")
 
 
+def validate_reboot_resource(task, resource):
+    """重启前确认任务仍绑定未删除的海康网络资源，且端点没有漂移。"""
+    if resource.get("kind") != "HIKVISION_NETWORK":
+        raise ValueError("暂停重启验证只支持 HIKVISION_NETWORK 资源")
+    if resource.get("deletedAt") is not None:
+        raise ValueError("验证资源已删除")
+    if resource.get("ip") != task.get("ip"):
+        raise ValueError("验证资源 IP 与任务端点不一致")
+
+
 async def assert_no_shared_active_ip(client, task):
     """每次关键状态轮询均拒绝同 IP 的其它活动任务，避免误解释 TCP FD。"""
     tasks = await list_tasks(client, {"search": task["ip"]})
@@ -174,6 +184,7 @@ async def execute(args):
             try:
                 await assert_no_shared_active_ip(client, task)
                 resource = await get_resource(client, resource_id)
+                validate_reboot_resource(task, resource)
                 if resource.get("healthStatus") != "ONLINE":
                     raise RuntimeError("设备资源必须先处于 ONLINE")
                 started = await start_and_wait_collecting(client, task["id"], args.worker_pid)

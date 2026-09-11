@@ -12,7 +12,11 @@ from unittest.mock import AsyncMock
 import asyncssh
 import pytest
 from camera_logs.collection.collector import Collector, LogChunk
-from camera_logs.collection.coredump_lease import bound_coredump_cleanup_guard
+from camera_logs.collection.coredump_lease import (
+    bound_coredump_cleanup_guard,
+    guard_coredump_cleanup,
+    guard_coredump_monitor,
+)
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
@@ -137,9 +141,9 @@ def test_coredump_guard_claims_resource_once_and_rejects_stale_runtime(tmp_path)
         settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node-a")
         repo = Repository(database, settings)
         task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
-                "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"}
+                "resourceId": "resource-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING"}
         await database.tasks.insert_one(task)
-        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE"})
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE", "enableCoredumpMonitor": True})
         runtime = object.__new__(SessionRuntime)
         runtime.repo, runtime.task = repo, task
         runtime.stopping = runtime.retired = False
@@ -164,12 +168,12 @@ def test_coredump_guard_allows_only_one_collecting_runtime_per_resource(tmp_path
                                              log_root=tmp_path, node_id="node-a"))
         tasks = [
             {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
-             "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"},
+             "resourceId": "resource-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING"},
             {"id": "task-b", "runId": "run-b", "nodeId": "node-b", "generation": 7,
-             "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"},
+             "resourceId": "resource-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING"},
         ]
         await database.tasks.insert_many(tasks)
-        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE"})
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE", "enableCoredumpMonitor": True})
         runtimes = []
         for task in tasks:
             runtime = object.__new__(SessionRuntime)
@@ -187,6 +191,33 @@ def test_coredump_guard_allows_only_one_collecting_runtime_per_resource(tmp_path
         assert resource["coredumpLeaseRunId"] == owner["runId"]
         assert resource["coredumpLeaseGeneration"] == owner["generation"]
         assert resource["coredumpLeaseNodeId"] == owner["nodeId"]
+    asyncio.run(scenario())
+
+
+def test_coredump_guard_does_not_renew_after_resource_switch_is_disabled(tmp_path):
+    """读取资源后管理员关闭开关时，最终租约 CAS 必须拒绝继续控制设备。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                             log_root=tmp_path, node_id="node-a"))
+        task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                "resourceId": "resource-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING"}
+        await database.tasks.insert_one(task)
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE",
+                                             "enableCoredumpMonitor": True})
+        resources = database.resources
+        original_claim = resources.find_one_and_update
+
+        async def disable_before_claim(*args, **kwargs):
+            await resources.update_one({"id": "resource-a"}, {"$set": {"enableCoredumpMonitor": False}})
+            return await original_claim(*args, **kwargs)
+
+        repo.db = SimpleNamespace(tasks=database.tasks, resources=SimpleNamespace(
+            find_one=resources.find_one, update_one=resources.update_one, find_one_and_update=disable_before_claim,
+        ))
+        assert await guard_coredump_monitor(repo, task, session_active=lambda: True,
+                                            report_status=lambda *_: None) is None
+
     asyncio.run(scenario())
 
 
@@ -233,6 +264,31 @@ def test_coredump_cleanup_guard_keeps_current_owner_during_stopping(tmp_path):
         assert await bound_coredump_cleanup_guard(runtime, collector)() is True
         resource = await database.resources.find_one({"id": "resource-a"})
         assert resource["coredumpLeaseUntil"].replace(tzinfo=UTC) > datetime.now(UTC) + timedelta(seconds=10)
+
+    asyncio.run(scenario())
+
+
+def test_coredump_cleanup_guard_unmounts_after_resource_disable_despite_successor(tmp_path):
+    """资源关闭后仍有采集候选也不能保留设备侧 NFS 挂载。"""
+    async def scenario():
+        database = AsyncMongoMockClient().camera_logs
+        repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                             log_root=tmp_path, node_id="node-a"))
+        owner = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
+                 "resourceId": "resource-a", "desiredState": "STOPPED", "status": "STOPPING",
+                 "protocol": "SSH"}
+        successor = {"id": "task-b", "runId": "run-b", "nodeId": "node-b", "generation": 4,
+                     "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING",
+                     "protocol": "SSH"}
+        await database.tasks.insert_many([owner, successor])
+        await database.resources.insert_one({
+            "id": "resource-a", "deletedAt": None, "healthStatus": "ONLINE", "enableCoredumpMonitor": False,
+            "coredumpLeaseTaskId": owner["id"], "coredumpLeaseRunId": owner["runId"],
+            "coredumpLeaseGeneration": owner["generation"], "coredumpLeaseNodeId": owner["nodeId"],
+            "coredumpLeaseUntil": datetime.now(UTC) + timedelta(seconds=60),
+        })
+
+        assert await guard_coredump_cleanup(repo, owner, session_active=lambda: True) is True
 
     asyncio.run(scenario())
 

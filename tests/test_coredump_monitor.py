@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from camera_logs.collection.collector import Collector
+from camera_logs.collection.coredump_cleanup import CoredumpMountCleanup
 from camera_logs.collection.coredump_monitor import monitor_mount, mount_target
 
 
@@ -105,6 +106,41 @@ async def test_sender_guard_blocks_command_that_lost_ownership_while_queued():
 
     await monitor_mount(send, report, "10.0.0.1:/srv/core/10.0.0.34", interval=0, guard=guard)
     assert calls == ["debug"]
+
+
+async def test_waiting_competitor_replaces_cleanup_target_before_first_mount_attempt():
+    """竞争失败后必须收尾赢家来源，不能保留本节点尚未挂载的旧 target。"""
+    loser = "10.0.0.2:/srv/core/10.0.0.34"
+    winner = "10.0.0.1:/srv/core/10.0.0.34"
+    current = loser
+    cleanup = CoredumpMountCleanup(lambda: True)
+    cleanup.configure(loser)
+    commands = []
+    claims = 0
+
+    async def guard():
+        nonlocal claims, current
+        claims += 1
+        if claims == 1:
+            current = winner
+            return None
+        return True
+
+    async def send(command, **_kwargs):
+        commands.append(command)
+        if command == "mount":
+            raise asyncio.CancelledError
+
+    async def report(*_args):
+        return None
+
+    with pytest.raises(asyncio.CancelledError):
+        await monitor_mount(send, report, lambda: current, interval=0, guard=guard, cleanup=cleanup)
+
+    assert cleanup._target == winner
+    assert cleanup._mount_attempted
+    assert any(winner in command for command in commands)
+    assert all(loser not in command for command in commands)
 
 
 async def test_collector_monitor_uses_existing_sender_lifecycle(tmp_path, monkeypatch):

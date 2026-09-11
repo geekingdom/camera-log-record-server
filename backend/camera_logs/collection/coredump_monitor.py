@@ -25,17 +25,30 @@ def mount_target(server: str, root: str, device: str) -> tuple[Path, str]:
     return directory, f"{host}:{directory}"
 
 
-async def monitor_mount(send, report, target: str, *, interval: float = 60, guard=None, cleanup=None):
+async def monitor_mount(send, report, target, *, interval: float = 60, guard=None, cleanup=None,
+                        wait_after_false: bool = False):
     """首次切换后挂载，后续仅在 mount 未确认时重挂载；错误不终止采集。"""
+    if not callable(target):
+        target = lambda value=target: value
     first = True
     # False 表示当前运行已失属，None 表示同资源其它会话持有租约，应等待后再竞争。
     while guard:
         claimed = await guard()
         if claimed is False:
-            return
+            if cleanup is not None:
+                await cleanup.run(send, report)
+            if not wait_after_false:
+                return
+            # 开关和认证状态会在运行中变化；保持协程等待，不建立额外设备连接。
+            first = True
+            await asyncio.sleep(min(interval, 5))
+            continue
         if claimed:
+            if cleanup is not None:
+                cleanup.reopen()
             break
-        await asyncio.sleep(interval)
+        # 等待方不访问设备，只需较短轮询租约以在负责人停止后及时接管。
+        await asyncio.sleep(min(interval, 5))
 
     async def send_guard():
         """sender 真正写 socket 前再次核对，排队期间失效不能继续控制设备。"""
@@ -54,22 +67,32 @@ async def monitor_mount(send, report, target: str, *, interval: float = 60, guar
             # 发送前复核任务代次、资源健康和同资源租约，避免旧实例迁移后继续控制设备。
             claimed = await guard() if guard else True
             if claimed is False:
-                return
+                if cleanup is not None:
+                    await cleanup.run(send, report)
+                if not wait_after_false:
+                    return
+                first = True
+                await asyncio.sleep(min(interval, 5))
+                continue
             if not claimed:
                 await asyncio.sleep(interval)
                 continue
+            if cleanup is not None:
+                cleanup.reopen()
             mounted = False
             if not first:
                 try:
-                    await send("mount", prompt=f"{target} on ", session_guard=send_guard)
+                    await send("mount", prompt=f"{target()} on ", session_guard=send_guard)
                     mounted = True
                 except TimeoutError:
                     pass
             if not mounted:
                 if first and cleanup is not None:
+                    # 等待租约时 target 可能已切到跨节点赢家；尝试前才固定实际来源用于收尾。
+                    cleanup.configure(target())
                     cleanup.mark_mount_attempted()
-                await send(f"gdbcfg --password=hiklinux --nfsmount={target} --open=1", session_guard=send_guard)
-                await send("mount", prompt=f"{target} on ", session_guard=send_guard)
+                await send(f"gdbcfg --password=hiklinux --nfsmount={target()} --open=1", session_guard=send_guard)
+                await send("mount", prompt=f"{target()} on ", session_guard=send_guard)
             await report("MOUNTED", None)
             first = False
         except Exception as error:  # noqa: BLE001 - 命令失败隔离于采集主任务。
@@ -78,23 +101,28 @@ async def monitor_mount(send, report, target: str, *, interval: float = 60, guar
         await asyncio.sleep(interval)
 
 
-async def run_monitor(collector, server: str, root: str, report, *, guard=None, cleanup=None):
+async def run_monitor(collector, server: str, root: str, report, *, guard=None, cleanup=None,
+                      resolve_target=None, wait_after_false: bool = False):
     """目录准备失败同样只影响 coredump；监控归属于当前 collector 的生命周期。"""
     try:
-        directory, target = mount_target(server, root, collector.task["ip"])
+        target = await resolve_target() if resolve_target is not None else None
+        if target is None:
+            directory, target = mount_target(server, root, collector.task["ip"])
+            # 只有首个来源创建本地目录；接管旧来源不应触碰本机 NFS 根。
+            if directory.parent.resolve() != directory.parent or directory.is_symlink():
+                raise ValueError("NFS 目录不可使用符号链接")
+            await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
+        collector._coredump_target = target
         if cleanup is not None:
             cleanup.configure(target)
-        # 拒绝符号链接目录，避免已有目录把设备写入引向另一个设备。
-        if directory.parent.resolve() != directory.parent or directory.is_symlink():
-            raise ValueError("NFS 目录不可使用符号链接")
-        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=True)
 
-        async def send(command, *, prompt=None, session_guard=None):
+        async def send(command, *, prompt=None, session_guard=None, allow_during_shutdown=False):
             """监控命令低于人工命令优先级，且不会另开 SSH 连接。"""
             await collector._enqueue(command, "\n", priority=2, prompt=prompt, timeout_seconds=10,
-                                     session_guard=session_guard)
+                                     session_guard=session_guard, allow_during_shutdown=allow_during_shutdown)
 
-        await monitor_mount(send, report, target, guard=guard, cleanup=cleanup)
+        await monitor_mount(send, report, lambda: collector._coredump_target, guard=guard, cleanup=cleanup,
+                            wait_after_false=wait_after_false)
     except Exception as error:  # noqa: BLE001 - 后台可选功能必须独立收尾。
         logger.warning("coredump 挂载监控不可用 task=%s error=%s", collector.task_id, type(error).__name__)
         try:
@@ -103,7 +131,8 @@ async def run_monitor(collector, server: str, root: str, report, *, guard=None, 
             logger.exception("coredump 状态记录失败 task=%s", collector.task_id)
 
 
-def start_monitor(collector, server: str, root: str, report, *, guard=None, cleanup_guard=None) -> None:
+def start_monitor(collector, server: str, root: str, report, *, guard=None, cleanup_guard=None,
+                  resolve_target=None, wait_after_false: bool = False) -> None:
     """为采集器创建唯一监控控制器和协程，仍由其现有 SSH 会话发送命令。"""
     from .coredump_cleanup import CoredumpMountCleanup
 
@@ -113,6 +142,9 @@ def start_monitor(collector, server: str, root: str, report, *, guard=None, clea
         return
     collector._coredump_cleanup = CoredumpMountCleanup(cleanup_guard)
     collector._coredump_report = report
-    collector._coredump_monitor = asyncio.create_task(
-        run_monitor(collector, server, root, report, guard=guard, cleanup=collector._coredump_cleanup)
-    )
+    kwargs = {"guard": guard, "cleanup": collector._coredump_cleanup}
+    if resolve_target is not None:
+        kwargs["resolve_target"] = resolve_target
+    if wait_after_false:
+        kwargs["wait_after_false"] = True
+    collector._coredump_monitor = asyncio.create_task(run_monitor(collector, server, root, report, **kwargs))

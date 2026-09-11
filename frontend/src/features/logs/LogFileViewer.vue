@@ -135,7 +135,7 @@ watch(() => [open.value, props.file?.id, props.initialOffset, props.keyword], ()
 onBeforeUnmount(cancelRead);
 </script>
 <template>
-  <el-dialog v-model="open" title="日志片段内容" width="min(1180px, calc(100% - 24px))" append-to-body destroy-on-close @closed="cancelRead">
+  <el-dialog v-model="open" title="日志片段内容" width="min(1180px, calc(100% - 24px))" class="file-viewer-dialog" append-to-body destroy-on-close @closed="cancelRead">
     <div class="file-viewer-meta"><strong>{{ file?.archiveName || file?.rawFileName || file?.id }}</strong><span>当前字节范围 {{ start.toLocaleString() }} 至 {{ end.toLocaleString() }}</span></div>
     <div class="file-viewer-tools">
       <el-button :icon="ArrowLeft" :disabled="busy || start === 0" @click="previousSegment">上一段</el-button>
@@ -150,6 +150,7 @@ onBeforeUnmount(cancelRead);
   </el-dialog>
 </template>
 <style scoped>
+:global(.file-viewer-dialog) { max-height: calc(100dvh - 112px); margin: 32px auto; }
 .file-viewer-meta { display: grid; gap: 7px; overflow-wrap: anywhere; color: #8a9a9f; font-size: 12px; }
 .file-viewer-meta strong { color: #254344; font-weight: 600; }
 .file-viewer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0 10px; }

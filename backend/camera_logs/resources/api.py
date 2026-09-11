@@ -221,7 +221,8 @@ def install_resource_routes(app, repo, listing):
         resource = await repo().get("resources", identifier)
         timestamp = now()
         inactive = {"active": False, "ownerTask": None, "mountStatus": None}
-        if (resource.get("kind") != "HIKVISION_NETWORK" or resource.get("deletedAt") is not None
+        if (resource.get("kind") != "HIKVISION_NETWORK" or not resource.get("enableCoredumpMonitor", False)
+                or resource.get("deletedAt") is not None
                 or resource.get("healthStatus") != "ONLINE"
                 or _lease_expired(resource.get("coredumpLeaseUntil"), timestamp)):
             return inactive
@@ -229,7 +230,6 @@ def install_resource_routes(app, repo, listing):
             "id": resource.get("coredumpLeaseTaskId"), "resourceId": identifier,
             "runId": resource.get("coredumpLeaseRunId"), "generation": resource.get("coredumpLeaseGeneration"),
             "nodeId": resource.get("coredumpLeaseNodeId"), "protocol": {"$in": ["SSH", "TELNET_DEVICE"]},
-            "enableCoredumpMonitor": True,
             "desiredState": "RUNNING", "status": "COLLECTING", "resourceDeleted": {"$ne": True},
         }, {"id": 1, "name": 1, "coredumpMountStatus": 1, "coredumpMountRunId": 1})
         if owner is None:
@@ -264,7 +264,9 @@ def install_resource_routes(app, repo, listing):
             metadata = await _verified_metadata(body)
             document = {"id": identifier, "name": body.name, "kind": body.kind, "ip": body.ip,
                         "version": 1, "createdAt": now(), "updatedAt": now(),
-                        "createdBy": user["id"], "createdByName": user.get("displayName") or user.get("username") or user["id"]}
+                        "createdBy": user["id"], "createdByName": user.get("displayName") or user.get("username") or user["id"],
+                        "enableCoredumpMonitor": body.enableCoredumpMonitor,
+                        "enableResourceMonitor": body.enableResourceMonitor}
             if body.kind == "HIKVISION_NETWORK":
                 document.update(username=body.username, authType=body.authType,
                                 passwordEncrypted=repo().encrypt(body.password), authenticatedAt=now(), **metadata)
@@ -314,7 +316,9 @@ def install_resource_routes(app, repo, listing):
         password = body.password or repo().decrypt(old.get("passwordEncrypted", ""))
         try:
             checked = ResourceInput(name=body.name, kind=body.kind, ip=body.ip, username=body.username,
-                                    password=password, authType=body.authType)
+                                    password=password, authType=body.authType,
+                                    enableCoredumpMonitor=body.enableCoredumpMonitor,
+                                    enableResourceMonitor=body.enableResourceMonitor)
         except ValueError as exc:
             raise HTTPException(422, "资源配置无效") from exc
         try:
@@ -324,7 +328,9 @@ def install_resource_routes(app, repo, listing):
             await record_authentication(repo(), old, source="EDIT", result=result, before=old, after=old,
                                         message=result)
             raise
-        update = {"name": checked.name, "updatedAt": now()}
+        update = {"name": checked.name, "updatedAt": now(),
+                  "enableCoredumpMonitor": checked.enableCoredumpMonitor,
+                  "enableResourceMonitor": checked.enableResourceMonitor}
         if checked.kind == "HIKVISION_NETWORK":
             update.update(username=checked.username, authType=checked.authType,
                           passwordEncrypted=repo().encrypt(password), authenticatedAt=now(),

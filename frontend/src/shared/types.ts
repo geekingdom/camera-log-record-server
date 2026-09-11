@@ -14,6 +14,10 @@ export interface Resource extends ResourceAuthentication {
   ip: string;
   username?: string;
   authType?: ResourceAuthType;
+  /** 资源级 Coredump 采集开关，仅海康网络设备可用。 */
+  enableCoredumpMonitor?: boolean;
+  /** 资源级 CPU 和内存采样开关，仅海康网络设备可用。 */
+  enableResourceMonitor?: boolean;
   version?: number;
   healthStatus?: "ONLINE" | "AUTH_FAILED" | "OFFLINE" | "ERROR" | string;
   healthCheckedAt?: string;
@@ -24,6 +28,27 @@ export interface Resource extends ResourceAuthentication {
   unsettledTaskCount?: number;
   createdBy?: string;
   createdByName?: string;
+}
+/** 资源监控样本内的单项 CPU 或内存值；pid 仅用于区分同类进程。 */
+export interface ResourceMetricValue {
+  id: string;
+  name: string;
+  value: number;
+  unit: "KB" | "%";
+  pid?: number;
+}
+/** 一次采样只保存结构化数值和受限错误码，不包含设备命令正文。 */
+export interface ResourceMetricSample {
+  sampledAt: string;
+  status: string;
+  values: ResourceMetricValue[];
+  errorCode?: string | null;
+}
+/** 资源监控历史采用游标续页，避免长时间范围计算精确总数。 */
+export interface ResourceMetricsPage {
+  items: ResourceMetricSample[];
+  nextCursor?: string | null;
+  owner?: { id?: string; name?: string } | null;
 }
 /** 海康网络设备认证历史的安全结果分类。 */
 export type AuthenticationRecordResult = "SUCCESS" | "AUTH_FAILED" | "OFFLINE" | "ERROR";
@@ -94,7 +119,6 @@ export interface Task {
   port?: number;
   username?: string;
   password?: string;
-  enableCoredumpMonitor?: boolean;
   status?: TaskActualStatus;
   desiredState?: TaskDesiredState;
   error?: string | null;

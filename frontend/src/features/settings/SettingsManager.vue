@@ -7,6 +7,7 @@ import { ApiError } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { settingsApi, type NodeConfig, type NodeRegistration, type PlatformSettings } from "./api";
 import { MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, normalizeCapacity } from "./settingsForm";
+import ResourceMonitorSettings from "./ResourceMonitorSettings.vue";
 
 const loading = ref(false);
 const savingRetention = ref(false);
@@ -20,6 +21,7 @@ const nodes = ref<NodeConfig[]>([]);
 const nodeDialog = ref(false);
 const editingNode = ref<NodeConfig>();
 const nodeForm = ref<NodeRegistration>({ id: "", url: "", capacity: 10, accepting: true });
+const nodeNetworksText = ref("");
 
 async function load() {
   loading.value = true;
@@ -60,20 +62,24 @@ async function savePlatformSettings() {
 function openRegister(node?: NodeConfig) {
   editingNode.value = undefined;
   nodeForm.value = node
-    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting }
-    : { id: "", url: "", capacity: 10, accepting: true };
+    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting, isGeneralNode: node.isGeneralNode ?? true }
+    : { id: "", url: "", capacity: 10, accepting: true, isGeneralNode: true };
+  nodeNetworksText.value = (node?.resourceNetworks ?? []).join("\n");
   nodeDialog.value = true;
 }
 
 function openEdit(node: NodeConfig) {
   editingNode.value = node;
-  nodeForm.value = { id: node.id, url: node.url, capacity: node.capacity, accepting: node.accepting };
+  nodeForm.value = { id: node.id, url: node.url, capacity: node.capacity, accepting: node.accepting, isGeneralNode: node.isGeneralNode ?? true };
+  nodeNetworksText.value = (node.resourceNetworks ?? []).join("\n");
   nodeDialog.value = true;
 }
 
 async function saveNode() {
   if (savingNode.value) return;
   if (!nodeForm.value.id.trim() || !nodeForm.value.url.trim()) return ElMessage.warning("请填写节点 ID 和服务地址");
+  const resourceNetworks = [...new Set(nodeNetworksText.value.split(/[\s,，]+/).filter(Boolean))];
+  if (!nodeForm.value.isGeneralNode && resourceNetworks.length === 0) return ElMessage.warning("非通用节点至少需要一个资源 IP 或网段");
   if (!await confirmAction(`确认保存节点“${nodeForm.value.id.trim()}”的配置吗？`, "确认保存配置")) return;
   savingNode.value = true;
   try {
@@ -82,10 +88,12 @@ async function saveNode() {
         version: editingNode.value.version,
         capacity: nodeForm.value.capacity,
         accepting: nodeForm.value.accepting,
+        isGeneralNode: nodeForm.value.isGeneralNode ?? true,
+        resourceNetworks,
       });
       ElMessage.success("节点配置已保存");
     } else {
-      await settingsApi.registerNode({ ...nodeForm.value, id: nodeForm.value.id.trim(), url: nodeForm.value.url.trim() });
+      await settingsApi.registerNode({ ...nodeForm.value, resourceNetworks, id: nodeForm.value.id.trim(), url: nodeForm.value.url.trim() });
       ElMessage.success("节点已登记");
     }
     nodeDialog.value = false;
@@ -141,12 +149,15 @@ onMounted(() => void load());
         <el-table-column label="运行状态" width="112"><template #default="{ row }"><el-tag :type="row.online ? 'success' : 'info'">{{ row.online ? "在线" : "离线" }}</el-tag></template></el-table-column>
         <el-table-column label="准入" width="110"><template #default="{ row }"><el-tag v-if="row.registered" :type="row.accepting ? 'success' : 'warning'">{{ row.accepting ? "允许" : "暂停" }}</el-tag><span v-else class="settings-muted">未配置</span></template></el-table-column>
         <el-table-column label="容量" width="100"><template #default="{ row }">{{ row.capacity }}</template></el-table-column>
+        <el-table-column label="资源准入" min-width="210"><template #default="{ row }"><el-tag :type="row.isGeneralNode === false ? 'warning' : 'info'">{{ row.isGeneralNode === false ? "专用节点" : "通用节点" }}</el-tag><span v-if="row.isGeneralNode === false" class="node-url">{{ (row.resourceNetworks || []).join('、') }}</span></template></el-table-column>
         <el-table-column label="心跳信息" min-width="180"><template #default="{ row }"><span v-if="row.reportedAt">{{ new Date(row.reportedAt).toLocaleString("zh-CN", { hour12: false }) }}</span><span v-else class="settings-muted">尚未收到心跳</span><span v-if="row.urlMismatch" class="settings-warning">地址与 Worker NODE_URL 不一致</span></template></el-table-column>
         <el-table-column label="操作" width="148" fixed="right"><template #default="{ row }"><el-tooltip :content="row.registered ? '编辑节点准入与容量' : '使用此 Worker 心跳信息登记节点'"><el-button text :icon="row.registered ? Edit3 : Plus" :aria-label="row.registered ? '编辑节点配置' : '登记此节点'" @click="row.registered ? openEdit(row) : openRegister(row)">{{ row.registered ? "编辑" : "登记" }}</el-button></el-tooltip><el-tooltip :content="row.activeTasks ? '节点仍有活动采集任务' : '删除节点，保留历史日志'"><el-button text type="danger" :icon="Trash2" :loading="deletingNode === row.id" :disabled="Boolean(deletingNode) || Boolean(row.activeTasks)" :aria-label="`删除节点 ${row.id}`" @click="removeNode(row)" /></el-tooltip></template></el-table-column>
       </el-table>
+      <ResourceMonitorSettings :settings="settings" :loading="loading" @saved="settings = $event" />
     </template>
     <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" destroy-on-close>
       <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">单节点并发上限；实际值还受 worker 本机 NODE_CAPACITY 限制，系统采用两者较小值。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="通用节点"><el-switch v-model="nodeForm.isGeneralNode" aria-label="通用节点" /></el-form-item><el-form-item v-if="nodeForm.isGeneralNode === false" label="允许接入的设备资源 IP / CIDR（每行一项）" required><el-input v-model="nodeNetworksText" type="textarea" :rows="4" aria-label="允许接入的设备资源地址" placeholder="10.41.203.35&#10;10.18.117.0/24" /></el-form-item></el-form>
       <template #footer><el-button @click="nodeDialog = false">取消</el-button><el-button type="primary" :loading="savingNode" :disabled="savingNode" :icon="ServerCog" @click="saveNode">保存配置</el-button></template>
     </el-dialog>
   </section>

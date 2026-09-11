@@ -28,6 +28,12 @@ ACTIVE_STATUSES = {
 }
 
 
+def validate_arguments(args):
+    """拒绝空生命周期循环，避免只启动和收尾就被报告为验证通过。"""
+    if not isinstance(args.cycles, int) or isinstance(args.cycles, bool) or args.cycles < 1:
+        raise ValueError("--cycles 必须是正整数")
+
+
 class SshSlotObserver:
     """只读观察当前平台库中的精确 SSH 占位，不参与设备连接或回收。"""
 
@@ -207,7 +213,8 @@ async def cleanup_tasks(client, task_ids, worker_pid, poll_interval=.5, slot_obs
             task_response = await client.get(f"/api/v1/tasks/{task_id}")
             task_response.raise_for_status()
             task = task_response.json()
-            if task.get("status") != "STOPPED" or task.get("nodeId") is not None:
+            if (task.get("status") != "STOPPED" or task.get("desiredState") != "STOPPED"
+                    or task.get("nodeId") is not None):
                 raise RuntimeError("任务停止后仍未完成节点回收")
             if connection_counts(worker_pid, [task])[task_id] != 0:
                 raise RuntimeError("任务停止后仍保留 SSH 连接")
@@ -286,6 +293,7 @@ def record_cleanup_result(report, cleanup):
 
 async def execute(args):
     """顺序执行启动、暂停、等待和继续，并始终经 stop API 回收连接。"""
+    validate_arguments(args)
     report = {"passed": False, "taskIds": args.task_id, "cycles": [], "cleanup": {}}
     workflow_error = None
     settings = Settings()

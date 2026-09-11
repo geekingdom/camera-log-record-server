@@ -13,7 +13,8 @@ const scripts = [
   "browser_resource_bulk_delete", "browser_task_bulk_operations",
   "browser_coredump_shared_monitor", "browser_blocked_recovery", "browser_command_history",
   "browser_resource_authentication_records", "browser_node_dashboard",
-  "browser_live_terminal_workbench", "browser_archive_viewer", "browser_live_ranges",
+  "browser_live_terminal_workbench", "browser_archive_viewer", "browser_live_ranges", "browser_resource_metrics",
+  "browser_resource_monitor_settings",
 ];
 const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: true } });
 try {

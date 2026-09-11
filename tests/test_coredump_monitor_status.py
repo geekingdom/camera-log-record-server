@@ -16,7 +16,7 @@ pytest_plugins = ("test_resources",)
         ({}, {"runId": "other-run"}, {}),
         ({}, {"generation": 9}, {}),
         ({}, {"protocol": "TELNET_SERIAL"}, {}),
-        ({}, {"enableCoredumpMonitor": False}, {}),
+        ({"enableCoredumpMonitor": False}, {}, {}),
         ({}, {"desiredState": "STOPPED"}, {}),
         ({}, {}, {"heartbeat": now() - timedelta(seconds=16)}),
     ],
@@ -29,6 +29,7 @@ def test_coredump_monitor_status_rejects_each_stale_owner_component(
     stamp = now()
     resource = {
         "id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None, "healthStatus": "ONLINE",
+        "enableCoredumpMonitor": True,
         "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a", "coredumpLeaseGeneration": 4,
         "coredumpLeaseNodeId": "node-a", "coredumpLeaseUntil": stamp + timedelta(seconds=60),
     } | resource_updates
@@ -54,6 +55,7 @@ def test_coredump_monitor_status_accepts_telnet_device_owner(resource_client):
     stamp = now()
     resource_client.portal.call(repo.db.resources.insert_one, {
         "id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None, "healthStatus": "ONLINE",
+        "enableCoredumpMonitor": True,
         "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a", "coredumpLeaseGeneration": 4,
         "coredumpLeaseNodeId": "node-a", "coredumpLeaseUntil": stamp + timedelta(seconds=60),
     })

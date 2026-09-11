@@ -16,7 +16,8 @@ TEMPLATE = {"id": "template-example", "name": "日志模板", "description": "�
             "sharedWithAll": False, "initialCommands": [{"command": "ls"}], "scheduledCommands": []}
 JOB = {"id": "job-example", "taskId": "task-example", "kind": "DOWNLOAD", "status": "QUEUED", "progress": 0}
 COMMAND = {"id": "command-example", "taskId": "task-example", "kind": "MANUAL", "command": "ls", "status": "QUEUED"}
-NODE = {"id": "collector-01", "url": "http://192.0.2.20:8001", "capacity": 100, "accepting": True,
+NODE = {"id": "collector-01", "url": "http://192.0.2.20:18081", "capacity": 100, "accepting": True,
+        "isGeneralNode": True, "resourceNetworks": [],
         "version": 1, "registered": True, "online": True}
 VALUES = {"name": "示例名称", "username": "integration-user", "password": "Example-password-123!",
           "currentPassword": "Example-current-123!", "newPassword": "Example-new-password-123!",
@@ -93,6 +94,16 @@ def response_example(path, method, status):
                      "initialAuthentication": False, "message": "认证成功，设备身份已变化"})
     if path.endswith("/coredump-monitor"):
         return {"active": True, "ownerTask": {"id": "task-example", "name": "值守采集"}, "mountStatus": "MOUNTED"}
+    if path.endswith("/resource-metrics"):
+        return {"items": [{"sampledAt": STAMP, "status": "PARTIAL", "configVersion": 1,
+                           "identity": {"model": "DS-2CD", "subSerialNumber": "SN-EXAMPLE"},
+                           "values": [{"id": "mem-available", "name": "MemAvailable", "value": 328424, "unit": "KB"},
+                                      {"id": "cpu-idle", "name": "CPU idle", "value": 43.7, "unit": "%"}],
+                           "errors": [{"scope": "slab", "code": "METRIC_NOT_FOUND"}]}],
+                "nextCursor": None, "owner": {"id": "task-example", "name": "值守采集"},
+                "config": {"version": 1, "intervalSeconds": 60, "retentionDays": 90,
+                           "items": [{"id": "mem-available", "name": "MemAvailable", "unit": "KB", "enabled": True},
+                                     {"id": "cpu-idle", "name": "CPU idle", "unit": "%", "enabled": True}]}}
     if "coredump" in path:
         if path.endswith("/browser-session"):
             return {"url": path.removesuffix("/browser-session") + "/content", "expiresInSeconds": 300}

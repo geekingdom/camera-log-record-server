@@ -17,7 +17,7 @@ from pymongo import AsyncMongoClient
 def online_resource(identifier: str) -> dict[str, object]:
     """生成最小在线资源；验证器只写随机库中的资源租约字段。"""
     return {"id": identifier, "kind": "HIKVISION_NETWORK", "ip": "192.0.2.200",
-            "deletedAt": None, "healthStatus": "ONLINE"}
+            "deletedAt": None, "healthStatus": "ONLINE", "enableCoredumpMonitor": True}
 
 
 def collecting_task(identifier: str, resource_id: str) -> dict[str, object]:

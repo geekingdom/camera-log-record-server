@@ -19,13 +19,13 @@ def run_shell(command: str, mounts, behavior: str) -> subprocess.CompletedProces
     """以 shell 函数替代 umount，仅验证生成命令的真实 sh 行为，不触碰主机挂载。"""
     script = """
 umount() {
-    [ "$#" -eq 2 ] && [ "$1" = "-l" ] && [ "$2" = "$TARGET" ] || return 97
+    [ "$#" -eq 2 ] && [ "$1" = "-l" ] && [ "$2" = "/mnt" ] || return 97
     case "$BEHAVIOR" in
         remove)
             temporary="$MOUNTS.next"
             : > "$temporary"
             while IFS= read -r line; do
-                case "$line" in "$2 "*) ;; *) printf '%s\\n' "$line" >> "$temporary" ;; esac
+                case "$line" in "$TARGET "*) ;; *) printf '%s\\n' "$line" >> "$temporary" ;; esac
             done < "$MOUNTS"
             mv "$temporary" "$MOUNTS"
             ;;

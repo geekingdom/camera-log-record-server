@@ -10,8 +10,6 @@ import CommandEditor from "../commands/CommandEditor.vue";
 import LiveLogs from "../logs/LiveLogs.vue";
 import LogArchives from "../logs/LogArchives.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
-import CoredumpMonitorControl from "./CoredumpMonitorControl.vue";
-import { useCoredumpMonitorStatus } from "./useCoredumpMonitorStatus";
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource; canEdit?: boolean; userId?: string }>();
 const emit = defineEmits<{ saved: [] }>();
@@ -25,7 +23,6 @@ const blank = (): Task => ({
   port: 22,
   username: "",
   password: "",
-  enableCoredumpMonitor: false,
   initialCommands: [],
   scheduledCommands: [],
   resourceId: "",
@@ -55,22 +52,6 @@ const linkedSerialServer = computed(() => resources.value.find((item) => item.id
 const serialUsesResource = computed(() => serial.value && Boolean(form.value.serialServerResourceId));
 const serialServerOwnedTask = computed(() => linkedResource.value?.kind === "SERIAL_SERVER" ||
   (!props.task && props.initialResource?.id === form.value.resourceId && props.initialResource?.kind === "SERIAL_SERVER"));
-const coredumpEligible = computed(() => ["SSH", "TELNET_DEVICE"].includes(form.value.protocol) &&
-  (linkedResource.value?.kind ??
-    (props.initialResource?.id === form.value.resourceId ? props.initialResource.kind : undefined)) === "HIKVISION_NETWORK");
-const coredumpResourceKind = computed(() => linkedResource.value?.kind ??
-  (props.initialResource?.id === form.value.resourceId ? props.initialResource.kind : undefined));
-const coredumpMonitor = useCoredumpMonitorStatus({
-  open,
-  protocol: computed(() => form.value.protocol),
-  resourceId: computed(() => form.value.resourceId),
-  resourceKind: coredumpResourceKind,
-  getStatus: api.coredumpMonitor,
-});
-const coredumpSharedByAnotherTask = computed(() => Boolean(
-  coredumpMonitor.status.value?.active && coredumpMonitor.status.value.ownerTask &&
-  coredumpMonitor.status.value.ownerTask.id !== props.task?.id,
-));
 let generation = 0;
 let templateGeneration = 0;
 let resourceGeneration = 0;
@@ -199,7 +180,6 @@ watch(
       form.value.port =
         protocol === "SSH" ? 22 : protocol === "TELNET_DEVICE" ? 23 : undefined;
     if (protocol !== "TELNET_SERIAL") clearPassword.value = false;
-    if (!["SSH", "TELNET_DEVICE"].includes(protocol)) form.value.enableCoredumpMonitor = false;
   },
 );
 watch([linkedResource, serial], ([resource]) => {
@@ -219,10 +199,6 @@ watch(serial, (isSerial) => {
 });
 watch(serialServerMode, (mode) => {
   if (mode === "custom") form.value.serialServerResourceId = null;
-});
-watch(linkedResource, (resource) => {
-  // 编辑既有任务时详情与资源列表并发加载；资源尚未解析不能提前清掉已保存的开关。
-  if (resource && resource.kind !== "HIKVISION_NETWORK") form.value.enableCoredumpMonitor = false;
 });
 async function replaceTemplate() {
   const template = templateItems.value.find((item) => item.id === templateId.value);
@@ -271,19 +247,6 @@ async function save() {
   saving.value = true;
   try {
     const payload = JSON.parse(JSON.stringify(form.value)) as Task;
-    // 共享展示不能变成新任务配置：保存前刷新一次，确认其他采集任务负责时清除本次载荷。
-    if (!props.task && coredumpEligible.value) {
-      const coredumpResourceId = form.value.resourceId;
-      const coredumpProtocol = form.value.protocol;
-      await coredumpMonitor.refresh();
-      if (current !== generation || !open.value || form.value.resourceId !== coredumpResourceId ||
-        form.value.protocol !== coredumpProtocol) return;
-      if (coredumpMonitor.error.value) {
-        ElMessage.error("无法确认共享 Coredump 监控状态，请稍后重试保存");
-        return;
-      }
-      if (coredumpSharedByAnotherTask.value) payload.enableCoredumpMonitor = false;
-    }
     if (serialUsesResource.value && linkedSerialServer.value) payload.ip = linkedSerialServer.value.ip;
     else if ((!serial.value || serialServerOwnedTask.value) && linkedResource.value) payload.ip = linkedResource.value.ip;
     if (props.task) {
@@ -404,14 +367,6 @@ async function save() {
                   :disabled="clearPassword"
               /></el-form-item>
             </div>
-            <CoredumpMonitorControl
-              v-if="coredumpEligible"
-              v-model="form.enableCoredumpMonitor"
-              :status="coredumpMonitor.status.value"
-              :loading="coredumpMonitor.loading.value"
-              :error="coredumpMonitor.error.value"
-              :task-id="props.task?.id"
-            />
             <el-checkbox v-if="serial && props.task" v-model="clearPassword">清除已保存密码</el-checkbox>
             <el-checkbox v-if="!props.task && permissions.can('tasks:control')" v-model="autoStart"
               >保存后立即启动</el-checkbox

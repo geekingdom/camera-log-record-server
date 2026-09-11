@@ -133,12 +133,14 @@ class Collector:
 
     def start_coredump_monitor(
         self, server: str, root: str, report: Callback, guard: Callback | None = None,
-        cleanup_guard: Callback | None = None,
+        cleanup_guard: Callback | None = None, resolve_target: Callback | None = None,
+        wait_after_false: bool = False,
     ) -> None:
         """挂载监控与定时协程共用会话取消/回收机制，不引入额外连接。"""
         from .coredump_monitor import start_monitor
 
-        start_monitor(self, server, root, report, guard=guard, cleanup_guard=cleanup_guard)
+        start_monitor(self, server, root, report, guard=guard, cleanup_guard=cleanup_guard,
+                      resolve_target=resolve_target, wait_after_false=wait_after_false)
 
     async def enqueue_manual(
         self,
@@ -172,6 +174,20 @@ class Collector:
         if delay_seconds > 0:
             await asyncio.sleep(delay_seconds)
         return command_id
+
+    async def ensure_ash_for_monitor(self, *, session_guard: Callback | None = None) -> None:
+        """资源监控复用 PSH 切换入口；未知模式先由 ls 探测，正常 ASH 不写 debug。"""
+        await self._commands.ensure_ash(timeout_seconds=10, session_guard=session_guard)
+
+    async def capture_monitor_command(
+        self, command: str, *, session_guard: Callback | None = None, timeout_seconds: float = 10,
+    ) -> bytes:
+        """在现有会话中捕获一条低优先级监控命令的有限输出。"""
+        if self._initializing or self._closed.is_set() or not self._accepting_commands:
+            raise ConnectionError("collector is not accepting monitor commands")
+        return await self._commands.capture_command(
+            command, timeout_seconds=timeout_seconds, session_guard=session_guard,
+        )
 
     def command_status(self, command_id: str) -> str | None:
         return self._command_status.get(command_id)

@@ -1,6 +1,7 @@
 """任务及命令模型校验，确保控制台和第三方接口遵守相同输入约束。"""
 import pytest
 from camera_logs.common.models import ScheduledCommand, TaskCreate
+from camera_logs.resources.models import ResourceInput, ResourcePatch
 from pydantic import ValidationError
 
 
@@ -18,19 +19,22 @@ def test_password_spaces_are_preserved():
     assert task.password == "  secret  "
 
 
-@pytest.mark.parametrize("protocol", ["SSH", "TELNET_DEVICE"])
-def test_coredump_monitor_accepts_network_connection_protocols(protocol):
-    """海康网络连接的 SSH 和 Telnet 设备协议都可请求 Coredump 监控。"""
-    task = TaskCreate(name="test", protocol=protocol, ip="127.0.0.1", port=23, resourceId="device",
-                      username="root", password="secret", enableCoredumpMonitor=True)
-    assert task.enableCoredumpMonitor
+def test_task_rejects_removed_coredump_monitor_input():
+    """Coredump 开关已迁移到资源，任务请求携带旧字段必须被拒绝。"""
+    with pytest.raises(ValidationError, match="Coredump"):
+        TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22, resourceId="device",
+                   username="root", password="secret", enableCoredumpMonitor=True)
 
 
-def test_coredump_monitor_rejects_telnet_serial():
-    """串口 Telnet 没有海康网络 NFS 挂载能力，模型层必须明确拒绝。"""
-    with pytest.raises(ValidationError, match="coredump"):
-        TaskCreate(name="test", protocol="TELNET_SERIAL", ip="127.0.0.1", port=9000,
-                   resourceId="device", enableCoredumpMonitor=True)
+@pytest.mark.parametrize("model", [ResourceInput, ResourcePatch])
+@pytest.mark.parametrize("switch", ["enableCoredumpMonitor", "enableResourceMonitor"])
+def test_serial_resource_rejects_all_device_monitor_switches(model, switch):
+    """串口服务器不能保存依赖海康设备 shell 的 Coredump 或资源采样开关。"""
+    values = {"name": "串口", "kind": "SERIAL_SERVER", "ip": "192.0.2.10", switch: True}
+    if model is ResourcePatch:
+        values["version"] = 1
+    with pytest.raises(ValidationError, match="监控仅支持海康网络设备资源"):
+        model(**values)
 
 
 @pytest.mark.parametrize("changes", [{"totalExecutions": 0}, {"intervalSeconds": 0}, {"command": "\n"}, {"command": "a\nb"}])

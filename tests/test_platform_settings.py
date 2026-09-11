@@ -60,6 +60,7 @@ def test_node_registration_does_not_create_heartbeat_and_merges_live_status(clie
     assert offline.json()["items"] == [{
         "id": "edge-a", "url": "https://edge-a.example.test:8443", "capacity": 24,
         "accepting": True, "version": 1, "registered": True, "online": False, "reportedAt": None,
+        "isGeneralNode": True, "resourceNetworks": [],
     }]
 
     client.portal.call(client.app.state.repo.db.nodes.insert_one, {

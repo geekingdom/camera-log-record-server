@@ -37,3 +37,21 @@ describe("认证记录游标 API", () => {
     );
   });
 });
+
+describe("资源监控历史 API", () => {
+  it("编码资源标识并只传递已定义的游标和时间范围", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [] })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.resourceMetrics("resource id", {
+      start: "2026-09-11T00:00:00.000Z",
+      end: "2026-09-11T01:00:00.000Z",
+      limit: 2000,
+    });
+
+    expect(fetch.mock.calls[0][0]).toBe(
+      "/api/v1/resources/resource%20id/resource-metrics?start=2026-09-11T00%3A00%3A00.000Z&end=2026-09-11T01%3A00%3A00.000Z&limit=2000",
+    );
+  });
+});

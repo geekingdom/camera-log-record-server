@@ -40,16 +40,12 @@ def test_selection_uses_capacity_ratios_cpu_memory_and_network():
     assert rank_nodes([node("full", capacity=1)], {"full": 1}) == []
 
 
-def test_selection_keeps_unknown_metrics_conservative_and_checks_nfs_capability():
-    """旧Worker缺少遥测不能优先于空闲已知节点，NFS任务只能交给有能力节点。"""
+def test_selection_keeps_unknown_metrics_conservative():
+    """节点排序只按节点负载；资源级 NFS 能力在领取事务中结合资源快照核验。"""
     measured, unknown = node("measured"), node("unknown")
     unknown.pop("telemetry")
     assert rank_nodes([unknown, measured], {})[0][1] == "measured"
     assert rank_nodes([unknown], {})[0][1] == "unknown"
-    measured["capabilities"] = {"coredumpNfs": True}
-    assert rank_nodes([unknown, measured], {}, {"enableCoredumpMonitor": True}) == rank_nodes(
-        [measured], {}, {"enableCoredumpMonitor": True}
-    )
     assert rank_nodes([node("zero", capacity=0)], {}) == []
     measured["telemetry"]["cpuPercent"] = 99
     measured["telemetry"]["sampledAt"] = now() - timedelta(minutes=1)

@@ -17,6 +17,7 @@ import type {
   CursorPage,
   ResourceAuthType,
   ResourceKind,
+  ResourceMetricsPage,
   Task,
   Template,
 } from "./types";
@@ -135,7 +136,6 @@ const taskFields = [
   "encoding",
   "loginPrompt",
   "passwordPrompt",
-  "enableCoredumpMonitor",
   "resourceId",
   "serialServerResourceId",
   "clearPassword",
@@ -162,6 +162,22 @@ export const api = {
     filters?: { search?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string },
   ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
   resource: (id: string) => request<Resource>(`/resources/${id}`),
+  /** 监控历史按资源读取；仅拼接已定义参数，避免把 undefined 送入服务端。 */
+  resourceMetrics: (resourceId: string, filters: {
+    start?: string;
+    end?: string;
+    limit?: number;
+    cursor?: string;
+  } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.start !== undefined) params.set("start", filters.start);
+    if (filters.end !== undefined) params.set("end", filters.end);
+    if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+    if (filters.cursor !== undefined) params.set("cursor", filters.cursor);
+    return request<ResourceMetricsPage>(
+      `/resources/${encodeURIComponent(resourceId)}/resource-metrics?${params}`,
+    );
+  },
   updateResource: (id: string, resource: object) => request<Resource>(`/resources/${id}`, {
     method: "PATCH", body: JSON.stringify(resource),
   }),
@@ -226,6 +242,8 @@ export const api = {
     username?: string;
     password?: string;
     authType?: ResourceAuthType;
+    enableCoredumpMonitor?: boolean;
+    enableResourceMonitor?: boolean;
   }) =>
     request<Resource>("/resources", {
       method: "POST",

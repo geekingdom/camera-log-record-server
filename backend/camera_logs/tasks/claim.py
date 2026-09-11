@@ -10,6 +10,7 @@ from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.node.health import resource_pressure
+from camera_logs.node.resource_routing import accepts_resource
 
 
 class SchedulerLeaseLost(RuntimeError):
@@ -100,13 +101,25 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
         current = await db.tasks.find_one(task_query, session=session)
         if current is None:
             return None
-        if current.get("enableCoredumpMonitor") and not (node.get("capabilities") or {}).get("coredumpNfs"):
-            return None
+        resource_ip = current.get("ip")
         # 旧迁移夹具和历史任务可能尚无资源绑定；正式创建路径始终具备 resourceId。
         if current.get("resourceId"):
             resource = await db.resources.find_one({"id": current["resourceId"], "deletedAt": None}, session=session)
             if resource is None or resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
                 return None
+            resource_ip = resource.get("ip")
+            if (resource.get("enableCoredumpMonitor") and not resource.get("coredumpLeaseTarget")
+                    and current.get("protocol") in {"SSH", "TELNET_DEVICE"}
+                    and not (node.get("capabilities") or {}).get("coredumpNfs")):
+                return None
+
+        # 写入同一配置记录使并发管理员编辑与领取产生事务冲突，重试时复核新规则。
+        node_config = await db.node_configs.find_one_and_update(
+            {"id": node_id}, {"$inc": {"assignmentRevision": 1}},
+            return_document=ReturnDocument.AFTER, session=session,
+        )
+        if node_config and (node_config.get("deletedAt") or not accepts_resource(node_config, resource_ip)):
+            return None
 
         lock = await db.endpoint_locks.find_one({"taskId": task["id"]}, session=session)
         if lock is not None and (not resuming or lock.get("runId") != run_id):

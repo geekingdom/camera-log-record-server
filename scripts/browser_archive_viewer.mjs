@@ -50,9 +50,21 @@ async function assertViewerLayout(page, dialog, viewport, screenshotName) {
   assert.ok(layout.documentWidth <= layout.viewportWidth, `${screenshotName} 页面不得产生横向溢出`);
   assert.ok(layout.contentWidth <= layout.contentViewportWidth, `${screenshotName} 日志窗口不得产生横向溢出`);
   assert.ok(layout.scrollable && layout.moved, `${screenshotName} 日志窗口必须可纵向滚动`);
+  const dialogBox = await dialog.boundingBox();
+  assert.ok(dialogBox && dialogBox.y >= 0 && dialogBox.y + dialogBox.height <= viewport.height,
+    `${screenshotName} 对话框必须完整位于视口内：${JSON.stringify({ viewport, dialogBox, layout })}`);
   const closeBox = await dialog.getByRole("button", { name: "关闭", exact: true }).boundingBox();
   assert.ok(closeBox && closeBox.y >= 0 && closeBox.y + closeBox.height <= viewport.height,
-    `${screenshotName} 页末关闭按钮必须可达`);
+    `${screenshotName} 页末关闭按钮必须可达：${JSON.stringify({ viewport, dialogBox, closeBox, layout })}`);
+  const surface = dialog.locator(".file-viewer-dialog");
+  const dialogStyle = await surface.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { className: element.className, maxHeight: style.maxHeight, marginTop: style.marginTop, marginBottom: style.marginBottom };
+  });
+  assert.equal(dialogStyle.marginTop, "32px", `${screenshotName} 弹窗顶部余量必须实际生效：${JSON.stringify(dialogStyle)}`);
+  assert.equal(dialogStyle.marginBottom, "32px", `${screenshotName} 弹窗底部余量必须实际生效：${JSON.stringify(dialogStyle)}`);
+  assert.ok(dialogStyle.maxHeight.includes("- 112px") || dialogStyle.maxHeight === `${viewport.height - 112}px`,
+    `${screenshotName} 弹窗最大高度必须保留关闭按钮余量：${JSON.stringify(dialogStyle)}`);
   // 截图保留匹配定位，滚动断言不能让截图停在页末。
   await content.evaluate(element => { element.scrollTop = 0; });
   await content.locator(".log-search-active").scrollIntoViewIfNeeded();

@@ -101,7 +101,6 @@ class TaskCreate(TemplateCreate):
     encoding: str = "utf-8"
     loginPrompt: str = Field(default="login:", max_length=256)
     passwordPrompt: str = Field(default="Password:", max_length=256)
-    enableCoredumpMonitor: bool = False
 
     @field_validator("ip")
     @classmethod
@@ -122,8 +121,6 @@ class TaskCreate(TemplateCreate):
         """SSH 与 Telnet 设备必须有账号密码；串口设备可不需要认证。"""
         if self.protocol != "TELNET_SERIAL" and (not self.username.strip() or not self.password):
             raise ValueError("SSH 和 Telnet 设备必须填写用户名和密码")
-        if self.enableCoredumpMonitor and self.protocol not in {"SSH", "TELNET_DEVICE"}:
-            raise ValueError("coredump 监控仅支持海康网络设备的 SSH 或 Telnet 设备任务")
         return self
 
 
@@ -145,7 +142,6 @@ class TaskPatch(Model):
     encoding: str | None = None
     loginPrompt: str | None = None
     passwordPrompt: str | None = None
-    enableCoredumpMonitor: bool | None = None
     serialServerResourceId: str | None = Field(default=None, min_length=1, max_length=64)
 
 

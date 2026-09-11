@@ -12,6 +12,7 @@ from pymongo import ReturnDocument
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.node.health import rank_nodes
+from camera_logs.node.resource_routing import routing_config
 from camera_logs.resources.health import reconcile_authorized_recoveries
 from camera_logs.resources.lifecycle import reconcile_deleted_resources
 from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task
@@ -70,12 +71,20 @@ async def schedule_once(repo, lease=None):
     cluster_capacity = configured_cluster or repo.settings.cluster_capacity
     if active >= cluster_capacity:
         return
+    node_configs = {item["id"]: item async for item in db.node_configs.find({})}
     async for task in db.tasks.find({"desiredState": "RUNNING", "nodeId": None,
                                     "resourceDeleted": {"$ne": True},
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
-        candidates = rank_nodes(nodes, occupancy, task)
+        nodes = [node | routing_config(node_configs.get(node["id"], {})) for node in nodes
+                 if not node_configs.get(node["id"], {}).get("deletedAt")]
+        resource = await db.resources.find_one({"id": task.get("resourceId")}) if task.get("resourceId") else None
+        routing_task = task | {"resourceIp": resource["ip"] if resource else task.get("ip"),
+                               "requiresNfs": bool(resource and resource.get("enableCoredumpMonitor")
+                                                   and not resource.get("coredumpLeaseTarget")
+                                                   and task.get("protocol") in {"SSH", "TELNET_DEVICE"})}
+        candidates = rank_nodes(nodes, occupancy, routing_task)
         if not candidates:
             if task["status"] != "PAUSED":
                 # 候选查询期间用户可能已暂停或停止；旧快照只能回写同一排队意图。

@@ -2,7 +2,7 @@
 // 资源编辑器只处理设备 HTTP 认证；采集任务的 SSH/Telnet 凭据始终由任务单独维护。
 import { computed, ref, watch } from "vue";
 import { ElMessage, type FormInstance } from "element-plus";
-import { Fingerprint, KeyRound, Network, Server, ShieldCheck } from "lucide-vue-next";
+import { Activity, Fingerprint, KeyRound, Network, Server, ShieldCheck } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { usePermissions } from "../../shared/permissions";
@@ -15,7 +15,7 @@ const permissions = usePermissions();
 const canSave = computed(() => props.resource
   ? Boolean(props.canEdit) && permissions.can("resources:write")
   : permissions.can("resources:create"));
-const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType });
+const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType, enableCoredumpMonitor: false, enableResourceMonitor: false });
 const form = ref(blank());
 const authenticated = ref<ResourceAuthentication>();
 const authenticating = ref(false);
@@ -47,6 +47,8 @@ watch(isNetwork, (network) => {
   if (network) return;
   form.value.username = "";
   form.value.password = "";
+  form.value.enableCoredumpMonitor = false;
+  form.value.enableResourceMonitor = false;
   authenticated.value = undefined;
   verifiedFingerprint = "";
   ++authenticationGeneration;
@@ -71,7 +73,9 @@ watch(() => [open.value, props.resource] as const, async ([visible, resource]) =
       const loaded = await api.resource(resource.id);
       if (current !== formGeneration || !open.value) return;
       form.value = { name: loaded.name, kind: loaded.kind, ip: loaded.ip,
-        username: loaded.username ?? "", password: "", authType: loaded.authType ?? "DIGEST" };
+        username: loaded.username ?? "", password: "", authType: loaded.authType ?? "DIGEST",
+        enableCoredumpMonitor: loaded.enableCoredumpMonitor ?? false,
+        enableResourceMonitor: loaded.enableResourceMonitor ?? false };
       editVersion.value = loaded.version ?? 1;
       authenticated.value = loaded;
       verifiedFingerprint = fingerprint.value;
@@ -143,6 +147,15 @@ async function save() {
         </div>
       </section>
       <section v-if="isNetwork" class="form-section resource-editor-section">
+        <div class="resource-section-heading"><span class="resource-section-icon"><Activity :size="18" /></span><div><h2>资源监控</h2><p>采集开关属于设备资源，所有可读用户可查看已采集的历史趋势</p></div></div>
+        <div class="resource-monitor-options">
+          <div><strong>Coredump 监控</strong><small>采集设备产生的 Coredump 文件</small></div>
+          <el-switch v-model="form.enableCoredumpMonitor" aria-label="启用 Coredump 监控" />
+          <div><strong>CPU 与内存监控</strong><small>按资源配置采样 CPU 和内存指标</small></div>
+          <el-switch v-model="form.enableResourceMonitor" aria-label="启用 CPU 与内存监控" />
+        </div>
+      </section>
+      <section v-if="isNetwork" class="form-section resource-editor-section">
         <div class="resource-section-heading resource-auth-heading"><span class="resource-section-icon verified"><ShieldCheck :size="18" /></span><div><h2>设备 HTTP 认证</h2><p>认证结果用于确认网络设备身份，不作为采集登录凭据</p></div><el-button :loading="authenticating" :icon="KeyRound" @click="authenticate">点击认证</el-button></div>
         <div class="form-grid">
           <el-form-item label="用户名" prop="username"><el-input v-model="form.username" autocomplete="off" /></el-form-item>
@@ -156,3 +169,7 @@ async function save() {
     <template #footer><el-button @click="open = false">关闭</el-button><el-button type="primary" :loading="saving" :disabled="loading || (isNetwork && (!authenticated || verifiedFingerprint !== fingerprint))" @click="save">保存资源</el-button></template>
   </el-drawer>
 </template>
+<style scoped>
+.resource-monitor-options { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; align-items: center; }
+.resource-monitor-options small { display: block; margin-top: 4px; color: var(--el-text-color-secondary); }
+</style>

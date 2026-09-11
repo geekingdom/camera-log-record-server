@@ -17,6 +17,9 @@ class ResourceInput(Model):
     username: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=4096)
     authType: Literal["DIGEST", "BASIC"] = "DIGEST"
+    enableCoredumpMonitor: bool = False
+    # 资源级 CPU/内存监控开关由采集会话按资源归属和租约动态执行。
+    enableResourceMonitor: bool = False
 
     @field_validator("name")
     @classmethod
@@ -39,6 +42,8 @@ class ResourceInput(Model):
             raise ValueError("海康网络设备必须填写用户名和密码")
         if self.kind == "SERIAL_SERVER" and (self.username or self.password):
             raise ValueError("串口服务器不支持用户名或密码")
+        if self.kind != "HIKVISION_NETWORK" and (self.enableCoredumpMonitor or self.enableResourceMonitor):
+            raise ValueError("设备监控仅支持海康网络设备资源")
         return self
 
 
@@ -52,6 +57,9 @@ class ResourcePatch(Model):
     username: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=4096)
     authType: Literal["DIGEST", "BASIC"] = "DIGEST"
+    enableCoredumpMonitor: bool = False
+    # 与创建模型一致地完整提交，采集会话据此动态调整资源监控。
+    enableResourceMonitor: bool = False
 
     @field_validator("name")
     @classmethod
@@ -74,6 +82,8 @@ class ResourcePatch(Model):
             raise ValueError("海康网络设备必须填写用户名")
         if self.kind == "SERIAL_SERVER" and (self.username or self.password):
             raise ValueError("串口服务器不支持用户名或密码")
+        if self.kind != "HIKVISION_NETWORK" and (self.enableCoredumpMonitor or self.enableResourceMonitor):
+            raise ValueError("设备监控仅支持海康网络设备资源")
         return self
 
 

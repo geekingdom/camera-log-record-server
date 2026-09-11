@@ -49,6 +49,13 @@ def test_validate_task_accepts_legacy_missing_coredump_setting_but_not_missing_d
         verify.validate_task(missing_desired_state)
 
 
+@pytest.mark.parametrize("cycles", [0, -1, False])
+def test_execute_rejects_non_positive_cycles_before_settings_or_api_access(cycles):
+    """空循环不能绕过暂停恢复断言，也不能触发实机前置访问。"""
+    with pytest.raises(ValueError, match="cycles"):
+        asyncio.run(verify.execute(type("Args", (), {"cycles": cycles})()))
+
+
 def test_select_tasks_requires_explicit_ids_and_rejects_another_active_endpoint_task():
     """脚本不得按名称回退选择，且同端口已有采集时必须在启动前拒绝。"""
     selected = valid_task()
@@ -111,6 +118,30 @@ def test_cleanup_stops_every_explicit_task_after_an_individual_failure():
     assert client.posts == ["/api/v1/tasks/task-a/stop", "/api/v1/tasks/task-b/stop"]
     assert client.gets == ["/api/v1/operations/operation-b", "/api/v1/tasks/task-b"]
     assert result["task-a"] == "RuntimeError" and result["task-b"] == "SUCCEEDED"
+
+
+def test_cleanup_rejects_stopped_snapshot_with_running_intent():
+    """收尾不能把已排队重新启动的 STOPPED 快照误报为已完成。"""
+    class Response:
+        def __init__(self, value): self.value = value
+        def raise_for_status(self): pass
+        def json(self): return self.value
+
+    class Client:
+        async def post(self, _path): return Response({"id": "operation"})
+        async def get(self, path):
+            if path.endswith("/tasks/task-a"):
+                return Response(valid_task() | {"desiredState": "RUNNING"})
+            return Response({"status": "SUCCEEDED"})
+
+    original_connection_counts = verify.connection_counts
+    verify.connection_counts = lambda _pid, tasks: {task["id"]: 0 for task in tasks}
+    try:
+        result = asyncio.run(verify.cleanup_tasks(Client(), ["task-a"], 1234, poll_interval=0))
+    finally:
+        verify.connection_counts = original_connection_counts
+
+    assert result == {"task-a": "RuntimeError"}
 
 
 def test_load_tasks_reads_explicit_target_and_all_endpoint_pages_before_selecting():

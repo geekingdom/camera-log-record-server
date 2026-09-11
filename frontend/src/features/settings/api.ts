@@ -1,11 +1,40 @@
 // 平台设置接口保持在功能目录，复用共享请求边界的认证和错误解析。
 import { idempotencyKey, request } from "../../shared/api";
 
+/** 设备指标规则由服务端校验正则、输出单位和命令边界。 */
+export interface ResourceMonitorItem {
+  id: string;
+  name: string;
+  command: string;
+  pattern: string;
+  unit: "KB" | "%";
+  enabled: boolean;
+}
+
+export interface ResourceMonitorProcessRule {
+  id: string;
+  name: string;
+  pattern: string;
+  nameGroup?: number | null;
+  enabled: boolean;
+}
+
+export interface ResourceMonitorConfig {
+  intervalSeconds: number;
+  retentionDays: number;
+  items: ResourceMonitorItem[];
+  processDiscoveryCommand: string;
+  processRules: ResourceMonitorProcessRule[];
+  processStatusCommand: string;
+  processValuePattern: string;
+}
+
 export interface PlatformSettings {
   retentionDays: number;
   clusterCapacity?: number;
   version: number;
   updatedAt: string;
+  resourceMonitor?: ResourceMonitorConfig;
 }
 
 export interface NodeConfig {
@@ -21,6 +50,8 @@ export interface NodeConfig {
   urlMismatch?: boolean;
   activeTasks?: number;
   diskPercent?: number | null;
+  isGeneralNode?: boolean;
+  resourceNetworks?: string[];
 }
 
 export interface NodeRegistration {
@@ -28,11 +59,13 @@ export interface NodeRegistration {
   url: string;
   capacity: number;
   accepting: boolean;
+  isGeneralNode?: boolean;
+  resourceNetworks?: string[];
 }
 
 export const settingsApi = {
   platform: () => request<PlatformSettings>("/platform-settings"),
-  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number }) =>
+  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; resourceMonitor?: ResourceMonitorConfig }) =>
     request<PlatformSettings>("/platform-settings", {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },
@@ -47,7 +80,7 @@ export const settingsApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(body),
     }),
-  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting">) =>
+  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks">) =>
     request<NodeConfig>(`/admin/nodes/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

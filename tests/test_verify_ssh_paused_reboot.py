@@ -44,6 +44,17 @@ def test_validate_arguments_rejects_multiple_task_ids_and_short_or_excessive_tim
             verify.validate_arguments(args)
 
 
+@pytest.mark.parametrize("resource, message", [
+    ({"kind": "SERIAL_SERVER", "deletedAt": None, "ip": "192.0.2.35"}, "HIKVISION_NETWORK"),
+    ({"kind": "HIKVISION_NETWORK", "deletedAt": "2026-09-11T00:00:00Z", "ip": "192.0.2.35"}, "已删除"),
+    ({"kind": "HIKVISION_NETWORK", "deletedAt": None, "ip": "192.0.2.36"}, "IP"),
+])
+def test_validate_reboot_resource_rejects_non_hikvision_deleted_or_drifted_endpoint(resource, message):
+    """重启命令前必须拒绝非海康、已删除或端点不一致的资源。"""
+    with pytest.raises(ValueError, match=message):
+        verify.validate_reboot_resource(task(), resource)
+
+
 def test_assert_paused_snapshot_rejects_auto_recovery_or_connection_residue(monkeypatch):
     """离线等待期间状态、运行身份、FD 和名额任何一个变化都必须中止验收。"""
     class Observer:

@@ -39,6 +39,11 @@ def public(document):
             "leaseUntil",
             "executionToken",
             "workerInstanceId",
+            "resourceMonitorLeaseUntil",
+            "resourceMonitorLeaseTaskId",
+            "resourceMonitorLeaseRunId",
+            "resourceMonitorLeaseGeneration",
+            "resourceMonitorLeaseNodeId",
         }
     }
 
@@ -73,6 +78,7 @@ class Repository:
             "coredump_snapshot_claims",
             "coredump_export_reservations",
             "coredump_export_reservation_claims",
+            "resource_metric_hours",
         ):
             await self.db[name].create_index("id", unique=True)
         # 旧版本以 name_1 全局唯一，迁移时只替换该精确旧索引，不删除模板数据或其它索引。
@@ -97,6 +103,8 @@ class Repository:
         # 快照孤儿回收按本节点 token 引用核对，避免每个过期 claim 扫描整个 catalog。
         await self.db.coredump_files.create_index([("nodeId", 1), ("freezeToken", 1)])
         await self.db.coredump_files.create_index([("nodeId", 1), ("snapshot.reservationToken", 1)])
+        await self.db.resource_metric_hours.create_index([("resourceId", 1), ("bucketStart", -1)])
+        await self.db.resource_metric_hours.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.coredump_snapshot_reservations.create_index("id", unique=True)
         await self.db.coredump_snapshot_claims.create_index("id", unique=True)
         await self.db.coredump_snapshot_claims.create_index([("nodeId", 1), ("state", 1), ("expiresAt", 1)])

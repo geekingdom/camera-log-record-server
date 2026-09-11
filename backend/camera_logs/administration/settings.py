@@ -10,7 +10,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -23,6 +23,12 @@ from camera_logs.common.config import (
 )
 from camera_logs.common.database import now
 from camera_logs.common.security import actor, authorize
+from camera_logs.node.resource_routing import normalize_resource_networks, routing_config
+from camera_logs.resource_metrics.models import (
+    ResourceMonitorConfig,
+    default_monitor_config,
+    parse_monitor_config,
+)
 
 PLATFORM_SETTINGS_ID = "platform"
 DEFAULT_RETENTION_DAYS = 7
@@ -41,6 +47,7 @@ class PlatformSettingsPatch(SettingsModel):
 
     retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True)
     clusterCapacity: int | None = Field(default=None, ge=1, le=MAX_CLUSTER_CAPACITY, strict=True)
+    resourceMonitor: ResourceMonitorConfig | None = None
     version: int = Field(ge=1, strict=True)
 
 
@@ -51,6 +58,21 @@ class NodeRegistration(SettingsModel):
     url: str = Field(min_length=1, max_length=2048)
     capacity: int = Field(ge=1, le=MAX_NODE_CAPACITY, strict=True)
     accepting: bool = True
+    isGeneralNode: bool = True
+    resourceNetworks: list[str] = Field(default_factory=list, max_length=128)
+
+    @field_validator("resourceNetworks")
+    @classmethod
+    def validate_networks(cls, value):
+        """节点允许范围仅匹配资源IP，与平台访问白名单无关。"""
+        return normalize_resource_networks(value)
+
+    @model_validator(mode="after")
+    def require_dedicated_networks(self):
+        """非通用节点必须提供至少一个允许的地址或网段。"""
+        if not self.isGeneralNode and not self.resourceNetworks:
+            raise ValueError("非通用节点必须配置允许接入的资源IP或网段")
+        return self
 
     @field_validator("id")
     @classmethod
@@ -94,6 +116,14 @@ class NodeConfigPatch(SettingsModel):
     version: int = Field(ge=1, strict=True)
     capacity: int | None = Field(default=None, ge=1, le=MAX_NODE_CAPACITY, strict=True)
     accepting: bool | None = None
+    isGeneralNode: bool | None = None
+    resourceNetworks: list[str] | None = Field(default=None, max_length=128)
+
+    @field_validator("resourceNetworks")
+    @classmethod
+    def validate_networks(cls, value):
+        """部分编辑的最终规则需要与数据库已有配置合并后再次检查。"""
+        return normalize_resource_networks(value) if value is not None else None
 
 
 def _reported_at(node: dict | None) -> object | None:
@@ -120,6 +150,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
         "registered": True,
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
+        **routing_config(config),
     }
     if node:
         result["reportedUrl"] = node.get("url")
@@ -143,6 +174,7 @@ def _public_discovered_node(node: dict) -> dict:
         "reportedAt": _reported_at(node),
         "activeTasks": node.get("activeTasks", 0),
         "diskPercent": node.get("diskPercent"),
+        **routing_config({}),
     }
 
 
@@ -159,6 +191,7 @@ async def _platform_settings(repo, *, session=None) -> dict:
         {"id": PLATFORM_SETTINGS_ID},
         {"$setOnInsert": {"id": PLATFORM_SETTINGS_ID, "retentionDays": retention_days,
                            "clusterCapacity": cluster_capacity,
+                           "resourceMonitor": default_monitor_config(),
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
@@ -175,7 +208,8 @@ def install_settings_routes(app):
         """返回版本化平台设置；首次读取建立可审计的默认配置记录。"""
         authorize(user, "admin")
         document = await _platform_settings(request.app.state.repo)
-        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "resourceMonitor", "version", "updatedAt")}
+        result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
         result["clusterCapacity"] = result["clusterCapacity"] or request.app.state.repo.settings.cluster_capacity
         return result
 
@@ -191,7 +225,9 @@ def install_settings_routes(app):
             document = await repo.db.platform_settings.find_one_and_update(
                 {"id": PLATFORM_SETTINGS_ID, "version": body.version},
                 {"$set": {"retentionDays": body.retentionDays, "updatedAt": now(),
-                           **({"clusterCapacity": body.clusterCapacity} if body.clusterCapacity is not None else {})},
+                           **({"clusterCapacity": body.clusterCapacity} if body.clusterCapacity is not None else {}),
+                           **({"resourceMonitor": parse_monitor_config(body.resourceMonitor.model_dump())}
+                              if body.resourceMonitor is not None else {})},
                  "$inc": {"version": 1}},
                 return_document=ReturnDocument.AFTER,
                 session=session,
@@ -203,7 +239,8 @@ def install_settings_routes(app):
         document = await audited_mutation(
             repo, user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID, commit
         )
-        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "resourceMonitor", "version", "updatedAt")}
+        result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
         result["clusterCapacity"] = result["clusterCapacity"] or repo.settings.cluster_capacity
         return result
 
@@ -258,6 +295,13 @@ def install_settings_routes(app):
 
         async def commit(session):
             """版本更新、未命中状态判断和审计均使用同一事务快照。"""
+            previous = await repo.db.node_configs.find_one(
+                {"id": node_id, "version": body.version, "deletedAt": None}, session=session,
+            )
+            if previous is not None:
+                combined = previous | changes
+                if not combined.get("isGeneralNode", True) and not combined.get("resourceNetworks"):
+                    raise HTTPException(422, "非通用节点必须配置允许接入的资源IP或网段")
             document = await repo.db.node_configs.find_one_and_update(
                 {"id": node_id, "version": body.version, "deletedAt": None},
                 {"$set": changes, "$inc": {"version": 1}},

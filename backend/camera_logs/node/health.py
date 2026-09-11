@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
+from camera_logs.node.resource_routing import accepts_resource
 
 
 def number(value):
@@ -84,6 +85,10 @@ def rank_nodes(nodes, occupancy, task=None):
     """
     current, candidates = now(), []
     for node in nodes:
+        if task is not None and not accepts_resource(node, task.get("resourceIp", task.get("ip"))):
+            continue
+        if task and task.get("requiresNfs") and not (node.get("capabilities") or {}).get("coredumpNfs"):
+            continue
         capacity = number(node.get("capacity", DEFAULT_NODE_CAPACITY))
         if capacity is None or capacity <= 0:
             continue
@@ -92,8 +97,6 @@ def rank_nodes(nodes, occupancy, task=None):
                 or node.get("deletedAt") or node.get("configurationMismatch") or count >= capacity \
                 or (number(node.get("diskPercent")) or 0) >= 90 or (number(node.get("writeLatencyMs")) or 0) > 200 \
                 or resource_pressure(node, current):
-            continue
-        if task and task.get("enableCoredumpMonitor") and not (node.get("capabilities") or {}).get("coredumpNfs"):
             continue
         sample = measurements(node, current)
         upload, download = (number(sample.get(key)) for key in ("networkUploadBytesPerSecond", "networkDownloadBytesPerSecond"))
@@ -108,5 +111,7 @@ def rank_nodes(nodes, occupancy, task=None):
                  + .10 * ((number(node.get("diskPercent")) or 0) / 100)
                  + .10 * min(1, (number(node.get("writeLatencyMs")) or 0) / 200)
                  + .10 * (network / peak_network if network is not None else .75))
-        ranked.append((score, node["id"]))
+        # 健康专用节点优先；同一类别仍使用原加权成本，硬准入失败已在上面剔除。
+        priority = 2 if task is not None and node.get("isGeneralNode", True) else 0
+        ranked.append((priority + score, node["id"]))
     return sorted(ranked)

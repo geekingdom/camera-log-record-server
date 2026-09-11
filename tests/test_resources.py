@@ -43,7 +43,7 @@ def test_coredump_monitor_status_exposes_only_a_current_resource_lease(resource_
     stamp = now()
     resource_client.portal.call(repo.db.resources.insert_one, {
         "id": "camera", "name": "大厅相机", "kind": "HIKVISION_NETWORK", "deletedAt": None,
-        "healthStatus": "ONLINE", "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a",
+        "healthStatus": "ONLINE", "enableCoredumpMonitor": True, "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a",
         "coredumpLeaseGeneration": 4, "coredumpLeaseNodeId": "node-a",
         "coredumpLeaseUntil": stamp + timedelta(seconds=60),
     })
@@ -73,7 +73,7 @@ def test_coredump_monitor_status_hides_mount_status_from_an_old_run(resource_cli
     stamp = now()
     resource_client.portal.call(repo.db.resources.insert_one, {
         "id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None, "healthStatus": "ONLINE",
-        "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-current", "coredumpLeaseGeneration": 2,
+        "enableCoredumpMonitor": True, "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-current", "coredumpLeaseGeneration": 2,
         "coredumpLeaseNodeId": "node-a", "coredumpLeaseUntil": stamp + timedelta(seconds=60),
     })
     resource_client.portal.call(repo.db.tasks.insert_one, {

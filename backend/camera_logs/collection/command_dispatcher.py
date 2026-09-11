@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -19,7 +21,36 @@ class CommandChannelBlocked(RuntimeError):
     """PSH 恢复未确认，禁止把普通命令写入可能仍等待口令的设备。"""
 
 
-CommandItem = tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, bool, asyncio.Future[None]]
+CommandItem = tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, bool, bytes | None, int, asyncio.Future[Any]]
+
+
+class CommandCaptureError(ConnectionError):
+    """设备监控命令的有限响应无法完整取得，不泄露设备原始输出。"""
+
+
+class _Capture:
+    """由唯一接收器旁路喂入的单命令响应窗口，不拥有连接也不消费日志字节。"""
+
+    def __init__(self, marker: bytes, maximum: int, after_epoch: int) -> None:
+        self.marker, self.maximum, self.after_epoch = marker, maximum, after_epoch
+        self.terminator = re.compile(re.escape(marker) + rb"([0-9]{1,3})\r?\n")
+        self.data = bytearray()
+        self.future: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+
+    def feed(self, data: bytes, epoch: int) -> None:
+        """保留 marker 前有限字节；所有数据仍由调用方继续写入原始日志。"""
+        if epoch <= self.after_epoch or self.future.done():
+            return
+        self.data.extend(data)
+        if len(self.data) > self.maximum + len(self.marker):
+            self.future.set_exception(CommandCaptureError("监控命令响应超过限制"))
+            return
+        matched = self.terminator.search(self.data)
+        if matched:
+            if int(matched.group(1)) != 0:
+                self.future.set_exception(CommandCaptureError("监控命令返回非零状态"))
+            else:
+                self.future.set_result(bytes(self.data[:matched.start()]))
 
 
 class CommandDispatcher:
@@ -46,6 +77,7 @@ class CommandDispatcher:
         self._received_epoch = 0
         self._prompt_waiter: tuple[bytes, asyncio.Future[None], int] | None = None
         self._prompt_tail = b""
+        self._capture: _Capture | None = None
         self.sending_future: asyncio.Future[None] | None = None
 
     async def enqueue(
@@ -58,21 +90,25 @@ class CommandDispatcher:
         timeout_seconds: float = 30,
         before_send: Callback | None = None,
         session_guard: Callback | None = None,
-        allow_during_shutdown: bool = False,
-    ) -> None:
+        allow_during_shutdown: bool = False, capture_marker: bytes | None = None,
+        capture_maximum: int = 0,
+    ) -> bytes | None:
         """按优先级和入队序号串行提交命令，失败始终结束本命令等待者。"""
         if not allow_during_shutdown and (not self._accepting() or self._stopping() or self._closed()):
             raise ConnectionError("connection closed")
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._counter += 1
         await self._queue.put((priority, self._counter, command, newline, prompt, timeout_seconds,
-                               before_send, session_guard, allow_during_shutdown, future))
-        await future
+                               before_send, session_guard, allow_during_shutdown, capture_marker,
+                               capture_maximum, future))
+        return await future
 
     def observe_received(self, data: bytes) -> None:
         """由唯一接收器按字节顺序调用，供 PSH 对话和提示符等待器消费。"""
         self._received_epoch += 1
         self._debug.feed(data)
+        if self._capture:
+            self._capture.feed(data, self._received_epoch)
         if self._prompt_waiter:
             needle, waiter, after_epoch = self._prompt_waiter
             combined = self._prompt_tail + data
@@ -83,6 +119,26 @@ class CommandDispatcher:
     async def observe_initial_mode(self) -> None:
         """初始化 debug 前观察当前设备 shell，ASH 已确认时不重复发送口令。"""
         await self._debug.observe_initial_mode()
+
+    async def ensure_ash(
+        self, *, newline: str = "\n", timeout_seconds: float = 10, session_guard: Callback | None = None,
+    ) -> None:
+        """经已有 PSH 对话先用 ls 判断 shell；已是 ASH 时不会发送 debug。"""
+        await self.enqueue("debug", newline, priority=3, timeout_seconds=timeout_seconds, session_guard=session_guard)
+
+    async def capture_command(
+        self, command: str, *, newline: str = "\n", timeout_seconds: float = 10,
+        maximum: int = 128 * 1024, session_guard: Callback | None = None,
+    ) -> bytes:
+        """用随机结束标识完成一次有限监控响应捕获，读操作仍只发生在 reader。"""
+        marker = "__CAMERA_LOGS_METRIC_" + uuid.uuid4().hex + "__"
+        wrapped = f'({command}); rc=$?; printf "\\n{marker}:%s\\n" "$rc"'
+        result = await self.enqueue(
+            wrapped, newline, priority=3, timeout_seconds=timeout_seconds,
+            session_guard=session_guard, capture_marker=("\n" + marker + ":").encode(),
+            capture_maximum=maximum,
+        )
+        return result if isinstance(result, bytes) else b""
 
     async def write_debug(self, data: bytes) -> None:
         """调试握手逐片发送串口口令，关闭中的会话禁止继续输入。"""
@@ -100,9 +156,11 @@ class CommandDispatcher:
     async def sender_loop(self) -> None:
         """独占连接写入，重检会话归属与预算后才发送业务字节。"""
         while True:
-            _, _, command, newline, prompt, timeout_seconds, before_send, session_guard, allow_during_shutdown, future = await self._queue.get()
+            (_, _, command, newline, prompt, timeout_seconds, before_send, session_guard,
+             allow_during_shutdown, capture_marker, capture_maximum, future) = await self._queue.get()
             self.sending_future = future
             prompt_future: asyncio.Future[None] | None = None
+            capture: _Capture | None = None
             try:
                 if future.cancelled():
                     continue
@@ -145,10 +203,23 @@ class CommandDispatcher:
                     prompt_future = asyncio.get_running_loop().create_future()
                     self._prompt_waiter = (prompt.encode(), prompt_future, self._received_epoch)
                     self._prompt_tail = b""
+                if capture_marker is not None:
+                    if self._capture is not None:
+                        raise CommandCaptureError("已有监控响应正在捕获")
+                    capture = self._capture = _Capture(capture_marker, capture_maximum, self._received_epoch)
                 if command.strip() != "debug":
                     await connection.write((command + newline).encode())
                 if prompt and command.strip() != "debug":
                     await asyncio.wait_for(prompt_future, timeout_seconds)
+                if capture is not None:
+                    try:
+                        captured = await asyncio.wait_for(capture.future, timeout_seconds)
+                    finally:
+                        if self._capture is capture:
+                            self._capture = None
+                    if not future.done():
+                        future.set_result(captured)
+                    continue
                 if not future.done():
                     future.set_result(None)
             except Exception as error:  # noqa: BLE001 - 每个发送失败都必须结束对应等待 future。
@@ -162,6 +233,10 @@ class CommandDispatcher:
                         prompt_future.cancel()
                     self._prompt_waiter = None
                     self._prompt_tail = b""
+                if capture is not None and self._capture is capture:
+                    if not capture.future.done():
+                        capture.future.cancel()
+                    self._capture = None
                 self.sending_future = None
                 self._queue.task_done()
 

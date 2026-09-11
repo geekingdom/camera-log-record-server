@@ -122,6 +122,8 @@ def create_app(settings=None, db=None):
     install_task_routes(app, repo, listing)
     from camera_logs.resources.api import install_resource_routes
     install_resource_routes(app, repo, listing)
+    from camera_logs.resource_metrics.api import install_resource_metric_routes
+    install_resource_metric_routes(app)
     from camera_logs.commands.templates import install_template_routes
     install_template_routes(app, repo, listing)
     from camera_logs.commands.api import install_command_routes

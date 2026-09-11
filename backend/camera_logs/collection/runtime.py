@@ -31,6 +31,7 @@ from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
 from camera_logs.common.ownership import OwnershipLost, owner_filter
+from camera_logs.resource_metrics.runtime import monitor_loop, release_resource_monitor_lease
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class SessionRuntime:
         self.input_bytes = 0
         self.error = None
         self.connection_uncertain = None
+        self.resource_monitor_task = None
         self.started_at = now()
         self.debug_passwords = PshPasswordProvider(repo.settings)
         # 目录水位不能只依赖下一块日志触发；设备停止输出后的尾块同样需要发布。
@@ -80,13 +82,26 @@ class SessionRuntime:
 
     async def coredump_guard(self):
         """在每次可选设备控制前续租资源，并确认本运行仍拥有任务及健康资源。"""
-        return await guard_coredump_monitor(
+        result = await guard_coredump_monitor(
             self.repo,
             self.task,
             session_active=lambda: not (self.stopping or self.retired or self.collector is None
                                         or self.collector._closed.is_set()),
             report_status=self.on_coredump,
+            mount_target=getattr(self.collector, "_coredump_target", None),
         )
+        if result is None and self.collector is not None:
+            winner = await self.coredump_target()
+            if winner:
+                self.collector._coredump_target = winner
+        return result
+
+    async def coredump_target(self):
+        """接管会话读取资源中已固定的设备侧 NFS 来源，避免覆盖旧导出。"""
+        resource = await self.repo.db.resources.find_one(
+            {"id": self.task.get("resourceId")}, {"coredumpLeaseTarget": 1},
+        )
+        return resource.get("coredumpLeaseTarget") if resource else None
 
     def file_id(self, path):
         """以不可变原始分卷路径生成逻辑 ID，多个成员可共享一个小时归档。"""
@@ -364,16 +379,20 @@ class SessionRuntime:
                 session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
                                     "sessionId": self.collector.session_id}
                 await self.collector.start()
-                if (config.get("enableCoredumpMonitor")
-                        and config.get("protocol") in {"SSH", "TELNET_DEVICE"}):
-                    if self.repo.settings.nfs_server_ip:
+                if config.get("protocol") in {"SSH", "TELNET_DEVICE"}:
+                    source = await self.coredump_target()
+                    if self.repo.settings.nfs_server_ip or source:
                         self.collector.start_coredump_monitor(
-                            self.repo.settings.nfs_server_ip, str(self.repo.settings.nfs_root), self.on_coredump,
+                            self.repo.settings.nfs_server_ip or "127.0.0.1", str(self.repo.settings.nfs_root), self.on_coredump,
                             guard=self.coredump_guard,
-                            cleanup_guard=bound_coredump_cleanup_guard(self, self.collector))
-                    else:
+                            cleanup_guard=bound_coredump_cleanup_guard(self, self.collector),
+                            resolve_target=self.coredump_target, wait_after_false=True)
+                    elif (await self.repo.db.resources.find_one({"id": self.task.get("resourceId"),
+                            "enableCoredumpMonitor": True}, {"id": 1})):
                         # 节点部署缺少 NFS 配置只影响可选监控，日志采集会话照常运行。
                         await self.on_coredump("FAILED", "节点未配置 NFS_SERVER_IP，未启动 Coredump 监控")
+                    # CPU/内存监控使用同一 collector 的发送队列与接收器；资源开关和租约在协程内复核。
+                    self.resource_monitor_task = asyncio.create_task(monitor_loop(self, self.collector))
                 delay = 1
                 await self.collector.wait_closed()
             except asyncio.CancelledError:
@@ -408,6 +427,15 @@ class SessionRuntime:
                     if self.collector:
                         await self._stop_collector()
                 finally:
+                    monitor = getattr(self, "resource_monitor_task", None)
+                    self.resource_monitor_task = None
+                    if monitor is not None:
+                        monitor.cancel()
+                        await asyncio.gather(monitor, return_exceptions=True)
+                    try:
+                        await release_resource_monitor_lease(self.repo, self.task)
+                    except Exception:
+                        logger.exception("资源监控租约释放失败 task=%s", self.task["id"])
                     # 只释放仍属于本运行的资源租约，避免旧会话清掉后继接管者的控制权。
                     try:
                         await release_coredump_lease(self.repo, self.task)
