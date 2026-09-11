@@ -34,7 +34,8 @@ def _derived_fields() -> dict:
             {"case": {"$eq": ["$status", status]}, "then": result}
             for status, result in COREDUMP_MOUNT_OUTCOMES.items()
         ], "default": "SUCCEEDED"}}},
-        {"case": {"$in": ["$type", ["CONNECTION_GAP", "CLOCK_ROLLBACK"]]}, "then": "UNKNOWN"},
+        {"case": {"$in": ["$type", ["CONNECTION_GAP", "CLOCK_ROLLBACK", "IDLE_TIMEOUT", "READ_ERROR"]]},
+         "then": "UNKNOWN"},
         {"case": {"$in": ["$type", _PRESSURE_EVENTS]}, "then": {
             "$cond": [{"$eq": ["$level", "NORMAL"]}, "SUCCEEDED", "UNKNOWN"]}},
         {"case": {"$eq": ["$type", "DEBUG_MODE"]}, "then": {

@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
@@ -53,6 +54,14 @@ class SshSlotObserver:
         )
         return sum(claim.get("taskId") == str(task.get("id")) for claim in (slot or {}).get("claims", []))
 
+    async def idle_timeout_recorded(self, task, session_id, started_at):
+        """只读确认本次命令后的旧会话确实触发了持久化空闲超时事件。"""
+        event = await self.database.events.find_one({
+            "type": "IDLE_TIMEOUT", "taskId": str(task["id"]), "runId": str(task["runId"]),
+            "sessionId": str(session_id), "createdAt": {"$gte": started_at},
+        }, {"_id": 1})
+        return event is not None
+
     async def close(self):
         """关闭只读 Mongo 客户端，不影响 Worker 或其名额文档。"""
         await self.client.close()
@@ -72,6 +81,12 @@ async def assert_task_slots_released(observer, task):
     count = await observer.count_task(task)
     if count:
         raise AssertionError(f"SSH 名额仍残留 taskId={task['id']} count={count}")
+
+
+async def assert_idle_timeout_evidence(observer, task, old_session_id, started_at):
+    """缺少旧会话的本次 IDLE_TIMEOUT 记录时，禁止把重连归因为空闲看门狗。"""
+    if not await observer.idle_timeout_recorded(task, old_session_id, started_at):
+        raise AssertionError("未找到本次 outputClose 后旧会话的 IDLE_TIMEOUT 事件")
 
 
 def connection_counts(pid, tasks, *, established=False):
@@ -207,6 +222,7 @@ async def cleanup_tasks(client, task_ids, worker_pid, poll_interval=.5, slot_obs
 async def verify_idle_reconnect(client, task, worker_pid, slot_observer, timeout=45):
     """仅在显式开关下关闭设备输出，验证空闲重连保持运行并重新取得一个名额。"""
     before = (task["runId"], task["sessionId"])
+    started_at = datetime.now(UTC)
     try:
         os.kill(worker_pid, 0)
     except OSError as error:
@@ -249,10 +265,12 @@ async def verify_idle_reconnect(client, task, worker_pid, slot_observer, timeout
                 and recovered.get("sessionId") != before[1] and recovered.get("nodeId") == Settings().node_id
                 and sockets == 1):
             await assert_slot_counts(slot_observer, [recovered], 1)
+            await assert_idle_timeout_evidence(slot_observer, recovered, before[1], started_at)
             return {"taskId": recovered["id"], "sameRun": True, "newSession": True,
                     "slotCount": 1, "endpointSockets": sockets, "quietSamples": len(samples),
+                    "idleTimeoutSessionId": before[1],
                     "initialOutputOpenConfigured": "outputOpen" in INITIAL_COMMANDS,
-                    "idleCauseLimit": "发送outputClose后观察到会话变化；FD采样不证明无输出，不能排除采样间短暂重叠或其它断线原因"}
+                    "idleCauseLimit": "已核对本次旧会话的空闲超时事件；FD采样仍不能排除采样间短暂连接重叠"}
         await asyncio.sleep(.5)
     raise TimeoutError("无输出重连后未观察到同运行的新会话")
 

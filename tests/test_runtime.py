@@ -27,12 +27,20 @@ class FakeCollection:
 
     async def update_one(self, query, update, **_kwargs):
         self.calls.append((query, update))
+        return SimpleNamespace(matched_count=1)
+
+    async def find_one(self, *_args, **_kwargs):
+        return {"id": "task-a"}
+
+    async def insert_one(self, value, **_kwargs):
+        self.calls.append(({}, {"$insert": value}))
 
 
 class FakeDatabase:
     def __init__(self) -> None:
         self.files = FakeCollection()
         self.tasks = FakeCollection()
+        self.events = FakeCollection()
 
 
 class BudgetCollection:

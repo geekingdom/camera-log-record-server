@@ -25,6 +25,7 @@ from camera_logs.collection.coredump_lease import (
 )
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
+from camera_logs.collection.runtime_events import apply_runtime_state, record_runtime_event
 from camera_logs.collection.ssh_admission import SshCapacityError, SshSlotUncertain
 from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
@@ -209,45 +210,8 @@ class SessionRuntime:
         await self._publish_catalog()
 
     async def on_state(self, state, details):
-        """将会话状态映射到运行状态；压缩失败单独告警，不伪装成连接中断。"""
-        if state == "CLOCK_ROLLBACK":
-            # 时钟异常属于可追踪事件，不覆盖采集中状态；文件身份沿用该块的不可变路径。
-            await self.repo.db.events.insert_one({
-                "type": state, "taskId": self.task["id"], "runId": self.task["runId"],
-                "sessionId": details["sessionId"], "nodeId": self.repo.settings.node_id,
-                "previousReceivedAt": details["previousReceivedAt"], "receivedAt": details["receivedAt"],
-                "sequence": details["sequence"], "fileId": self.file_id(details["path"]),
-                "message": "服务器接收时间回拨，日志已另起片段，按块序号保持接收顺序", "createdAt": now(),
-            })
-            logger.warning("采集接收时间回拨", extra={"context": {
-                "taskId": self.task["id"], "sessionId": details["sessionId"],
-                "previousReceivedAt": details["previousReceivedAt"], "receivedAt": details["receivedAt"],
-            }})
-            return
-        if getattr(self, "retired", False):
-            if state == "CONNECTING":
-                raise OwnershipLost("运行实例已隔离，禁止重新连接")
-            return
-        if state == "CLOSED":
-            state = "STOPPING" if self.stopping else "RECONNECTING"
-        elif state in {"READ_ERROR", "IDLE_TIMEOUT"}:
-            # 网络读失败和无日志超时会由本运行实例重连，前端统一展示重连中。
-            state = "RECONNECTING"
-        if state == "ARCHIVE_ERROR":
-            await self.repo.db.tasks.update_one(
-                owner_filter(self.task),
-                {"$set": {"archiveError": details.get("error"), "updatedAt": now()}},
-            )
-            return
-        changed = await self.repo.db.tasks.update_one({**owner_filter(self.task), "status": {"$ne": "BLOCKED"}},
-            {"$set": {"status": state, "sessionId": details.get("sessionId"), "updatedAt": now()}})
-        if state == "CONNECTING" and not changed.matched_count:
-            raise OwnershipLost("建连前任务归属或准入已失效")
-        if state == "COLLECTING" and changed.matched_count:
-            await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {"error": None}})
-            await self.repo.db.operations.update_many({"taskId": self.task["id"], "desiredState": "RUNNING", "status": "PENDING"},
-                {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
-        logger.info("采集状态变化", extra={"context": {"taskId": self.task["id"], "state": state}})
+        """委托状态事件模块处理归属核验、审计事件与任务状态映射。"""
+        await apply_runtime_state(self, state, details)
 
     async def reserve(self, command_id, details):
         """复核发送会话及运行归属后占用预算；不确定结果不退回次数。"""
@@ -461,8 +425,13 @@ class SessionRuntime:
             if self.error:
                 break
             if not self.stopping:
-                await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"],
-                    "type": "CONNECTION_GAP", "detectedAt": now(), "message": "连接中断，设备端未提供补传"})
+                detected_at = now()
+                await record_runtime_event(self, {
+                    "taskId": self.task["id"], "runId": self.task["runId"],
+                    "sessionId": self.collector.session_id, "nodeId": self.repo.settings.node_id,
+                    "type": "CONNECTION_GAP", "detectedAt": detected_at, "createdAt": detected_at,
+                    "level": "WARNING", "outcome": "UNKNOWN", "message": "连接中断，设备端未提供补传",
+                })
                 await self.on_state("RECONNECTING", {"sessionId": self.collector.session_id})
                 import random
                 await asyncio.sleep(delay+random.random())

@@ -13,6 +13,30 @@ pytest_plugins = ("test_api",)
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+@pytest.mark.parametrize("event_type,summary", [
+    ("IDLE_TIMEOUT", "采集日志空闲超时"), ("READ_ERROR", "采集连接读取失败"),
+])
+def test_reconnect_cause_summary_and_warning_filter_agree(client, event_type, summary):
+    """重连原因保留会话定位，列表与结果/级别筛选不能把异常误标成成功。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.events.insert_one, {
+        "id": "reconnect-cause", "taskId": "cause-task", "runId": "cause-run",
+        "sessionId": "cause-session", "nodeId": "cause-node", "type": event_type,
+        "createdAt": now(), "message": "连接将由原运行实例重试",
+    })
+    query = {"type": event_type, "taskId": "cause-task", "outcome": "UNKNOWN", "level": "WARNING"}
+    response = client.get("/api/v1/runtime-events", params=query)
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    item = response.json()["items"][0]
+    assert item["summary"] == summary
+    assert item["sessionId"] == "cause-session" and item["runId"] == "cause-run"
+    assert item["reason"] == "连接将由原运行实例重试"
+    succeeded = client.get("/api/v1/runtime-events", params={"type": event_type, "outcome": "SUCCEEDED"})
+    assert succeeded.json()["total"] == 0
+
+
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_coredump_failure_summary_target_and_filter_agree(client):
     """核心转储失败审计的中文摘要、导出名称和数据库失败筛选一致。"""
     repo = client.app.state.repo

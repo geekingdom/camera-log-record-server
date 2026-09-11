@@ -43,6 +43,7 @@ EVENT_SUMMARIES = {
     "DISK_PRESSURE_CHANGED": "节点磁盘压力变化", "WRITE_PRESSURE_CHANGED": "节点写入压力变化",
     "EXTERNAL_FENCING_CONFIRMED": "确认节点外部隔离", "DEBUG_MODE": "调试模式状态变化",
     "CLOCK_ROLLBACK": "服务器时间回拨",
+    "IDLE_TIMEOUT": "采集日志空闲超时", "READ_ERROR": "采集连接读取失败",
     "COREDUMP_MOUNT": "核心转储挂载状态变化",
 }
 COREDUMP_MOUNT_SUMMARIES = {
@@ -87,7 +88,7 @@ def event_outcome(item: dict) -> str:
             return "PENDING"
         return "FAILED" if item["httpStatus"] >= 400 else "SUCCEEDED"
     event_type = item.get("type")
-    if event_type in {"CONNECTION_GAP", "CLOCK_ROLLBACK"}:
+    if event_type in {"CONNECTION_GAP", "CLOCK_ROLLBACK", "IDLE_TIMEOUT", "READ_ERROR"}:
         return "UNKNOWN"
     if event_type in _PRESSURE_EVENTS:
         return "SUCCEEDED" if item.get("level") == "NORMAL" else "UNKNOWN"

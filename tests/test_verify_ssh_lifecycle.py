@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,22 @@ def test_slot_assertions_keep_current_generation_and_reject_any_stop_residue():
         "runId": "run-a", "generation": 3}], 1)) == {"task-a": 1}
     with pytest.raises(AssertionError, match="仍残留"):
         asyncio.run(verify.assert_task_slots_released(Observer(), valid_task()))
+
+
+def test_idle_timeout_evidence_requires_old_session_event_after_output_close():
+    """空闲模式只有读到本次旧会话事件，才允许将新会话归因于空闲超时。"""
+    class Observer:
+        def __init__(self, recorded): self.recorded = recorded
+        async def idle_timeout_recorded(self, task, session, started):
+            assert task["id"] == "task-a" and session == "session-old"
+            assert started == datetime(2026, 9, 11, tzinfo=UTC)
+            return self.recorded
+
+    task = valid_task() | {"runId": "run-a"}
+    stamp = datetime(2026, 9, 11, tzinfo=UTC)
+    asyncio.run(verify.assert_idle_timeout_evidence(Observer(True), task, "session-old", stamp))
+    with pytest.raises(AssertionError, match="IDLE_TIMEOUT"):
+        asyncio.run(verify.assert_idle_timeout_evidence(Observer(False), task, "session-old", stamp))
 
 
 @pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "UNKNOWN"])
