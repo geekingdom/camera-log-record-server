@@ -1,9 +1,10 @@
 """集中声明服务环境变量及其安全默认值。"""
 
+import re
 import socket
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_NODE_CAPACITY = 100
@@ -15,6 +16,22 @@ MAX_CLUSTER_CAPACITY = 10_000
 class Settings(BaseSettings):
     """从 `.env` 与进程环境读取 API、节点、存储和保留策略配置。"""
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @field_validator(
+        "node_capacity", "cluster_capacity", "retention_days",
+        "authentication_record_retention_days", "audit_record_retention_days",
+        "runtime_event_retention_days", mode="before",
+    )
+    @classmethod
+    def parse_integer_environment(cls, value):
+        """部署环境只能传文本；先解析十进制整数，再保留严格类型与范围校验。
+
+        不使用宽松int转换吞掉布尔值或小数，JSON平台设置仍由独立请求模型校验。
+        """
+        if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value.strip()):
+            return int(value.strip())
+        return value
+
     mongo_uri: str = "mongodb://127.0.0.1:27019/?directConnection=true"
     database_name: str = "camera_logs"
     bootstrap_token: str = ""
