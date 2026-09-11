@@ -18,19 +18,12 @@ import asyncssh
 from camera_logs.common.write_metrics import WriteLatency
 from camera_logs.logs.storage import HourlyWriter
 
+from .command_dispatcher import BudgetExhausted, CommandChannelBlocked, CommandDispatcher
 from .contracts import AsyncConnection, Callback, LogChunk
 from .contracts import call_callback as _call
 from .line_prefix import LinePrefixer
-from .psh_dialogue import PshDialogue, PshSwitchError
+from .psh_dialogue import PshSwitchError
 from .scheduled_supervision import supervise_scheduled
-
-
-class BudgetExhausted(RuntimeError):
-    """定时命令在写入 socket 前被持久化执行预算拒绝。"""
-
-
-class CommandChannelBlocked(RuntimeError):
-    """PSH 失败后的恢复未确认，禁止把普通命令写入可能仍等待口令的设备。"""
 
 
 class Collector:
@@ -68,11 +61,6 @@ class Collector:
             storage_identity=self.task["storageIdentity"],
         )
         self.write_latency = WriteLatency()
-        self._queue: asyncio.PriorityQueue[
-            tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, bool, asyncio.Future[None]]
-        ] = (
-            asyncio.PriorityQueue()
-        )
         self._sender: asyncio.Task[None] | None = None
         self._reader: asyncio.Task[None] | None = None
         self._scheduled: list[asyncio.Task[None]] = []
@@ -82,16 +70,19 @@ class Collector:
         self._closed = asyncio.Event()
         self._accepting_commands = True
         self._stopping_commands = False
-        self._command_blocked = False
         self._initializing = True
-        self._counter = 0
         self._command_status: dict[str, str] = {}
-        self._prompt_waiter: tuple[bytes, asyncio.Future[None], int] | None = None
-        self._sending_future: asyncio.Future[None] | None = None
-        self._received_epoch = 0
         self._prefixer = LinePrefixer()
         self._terminal_error: Exception | None = None
-        self._debug = PshDialogue(self.task, resolve_debug_password, on_debug)
+        self._commands = CommandDispatcher(
+            self.task,
+            resolve_debug_password=resolve_debug_password,
+            on_debug=on_debug,
+            connection=lambda: self._connection,
+            accepting=lambda: self._accepting_commands,
+            stopping=lambda: self._stopping_commands,
+            closed=lambda: self._connection_closed,
+        )
 
     async def start(self) -> None:
         if self._connection is not None:
@@ -108,7 +99,7 @@ class Collector:
         self._reader = asyncio.create_task(self._reader_loop())
         try:
             if any(str(item["command"]).strip() == "debug" for item in self.task.get("initialCommands", [])):
-                await self._debug.observe_initial_mode()
+                await self._commands.observe_initial_mode()
             for item in self.task.get("initialCommands", []):
                 await self._send_initial(item)
             self._initializing = False
@@ -202,16 +193,12 @@ class Collector:
         session_guard: Callback | None = None,
         allow_during_shutdown: bool = False,
     ) -> None:
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._counter += 1
-        if not allow_during_shutdown and (
-            not self._accepting_commands or self._stopping_commands or self._connection_closed
-        ):
-            raise ConnectionError("connection closed")
-        await self._queue.put((priority, self._counter, command, newline, prompt, timeout_seconds,
-                               before_send, session_guard, allow_during_shutdown, future))
         try:
-            await future
+            await self._commands.enqueue(
+                command, newline, priority=priority, prompt=prompt, timeout_seconds=timeout_seconds,
+                before_send=before_send, session_guard=session_guard,
+                allow_during_shutdown=allow_during_shutdown,
+            )
         except Exception:
             if command_id:
                 self._command_status[command_id] = "UNKNOWN"
@@ -221,76 +208,12 @@ class Collector:
                 self._command_status[command_id] = "SENT"
 
     async def _sender_loop(self) -> None:
-        while True:
-            _, _, command, newline, prompt, timeout_seconds, before_send, session_guard, allow_during_shutdown, future = await self._queue.get()
-            self._sending_future = future
-            try:
-                if future.cancelled():
-                    continue
-                if self._connection is None or self._connection_closed or (
-                    (not self._accepting_commands or self._stopping_commands) and not allow_during_shutdown
-                ):
-                    raise ConnectionError("connection closed")
-                # 手动命令在排队期间可能已失属。先于 PSH 恢复探测复核，避免旧会话
-                # 写入 Ctrl-C、ls 或口令；定时预算回调不在此处执行，防止重复扣减。
-                if session_guard:
-                    await _call(session_guard)
-                if self._stopping_commands and not allow_during_shutdown:
-                    raise ConnectionError("connection is stopping")
-                if self._command_blocked:
-                    # 每个后续命令都可重新确认通道，不重试前次 debug 或口令。
-                    # 未回到 shell 时本次仍未进入发送阶段，定时预算必须保留。
-                    if not await self._debug.recover_command_channel(self._write_debug, newline, timeout_seconds):
-                        raise CommandChannelBlocked("PSH 调试恢复未确认，当前会话暂不可发送命令")
-                    self._command_blocked = False
-                # 恢复过程和前一条命令都可能耗时，业务命令写 socket 前再次核对归属。
-                if session_guard:
-                    await _call(session_guard)
-                if self._stopping_commands and not allow_during_shutdown:
-                    raise ConnectionError("connection is stopping")
-                # 预算在真正写 socket 前才占用，恢复未确认的命令不能虚耗执行次数。
-                if before_send and not await _call(before_send):
-                    raise BudgetExhausted("scheduled command budget is exhausted")
-                if self._stopping_commands and not allow_during_shutdown:
-                    raise ConnectionError("connection is stopping")
-                if command.strip() == "debug":
-                    # 整个解密握手占用同一发送槽，后续命令不能穿插为设备口令输入。
-                    await self._debug.ensure_ash(self._write_debug, newline, timeout_seconds)
-                    self._command_blocked = False
-                elif prompt:
-                    prompt_future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                    # 写入前安装等待器，防止漏过设备立即返回的提示符。
-                    self._prompt_waiter = (prompt.encode(), prompt_future, self._received_epoch)
-                if command.strip() != "debug":
-                    await self._connection.write((command + newline).encode())
-                if prompt and command.strip() != "debug":
-                    try:
-                        await asyncio.wait_for(prompt_future, timeout_seconds)
-                    finally:
-                        self._prompt_waiter = None
-                if future and not future.done():
-                    future.set_result(None)
-            except Exception as error:  # noqa: BLE001 - 每个发送失败都必须结束对应等待 future。
-                if future and not future.done():
-                    future.set_exception(error)
-                if isinstance(error, PshSwitchError):
-                    # 仅调试命令失败：恢复确认后继续 FIFO；未确认时只阻止命令，reader 保持运行。
-                    self._command_blocked = not self._debug.command_safe
-            finally:
-                self._sending_future = None
-                self._queue.task_done()
+        """兼容已有监督和验证入口；实际队列状态由命令派发器独占。"""
+        await self._commands.sender_loop()
 
     async def _write_debug(self, data: bytes) -> None:
-        """握手每一步复查原会话仍可发送；口令只写 socket，不加入命令记录。"""
-        serial = (self.task.get("protocol") or self.task.get("protocolType")) == "TELNET_SERIAL"
-        interval = float(self.task.get("pshSerialCharacterInterval", .1)) if serial else 0
-        pieces = [bytes([value]) for value in data] if interval else [data]
-        for index, piece in enumerate(pieces):
-            if index and interval:
-                await asyncio.sleep(interval)
-            if self._stopping_commands or not self._accepting_commands or self._connection_closed or self._connection is None:
-                raise PshSwitchError("PSH 切换会话已经关闭")
-            await self._connection.write(piece)
+        """兼容串口调试验证入口；实际逐片写入归命令派发器管理。"""
+        await self._commands.write_debug(data)
 
     async def _scheduled_loop(self, position: int, item: Mapping[str, Any]) -> None:
         total, interval = int(item["totalExecutions"]), float(item["intervalSeconds"])
@@ -344,7 +267,6 @@ class Collector:
     async def _reader_loop(self) -> None:
         pending: list[tuple[bytes, object]] = []
         pending_bytes = 0
-        prompt_tail = b""
         flush_deadline = asyncio.get_running_loop().time() + 0.1
         last_received = asyncio.get_running_loop().time()
         idle_timeout = float(self.task.get("logIdleTimeoutSeconds", 10))
@@ -387,13 +309,7 @@ class Collector:
                 if not data:
                     break
                 last_received = asyncio.get_running_loop().time()
-                self._received_epoch += 1
-                self._debug.feed(data)
-                if self._prompt_waiter:
-                    needle, waiter, after_epoch = self._prompt_waiter
-                    if self._received_epoch > after_epoch and needle in prompt_tail + data and not waiter.done():
-                        waiter.set_result(None)
-                    prompt_tail = (prompt_tail + data)[-max(len(needle) - 1, 0):]
+                self._commands.observe_received(data)
                 received_at = datetime.now(UTC)
                 self.write_latency.begin()
                 prefixed = self._prefixer.prefix(data, received_at)
@@ -437,7 +353,7 @@ class Collector:
                 for task in self._scheduled:
                     task.cancel()
                 if self._sender and self._sender is not asyncio.current_task():
-                    self._fail_queued(ConnectionError("connection closed before command dispatch"))
+                    self._commands.fail_queued(ConnectionError("connection closed before command dispatch"))
                     self._sender.cancel()
                 self._closed.set()
                 await _call(
@@ -499,7 +415,7 @@ class Collector:
                 # 先断开网络使 read 返回，再等待收尾落盘；禁止取消最终 flush/归档路径。
                 await self._reader
             if self._sender:
-                self._fail_queued(ConnectionError("collector stopped before command dispatch"))
+                self._commands.fail_queued(ConnectionError("collector stopped before command dispatch"))
                 self._sender.cancel()
                 try:
                     await self._sender
@@ -509,25 +425,13 @@ class Collector:
         if self._terminal_error:
             raise self._terminal_error
 
-    def _fail_queued(self, error: Exception) -> None:
-        if self._sending_future and not self._sending_future.done():
-            self._sending_future.set_exception(error)
-        while True:
-            try:
-                *_, future = self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            if not future.done():
-                future.set_exception(error)
-            self._queue.task_done()
-
     async def _close_connection(self) -> None:
         """序列化所有关闭调用；失败或取消不确认释放，后续收尾仍可重试。"""
         self._accepting_commands = False
         async with self._connection_close_lock:
             if self._connection is None or self._connection_closed:
                 return
-            self._debug.close()
+            self._commands.close_debug()
             await self._connection.close()
             self._connection_closed = True
 
