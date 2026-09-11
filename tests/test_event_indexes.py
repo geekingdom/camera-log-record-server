@@ -16,6 +16,7 @@ EXPECTED_EVENT_INDEXES = {
         "audit_request_created_at_id": (("requestId", 1), ("createdAt", -1), ("_id", -1)),
     },
     "events": {
+        "events_created_at_id": (("createdAt", -1), ("_id", -1)),
         "events_task_created_at_id": (("taskId", 1), ("createdAt", -1), ("_id", -1)),
         "events_node_created_at_id": (("nodeId", 1), ("createdAt", -1), ("_id", -1)),
         "events_type_created_at_id": (("type", 1), ("createdAt", -1), ("_id", -1)),

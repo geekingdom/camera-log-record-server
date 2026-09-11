@@ -143,6 +143,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_session_transactions.py
       - name: 验证审计事件派生筛选与分页
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_event_queries.py
+      - name: 验证运行事件时间回填与索引排序
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_runtime_event_time.py
       - name: 验证核心转储读者与到期回收互斥
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_coredump_readers.py
       - name: 验证同资源核心转储监控单路归属

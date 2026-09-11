@@ -71,7 +71,11 @@ async def _derived_page(db, collection: str, database_query: dict, derived: dict
     match = {"_derivedLevel" if name == "level" else "_derivedOutcome": value for name, value in derived.items()}
     prefix = [{"$match": database_query}, {"$addFields": outcome_fields}, {"$addFields": level_fields}, {"$match": match}]
     sort = {"_eventTime": -1, "_id": -1} if event_time else {"createdAt": -1, "_id": -1}
-    page_pipeline = prefix + [{"$sort": sort}, {"$skip": (page - 1) * page_size}, {"$limit": page_size},
+    # 持久时间排序放在派生字段前，Mongo可直接按索引有序读取；过滤后才允许skip/limit。
+    # 旧事件的_eventTime需要先计算，迁移未完成时继续保留原来的兼容排序。
+    ordered = (prefix + [{"$sort": sort}] if event_time else
+               [prefix[0], {"$sort": sort}, *prefix[1:]])
+    page_pipeline = ordered + [{"$skip": (page - 1) * page_size}, {"$limit": page_size},
                               {"$project": {"_derivedOutcome": 0, "_derivedLevel": 0, "_eventTime": 0}}]
     count_pipeline = prefix + [{"$count": "total"}]
     items, count_rows = await _aggregate(db, collection, page_pipeline), await _aggregate(db, collection, count_pipeline)
@@ -94,8 +98,20 @@ async def event_page(db, collection, query, page, page_size):
             "total": await db[collection].count_documents(database_query), "page": page, "pageSize": page_size}
 
 
-async def runtime_event_page(db, query, page, page_size):
-    """兼容 detectedAt 历史运行事件；所有路径均在数据库内排序分页。"""
+async def runtime_event_page(db, query, page, page_size, *, time_range=None):
+    """旧时间未迁移时兼容读取；规范化后使用createdAt索引，不缓存迁移完成判断。"""
+    # 默认时间索引可定位null/缺失项；每次检查已提交的旧格式，不缓存迁移完成状态。
+    # 探测和分页不是同一快照，部署应先升级全部写入端，避免旧格式在两次读取间插入。
+    # 不使用持久迁移标记；迁移并发只会将旧格式变成等价新格式，不改变排序时间。
+    legacy = await db.events.find_one({"createdAt": None, "detectedAt": {"$ne": None}}, {"_id": 1})
+    query = dict(query)
+    if time_range:
+        if legacy is None:
+            query["createdAt"] = time_range
+        else:
+            query["$or"] = [{"createdAt": time_range}, {"createdAt": None, "detectedAt": time_range}]
+    if legacy is None:
+        return await event_page(db, "events", query, page, page_size)
     database_query, derived = split_derived_filters(query)
     if derived:
         return await _derived_page(db, "events", database_query, derived, page, page_size, event_time=True)

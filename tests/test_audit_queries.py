@@ -194,12 +194,14 @@ def test_coredump_unmount_events_have_chinese_summary_and_derived_filters(client
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
-def test_runtime_events_filter_and_sort_legacy_detected_time(client):
+@pytest.mark.parametrize("created", [{}, {"createdAt": None}])
+def test_runtime_events_filter_and_sort_legacy_detected_time(client, created):
     """连接缺口的历史 detectedAt 字段与新事件同样可筛选并返回统一展示时间。"""
     repo = client.app.state.repo
     detected = datetime(2026, 9, 8, 8, tzinfo=UTC)
     client.portal.call(repo.db.events.insert_one, {
         "taskId": "task-gap", "nodeId": "node-gap", "type": "CONNECTION_GAP", "detectedAt": detected,
+        **created,
     })
     response = client.get("/api/v1/runtime-events", params={
         "taskId": "task-gap", "start": "2026-09-08T00:00:00+00:00", "end": "2026-09-09T00:00:00+00:00",
@@ -208,6 +210,23 @@ def test_runtime_events_filter_and_sort_legacy_detected_time(client):
     item = response.json()["items"][0]
     assert item["detectedAt"].startswith("2026-09-08T08:00:00")
     assert item["createdAt"].startswith("2026-09-08T08:00:00")
+
+
+def test_normalized_runtime_page_does_not_aggregate(client, monkeypatch):
+    """所有时间已规范化时走索引find，不再对默认列表计算派生时间。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.events.insert_one, {
+        "id": "normalized", "type": "CONNECTION_GAP", "createdAt": datetime(2026, 9, 8, 8, tzinfo=UTC),
+        "detectedAt": datetime(2026, 9, 7, 8, tzinfo=UTC),
+    })
+    monkeypatch.setattr("camera_logs.administration.event_queries._aggregate",
+                        AsyncMock(side_effect=AssertionError("不能使用派生排序")))
+    response = client.get("/api/v1/runtime-events", params={
+        "start": "2026-09-08T00:00:00+00:00", "end": "2026-09-09T00:00:00+00:00",
+    })
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["id"] == "normalized"
 
 
 def test_admin_event_queries_reject_naive_or_excessive_time_ranges_and_non_admin(client):

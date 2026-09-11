@@ -126,12 +126,7 @@ def install_admin_routes(app):
         query = {key: value for key, value in {
             "taskId": task_id, "nodeId": node_id, "type": event_type, "level": level, "outcome": outcome, "requestId": request_id,
         }.items() if value}
-        if stamp := _utc_range(start, end):
-            query["$or"] = [
-                {"createdAt": stamp},
-                {"createdAt": {"$exists": False}, "detectedAt": stamp},
-            ]
-        return await runtime_event_page(db, query, page, pageSize)
+        return await runtime_event_page(db, query, page, pageSize, time_range=_utc_range(start, end))
 
     @app.get("/api/v1/request-events")
     async def request_events(request: Request, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
