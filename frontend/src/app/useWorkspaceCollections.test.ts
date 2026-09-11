@@ -2,7 +2,7 @@
 import { nextTick, ref } from "vue";
 import { describe, expect, it } from "vitest";
 
-import type { Page, Task, Template } from "../shared/types";
+import type { Page, Resource, Task, Template } from "../shared/types";
 import { useWorkspaceCollections } from "./useWorkspaceCollections";
 
 function deferred<T>() {
@@ -45,6 +45,29 @@ describe("useWorkspaceCollections", () => {
 
     expect(subject.tasks.value.map(item => item.id)).toEqual(["new"]);
     expect(subject.totals.value.tasks).toBe(1);
+  });
+
+  it("筛选已变化但新请求尚未发起时不展示旧响应", async () => {
+    const user = ref({ id: "user-a", isAdmin: false });
+    const sessionGeneration = ref(1);
+    const pending = deferred<Page<Task>>();
+    const subject = useWorkspaceCollections({
+      user, sessionGeneration, can: () => true,
+      api: {
+        tasks: () => pending.promise,
+        templates: async () => page([]), nodes: async () => page([]),
+      },
+      onError: () => {},
+    });
+
+    void subject.loadTasks();
+    subject.selectedResource.value = { id: "next-resource" } as Resource;
+    pending.resolve(page([task("old-resource")]));
+    await nextTick();
+    await Promise.resolve();
+
+    expect(subject.tasks.value).toEqual([]);
+    expect(subject.totals.value.tasks).toBe(0);
   });
 
   it("忽略跨会话的模板迟到响应", async () => {

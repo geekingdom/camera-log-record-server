@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 根协调层只保存会话、页签和列表数据；具体编辑器与业务动作下沉到 feature 目录。
-import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref } from "vue";
 import {
   RefreshCw,
   Plus,
@@ -19,6 +19,7 @@ import PasswordChangeDialog from "../features/auth/PasswordChangeDialog.vue";
 import { usePlatformSession } from "../features/auth/usePlatformSession";
 import AppNavigation from "./AppNavigation.vue";
 import { useWorkspaceCollections } from "./useWorkspaceCollections";
+import { DEFAULT_WORKSPACE, useWorkspaceNavigation } from "./useWorkspaceNavigation";
 import { workspaceNavigation } from "./workspaceNavigation";
 
 const loadTaskOverview = () => import("../features/tasks/TaskOverview.vue");
@@ -36,14 +37,6 @@ const loadApiReferenceWorkspace = () => import("../features/api/ApiReferenceWork
 const sidebarCollapsed = ref(
   localStorage.getItem("camera-log-sidebar-collapsed") === "true",
 );
-const defaultWorkspace = "resources";
-function workspaceFromHash() {
-  return window.location.hash.slice(1) || defaultWorkspace;
-}
-function syncWorkspaceHash(key: string) {
-  const next = `#${key}`;
-  if (window.location.hash !== next) window.history.replaceState(null, "", next);
-}
 function toggleSidebar() {
   sidebarCollapsed.value = !sidebarCollapsed.value;
   try {
@@ -57,7 +50,7 @@ function toggleSidebar() {
 }
 const selectedWorkspace = ref("config");
 const selectedLogTask = ref("");
-const activeTab = ref(workspaceFromHash()),
+const activeTab = ref(window.location.hash.slice(1) || DEFAULT_WORKSPACE),
   taskEditorOpen = ref(false),
   templateEditorOpen = ref(false);
 const {
@@ -92,7 +85,9 @@ const {
     selectedLogTask.value = "";
     activeTab.value = "resources";
   },
-  refreshWorkspace: () => refresh(),
+  refreshWorkspace: async () => {
+    navigation.requestRefresh();
+  },
 });
 const hasScope = (scope?: string) =>
   !scope ||
@@ -141,21 +136,12 @@ const visibleNavigation = computed(() =>
     (item) => (!item.admin || user.value?.isAdmin) && hasScope(item.scope),
   ).map(item => item.key === "access" && !user.value?.isAdmin ? { ...item, label: "我的服务账号" } : item),
 );
-const activeNavigationLabel = computed(() =>
-  visibleNavigation.value.find((item) => item.key === activeTab.value)?.label,
-);
-watch(visibleNavigation, (items) => {
-  if (!user.value) return;
-  if (!items.some((item) => item.key === activeTab.value))
-    activeTab.value = items.some((item) => item.key === defaultWorkspace)
-      ? defaultWorkspace
-      : items[0]?.key ?? "empty";
-});
 const selectedTask = ref<Task>(),
   selectedTemplate = ref<Template>();
 const resourceWorkspace = ref<InstanceType<typeof AsyncView>>();
 // 静默刷新供轮询使用，避免网络暂态在用户未操作时反复弹出错误消息。
 async function refresh(quiet = false) {
+  const refreshGeneration = sessionGeneration.value;
   if (!authenticated.value || busy.value || user.value?.mustChangePassword)
     return;
   if (!quiet) busy.value = true;
@@ -168,7 +154,7 @@ async function refresh(quiet = false) {
   } catch (value) {
     if (!quiet) error(value);
   } finally {
-    if (!quiet) busy.value = false;
+    if (!quiet && refreshGeneration === sessionGeneration.value) busy.value = false;
   }
 }
 function createTask(resource?: Resource) {
@@ -182,19 +168,24 @@ function createTask(resource?: Resource) {
   taskEditorOpen.value = true;
   if (hasScope("templates:read")) void loadTemplates().catch(error);
 }
-function viewResourceTasks(resource: Resource) {
-  selectedResource.value = resource;
-  page.value = 1;
-  activeTab.value = "tasks";
-}
-function navigate(key: string) {
-  if (key === "tasks") {
-    selectedResource.value = undefined;
-    page.value = 1;
-    void loadTasks().catch(error);
-  }
-  activeTab.value = key;
-}
+const navigation = useWorkspaceNavigation({
+  activeTab,
+  available: visibleNavigation,
+  page,
+  pageSize,
+  selectedResource,
+  authenticated,
+  sessionUser: user,
+  busy,
+  readHash: () => window.location.hash.slice(1),
+  writeHash: (key) => {
+    const next = `#${key}`;
+    if (window.location.hash !== next) window.history.replaceState(null, "", next);
+  },
+  refresh: (quiet) => refresh(quiet),
+  onError: error,
+});
+const { activeNavigationLabel, navigate, restoreWorkspaceFromHash, syncWorkspaceHash, viewResourceTasks } = navigation;
 function editTask(task: Task) {
   if (!hasScope("tasks:write") || !owns(task)) return;
   selectedWorkspace.value = "config";
@@ -219,13 +210,13 @@ function editTemplate(template: Template) {
 }
 function applyTaskFilters() {
   page.value = 1;
-  void refresh();
+  navigation.requestRefresh();
 }
 function applyTaskOwnershipFilters(filters: { createdBy: string; showAll: boolean }) {
   taskCreatedBy.value = filters.createdBy;
   taskShowAll.value = filters.showAll;
   page.value = 1;
-  void loadTasks().catch(error);
+  navigation.requestRefresh();
 }
 function applyTemplateFilters(filters: {
   createdBy: string;
@@ -236,27 +227,14 @@ function applyTemplateFilters(filters: {
   templateShowAll.value = filters.showAll;
   templateIncludeDeleted.value = filters.includeDeleted;
   templatePage.value = 1;
-  void loadTemplates().catch(error);
+  navigation.requestRefresh();
 }
-watch(activeTab, (key) => {
-  syncWorkspaceHash(key);
-  page.value = 1;
-  void refresh();
-});
-watch([page, pageSize], () => void refresh());
 let timer: ReturnType<typeof setInterval>;
-function restoreWorkspaceFromHash() {
-  const key = workspaceFromHash();
-  if (visibleNavigation.value.some((item) => item.key === key)) activeTab.value = key;
-  else activeTab.value = visibleNavigation.value.some((item) => item.key === defaultWorkspace)
-    ? defaultWorkspace
-    : visibleNavigation.value[0]?.key ?? "empty";
-}
 onMounted(() => {
-  syncWorkspaceHash(activeTab.value);
+  syncWorkspaceHash();
   startSession();
   window.addEventListener("hashchange", restoreWorkspaceFromHash);
-  timer = setInterval(() => void refresh(true), 5000);
+  timer = setInterval(() => navigation.requestRefresh(true), 5000);
 });
 onBeforeUnmount(() => {
   clearInterval(timer);
@@ -306,7 +284,7 @@ onBeforeUnmount(() => {
                 ><el-button
                   :icon="RefreshCw"
                   aria-label="刷新列表"
-                  @click="refresh()" /></el-tooltip
+                  @click="navigation.requestRefresh()" /></el-tooltip
               ><el-button
                 v-if="
                   (activeTab === 'templates' && hasScope('templates:write')) ||
@@ -386,7 +364,7 @@ onBeforeUnmount(() => {
               :listeners="{
                 edit: editTask,
                 view: viewTask,
-                changed: () => refresh(),
+                changed: () => navigation.requestRefresh(),
                 filters: applyTaskOwnershipFilters,
               }"
             />
@@ -418,7 +396,7 @@ onBeforeUnmount(() => {
               includeDeleted: templateIncludeDeleted,
               selectionKey: templateSelectionKey,
             }"
-            :listeners="{ edit: editTemplate, changed: () => refresh(), filters: applyTemplateFilters }"
+            :listeners="{ edit: editTemplate, changed: () => navigation.requestRefresh(), filters: applyTemplateFilters }"
           />
           <AsyncView
             v-else-if="activeTab === 'nodes'"
@@ -491,7 +469,7 @@ onBeforeUnmount(() => {
       }"
       :listeners="{
         'update:modelValue': (value: boolean) => (taskEditorOpen = value),
-        saved: () => refresh(),
+        saved: () => navigation.requestRefresh(),
       }"
     />
     <AsyncView
@@ -506,7 +484,7 @@ onBeforeUnmount(() => {
       }"
       :listeners="{
         'update:modelValue': (value: boolean) => (templateEditorOpen = value),
-        saved: () => refresh(),
+        saved: () => navigation.requestRefresh(),
       }"
     />
   </el-config-provider>

@@ -30,6 +30,12 @@ const selected = ref<Resource[]>([]);
 const batchDeleting = ref(false);
 const selectionGeneration = ref(0);
 const table = ref<{ clearSelection: () => void; toggleRowSelection: (row: Resource, selected?: boolean) => void }>();
+const narrowViewport = ref(false);
+const narrowViewportQuery = window.matchMedia("(max-width: 767px)");
+function syncViewport(event?: MediaQueryListEvent) {
+  // 窄屏不固定操作列，避免固定列覆盖资源身份和网络地址。
+  narrowViewport.value = event?.matches ?? narrowViewportQuery.matches;
+}
 const labels: Record<ResourceKind, string> = { HIKVISION_NETWORK: "海康网络设备", SERIAL_SERVER: "串口服务器" };
 function kindLabel(value: ResourceKind) { return labels[value]; }
 function kindIcon(value: ResourceKind) { return value === "HIKVISION_NETWORK" ? Network : Server; }
@@ -109,8 +115,16 @@ watch(() => [props.userId, props.isAdmin], ([userId, isAdmin], previous) => {
     filter();
   }
 });
-onMounted(load);
-onBeforeUnmount(() => { generation += 1; clearSelection(true); });
+onMounted(() => {
+  syncViewport();
+  narrowViewportQuery.addEventListener("change", syncViewport);
+  void load();
+});
+onBeforeUnmount(() => {
+  generation += 1;
+  narrowViewportQuery.removeEventListener("change", syncViewport);
+  clearSelection(true);
+});
 defineExpose({ reload: load });
 </script>
 <template>
@@ -138,7 +152,7 @@ defineExpose({ reload: load });
     <el-table-column label="创建时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
     <el-table-column label="删除时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.deletedAt) }}</template></el-table-column>
     <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 采集中</span></div></template></el-table-column>
-    <el-table-column label="操作" width="328" fixed="right"><template #default="{ row }"><div class="resource-actions">
+    <el-table-column label="操作" width="328" :fixed="narrowViewport ? false : 'right'"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看认证记录"><el-button text :icon="History" aria-label="查看认证记录" @click="viewAuthenticationRecords(row)" /></el-tooltip>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看 coredump 文件"><el-button text :icon="FileArchive" aria-label="查看 coredump 文件" @click="viewCoredumps(row)" /></el-tooltip>

@@ -25,6 +25,9 @@ let server;
 let browser;
 const errors = [];
 const resourcePages = [];
+const taskRequests = [];
+let holdTaskRequest = false;
+let releaseTaskRequest;
 
 async function json(route, body) {
   await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
@@ -55,6 +58,9 @@ try {
     const url = new URL(request.url());
     const path = url.pathname;
     const account = request.headers().authorization?.endsWith("navigation-operator") ? operator : administrator;
+    // 认证写请求仅由本地模拟响应，不接触实际用户或设备。
+    if (request.method() === "POST" && path === "/api/v1/auth/logout") return json(route, {});
+    if (request.method() === "POST" && path === "/api/v1/auth/login") return json(route, { user: administrator });
     if (request.method() !== "GET") throw new Error(`不应发出写请求：${request.method()} ${path}`);
     if (path === "/api/v1/auth/me") return json(route, { user: account });
     if (path === "/api/v1/resources") {
@@ -63,7 +69,14 @@ try {
       resourcePages.push({ account: account.id, page });
       return json(route, { ...pageOf(resources.slice((page - 1) * pageSize, page * pageSize), page, pageSize), total: resources.length });
     }
-    if (path === "/api/v1/tasks") return json(route, pageOf([]));
+    if (path === "/api/v1/tasks") {
+      taskRequests.push(url.search);
+      if (holdTaskRequest) {
+        holdTaskRequest = false;
+        await new Promise(resolve => { releaseTaskRequest = resolve; });
+      }
+      return json(route, pageOf([]));
+    }
     if (["/api/v1/command-templates", "/api/v1/nodes", "/api/v1/admin/nodes"].includes(path)) return json(route, pageOf([]));
     if (path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
     throw new Error(`未模拟的读取接口：${path}`);
@@ -79,11 +92,37 @@ try {
   assert.equal(new URL(page.url()).hash, "#resources", "首次登录必须进入设备资源页");
   await page.screenshot({ path: `${screenshots}/navigation-desktop.png`, fullPage: true, animations: "disabled" });
 
+  const taskRequestsBeforeNavigation = taskRequests.length;
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("heading", { name: "采集任务", exact: true }).waitFor();
+  await page.waitForLoadState("networkidle");
+  assert.equal(taskRequests.length - taskRequestsBeforeNavigation, 1, "跨页进入任务列表只应请求一次");
   assert.equal(new URL(page.url()).hash, "#tasks");
+  const taskRequestsBeforeReset = taskRequests.length;
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
+  await page.waitForLoadState("networkidle");
+  assert.equal(taskRequests.length - taskRequestsBeforeReset, 1, "同页重置筛选只应请求一次");
   await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "采集任务", exact: true }).waitFor();
+
+  // 人为阻塞一次静默轮询跨过下一个5秒周期，确认不会并发读取；切页仍须补最终刷新。
+  holdTaskRequest = true;
+  await page.waitForRequest(request => new URL(request.url()).pathname === "/api/v1/tasks", { timeout: 8000 });
+  await page.waitForTimeout(100);
+  assert.equal(typeof releaseTaskRequest, "function", "已确认轮询请求由模拟接口阻塞");
+  const slowRequestCount = taskRequests.length;
+  await page.waitForTimeout(5500);
+  assert.equal(taskRequests.length, slowRequestCount, "慢静默轮询期间不能再次并发请求任务列表");
+  await page.getByRole("tab", { name: "设备资源", exact: true }).click();
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
+  await page.waitForTimeout(100);
+  assert.equal(taskRequests.length, slowRequestCount, "切页刷新须等待当前静默请求完成");
+  const resumedRequest = page.waitForRequest(request => new URL(request.url()).pathname === "/api/v1/tasks");
+  releaseTaskRequest();
+  releaseTaskRequest = undefined;
+  await (await resumedRequest).response();
+  await page.waitForLoadState("networkidle");
+  assert.equal(taskRequests.length, slowRequestCount + 1, "慢请求结束只补一次最终任务页刷新");
 
   await page.getByRole("tab", { name: "设备资源", exact: true }).click();
   await page.getByText("分页资源 1", { exact: true }).waitFor();
@@ -101,15 +140,31 @@ try {
   await page.waitForTimeout(100);
   const layout = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.ok(layout.scrollWidth <= layout.clientWidth + 1, `手机资源页不得横向溢出：${JSON.stringify(layout)}`);
+  assert.equal(await page.locator(".resource-table .el-table-fixed-column--right").count(), 0,
+    "窄屏资源表格操作列不能固定遮住设备身份");
+  const resourceScroll = page.locator(".resource-table .el-scrollbar__wrap");
+  const scrollRange = await resourceScroll.evaluate(element => element.scrollWidth - element.clientWidth);
+  assert.ok(scrollRange > 0, "窄屏资源表格须可横向滚动查看其余字段");
   await page.screenshot({ path: `${screenshots}/navigation-mobile.png`, fullPage: true, animations: "disabled" });
+
+  await page.getByRole("button", { name: "退出", exact: true }).click();
+  await page.getByRole("button", { name: "登录", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).hash, "#resources", "退出不能被未登录权限回退改成API文档页");
+  await page.getByRole("textbox", { name: "用户名", exact: true }).fill("navigation-admin");
+  await page.getByRole("textbox", { name: "密码", exact: true }).fill("mock-password-only");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).hash, "#resources", "重新登录必须进入设备资源页");
 
   await page.evaluate(() => sessionStorage.setItem("camera-log-record-token", "navigation-operator"));
   await page.goto(`${baseUrl}/?session=operator#settings`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   assert.equal(new URL(page.url()).hash, "#resources", "无权限页必须优先回退设备资源");
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: true, resourceRefreshPage: 2, screenshots, consoleErrors: 0 }));
+  console.log(JSON.stringify({ passed: true, taskNavigationRequests: 1, sameTabResetRequests: 1,
+    reloginWorkspace: "resources", resourceRefreshPage: 2, screenshots, consoleErrors: 0 }));
 } finally {
+  releaseTaskRequest?.();
   if (browser) await browser.close();
   if (server) await server.close();
   if (cacheDir) await rm(cacheDir, { recursive: true, force: true });

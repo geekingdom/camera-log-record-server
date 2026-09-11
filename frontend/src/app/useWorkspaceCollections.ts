@@ -54,13 +54,15 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
   async function loadTasks() {
     if (!options.can("tasks:read")) return;
     const current = ++taskGeneration;
+    const requestedSelection = taskSelectionKey.value;
     const data = await options.api.tasks(page.value, pageSize.value, {
       search: taskSearch.value.trim() || undefined,
       status: taskStatus.value || undefined,
       resourceId: selectedResource.value?.id,
       createdBy: taskShowAll.value ? taskCreatedBy.value || undefined : options.user.value?.id,
     });
-    if (current !== taskGeneration) return;
+    // 导航已先更新筛选、但下一次请求尚未调度时，也不能短暂显示旧筛选的响应。
+    if (current !== taskGeneration || requestedSelection !== taskSelectionKey.value) return;
     tasks.value = data.items;
     totals.value.tasks = data.total;
     lastUpdated.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });

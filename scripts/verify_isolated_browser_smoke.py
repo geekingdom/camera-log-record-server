@@ -1,6 +1,7 @@
 """在随机本地数据库中运行 API、Worker 与浏览器冒烟，绝不触碰现有服务。"""
 
 import asyncio
+import ipaddress
 import json
 import os
 import secrets
@@ -14,8 +15,34 @@ import telnetlib3
 from camera_logs.common.config import Settings
 from cryptography.fernet import Fernet
 from pymongo import AsyncMongoClient
+from pymongo.uri_parser import parse_uri
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def local_mongo_uri(uri: str) -> bool:
+    """只接受全部节点均为回环地址的普通 MongoDB URI。
+
+    隔离浏览器验收会创建并删除随机数据库，因此凭据、端口和 IPv6 表达形式不能影响
+    本机判断；SRV 记录可能在解析时扩展到远程主机，始终拒绝。
+    """
+    if uri.startswith("mongodb+srv://"):
+        return False
+    try:
+        nodes = parse_uri(uri)["nodelist"]
+    except Exception:  # noqa: BLE001 - 无法可靠解析时必须拒绝访问配置数据库。
+        return False
+    if not nodes:
+        return False
+    for host, _port in nodes:
+        if host.lower() == "localhost":
+            continue
+        try:
+            if not ipaddress.ip_address(host).is_loopback:
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 def free_port():
@@ -134,7 +161,7 @@ def environment(database, mongo_uri, log_root, api_port, node_port, vite_port, s
 async def main():
     """执行隔离的真实 Worker、WebSocket、小时下载和浏览器 UI 验收。"""
     configured = Settings()
-    if not (configured.mongo_uri.startswith("mongodb://127.0.0.1") or configured.mongo_uri.startswith("mongodb://localhost")):
+    if not local_mongo_uri(configured.mongo_uri):
         raise RuntimeError("隔离浏览器验收仅允许本机 MongoDB")
     database = f"isolated_browser_smoke_{uuid4().hex}"
     if database == configured.database_name:
