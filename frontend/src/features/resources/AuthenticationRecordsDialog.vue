@@ -1,22 +1,20 @@
 <script setup lang="ts">
-// 海康资源认证历史仅供审阅；筛选条件变化时以代次隔离迟到的分页响应。
+// 海康资源认证历史仅供审阅；游标分页避免高频历史的总数统计和深页跳过扫描。
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { RefreshCw } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import type { AuthenticationRecord, AuthenticationRecordResult, Resource } from "../../shared/types";
+import { AuthenticationRecordCursorPager } from "./authenticationRecordPager";
 
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ resource?: Resource }>();
-const records = ref<AuthenticationRecord[]>([]);
-const total = ref(0);
-const page = ref(1);
-const loading = ref(false);
 const result = ref<AuthenticationRecordResult>();
 const identityChanged = ref<"true" | "false">();
 const range = ref<[Date, Date]>();
+const pager = new AuthenticationRecordCursorPager<AuthenticationRecord>();
+const pagerRevision = ref(0);
 let lifecycleGeneration = 0;
-let listGeneration = 0;
 
 const resultOptions: Array<{ value: AuthenticationRecordResult; label: string }> = [
   { value: "SUCCESS", label: "认证成功" },
@@ -27,6 +25,11 @@ const resultOptions: Array<{ value: AuthenticationRecordResult; label: string }>
 const sourceLabels: Record<string, string> = { CREATE: "创建资源", EDIT: "编辑资源", PERIODIC: "周期检查", HEALTH_CHECK: "周期检查", MANUAL: "手动认证" };
 const resultLabels: Record<string, string> = Object.fromEntries(resultOptions.map(option => [option.value, option.label]));
 const title = computed(() => `${props.resource?.name ?? "设备资源"} · 认证记录`);
+const records = computed(() => { pagerRevision.value; return pager.items; });
+const page = computed(() => { pagerRevision.value; return pager.currentPage; });
+const loading = computed(() => { pagerRevision.value; return pager.loading; });
+const hasPrevious = computed(() => { pagerRevision.value; return pager.hasPrevious; });
+const hasNext = computed(() => { pagerRevision.value; return pager.hasNext; });
 
 function time(value?: string) {
   if (!value) return "-";
@@ -55,44 +58,74 @@ function value(value?: string | null) { return value?.trim() || "未返回"; }
 function active(lifecycle: number, resourceId: string) {
   return lifecycle === lifecycleGeneration && open.value && props.resource?.id === resourceId;
 }
-async function load() {
+function touchPager() { pagerRevision.value += 1; }
+function filters() {
+  return {
+    result: result.value,
+    start: range.value?.[0].toISOString(),
+    end: range.value?.[1].toISOString(),
+    identityChanged: identityChanged.value,
+  };
+}
+async function refresh() {
   const resourceId = props.resource?.id;
   if (!resourceId) return;
-  const current = ++listGeneration;
   const lifecycle = lifecycleGeneration;
-  loading.value = true;
+  touchPager();
   try {
-    const data = await api.authenticationRecords(resourceId, page.value, {
-      result: result.value,
-      start: range.value?.[0].toISOString(),
-      end: range.value?.[1].toISOString(),
-      identityChanged: identityChanged.value,
-    });
-    if (current === listGeneration && active(lifecycle, resourceId)) {
-      records.value = data.items;
-      total.value = data.total;
-    }
+    await pager.refresh(cursor => api.authenticationRecordsCursor(resourceId, cursor, filters()));
   } catch (error) {
-    if (current === listGeneration && active(lifecycle, resourceId)) {
+    if (active(lifecycle, resourceId)) {
       ElMessage.error(error instanceof Error ? error.message : "读取认证记录失败");
     }
   } finally {
-    if (current === listGeneration) loading.value = false;
+    touchPager();
   }
 }
-function filter() { if (page.value === 1) void load(); else page.value = 1; }
+async function next() {
+  const resourceId = props.resource?.id;
+  if (!resourceId || !hasNext.value || loading.value) return;
+  const lifecycle = lifecycleGeneration;
+  touchPager();
+  try {
+    await pager.next(cursor => api.authenticationRecordsCursor(resourceId, cursor, filters()));
+  } catch (error) {
+    if (active(lifecycle, resourceId)) {
+      ElMessage.error(error instanceof Error ? error.message : "读取下一页认证记录失败");
+    }
+  } finally {
+    touchPager();
+  }
+}
+async function previous() {
+  const resourceId = props.resource?.id;
+  if (!resourceId || !hasPrevious.value || loading.value) return;
+  const lifecycle = lifecycleGeneration;
+  touchPager();
+  try {
+    await pager.previous(cursor => api.authenticationRecordsCursor(resourceId, cursor, filters()));
+  } catch (error) {
+    if (active(lifecycle, resourceId)) {
+      ElMessage.error(error instanceof Error ? error.message : "读取上一页认证记录失败");
+    }
+  } finally {
+    touchPager();
+  }
+}
+function filter() {
+  // 新筛选条件不能使用旧条件下的 nextCursor；先失效并清空，再请求新的首屏。
+  pager.invalidate();
+  touchPager();
+  void refresh();
+}
 
-watch(page, () => void load());
 watch(() => [open.value, props.resource?.id] as const, ([visible]) => {
   lifecycleGeneration += 1;
-  listGeneration += 1;
-  records.value = [];
-  total.value = 0;
-  loading.value = false;
-  page.value = 1;
-  if (visible) void load();
+  pager.invalidate();
+  touchPager();
+  if (visible) void refresh();
 }, { immediate: true });
-onBeforeUnmount(() => { lifecycleGeneration += 1; listGeneration += 1; });
+onBeforeUnmount(() => { lifecycleGeneration += 1; pager.invalidate(); });
 </script>
 
 <template>
@@ -107,7 +140,7 @@ onBeforeUnmount(() => { lifecycleGeneration += 1; listGeneration += 1; });
       </el-select>
       <el-date-picker v-model="range" type="datetimerange" range-separator="至" start-placeholder="认证起始时间" end-placeholder="认证截止时间" @change="filter" />
       <el-button @click="filter">筛选</el-button>
-      <el-tooltip content="刷新认证记录"><el-button :icon="RefreshCw" aria-label="刷新认证记录" @click="load" /></el-tooltip>
+      <el-tooltip content="刷新认证记录"><el-button :icon="RefreshCw" aria-label="刷新认证记录" :loading="loading" @click="refresh" /></el-tooltip>
     </div>
     <el-table :data="records" v-loading="loading" class="data-table authentication-table" empty-text="暂无认证记录">
       <el-table-column label="首次认证（北京时间）" min-width="190"><template #default="{ row }">{{ time(row.createdAt) }}</template></el-table-column>
@@ -118,7 +151,12 @@ onBeforeUnmount(() => { lifecycleGeneration += 1; listGeneration += 1; });
       <el-table-column label="设备身份" min-width="310"><template #default="{ row }"><div class="identity-details"><strong :class="{ changed: row.identityChanged }">{{ identitySummary(row) }}</strong><template v-if="row.identityChanged"><span>型号：{{ value(row.modelBefore) }} → {{ value(row.modelAfter) }}</span><span>序列号：{{ value(row.serialBefore) }} → {{ value(row.serialAfter) }}</span></template><template v-else><span>型号：{{ value(row.modelAfter || row.modelBefore) }}</span><span>序列号：{{ value(row.serialAfter || row.serialBefore) }}</span></template></div></template></el-table-column>
       <el-table-column label="说明" min-width="220"><template #default="{ row }"><span class="authentication-message">{{ row.message || "-" }}</span></template></el-table-column>
     </el-table>
-    <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" />
+    <div class="authentication-pagination" aria-label="认证记录分页">
+      <el-tooltip content="上一页"><el-button :icon="ChevronLeft" circle aria-label="上一页" :disabled="!hasPrevious || loading" @click="previous" /></el-tooltip>
+      <span aria-label="当前页">第 {{ page }} 页</span>
+      <el-tooltip content="下一页"><el-button :icon="ChevronRight" circle aria-label="下一页" :disabled="!hasNext || loading" @click="next" /></el-tooltip>
+      <span class="pagination-size">每页 20 条</span>
+    </div>
     <template #footer><el-button @click="open = false">关闭</el-button></template>
   </el-drawer>
 </template>
@@ -130,6 +168,8 @@ onBeforeUnmount(() => { lifecycleGeneration += 1; listGeneration += 1; });
 .identity-details strong { color: #293d40; }
 .identity-details strong.changed { color: #b54708; }
 .authentication-message { overflow-wrap: anywhere; }
+.authentication-pagination { display: flex; align-items: center; gap: 8px; min-height: 34px; margin-top: 14px; color: #526467; font-size: 13px; }
+.authentication-pagination .pagination-size { margin-left: 4px; color: #758588; }
 @media (max-width: 620px) {
   .authentication-toolbar .el-select, .authentication-toolbar .el-date-editor { width: 100%; }
 }

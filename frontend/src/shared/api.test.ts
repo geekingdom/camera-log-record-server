@@ -21,3 +21,19 @@ describe("阻塞任务重新启动 API", () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ confirmIsolation: true, evidence: "旧实例已由值班人员隔离" });
   });
 });
+
+describe("认证记录游标 API", () => {
+  it("首屏保留空 cursor，避免回退为带总数的页码查询", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [], total: null, pageSize: 20, hasMore: false, nextCursor: null,
+    })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.authenticationRecordsCursor("resource id", "", { result: "SUCCESS" });
+
+    expect(fetch.mock.calls[0][0]).toBe(
+      "/api/v1/resources/resource%20id/authentication-records?pageSize=20&cursor=&result=SUCCESS",
+    );
+  });
+});

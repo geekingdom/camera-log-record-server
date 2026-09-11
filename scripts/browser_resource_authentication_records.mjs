@@ -11,6 +11,7 @@ const resourceItems = [
   { id: "serial", name: "模拟串口", kind: "SERIAL_SERVER", ip: "192.0.2.20" },
 ];
 const requests = [];
+let failNextPage = false;
 const records = [
   {
     id: "record-change",
@@ -66,8 +67,16 @@ try {
     if (path === "/api/v1/resources") return json(pageOf(resourceItems));
     if (path === "/api/v1/resources/camera/authentication-records") {
       requests.push(Object.fromEntries(url.searchParams));
-      const page = Number(url.searchParams.get("page") || "1");
-      return json(pageOf(page === 1 ? records : [{ ...records[0], id: "record-page-2" }], page));
+      const cursor = url.searchParams.get("cursor");
+      assert.notEqual(cursor, null, "首屏也必须显式传递空游标，避免全量计数");
+      assert.ok(!url.searchParams.has("page") || url.searchParams.get("page") === "1");
+      if (cursor && failNextPage) {
+        failNextPage = false;
+        return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { message: "模拟分页失败" } }) });
+      }
+      assert.ok(cursor === "" || cursor === "next-page", "翻页必须使用服务端返回的游标");
+      return json({ items: cursor === "" ? records : [{ ...records[0], id: "record-page-2", message: "第二页认证记录" }],
+        total: null, page: 1, pageSize: 20, hasMore: cursor === "", nextCursor: cursor === "" ? "next-page" : null });
     }
     if (path === "/api/v1/resources/camera/coredump-monitor") return json({ active: false, ownerTask: null, mountStatus: null });
     if (["/api/v1/tasks", "/api/v1/command-templates", "/api/v1/users/creators", "/api/v1/nodes"].includes(path)) return json(pageOf([]));
@@ -89,6 +98,8 @@ try {
   await drawer.getByText("设备身份变更", { exact: true }).waitFor();
   await drawer.getByText("型号：DS-2CD2143G2 → DS-2CD2143G2-I", { exact: true }).waitFor();
   await drawer.getByText("序列号：OLD-001 → NEW-001", { exact: true }).waitFor();
+  assert.equal(requests.at(-1).cursor, "");
+  assert.equal(await drawer.getByRole("button", { name: "上一页", exact: true }).isDisabled(), true);
 
   await drawer.locator(".el-select").nth(0).click();
   await page.getByRole("option", { name: "认证异常", exact: true }).click();
@@ -110,18 +121,36 @@ try {
   assert.match(ranged.start || "", /^\d{4}-\d{2}-\d{2}T.*Z$/, "start 必须发送 UTC ISO 时间");
   assert.match(ranged.end || "", /^\d{4}-\d{2}-\d{2}T.*Z$/, "end 必须发送 UTC ISO 时间");
 
+  failNextPage = true;
   await drawer.getByRole("button", { name: "下一页", exact: true }).click();
-  await page.waitForTimeout(100);
-  assert.equal(requests.at(-1).page, "2", "分页必须发送第二页 page 参数");
+  await page.getByText("模拟分页失败", { exact: true }).waitFor();
+  await drawer.getByText("初始认证", { exact: true }).waitFor();
+  assert.equal(await drawer.getByRole("button", { name: "上一页", exact: true }).isDisabled(), true);
+  await drawer.getByRole("button", { name: "下一页", exact: true }).click();
+  await drawer.getByText("第二页认证记录", { exact: true }).waitFor();
+  assert.equal(requests.at(-1).cursor, "next-page");
+  assert.equal(await drawer.getByRole("button", { name: "下一页", exact: true }).isDisabled(), true);
+  await drawer.getByRole("button", { name: "上一页", exact: true }).click();
+  await drawer.getByText("初始认证", { exact: true }).waitFor();
+  assert.equal(requests.at(-1).cursor, "");
+  await drawer.getByRole("button", { name: "下一页", exact: true }).click();
+  await drawer.getByText("第二页认证记录", { exact: true }).waitFor();
+  await drawer.getByRole("button", { name: "刷新认证记录", exact: true }).click();
+  await drawer.getByText("初始认证", { exact: true }).waitFor();
+  assert.equal(requests.at(-1).cursor, "", "刷新必须从最新首屏重新建立游标");
+  await page.getByText("模拟分页失败", { exact: true }).waitFor({ state: "hidden" });
+  await drawer.locator(".el-drawer__title").click();
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(400);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 844 });
     await assertViewport(page, width);
     await assertTableScrollsInsideDrawer(drawer, width);
-    await page.screenshot({ path: `${screenshots}/resource-authentication-records-${width}.png`, fullPage: true });
+    await page.screenshot({ path: `${screenshots}/resource-authentication-records-${width}.png` });
   }
   assert.deepEqual(errors, []);
   await context.close();
-  console.log("资源认证记录浏览器验收通过，已检查筛选、分页与 1440px/390px 截图");
+  console.log("资源认证记录浏览器验收通过，已检查空游标首屏、筛选、失败重试、前后翻页、刷新与 1440px/390px 截图");
 } finally {
   await browser.close();
 }

@@ -204,7 +204,7 @@ def test_deleted_resource_remains_readable_and_reader_requires_authentication(re
     assert resource_client.get("/api/v1/resources/camera/authentication-records", headers={"Authorization": "Bearer bad"}).status_code == 401
 
 
-def test_authentication_history_cursor_paginates_without_count(resource_client):
+def test_authentication_history_cursor_paginates_without_count(resource_client, monkeypatch):
     """长期认证历史使用排序键游标，跨相同时间戳不重复且不依赖全量计数。"""
     repo, resource = resource_client.app.state.repo, _resource()
     resource_client.portal.call(repo.db.resources.insert_one, resource)
@@ -212,11 +212,17 @@ def test_authentication_history_cursor_paginates_without_count(resource_client):
     records = [{"id": identifier, "resourceId": "camera", "result": "SUCCESS", "identityChanged": False,
                 "createdAt": stamp} for identifier in ("c", "b", "a")]
     resource_client.portal.call(repo.db.authentication_records.insert_many, records)
-    first = resource_client.get("/api/v1/resources/camera/authentication-records", params={"pageSize": 2})
+    async def count_forbidden(*args, **kwargs):
+        raise AssertionError("游标首屏和后续页不得进行全量计数")
+
+    monkeypatch.setattr(repo.db.authentication_records, "count_documents", count_forbidden)
+    first = resource_client.get("/api/v1/resources/camera/authentication-records", params={"pageSize": 2, "cursor": ""})
     assert first.status_code == 200
     payload = first.json()
     assert [item["id"] for item in payload["items"]] == ["c", "b"]
     assert payload["nextCursor"]
+    assert payload["total"] is None
+    assert payload["hasMore"] is True
 
     second = resource_client.get("/api/v1/resources/camera/authentication-records", params={
         "pageSize": 2, "cursor": payload["nextCursor"]})

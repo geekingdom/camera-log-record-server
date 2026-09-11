@@ -12,4 +12,6 @@ container-smoke增加verify_ssh_admission.py及verify_ssh_socket_admission.py。
 - 真实回环SSH与Mongo验证通过：acceptedShells=5、rejectedSixth=true、reopenedAfterClose=true，serverConnections=0、finalClaims=0。
 - 两个脚本finally均删除并确认临时数据库；CI工作流结构解析及diff检查通过。
 
-这些检查为持续防回归补充，不代表真实物理多机故障隔离或500路全天容量验收。新增CI步骤须在本次提交运行后单独确认，不能用前一提交的CI作为其执行证据。
+这些检查为持续防回归补充，不代表真实物理多机故障隔离或500路全天容量验收。
+
+后续已核实7d5e383对应CI34570026428七项全部成功，包含新增的真实Mongo跨进程名额和真实SSH socket步骤。这是该提交的远端执行证据，不借用前一提交的CI结果。

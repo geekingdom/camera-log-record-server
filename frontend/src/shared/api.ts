@@ -13,6 +13,7 @@ import type {
   ResourceAuthentication,
   AuthenticationRecord,
   AuthenticationRecordResult,
+  CursorPage,
   ResourceAuthType,
   ResourceKind,
   Task,
@@ -187,6 +188,21 @@ export const api = {
   }) => request<Page<AuthenticationRecord>>(
     `/resources/${encodeURIComponent(resourceId)}/authentication-records${query(page, 20, filters)}`,
   ),
+  // 游标首屏必须保留 `cursor=`，不能复用会忽略空字符串的通用 query()。
+  authenticationRecordsCursor: (resourceId: string, cursor: string, filters?: {
+    result?: AuthenticationRecordResult;
+    start?: string;
+    end?: string;
+    identityChanged?: "true" | "false";
+  }) => {
+    const params = new URLSearchParams({ pageSize: "20", cursor });
+    Object.entries(filters ?? {}).forEach(([key, value]) => {
+      if (value !== undefined) params.set(key, value);
+    });
+    return request<CursorPage<AuthenticationRecord>>(
+      `/resources/${encodeURIComponent(resourceId)}/authentication-records?${params}`,
+    );
+  },
   coredumps: (resourceId: string, page = 1, pageSize = 50, filters?: {
     name?: string; receivedFrom?: string; receivedTo?: string;
   }) => request<Page<CoredumpFile>>(`/resources/${encodeURIComponent(resourceId)}/coredumps${query(page, pageSize, filters)}`),

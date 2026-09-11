@@ -46,6 +46,14 @@ export interface AuthenticationRecord {
   initialAuthentication?: boolean;
   message?: string | null;
 }
+/** 游标读取不计算总数；空 cursor 表示请求满足筛选条件的首屏。 */
+export interface CursorPage<T> {
+  items: T[];
+  total: null;
+  pageSize: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
 /** 同一资源当前实际执行 NFS Coredump 监控的采集任务。 */
 export interface CoredumpMonitorStatus {
   active: boolean;
