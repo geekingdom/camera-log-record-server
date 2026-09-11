@@ -18,20 +18,22 @@ from pymongo.errors import ConnectionFailure, ExecutionTimeout, PyMongoError
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.coredump_lease import (
-    bound_coredump_cleanup_guard,
     guard_coredump_monitor,
     record_coredump_status,
-    release_coredump_lease,
 )
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.collection.runtime_events import apply_runtime_state, record_runtime_event
+from camera_logs.collection.runtime_monitors import (
+    monitor_session,
+    release_monitor_leases,
+    stop_session_monitors,
+)
 from camera_logs.collection.ssh_admission import SshCapacityError, SshSlotUncertain
 from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
 from camera_logs.common.ownership import OwnershipLost, owner_filter
-from camera_logs.resource_metrics.runtime import monitor_loop, release_resource_monitor_lease
 
 logger = logging.getLogger(__name__)
 
@@ -380,19 +382,7 @@ class SessionRuntime:
                                     "sessionId": self.collector.session_id}
                 await self.collector.start()
                 if config.get("protocol") in {"SSH", "TELNET_DEVICE"}:
-                    source = await self.coredump_target()
-                    if self.repo.settings.nfs_server_ip or source:
-                        self.collector.start_coredump_monitor(
-                            self.repo.settings.nfs_server_ip or "127.0.0.1", str(self.repo.settings.nfs_root), self.on_coredump,
-                            guard=self.coredump_guard,
-                            cleanup_guard=bound_coredump_cleanup_guard(self, self.collector),
-                            resolve_target=self.coredump_target, wait_after_false=True)
-                    elif (await self.repo.db.resources.find_one({"id": self.task.get("resourceId"),
-                            "enableCoredumpMonitor": True}, {"id": 1})):
-                        # 节点部署缺少 NFS 配置只影响可选监控，日志采集会话照常运行。
-                        await self.on_coredump("FAILED", "节点未配置 NFS_SERVER_IP，未启动 Coredump 监控")
-                    # CPU/内存监控使用同一 collector 的发送队列与接收器；资源开关和租约在协程内复核。
-                    self.resource_monitor_task = asyncio.create_task(monitor_loop(self, self.collector))
+                    self.resource_monitor_task = asyncio.create_task(monitor_session(self, self.collector))
                 delay = 1
                 await self.collector.wait_closed()
             except asyncio.CancelledError:
@@ -427,20 +417,8 @@ class SessionRuntime:
                     if self.collector:
                         await self._stop_collector()
                 finally:
-                    monitor = getattr(self, "resource_monitor_task", None)
-                    self.resource_monitor_task = None
-                    if monitor is not None:
-                        monitor.cancel()
-                        await asyncio.gather(monitor, return_exceptions=True)
-                    try:
-                        await release_resource_monitor_lease(self.repo, self.task)
-                    except Exception:
-                        logger.exception("资源监控租约释放失败 task=%s", self.task["id"])
-                    # 只释放仍属于本运行的资源租约，避免旧会话清掉后继接管者的控制权。
-                    try:
-                        await release_coredump_lease(self.repo, self.task)
-                    except Exception:
-                        logger.exception("coredump 租约释放失败 task=%s", self.task["id"])
+                    await stop_session_monitors(self)
+                    await release_monitor_leases(self)
                     # 连接或归档收尾报错仍需结束本会话命令；不能跳过并遗留 SENDING。
                     if session_commands is not None:
                         await self.repo.db.commands.update_many({**session_commands, "status": "QUEUED"},
@@ -496,6 +474,7 @@ class SessionRuntime:
 
     async def _stop_collector(self):
         """握手失败在连接和文件已关闭后作为运行错误返回，不误标为隔离失败。"""
+        await stop_session_monitors(self)
         try:
             await self.collector.stop()
         except PshSwitchError as exc:
