@@ -6,11 +6,15 @@
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import time
+from uuid import uuid4
 
 import httpx
+from camera_logs.collection.ssh_admission import normalize_ssh_address
 from camera_logs.common.config import Settings
+from pymongo import AsyncMongoClient
 
 INITIAL_COMMANDS = (
     "outputClose",
@@ -23,9 +27,59 @@ ACTIVE_STATUSES = {
 }
 
 
-def connection_counts(pid, tasks):
-    """仅检查指定采集进程的设备 SSH socket，不触碰设备其他连接。"""
-    result = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:ESTABLISHED"],
+class SshSlotObserver:
+    """只读观察当前平台库中的精确 SSH 占位，不参与设备连接或回收。"""
+
+    def __init__(self, settings):
+        self.client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True)
+        self.database = self.client[settings.database_name]
+
+    async def count(self, task):
+        """按任务、运行和代次统计名额，旧会话不得被误算为当前连接。"""
+        slot = await self.database.ssh_connection_slots.find_one(
+            {"_id": normalize_ssh_address(task["ip"])}, {"claims": 1}
+        )
+        return sum(
+            claim.get("taskId") == str(task.get("id"))
+            and claim.get("runId") == str(task.get("runId"))
+            and claim.get("generation") == task.get("generation")
+            for claim in (slot or {}).get("claims", [])
+        )
+
+    async def count_task(self, task):
+        """统计该任务在同一设备上的全部运行代次，供停止后遗留检查使用。"""
+        slot = await self.database.ssh_connection_slots.find_one(
+            {"_id": normalize_ssh_address(task["ip"])}, {"claims": 1}
+        )
+        return sum(claim.get("taskId") == str(task.get("id")) for claim in (slot or {}).get("claims", []))
+
+    async def close(self):
+        """关闭只读 Mongo 客户端，不影响 Worker 或其名额文档。"""
+        await self.client.close()
+
+
+async def assert_slot_counts(observer, tasks, expected):
+    """断言每个当前任务运行的精确占位数，输出不含任务凭据。"""
+    actual = {task["id"]: await observer.count(task) for task in tasks}
+    mismatched = {identifier: count for identifier, count in actual.items() if count != expected}
+    if mismatched:
+        raise AssertionError(f"SSH 名额数不符合预期 expected={expected} actual={mismatched}")
+    return actual
+
+
+async def assert_task_slots_released(observer, task):
+    """停止后任务任何旧 run/generation 的遗留占位都属于失败，不能只检查新快照。"""
+    count = await observer.count_task(task)
+    if count:
+        raise AssertionError(f"SSH 名额仍残留 taskId={task['id']} count={count}")
+
+
+def connection_counts(pid, tasks, *, established=False):
+    """默认检查全部 TCP FD，不能把正在关闭的连接误当作已经释放。"""
+    command = ["lsof", "-nP", "-a", "-p", str(pid), "-iTCP"]
+    if established:
+        command.extend(["-sTCP:ESTABLISHED"])
+    result = subprocess.run(command,
                             capture_output=True, text=True, check=False)
     if result.returncode not in (0, 1):
         raise RuntimeError("无法读取采集进程 socket")
@@ -78,7 +132,7 @@ def select_tasks(all_tasks, task_ids):
         for other in all_tasks:
             if other.get("id") == task["id"]:
                 continue
-            if other.get("ip") != task.get("ip") or other.get("port") != task.get("port"):
+            if other.get("ip") != task.get("ip"):
                 continue
             if other.get("nodeId") is not None or other.get("status") in ACTIVE_STATUSES:
                 raise ValueError(f"任务 {task['id']} 的端点已有其他活动任务: {other.get('id')}")
@@ -127,7 +181,7 @@ async def wait_operation(client, operation_id, timeout=120, poll_interval=.5, on
     raise TimeoutError("异步控制操作未完成")
 
 
-async def cleanup_tasks(client, task_ids, worker_pid, poll_interval=.5):
+async def cleanup_tasks(client, task_ids, worker_pid, poll_interval=.5, slot_observer=None):
     """逐个停止显式任务，并确认任务状态和设备 SSH socket 都已完成回收。"""
     results = {}
     for task_id in task_ids:
@@ -142,10 +196,65 @@ async def cleanup_tasks(client, task_ids, worker_pid, poll_interval=.5):
                 raise RuntimeError("任务停止后仍未完成节点回收")
             if connection_counts(worker_pid, [task])[task_id] != 0:
                 raise RuntimeError("任务停止后仍保留 SSH 连接")
+            if slot_observer is not None:
+                await assert_task_slots_released(slot_observer, task)
             results[task_id] = "SUCCEEDED"
         except Exception as error:  # noqa: BLE001 - 收尾必须继续，汇总结果交由调用方判定。
             results[task_id] = type(error).__name__
     return results
+
+
+async def verify_idle_reconnect(client, task, worker_pid, slot_observer, timeout=45):
+    """仅在显式开关下关闭设备输出，验证空闲重连保持运行并重新取得一个名额。"""
+    before = (task["runId"], task["sessionId"])
+    try:
+        os.kill(worker_pid, 0)
+    except OSError as error:
+        raise RuntimeError("采集 Worker 进程不存在，拒绝解释空闲重连") from error
+    response = await client.post(f'/api/v1/tasks/{task["id"]}/commands', json={"command": "outputClose"},
+                                 headers={"Idempotency-Key": "ssh-idle-close-" + uuid4().hex})
+    response.raise_for_status()
+    command_id = response.json()["id"]
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        current = await client.get(f"/api/v1/commands/{command_id}")
+        current.raise_for_status()
+        status = current.json().get("status")
+        if status == "SENT":
+            break
+        if status in {"FAILED", "CANCELLED", "UNKNOWN"}:
+            raise RuntimeError("outputClose 未进入发送路径: " + status)
+        await asyncio.sleep(.5)
+    else:
+        raise TimeoutError("等待 outputClose 命令发送超时")
+
+    # Worker 无输出看门狗至少10秒。全 TCP FD 连续采样保证没有观察到两路并存；
+    # 采样不能排除采样间极短重叠，也无法区分其它断线原因，报告必须保留该边界。
+    quiet_deadline, samples = time.monotonic() + 11, []
+    while time.monotonic() < quiet_deadline:
+        count = connection_counts(worker_pid, [task], established=False)[task["id"]]
+        if count > 1:
+            raise AssertionError(f"空闲窗口出现多个 SSH TCP FD count={count}")
+        samples.append(count)
+        await asyncio.sleep(.2)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = await client.get(f'/api/v1/tasks/{task["id"]}')
+        current.raise_for_status()
+        recovered = current.json()
+        sockets = connection_counts(worker_pid, [recovered])[recovered["id"]]
+        if sockets > 1:
+            raise AssertionError("重连阶段观察到多个 SSH TCP FD")
+        if (recovered.get("status") == "COLLECTING" and recovered.get("runId") == before[0]
+                and recovered.get("sessionId") != before[1] and recovered.get("nodeId") == Settings().node_id
+                and sockets == 1):
+            await assert_slot_counts(slot_observer, [recovered], 1)
+            return {"taskId": recovered["id"], "sameRun": True, "newSession": True,
+                    "slotCount": 1, "endpointSockets": sockets, "quietSamples": len(samples),
+                    "initialOutputOpenConfigured": "outputOpen" in INITIAL_COMMANDS,
+                    "idleCauseLimit": "发送outputClose后观察到会话变化；FD采样不证明无输出，不能排除采样间短暂重叠或其它断线原因"}
+        await asyncio.sleep(.5)
+    raise TimeoutError("无输出重连后未观察到同运行的新会话")
 
 
 def record_cleanup_result(report, cleanup):
@@ -161,51 +270,79 @@ async def execute(args):
     """顺序执行启动、暂停、等待和继续，并始终经 stop API 回收连接。"""
     report = {"passed": False, "taskIds": args.task_id, "cycles": [], "cleanup": {}}
     workflow_error = None
-    async with httpx.AsyncClient(base_url=args.url,
-            headers={"Authorization": "Bearer " + Settings().bootstrap_token}, timeout=30) as client:
-        tasks = await load_tasks_for_validation(client, args.task_id)
+    settings = Settings()
+    slot_observer = SshSlotObserver(settings)
+    try:
+        async with httpx.AsyncClient(base_url=args.url,
+                                    headers={"Authorization": "Bearer " + settings.bootstrap_token}, timeout=30) as client:
+            tasks = await load_tasks_for_validation(client, args.task_id)
 
-        async def control(task, action):
-            """轮询异步操作，同时验证不会因重连重叠耗尽设备会话槽。"""
-            response = await client.post(f'/api/v1/tasks/{task["id"]}/{action}')
-            response.raise_for_status()
-            operation_id = response.json()["id"]
-            def check_connections():
-                """在每个操作状态轮询前确认单端点没有重叠连接。"""
-                counts = connection_counts(args.worker_pid, tasks)
-                assert max(counts.values()) <= 1, "检测到同设备多个采集连接"
-            await wait_operation(client, operation_id, on_poll=check_connections)
-            return (await client.get('/api/v1/tasks/' + task["id"])).json()
+            async def control(task, action):
+                """轮询异步操作，同时验证不会因重连重叠耗尽设备会话槽。"""
+                response = await client.post(f'/api/v1/tasks/{task["id"]}/{action}')
+                response.raise_for_status()
+                operation_id = response.json()["id"]
 
-        try:
-            for index, task in enumerate(tasks):
-                tasks[index] = await control(task, "start")
-            before = {task["id"]: (task["runId"], task["sessionId"]) for task in tasks}
-            for cycle in range(args.cycles):
-                for task in tasks:
-                    paused = await control(task, "pause")
-                    assert paused["status"] == "PAUSED"
-                assert all(count == 0 for count in connection_counts(args.worker_pid, tasks).values())
-                # 超过十秒看门狗，证明暂停状态不会被无日志重连逻辑唤醒。
-                await asyncio.sleep(12)
-                assert all(count == 0 for count in connection_counts(args.worker_pid, tasks).values())
+                def check_connections():
+                    """在每个操作状态轮询前确认单端点没有重叠连接。"""
+                    counts = connection_counts(args.worker_pid, tasks)
+                    assert max(counts.values()) <= 1, "检测到同设备多个采集连接"
+
+                await wait_operation(client, operation_id, on_poll=check_connections)
+                current = await client.get('/api/v1/tasks/' + task["id"])
+                current.raise_for_status()
+                return current.json()
+
+            try:
+                os.kill(args.worker_pid, 0)
                 for index, task in enumerate(tasks):
-                    resumed = await control(task, "resume")
-                    assert resumed["runId"] == before[task["id"]][0]
-                    assert resumed["sessionId"] != before[task["id"]][1]
-                    before[task["id"]] = (resumed["runId"], resumed["sessionId"])
-                    tasks[index] = resumed
-                counts = connection_counts(args.worker_pid, tasks)
-                assert all(count == 1 for count in counts.values())
-                report["cycles"].append({"cycle": cycle + 1, "pauseReleased": True,
-                    "pausedRetryDisabled": True, "sameRun": True, "newSession": True,
-                    "activeConnections": counts})
-            report["passed"] = True
-        except Exception as error:  # noqa: BLE001 - finally 仍须运行正式 stop 收尾。
-            workflow_error = error
-            report["error"] = {"type": type(error).__name__, "message": str(error)}
-        finally:
-            record_cleanup_result(report, await cleanup_tasks(client, args.task_id, args.worker_pid))
+                    tasks[index] = await control(task, "start")
+                    if tasks[index].get("nodeId") != settings.node_id:
+                        raise AssertionError("任务未分配到本机配置的Worker，不能使用本机PID验证")
+                if any(count != 1 for count in connection_counts(args.worker_pid, tasks).values()):
+                    raise AssertionError("启动后指定Worker未持有预期SSH连接")
+                await assert_slot_counts(slot_observer, tasks, 1)
+                before = {task["id"]: (task["runId"], task["sessionId"]) for task in tasks}
+                for cycle in range(args.cycles):
+                    for task in tasks:
+                        paused = await control(task, "pause")
+                        assert paused["status"] == "PAUSED"
+                    assert all(count == 0 for count in connection_counts(args.worker_pid, tasks).values())
+                    await assert_slot_counts(slot_observer, tasks, 0)
+                    await asyncio.sleep(12)
+                    assert all(count == 0 for count in connection_counts(args.worker_pid, tasks).values())
+                    await assert_slot_counts(slot_observer, tasks, 0)
+                    for index, task in enumerate(tasks):
+                        resumed = await control(task, "resume")
+                        assert resumed["runId"] == before[task["id"]][0]
+                        assert resumed["sessionId"] != before[task["id"]][1]
+                        before[task["id"]] = (resumed["runId"], resumed["sessionId"])
+                        tasks[index] = resumed
+                    counts = connection_counts(args.worker_pid, tasks)
+                    assert all(count == 1 for count in counts.values())
+                    await assert_slot_counts(slot_observer, tasks, 1)
+                    report["cycles"].append({"cycle": cycle + 1, "pauseReleased": True,
+                        "pausedRetryDisabled": True, "sameRun": True, "newSession": True,
+                        "activeConnections": counts})
+                if getattr(args, "verify_idle_reconnect", False):
+                    report["idleReconnect"] = []
+                    for index, task in enumerate(tasks):
+                        report["idleReconnect"].append(await verify_idle_reconnect(
+                            client, task, args.worker_pid, slot_observer
+                        ))
+                        response = await client.get(f'/api/v1/tasks/{task["id"]}')
+                        response.raise_for_status()
+                        tasks[index] = response.json()
+                report["passed"] = True
+            except Exception as error:  # noqa: BLE001 - finally 仍须运行正式 stop 收尾。
+                workflow_error = error
+                report["error"] = {"type": type(error).__name__, "message": str(error)}
+            finally:
+                record_cleanup_result(report, await cleanup_tasks(
+                    client, args.task_id, args.worker_pid, slot_observer=slot_observer
+                ))
+    finally:
+        await slot_observer.close()
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if workflow_error:
         raise workflow_error
@@ -218,6 +355,8 @@ if __name__ == "__main__":
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--worker-pid", type=int, required=True)
     parser.add_argument("--cycles", type=int, default=2)
+    parser.add_argument("--verify-idle-reconnect", action="store_true",
+                        help="显式发送 outputClose 并验证超过10秒无输出后的同运行重连")
     parser.add_argument("--task-id", action="append", required=True,
                         help="要验证的 STOPPED SSH 任务 ID，可重复指定")
     asyncio.run(execute(parser.parse_args()))

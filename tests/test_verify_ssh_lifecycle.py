@@ -61,6 +61,15 @@ def test_select_tasks_requires_explicit_ids_and_rejects_another_active_endpoint_
         verify.select_tasks([selected], ["missing"])
 
 
+def test_select_tasks_rejects_another_active_task_on_same_ip_with_different_ssh_port():
+    """设备 SSH 名额按 IP 而非端口计，实机脚本不能遗漏另一 SSH 端口的活动任务。"""
+    selected = valid_task()
+    other = valid_task() | {"id": "task-b", "port": 2222, "status": "COLLECTING",
+                            "desiredState": "RUNNING", "nodeId": "worker"}
+    with pytest.raises(ValueError, match="其他活动任务"):
+        verify.select_tasks([selected, other], ["task-a"])
+
+
 def test_cleanup_stops_every_explicit_task_after_an_individual_failure():
     """一个任务 stop 请求失败时仍继续收尾其它任务，避免测试遗留采集连接。"""
     class Response:
@@ -150,3 +159,37 @@ def test_record_cleanup_result_marks_a_completed_workflow_as_failed():
         "cleanup": {"task-a": "RuntimeError", "task-b": "SUCCEEDED"},
         "error": {"type": "CleanupError", "message": "任务收尾失败: task-a"},
     }
+
+
+def test_slot_assertions_keep_current_generation_and_reject_any_stop_residue():
+    """采集状态只计算精确运行，停止态必须检查同任务的所有历史代次。"""
+    class Observer:
+        async def count(self, _task):
+            return 1
+
+        async def count_task(self, _task):
+            return 2
+
+    assert asyncio.run(verify.assert_slot_counts(Observer(), [valid_task() | {
+        "runId": "run-a", "generation": 3}], 1)) == {"task-a": 1}
+    with pytest.raises(AssertionError, match="仍残留"):
+        asyncio.run(verify.assert_task_slots_released(Observer(), valid_task()))
+
+
+@pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "UNKNOWN"])
+def test_idle_reconnect_rejects_non_sent_output_close_without_waiting_for_device(status):
+    """空闲重连只能以明确 SENT 的 outputClose 为起点，结果未知不能当作成功。"""
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def raise_for_status(self): pass
+        def json(self): return self.payload
+
+    class Client:
+        async def post(self, *_args, **_kwargs): return Response({"id": "command"})
+        async def get(self, *_args, **_kwargs): return Response({"status": status})
+
+    task = valid_task() | {"status": "COLLECTING", "desiredState": "RUNNING",
+                           "runId": "run-a", "sessionId": "session-a", "generation": 1,
+                           "nodeId": "worker"}
+    with pytest.raises(RuntimeError, match="outputClose"):
+        asyncio.run(verify.verify_idle_reconnect(Client(), task, 0, object(), timeout=0))
