@@ -48,7 +48,7 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/http-browser" playwright@1.58.2 --no-audit --no-fund
           PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node ../scripts/verify_http_browser.mjs
-      - name: 验证生产页面布局与资源快捷创建
+      - name: 验证生产页面布局与日志工作台交互
         run: PYTHON_BIN=python PLAYWRIGHT_MODULE="$RUNNER_TEMP/http-browser/node_modules/playwright/index.mjs" node scripts/verify-workspace.mjs
       - name: 保存布局验收截图
         if: always()

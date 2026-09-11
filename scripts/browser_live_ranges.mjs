@@ -166,7 +166,7 @@ async function assertDialogFooterReachable(dialog) {
 
 try {
   await mkdir(output, { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
   await openPrimaryLiveLogs();
   const consoleOutput = page.locator(".log-console");
   await consoleOutput.getByText(line(199).trim(), { exact: true }).waitFor();
