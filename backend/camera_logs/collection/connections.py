@@ -137,16 +137,24 @@ def _tcp_keepalive(owner: Any) -> None:
         sock = transport.get_extra_info("socket") if transport else None
     if sock is None:
         return
+    option = "SO_KEEPALIVE"
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         if hasattr(socket, "TCP_KEEPIDLE"):
+            option = "TCP_KEEPIDLE"
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            option = "TCP_KEEPINTVL"
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            option = "TCP_KEEPCNT"
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
         elif hasattr(socket, "TCP_KEEPALIVE"):
+            option = "TCP_KEEPALIVE"
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
-    except OSError:
-        return
+    except OSError as error:
+        # 配置降级不能中止已建立连接；只记录可诊断的系统字段，不输出异常原文或凭据。
+        logger.warning("TCP 保活配置失败，连接继续使用协议保活", extra={"context": {
+            "socketOption": option, "errorType": type(error).__name__, "errno": error.errno,
+        }})
 
 
 def _abort_transport(owner: Any) -> None:

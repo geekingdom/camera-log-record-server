@@ -1,14 +1,20 @@
 """请求日志覆盖流式响应结束、响应中断及异常前后的实际 HTTP 状态。"""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from camera_logs.common import observability
+from camera_logs.common.config import Settings
 from camera_logs.common.request_context import current_request_context
+from camera_logs.main import create_app
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from mongomock_motor import AsyncMongoMockClient
 
 pytest_plugins = ("test_api",)
 
@@ -122,7 +128,17 @@ async def test_request_context_is_isolated_and_reset_after_each_request():
 
 async def test_request_event_persistence_failure_does_not_mask_business_failure():
     """排障记录 Mongo 故障只能降级为日志，原始业务异常仍需完整传播。"""
-    insert = AsyncMock(side_effect=OSError("request event unavailable"))
+    private_error = "request-event-private-credential"
+    insert = AsyncMock(side_effect=OSError(private_error))
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    access_logger = logging.getLogger("camera_logs.access")
+    capture = Capture()
+    access_logger.addHandler(capture)
 
     async def app(request_scope, receive, send):
         raise RuntimeError("business failure")
@@ -130,9 +146,18 @@ async def test_request_event_persistence_failure_does_not_mask_business_failure(
     event_store = SimpleNamespace(insert_one=insert)
     request_scope = scope() | {"path": "/api/v1/write", "raw_path": b"/api/v1/write",
         "app": SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(db=SimpleNamespace(request_events=event_store))))}
-    with pytest.raises(RuntimeError, match="business failure"):
-        await observability.RequestLoggingMiddleware(app)(request_scope, None, None)
+    try:
+        with pytest.raises(RuntimeError, match="business failure"):
+            await observability.RequestLoggingMiddleware(app)(request_scope, None, None)
+    finally:
+        access_logger.removeHandler(capture)
     insert.assert_awaited_once()
+    persistence = [record for record in records if record.getMessage() == "请求事件持久化失败"]
+    assert len(persistence) == 1
+    assert persistence[0].context["errorType"] == "OSError"
+    assert persistence[0].context["errorFrames"]
+    assert persistence[0].exc_info is None
+    assert private_error not in observability.JsonLineFormatter().format(persistence[0])
 
 
 def test_rejected_requests_keep_http_status_and_request_id(monkeypatch):
@@ -188,3 +213,120 @@ def test_api_request_events_record_successful_reads_without_request_secrets(clie
     assert event["responseComplete"] is True
     assert event["responseBytes"] == len(response.content)
     assert "query" not in event and "headers" not in event and "body" not in event
+
+
+def test_unhandled_api_error_uses_safe_reason_and_type_with_observed_response_send(tmp_path):
+    """通用 500 必须经过观察发送链路，排障记录不得泄露异常正文。"""
+    secret = "synthetic-private-credential"
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    access_logger = logging.getLogger("camera_logs.access")
+    capture = Capture()
+    access_logger.addHandler(capture)
+
+    settings = Settings(_env_file=None, bootstrap_token="synthetic-bootstrap",
+                        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                        start_background=False)
+    app = create_app(settings, AsyncMongoMockClient().camera_logs)
+
+    @app.get("/api/v1/request-observability-unhandled")
+    async def unhandled():
+        raise ValueError(secret)
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/request-observability-unhandled", headers={
+                "X-Request-ID": "unhandled-request-observability",
+            })
+            event = client.portal.call(client.app.state.repo.db.request_events.find_one, {
+                "requestId": "unhandled-request-observability",
+            })
+    finally:
+        access_logger.removeHandler(capture)
+
+    assert response.status_code == 500
+    assert event["httpStatus"] == 500
+    assert event["outcome"] == "FAILED"
+    assert event["responseComplete"] is True
+    assert event["reason"] == "服务内部异常"
+    assert event["errorType"] == "ValueError"
+    assert event["responseBytes"] == len(response.content)
+    assert secret not in str(event)
+    access = [record for record in records if record.name == "camera_logs.access"]
+    assert len(access) == 1
+    assert access[0].context["error"]["type"] == "ValueError"
+    assert access[0].context["error"]["message"] == "服务内部异常"
+    assert access[0].context["error"]["frames"][-1]["function"] == "unhandled"
+    assert access[0].exc_info is None
+    assert response.headers["X-Request-ID"] == "unhandled-request-observability"
+    assert secret not in observability.JsonLineFormatter().format(access[0])
+
+
+def test_streaming_response_error_after_completed_send_does_not_emit_second_500(tmp_path):
+    """首块已经发送后发生的处理错误不得覆盖 200 响应，但事件仍保留失败关联。"""
+    secret = "stream-private-credential"
+    settings = Settings(_env_file=None, bootstrap_token="synthetic-bootstrap",
+                        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                        start_background=False)
+    app = create_app(settings, AsyncMongoMockClient().camera_logs)
+
+    @app.get("/api/v1/request-observability-stream")
+    async def stream():
+        async def chunks():
+            yield b"first-"
+            raise ValueError(secret)
+
+        return StreamingResponse(chunks())
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/request-observability-stream", headers={
+            "X-Request-ID": "request-observability-stream",
+        })
+        event = client.portal.call(client.app.state.repo.db.request_events.find_one, {
+            "requestId": "request-observability-stream",
+        })
+
+    assert response.status_code == 200
+    assert response.content == b"first-"
+    assert event["httpStatus"] == 200
+    assert event["responseComplete"] is True
+    assert event["responseBytes"] == len(response.content)
+    assert event["outcome"] == "FAILED"
+    assert event["reason"] == "响应完成后处理失败"
+    assert event["errorType"] == "ValueError"
+    assert event["errorFrames"][-1]["function"] == "chunks"
+    assert secret not in str(event)
+
+
+def test_completed_accepted_response_with_late_error_is_not_left_pending(tmp_path):
+    """202 已被完整发送后出现异常属于失败处理，不能继续显示为异步等待。"""
+    settings = Settings(_env_file=None, bootstrap_token="synthetic-bootstrap",
+                        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                        start_background=False)
+    app = create_app(settings, AsyncMongoMockClient().camera_logs)
+
+    @app.get("/api/v1/request-observability-accepted")
+    async def accepted():
+        async def chunks():
+            yield b"accepted"
+            raise RuntimeError("accepted-private-credential")
+
+        return StreamingResponse(chunks(), status_code=202)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/request-observability-accepted", headers={
+            "X-Request-ID": "request-observability-accepted",
+        })
+        event = client.portal.call(client.app.state.repo.db.request_events.find_one, {
+            "requestId": "request-observability-accepted",
+        })
+
+    assert response.status_code == 202 and response.content == b"accepted"
+    assert event["responseComplete"] is True
+    assert event["outcome"] == "FAILED"
+    assert event["reason"] == "响应完成后处理失败"
+    assert event["errorType"] == "RuntimeError"

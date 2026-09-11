@@ -88,22 +88,69 @@ async def make_worker(tmp_path, *, nfs_server_ip=""):
     return worker, repo
 
 
-async def test_timeout_publishes_unknown_without_late_sample_overwrite(tmp_path, monkeypatch):
+async def test_sampling_error_is_logged_without_sensitive_exception_text(tmp_path, monkeypatch, caplog):
+    """采样降级必须保留诊断类型，但异常中的路径或凭据不得原样输出。"""
+    worker, _ = await make_worker(tmp_path)
+
+    def fail():
+        raise OSError("synthetic-private-credential")
+
+    monkeypatch.setattr(worker.telemetry.sampler, "sample", fail)
+    await worker.telemetry._sample()
+    assert worker.telemetry.value["status"] == "UNKNOWN"
+    records = [record for record in caplog.records if "节点遥测采样失败" in record.getMessage()]
+    assert len(records) == 1
+    assert records[0].context["errorType"] == "OSError"
+    assert "synthetic-private-credential" not in str(records[0].__dict__)
+
+
+async def test_timeout_publishes_unknown_without_late_sample_overwrite(tmp_path, monkeypatch, caplog):
     """超时后即使线程稍后返回，也只能保留无时间戳的未知采样。"""
     worker, _ = await make_worker(tmp_path)
-    monkeypatch.setattr(worker.telemetry, "sample", lambda: {"sampledAt": datetime.now(UTC), "status": "OK"})
+    monkeypatch.setattr(worker.telemetry.sampler, "sample", lambda: {"sampledAt": datetime.now(UTC), "status": "OK"})
 
     async def timed_out(awaitable, *, timeout):
         raise TimeoutError
 
-    monkeypatch.setattr("camera_logs.node.worker.asyncio.wait_for", timed_out)
-    await worker._sample_telemetry()
-    assert worker.telemetry_value == {
+    monkeypatch.setattr("camera_logs.node.telemetry_runtime.asyncio.wait_for", timed_out)
+    await worker.telemetry._sample()
+    assert any("节点遥测采样超时" in record.message for record in caplog.records)
+    assert worker.telemetry.value == {
         "sampledAt": None,
         "scope": "UNKNOWN",
         "status": "UNKNOWN",
         "error": "TimeoutError",
     }
+
+
+async def test_close_waits_for_thread_after_sampling_timeout(tmp_path, monkeypatch):
+    """超时采样的线程仍在运行时，关闭不能先返回并留下后台线程。"""
+    worker, _ = await make_worker(tmp_path)
+    timed_out, started, release = asyncio.Event(), threading.Event(), threading.Event()
+
+    def slow_sample():
+        started.set()
+        release.wait(1)
+        return {"sampledAt": datetime.now(UTC), "scope": "HOST", "status": "OK"}
+
+    async def force_timeout(awaitable, *, timeout):
+        timed_out.set()
+        raise TimeoutError
+
+    monkeypatch.setattr(worker.telemetry.sampler, "sample", slow_sample)
+    monkeypatch.setattr("camera_logs.node.telemetry_runtime.asyncio.wait_for", force_timeout)
+    worker.telemetry.start_if_idle()
+    await timed_out.wait()
+    assert await asyncio.to_thread(started.wait, 1)
+    closing = asyncio.create_task(worker.telemetry.close())
+    try:
+        done, pending = await asyncio.wait({closing}, timeout=.05)
+        assert not done
+        assert closing in pending
+    finally:
+        release.set()
+        await asyncio.gather(closing, return_exceptions=True)
+    assert worker.telemetry.work.done()
 
 
 async def test_tick_keeps_one_telemetry_thread_and_close_waits_for_it(tmp_path, monkeypatch):
@@ -119,7 +166,7 @@ async def test_tick_keeps_one_telemetry_thread_and_close_waits_for_it(tmp_path, 
         release.wait(1)
         return {"sampledAt": datetime.now(UTC), "scope": "HOST", "status": "OK"}
 
-    monkeypatch.setattr(worker.telemetry, "sample", slow_sample)
+    monkeypatch.setattr(worker.telemetry.sampler, "sample", slow_sample)
     disk = SimpleNamespace(used=10, total=100, free=90)
     with patch("camera_logs.node.worker.shutil.disk_usage", return_value=disk):
         await worker.tick()
@@ -131,8 +178,8 @@ async def test_tick_keeps_one_telemetry_thread_and_close_waits_for_it(tmp_path, 
         assert not closing.done()
         release.set()
         await closing
-    assert worker.telemetry_task.cancelled()
-    assert worker.telemetry_work.done()
+    assert worker.telemetry.task.cancelled()
+    assert worker.telemetry.work.done()
 
 
 async def test_pressure_blocks_only_new_admission_and_reports_nfs_capability(tmp_path):
@@ -151,7 +198,7 @@ async def test_pressure_blocks_only_new_admission_and_reports_nfs_capability(tmp
         stop=AsyncMock(),
     )
     worker.active["active"] = runtime
-    worker.telemetry_value = {"sampledAt": datetime.now(UTC), "scope": "HOST", "status": "OK", "cpuPercent": 96, "memoryPercent": 10}
+    worker.telemetry.value = {"sampledAt": datetime.now(UTC), "scope": "HOST", "status": "OK", "cpuPercent": 96, "memoryPercent": 10}
     disk = SimpleNamespace(used=10, total=100, free=90)
     with patch("camera_logs.node.worker.shutil.disk_usage", return_value=disk), patch("camera_logs.node.worker.SessionRuntime") as factory:
         await worker.tick()

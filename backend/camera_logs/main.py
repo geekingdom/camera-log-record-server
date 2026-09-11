@@ -92,7 +92,7 @@ def create_app(settings=None, db=None):
 
     @app.exception_handler(Exception)
     async def unexpected_error(request, exc):
-        """完整堆栈由请求中间件记录，对外仅返回关联号而不暴露内部路径或凭据。"""
+        """对外只返回安全说明；请求中间件记录异常类型及安全的结构化位置。"""
         request.state.safe_error = "服务内部异常"
         return JSONResponse(status_code=500, content={"error": {
             "code": "INTERNAL_ERROR", "message": "服务内部异常，请凭请求编号查询运行日志",

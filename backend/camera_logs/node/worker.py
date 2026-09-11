@@ -18,7 +18,7 @@ from camera_logs.common.ownership import owner_filter
 from camera_logs.node.health import resource_pressure
 from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
-from camera_logs.node.telemetry import TelemetrySampler
+from camera_logs.node.telemetry_runtime import TelemetryRuntime
 from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
 
 logger = logging.getLogger(__name__)
@@ -45,28 +45,7 @@ class Worker:
         self.coredump_scan_task = None
         self.last_coredump_scan = 0.0
         self.instance_id = uuid.uuid4().hex
-        self.telemetry = TelemetrySampler(repo.settings.host_proc_root)
-        self.telemetry_task = None
-        self.telemetry_work = None
-        self.telemetry_value = {"sampledAt": None, "scope": "UNKNOWN", "status": "UNKNOWN"}
-
-    async def _sample_telemetry(self):
-        """采样异常只保留未知状态，心跳继续写入其它节点字段。"""
-        work = self.telemetry_work = asyncio.create_task(asyncio.to_thread(self.telemetry.sample))
-        try:
-            self.telemetry_value = await asyncio.wait_for(asyncio.shield(work), timeout=2)
-        except TimeoutError:
-            self.telemetry_value = {"sampledAt": None, "scope": "UNKNOWN", "status": "UNKNOWN", "error": "TimeoutError"}
-            try:
-                await work
-            except Exception as error:  # noqa: BLE001 - 超时后的线程异常不得影响节点心跳。
-                logger.warning("节点 telemetry 超时后采样失败 type=%s", type(error).__name__)
-        except asyncio.CancelledError:
-            # to_thread 无法中断；关闭者也持有 work，重复取消不会允许下一周期重叠采样。
-            await asyncio.shield(work)
-            raise
-        except Exception as error:  # noqa: BLE001 - 采样库或主机 proc 失败不能影响节点心跳。
-            self.telemetry_value = {"sampledAt": None, "scope": "UNKNOWN", "status": "UNKNOWN", "error": type(error).__name__}
+        self.telemetry = TelemetryRuntime(repo.settings.host_proc_root)
 
     def discard_closed(self, runtime):
         """仅移除已关闭的同一对象，等待期间安装的后继实例不得被旧回调移除。"""
@@ -294,10 +273,7 @@ class Worker:
             return await connect(config)
         root = self.repo.settings.log_root
         root.mkdir(parents=True, exist_ok=True)
-        if (self.telemetry_task is None or self.telemetry_task.done()) and (
-            self.telemetry_work is None or self.telemetry_work.done()
-        ):
-            self.telemetry_task = asyncio.create_task(self._sample_telemetry())
+        self.telemetry.start_if_idle()
         # NFS 扫描与采集会话完全分离，且最多一个后台任务；扫描慢不能阻塞心跳或写入。
         if self.coredump_scanner is None:
             from camera_logs.coredumps.scanner import CoredumpScanner
@@ -326,7 +302,7 @@ class Worker:
             and not mismatch
             and not reported.get("isolated", False)
             and write_latency["writeLatencyMs"] <= WRITE_LATENCY_LIMIT_MS
-            and not resource_pressure({"telemetry": self.telemetry_value})
+            and not resource_pressure({"telemetry": self.telemetry.value})
         )
         current_bytes = sum(r.input_bytes for r in self.active.values())
         tick = time.monotonic()
@@ -338,7 +314,7 @@ class Worker:
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
             **write_latency,
             "configurationMismatch": mismatch,
-            "configuredUrl": config.get("url"), "telemetry": self.telemetry_value,
+            "configuredUrl": config.get("url"), "telemetry": self.telemetry.value,
             "capabilities": {"coredumpNfs": bool(self.repo.settings.nfs_server_ip)},
             "accepting": accepting}}, upsert=True)
         for task_id, future in list(self.releases.items()):
@@ -492,11 +468,7 @@ class Worker:
         if self.coredump_scan_task:
             self.coredump_scan_task.cancel()
             tasks.append(self.coredump_scan_task)
-        if self.telemetry_task:
-            self.telemetry_task.cancel()
-            tasks.append(self.telemetry_task)
-        if self.telemetry_work and self.telemetry_work is not self.telemetry_task:
-            tasks.append(self.telemetry_work)
+        await self.telemetry.close()
         await asyncio.gather(*tasks, return_exceptions=True)
 
 

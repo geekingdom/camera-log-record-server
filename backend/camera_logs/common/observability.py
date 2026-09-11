@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from starlette.datastructures import MutableHeaders
+from starlette.middleware.errors import ServerErrorMiddleware
 from starlette.requests import Request
 
 from camera_logs.common.database import now
@@ -142,6 +143,29 @@ def request_actor(request: Any) -> str | None:
     return None
 
 
+def _error_frames(error: BaseException) -> list[dict[str, str | int]]:
+    """提取有限的结构化异常位置，保留定位能力但不记录正文、源码或局部变量。"""
+    frames = traceback.extract_tb(error.__traceback__)
+    return [
+        {"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+        for frame in frames[-16:]
+    ]
+
+
+def _failure_reason(request: Any, status: int, complete: bool, error: BaseException | None) -> str | None:
+    """选择可持久化的失败说明，禁止将任意异常正文写入访问日志或事件。"""
+    if error is not None and status < 400 and complete:
+        return "响应完成后处理失败"
+    configured = getattr(request.state, "safe_error", None)
+    if configured:
+        return redact_text(str(configured))
+    if error is None:
+        return None
+    if status >= 500:
+        return "服务内部异常"
+    return "响应传输中断"
+
+
 def log_request(
     request: Any,
     *,
@@ -152,8 +176,9 @@ def log_request(
     logger: logging.Logger | None = None,
     response_complete: bool = True,
     response_bytes: int = 0,
+    error_reason: str | None = None,
 ) -> None:
-    """写入不含 query、header、body 的访问日志；异常附带已脱敏追踪。"""
+    """写入不含 query、header、body 的访问日志；异常仅保留安全说明与结构化定位帧。"""
     logger = logger or logging.getLogger("camera_logs.access")
     route = getattr(getattr(request, "scope", {}), "get", lambda *_: None)("route")
     path = getattr(route, "path", None) or request.url.path
@@ -170,8 +195,11 @@ def log_request(
         "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
     }
     if error is not None:
-        context["error"] = {"type": type(error).__name__, "message": redact_text(str(error))}
-        logger.error("request failed", extra={"context": context}, exc_info=error)
+        context["error"] = {
+            "type": type(error).__name__, "message": error_reason or "请求处理异常",
+            "frames": _error_frames(error),
+        }
+        logger.error("request failed", extra={"context": context})
     elif response_complete:
         logger.info("request completed", extra={"context": context})
     else:
@@ -225,9 +253,10 @@ class RequestLoggingMiddleware:
         finally:
             fallback = 499 if isinstance(failure, asyncio.CancelledError) else 500
             final_status = status if status is not None else fallback
+            reason = _failure_reason(request, final_status, complete, failure)
             try:
                 log_request(request, status=final_status, started_at=started_at, error=failure,
-                            response_complete=complete, response_bytes=sent_bytes)
+                            response_complete=complete, response_bytes=sent_bytes, error_reason=reason)
                 app = scope.get("app")
                 repo = getattr(getattr(app, "state", None), "repo", None)
                 path = request.url.path
@@ -238,10 +267,9 @@ class RequestLoggingMiddleware:
                 # 取消中的协程不能再等待数据库 I/O，否则 finally 可能覆盖调用方的取消语义。
                 cancelled = failure is not None and isinstance(failure, asyncio.CancelledError)
                 if repo and not cancelled and path.startswith("/api/v1/") and recordable:
-                    outcome = "UNKNOWN" if not complete else "PENDING" if final_status == 202 else (
-                        "FAILED" if final_status >= 400 else "SUCCEEDED")
+                    outcome = "UNKNOWN" if not complete else "FAILED" if failure is not None else (
+                        "PENDING" if final_status == 202 else "FAILED" if final_status >= 400 else "SUCCEEDED")
                     level = "ERROR" if outcome == "FAILED" else "WARNING" if outcome == "UNKNOWN" else "INFO"
-                    safe_error = getattr(request.state, "safe_error", None)
                     await self._persist_request_event(repo, {
                         "createdAt": now(),
                         "requestId": request.state.request_id, "actor": request_actor(request),
@@ -251,16 +279,24 @@ class RequestLoggingMiddleware:
                         "responseBytes": sent_bytes,
                         "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
                         "taskId": request.path_params.get("task_id") if hasattr(request, "path_params") else None,
-                        "reason": redact_text(str(safe_error or failure)) if (safe_error or failure) else None,
+                        "reason": reason,
+                        "errorType": type(failure).__name__ if failure is not None else None,
+                        "errorFrames": _error_frames(failure) if failure is not None else None,
                     })
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logging.getLogger("camera_logs.access").warning("请求事件持久化失败", exc_info=True)
+            except Exception as error:  # noqa: BLE001 - 排障写入不得覆盖原请求结果或异常传播。
+                logging.getLogger("camera_logs.access").warning("请求事件持久化失败", extra={"context": {
+                    "errorType": type(error).__name__, "errorFrames": _error_frames(error),
+                }})
             finally:
                 request_context.reset(context_token)
 
 
 def add_request_logging(app: Any) -> None:
-    """向 FastAPI 应用安装请求日志中间件，保持调用方无需了解实现细节。"""
+    """安装内层 500 响应器与外层观察器，使未开始响应的异常也能被实际发送链路观测。"""
+    handler = app.exception_handlers.get(Exception) or app.exception_handlers.get(500)
+    # add_middleware 后注册者最先运行：先放置错误响应器，再放置外层观察器。
+    # 已开始的流式响应由错误响应器原样重抛，绝不发送第二个 500 响应。
+    app.add_middleware(ServerErrorMiddleware, handler=handler)
     app.add_middleware(RequestLoggingMiddleware)
