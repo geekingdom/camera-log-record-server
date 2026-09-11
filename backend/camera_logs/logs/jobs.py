@@ -35,6 +35,7 @@ from camera_logs.logs.time_range import TimeRangeScan
 OUTPUT_LIMIT = 20_000_000_000
 TEMP_LIMIT = 100_000_000_000
 SEARCH_SNAPSHOT_LIMIT = 20_000_000_000
+SEARCH_RESULTS_TEXT_LIMIT = 8 * 1024 * 1024
 _jobs = asyncio.Semaphore(2)
 _temp_reservation_lock = asyncio.Lock()
 _temp_reservations: dict[str, int] = {}
@@ -342,18 +343,40 @@ def _scan_archive(path: Path, scanner: StreamSearch, file: dict, cancelled, arch
 
 def _search_archive(path: Path, needle: bytes, start: datetime, end: datetime, cancelled, archive_member: str | None = None):
     """单归档扫描入口，保留偏移与文本的调用合同。"""
-    for result in _scan_archive(path, StreamSearch(needle, start, end), {}, cancelled, archive_member):
+    scanner = StreamSearch(needle, start, end)
+    for result in _scan_archive(path, scanner, {}, cancelled, archive_member):
+        yield result["offset"], result["text"]
+    for result in scanner.finish():
         yield result["offset"], result["text"]
 
 
-def _search_limited(path: Path, scanner: StreamSearch, file: dict, limit: int, cancelled, archive_member: str | None = None):
-    """累计有界结果，匹配器继续保留本作业下一连续文件所需的尾部。"""
-    results = []
+def _search_limited(path: Path, scanner: StreamSearch, file: dict, limit: int, text_limit: int,
+                    cancelled, archive_member: str | None = None):
+    """在线程内限制结果正文，避免单文件先累积大结果集再交给事件循环。"""
+    results, text_bytes = [], 0
     for result in _scan_archive(path, scanner, file, cancelled, archive_member):
+        size = len(result.get("text", "").encode("utf-8"))
+        if text_bytes + size > text_limit:
+            return results, text_bytes, True
         results.append(result)
+        text_bytes += size
         if len(results) >= limit:
-            break
-    return results
+            return results, text_bytes, True
+    return results, text_bytes, False
+
+
+def _finish_search_limited(scanner: StreamSearch, limit: int, text_limit: int):
+    """提交最后一行时同样在线程内执行条数和正文预算限制。"""
+    results, text_bytes = [], 0
+    for result in scanner.finish():
+        size = len(result["text"].encode("utf-8"))
+        if text_bytes + size > text_limit:
+            return results, text_bytes, True
+        results.append(result)
+        text_bytes += size
+        if len(results) >= limit:
+            return results, text_bytes, True
+    return results, text_bytes, False
 
 
 async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
@@ -362,7 +385,7 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     start = datetime.fromisoformat(job["start"])
     end = datetime.fromisoformat(job["end"])
     scanner = StreamSearch(needle, start, end) if needle else TimeRangeScan(start, end)
-    results, truncated = [], False
+    results, truncated, result_text_bytes = [], False, 0
     progress: JobProgress | None = job.get("_progress")
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()
     # 每次只保留一个快照；以实际写入上限预留，不能把正文大小当作含索引压缩包上限。
@@ -375,17 +398,28 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 raise asyncio.CancelledError()
             file = await _file_doc(repo, frozen)
             path, temporary = await _archive(repo, frozen, scratch, include_index=True, max_output_bytes=SEARCH_SNAPSHOT_LIMIT)
-            matches = await job_thread(_search_limited, path, scanner, frozen,
-                1000 - len(results), stopped.is_set, file.get("archiveMember"), stop=stopped)
+            matches, text_bytes, bounded = await job_thread(
+                _search_limited, path, scanner, frozen, 1000 - len(results),
+                SEARCH_RESULTS_TEXT_LIMIT - result_text_bytes, stopped.is_set,
+                file.get("archiveMember"), stop=stopped,
+            )
             if temporary:
                 await job_thread(path.unlink, missing_ok=True)
             if progress is not None:
                 await progress.advance()
-            for match in matches:
-                results.append(match)
-                if len(results) >= 1000:
-                    truncated = True
-                    return {"results": results, "truncated": truncated}
+            results.extend(matches)
+            result_text_bytes += text_bytes
+            if bounded:
+                return {"results": results, "truncated": True}
+        if isinstance(scanner, StreamSearch):
+            matches, text_bytes, bounded = await job_thread(
+                _finish_search_limited, scanner, 1000 - len(results),
+                SEARCH_RESULTS_TEXT_LIMIT - result_text_bytes, stop=stopped,
+            )
+            results.extend(matches)
+            result_text_bytes += text_bytes
+            if bounded:
+                return {"results": results, "truncated": True}
         return {"results": results, "truncated": truncated}
     finally:
         stopped.set()

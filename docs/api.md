@@ -256,7 +256,13 @@ GET /api/v1/tasks/{taskId}/log-hours?page=1&pageSize=100
 
 小时 `status` 为 `READY`、`OPEN` 或 `UNAVAILABLE`。`integrity` 为 `VERIFIED`（所有 READY 片段有摘要）、`UNVERIFIED`（已封存但缺少摘要）、`OPEN`（仍在写入）或 `UNAVAILABLE`（存在删除中或不可用片段）。它描述目录中的片段状态，不替代下载作业的最终清单校验。
 
-读取开放原始文件的一段内容：
+按文件 ID 查询安全元数据（需要 `logs:read`）：
+
+```http
+GET /api/v1/log-files/{fileId}
+```
+
+返回文件身份、任务/运行/会话、状态、登记字节数及归档文件名，不返回宿主机路径、索引路径或凭据。可使用搜索结果的 `fileId` 获取元数据，再读取开放或已归档日志的一段内容：
 
 ```http
 GET /api/v1/log-files/{fileId}/content?offset=0&limit=65536
@@ -315,7 +321,17 @@ Content-Type: application/json
 {"taskId":"task-example","keyword":"ERROR","start":"2026-09-08T00:00:00+00:00","end":"2026-09-08T01:00:00+00:00"}
 ```
 
-通过 `GET /api/v1/log-searches/{jobId}/results?page=1&pageSize=100` 读取结果。每条记录包含 `fileId`、`offset`、`text`；`truncated=true` 表示已达到服务端匹配上限。
+通过 `GET /api/v1/log-searches/{jobId}/results?page=1&pageSize=100` 读取结果。非空关键词的结果按完整匹配行返回，不含相邻行和行尾换行符；同一逻辑行多个命中只返回一项。
+
+```json
+{"fileId":"file-example","offset":6,"lineStartFileId":"file-example","lineStartOffset":0,"text":"[DSP] ERROR device disconnected"}
+```
+
+`fileId/offset` 是首个范围内命中的原始字节位置；`lineStartFileId/lineStartOffset` 是完整逻辑行的起点，连续分卷中的一行可能从另一个文件开始。前端从命中位置附近读取上下文并定位该行。单条匹配行最多256KiB，命中超长行会明确失败，不会静默截断正文；每次最多1000条结果，正文总计最多8MiB，达到任一结果预算时 `truncated=true`，应缩小时间范围或读取原始文件。空关键词的字节片段契约保持不变。
+
+非 UTF-8 设备正文的 `text` 使用替换字符预览，并返回 `encodingError=true`；原始字节通过文件内容接口读取。旧归档缺少旁路时间索引时，非空关键词沿用兼容检索，不能据此声称按精确接收时间筛选；空关键词时间查询仍明确拒绝缺失索引。
+
+日志工作台默认展示上海时区当天归档，使用单日选择；页面历史检索使用所选日期的上海自然日范围。实时查找针对当前有界视图，段内查找针对当前读取段，均不等于扫描全部历史日志。字号、级别着色、匹配高亮、暂停视图和清空视图只影响浏览器显示。
 
 日志搜索和下载作业的执行者失联且租约到期后，状态查询返回 `status=FAILED`、`error=WORKER_EXECUTION_LOST` 和中文 `errorMessage`。服务不会自动重做不确定的文件操作，调用方可使用新的幂等键重新提交；原幂等键仍返回原作业。旧执行租约、令牌和实例ID不公开。该行为只适用于带执行租约的日志作业，详情见[作业恢复说明](log-job-recovery.md)。
 

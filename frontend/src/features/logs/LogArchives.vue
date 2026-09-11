@@ -8,13 +8,36 @@ import { confirmAction } from "../../shared/confirm";
 import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
 import LogFileViewer from "./LogFileViewer.vue";
+import { shanghaiDayBounds, shanghaiToday } from "./archiveDate";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
 const props = defineProps<{ taskId: string; canDownload?: boolean }>();
-const date = ref<string>(), hourPage = ref(1), hourTotal = ref(0), progress = ref(0);
-const file = ref<LogFile>(), viewerOpen = ref(false), resultPage = ref(1), resultTotal = ref(0), resultJob = ref("");
+const date = ref(shanghaiToday()), hourPage = ref(1), hourTotal = ref(0), progress = ref(0);
+const file = ref<LogFile>(), viewerOpen = ref(false), viewerOffset = ref(0), viewerKeyword = ref(""), resultPage = ref(1), resultTotal = ref(0), resultJob = ref(""), searchKeyword = ref("");
 const integrityLabels: Record<string, string> = { VERIFIED: "归档已校验", OPEN: "正在写入", UNAVAILABLE: "含不可用片段", UNVERIFIED: "待确认摘要" };
 const jobStatusLabels: Record<string, string> = { QUEUED: "等待执行", RUNNING: "正在执行", SUCCEEDED: "已完成", FAILED: "执行失败", CANCELLED: "已取消", EXPIRED: "已过期" };
-function viewFile(selectedFile: LogFile) { file.value = selectedFile; viewerOpen.value = true; }
+function viewFile(selectedFile: LogFile) {
+  fileLookupGeneration++;
+  file.value = selectedFile;
+  viewerOffset.value = 0;
+  viewerKeyword.value = "";
+  viewerOpen.value = true;
+}
+async function viewSearchResult(row: Record<string, unknown>) {
+  const fileId = typeof row.fileId === "string" ? row.fileId : "";
+  const offset = typeof row.offset === "number" && Number.isFinite(row.offset) ? row.offset : 0;
+  if (!fileId) return ElMessage.error("检索结果缺少日志文件定位信息");
+  const inLoadedHours = hours.value.flatMap((hour) => hour.files || []).find((item) => item.id === fileId);
+  const current = ++fileLookupGeneration;
+  try {
+    // 当前日期目录通常已有文件元数据；跨页或归档目录未加载时再向服务端按 ID 获取。
+    const selectedFile = inLoadedHours || await api.logFile(fileId);
+    if (current !== fileLookupGeneration) return;
+    file.value = selectedFile;
+    viewerOffset.value = Math.max(0, offset);
+    viewerKeyword.value = searchKeyword.value;
+    viewerOpen.value = true;
+  } catch (error) { if (current === fileLookupGeneration) fail(error); }
+}
 function displayResultText(row: Record<string, unknown>) {
   return stripTerminalControls(typeof row.text === "string" ? row.text : "");
 }
@@ -25,12 +48,12 @@ const results = ref<Record<string, unknown>[]>([]),
   busy = ref(false),
   allowPartial = ref(false);
 const status = ref(""),
-  truncated = ref(false),
-  range = ref<[Date, Date]>();
+  truncated = ref(false);
 let generation = 0;
 let hoursGeneration = 0;
 let resultsGeneration = 0;
 let jobGeneration = 0;
+let fileLookupGeneration = 0;
 let runningJob: { id: string; kind: "downloads" | "log-searches" } | undefined;
 function fail(error: unknown) {
   ElMessage.error(error instanceof Error ? error.message : "操作失败");
@@ -109,15 +132,12 @@ async function download() {
 async function search() {
   if (busy.value) return;
   if (!keyword.value.trim()) return ElMessage.warning("请输入关键词");
-  if (
-    range.value &&
-    (range.value[1].getTime() - range.value[0].getTime() > 86400000 ||
-      range.value[1] <= range.value[0])
-  )
-    return ElMessage.warning("查询范围必须大于零且不超过24小时");
+  const range = shanghaiDayBounds(date.value);
   const current = ++jobGeneration;
   // 新检索必须作废旧结果页请求，避免旧作业的分页响应覆盖新作业首屏。
   resultsGeneration++;
+  fileLookupGeneration++;
+  viewerOpen.value = false;
   busy.value = true;
   results.value = [];
   resultPage.value = 1;
@@ -126,11 +146,12 @@ async function search() {
   progress.value = 0;
   truncated.value = false;
   try {
+    searchKeyword.value = keyword.value.trim();
     const job = await api.search(
       props.taskId,
-      keyword.value,
-      range.value?.[0].toISOString(),
-      range.value?.[1].toISOString(),
+      searchKeyword.value,
+      range.start,
+      range.end,
     );
     if (current !== jobGeneration) return;
     runningJob = { id: job.id, kind: "log-searches" };
@@ -169,8 +190,19 @@ async function loadResultPage() {
   } catch (error) { if (workspace === generation && current === resultsGeneration) fail(error); }
 }
 watch(date, () => {
+  // 更换上海自然日后，旧检索作业及其分页响应不得回写到新日期。
+  jobGeneration++;
+  runningJob = undefined;
+  busy.value = false;
+  status.value = "";
+  progress.value = 0;
+  resultsGeneration++;
+  fileLookupGeneration++;
   if (hourPage.value !== 1) hourPage.value = 1;
   else void load();
+  results.value = [];
+  resultTotal.value = 0;
+  resultJob.value = "";
 });
 watch(hourPage, () => void load());
 watch(
@@ -187,6 +219,7 @@ watch(
     status.value = "";
     progress.value = 0;
     viewerOpen.value = false;
+    fileLookupGeneration++;
     results.value = [];
     busy.value = false;
   },
@@ -197,6 +230,7 @@ onBeforeUnmount(() => {
   hoursGeneration++;
   resultsGeneration++;
   jobGeneration++;
+  fileLookupGeneration++;
   runningJob = undefined;
 });
 </script>
@@ -206,7 +240,7 @@ onBeforeUnmount(() => {
       <h2>小时归档</h2>
       <el-button :icon="RefreshCw" aria-label="刷新小时归档" @click="load" />
     </div>
-    <div class="archive-date"><el-date-picker v-model="date" type="date" value-format="YYYY-MM-DD" placeholder="全部日期（上海时区）" aria-label="归档日期" clearable /></div>
+    <div class="archive-date"><el-date-picker v-model="date" type="date" value-format="YYYY-MM-DD" placeholder="归档日期" aria-label="归档日期（上海时区）" :clearable="false" /></div>
     <div class="archive-table">
       <el-table
         scrollbar-always-on
@@ -254,12 +288,7 @@ onBeforeUnmount(() => {
     </div>
     <el-progress v-if="busy || status === 'SUCCEEDED'" :percentage="Math.min(100, Math.max(0, progress))" :status="status === 'SUCCEEDED' ? 'success' : undefined" />
     <h3>历史检索</h3>
-    <el-date-picker
-      v-model="range"
-      type="datetimerange"
-      start-placeholder="开始时间"
-      end-placeholder="结束时间"
-    />
+    <div class="search-scope">检索范围：{{ date }} 00:00:00 至次日 00:00:00（上海时间）</div>
     <div class="search-row">
       <el-input
         v-model="keyword"
@@ -281,13 +310,10 @@ onBeforeUnmount(() => {
       size="small"
       max-height="320"
       empty-text="暂无匹配结果"
-      ><el-table-column
-        prop="offset"
-        label="字节位置"
-        width="100" /><el-table-column label="日志片段"><template #default="{ row }">{{ displayResultText(row) }}</template></el-table-column>
+      ><el-table-column prop="offset" label="字节位置" width="112" /><el-table-column label="完整匹配行" min-width="380"><template #default="{ row }"><span class="search-line">{{ displayResultText(row) }}</span></template></el-table-column><el-table-column label="操作" width="126" fixed="right"><template #default="{ row }"><el-button size="small" :icon="FileSearch" @click="viewSearchResult(row)">查看具体信息</el-button></template></el-table-column>
     </el-table>
     <el-pagination v-if="resultTotal > 100" v-model:current-page="resultPage" :page-size="100" :total="resultTotal" layout="total, prev, pager, next" @current-change="loadResultPage" />
-    <LogFileViewer v-model="viewerOpen" :file="file" />
+    <LogFileViewer v-model="viewerOpen" :file="file" :initial-offset="viewerOffset" :keyword="viewerKeyword" />
   </section>
 </template>
 <style scoped>
@@ -304,6 +330,8 @@ onBeforeUnmount(() => {
   gap: 8px;
   margin: 12px 0;
 }
+.search-scope { margin: 6px 0 10px; color: #697a79; font-size: 12px; }
+.search-line { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 :deep(.el-date-editor) {
   max-width: 100%;
 }

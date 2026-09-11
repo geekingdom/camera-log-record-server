@@ -68,6 +68,7 @@ watch(selected, resetCurrentTask, { immediate: true });
 onBeforeUnmount(() => { stateGeneration++; window.clearTimeout(stateTimer); });
 </script>
 <template>
+  <div class="logs-workbench" :class="{ 'is-live': selected && tab === 'live' }">
   <section v-if="selected" class="current-log-task" aria-label="当前日志任务">
     <div class="current-task-details">
       <span class="current-task-label">当前任务</span>
@@ -92,13 +93,16 @@ onBeforeUnmount(() => { stateGeneration++; window.clearTimeout(stateTimer); });
   </div>
   <LogTaskPicker v-model="pickerOpen" @selected="changeTask" />
   <el-tabs v-if="selected" v-model="tab" class="logs-workspace-tabs">
-    <el-tab-pane label="实时打印" name="live"><LiveLogs v-if="tab === 'live'" :key="selected" :task-id="selected" :can-send="canSendCurrent" @history="tab = 'archives'" /></el-tab-pane>
+    <el-tab-pane label="实时打印" name="live"><LiveLogs v-if="tab === 'live'" :key="selected" :task-id="selected" :can-send="canSendCurrent" :user-id="props.userId" @history="tab = 'archives'" /></el-tab-pane>
     <el-tab-pane label="小时归档与检索" name="archives"><LogArchives v-if="tab === 'archives'" :key="selected" :task-id="selected" :can-download="props.canDownload" /></el-tab-pane>
     <el-tab-pane label="命令记录" name="commands"><CommandHistory v-if="tab === 'commands'" :key="selected" :task-id="selected" /></el-tab-pane>
   </el-tabs>
+  </div>
 </template>
 <style scoped>
-.current-log-task, .log-workspace-selector { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 22px; padding: 12px 0; color: #526467; border-bottom: 1px solid #e4e9ea; }
+.logs-workbench { min-width: 0; }
+.logs-workbench.is-live { display: flex; flex-direction: column; height: calc(100dvh - 128px); min-height: 480px; }
+.current-log-task, .log-workspace-selector { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; padding: 6px 0 10px; color: #526467; border-bottom: 1px solid #e4e9ea; }
 .current-task-details { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
 .current-task-details strong { color: #26393d; overflow-wrap: anywhere; }
 .current-task-label { color: #76868a; font-size: 13px; }
@@ -110,10 +114,16 @@ onBeforeUnmount(() => { stateGeneration++; window.clearTimeout(stateTimer); });
 .log-workspace-selector .el-button { margin-left: auto; }
 .logs-workspace-tabs { min-width: 0; width: 100%; }
 .logs-workspace-tabs :deep(.el-tabs__content), .logs-workspace-tabs :deep(.el-tab-pane) { min-width: 0; max-width: 100%; }
+.is-live .logs-workspace-tabs { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.is-live .logs-workspace-tabs :deep(.el-tabs__header) { margin: 0; flex-shrink: 0; }
+.is-live .logs-workspace-tabs :deep(.el-tabs__content) { flex: 1; min-height: 0; }
+.is-live .logs-workspace-tabs :deep(.el-tab-pane) { height: 100%; }
+.is-live :deep(.runtime) { height: 100%; min-height: 0; margin: 0; }
 @media(max-width: 520px) {
   .current-log-task { align-items: stretch; flex-direction: column; }
   .current-task-actions { justify-content: flex-end; }
   .log-workspace-selector { align-items: flex-start; flex-wrap: wrap; }
   .log-workspace-selector .el-button { margin-left: 38px; }
+  .logs-workbench.is-live { min-height: 580px; }
 }
 </style>

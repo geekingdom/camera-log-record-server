@@ -135,6 +135,17 @@ def install_log_routes(app):
                                   {"offset": offset, "limit": limit}, client=request.app.state.node_http,
                                   downstream=response)
 
+    @app.get("/api/v1/log-files/{identifier}")
+    async def log_file(identifier: str, user: User):
+        """读取定位整行所需的安全文件元数据，禁止泄露节点文件系统路径。"""
+        file = await repo().get("files", identifier)
+        authorize(user, "logs:read", file["taskId"])
+        fields = (
+            "id", "taskId", "runId", "sessionId", "nodeId", "status", "bytes", "hour",
+            "archiveName", "rawFileName", "segmentNumber", "firstSequence", "lastSequence",
+        )
+        return {name: file[name] for name in fields if name in file}
+
     async def create_job(body, request, user, kind):
         """冻结任务文件目录，申请保留期保护，并通过幂等键提交后台作业。"""
         authorize(user, "logs:download" if kind == "DOWNLOAD" else "logs:read", body.taskId)

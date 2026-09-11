@@ -17,12 +17,13 @@ NOW = datetime(2026, 9, 9, tzinfo=UTC)
 
 
 def assert_match(result, keyword):
-    """严格检查唯一命中身份和偏移；正文合同是上下文片段，不保证完整行。"""
+    """严格检查唯一命中身份和偏移；正文合同是命中所在完整逻辑行。"""
     assert result["status"] == "SUCCEEDED"
     assert len(result["results"]) == 1
     item = result["results"][0]
     assert (item["fileId"], item["offset"]) == ("file-0", 7)
     assert keyword in item["text"]
+    assert "\n" not in item["text"]
 
 
 async def search(tmp_path, chunks, keyword, *, start=NOW - timedelta(minutes=1), end=NOW + timedelta(minutes=1), archived=False):
@@ -143,6 +144,17 @@ def test_search_excludes_cross_file_match_when_start_byte_time_is_outside_range(
 
     result = asyncio.run(scenario())
     assert result["results"] == []
+
+
+def test_search_excludes_cross_file_match_when_start_byte_is_exactly_end(tmp_path):
+    """跨文件关键词按首字节归属，等于 end 时必须被半开区间排除。"""
+    async def scenario():
+        return await search(tmp_path, [
+            {"data": b"prefix nee", "sequence": 32, "received_at": NOW + timedelta(seconds=1)},
+            {"data": b"dle suffix", "sequence": 33, "received_at": NOW},
+        ], b"needle", start=NOW, end=NOW + timedelta(seconds=1))
+
+    assert asyncio.run(scenario())["results"] == []
 
 
 def test_search_matches_utf8_keyword_split_across_continuous_files(tmp_path):

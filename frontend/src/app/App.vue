@@ -264,7 +264,7 @@ onBeforeUnmount(() => {
         @logout="logout"
       >
         <LoginPanel v-if="!authenticated" :busy="busy" :login="login" />
-        <section v-else-if="!user?.mustChangePassword" class="workspace">
+        <section v-else-if="!user?.mustChangePassword" class="workspace" :class="{ 'logs-workspace-shell': activeTab === 'logs' }">
           <el-empty
             v-if="activeTab === 'empty'"
             description="当前账号没有可用的平台权限"
@@ -450,7 +450,7 @@ onBeforeUnmount(() => {
             layout="total, prev, pager, next"
           />
         </section>
-        <footer v-if="authenticated" class="workspace-footer">
+        <footer v-if="authenticated && activeTab !== 'logs'" class="workspace-footer">
           <span>设备日志记录平台</span><span>SSH / Telnet</span>
         </footer>
       </AppNavigation>
@@ -466,6 +466,7 @@ onBeforeUnmount(() => {
         initialResource: selectedResource,
         templates,
         canEdit: !selectedTask || owns(selectedTask),
+        userId: user?.id,
       }"
       :listeners="{
         'update:modelValue': (value: boolean) => (taskEditorOpen = value),

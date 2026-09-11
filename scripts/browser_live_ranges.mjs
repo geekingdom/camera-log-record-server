@@ -128,9 +128,15 @@ page.on("console", message => { if (message.type() === "error") errors.push(mess
 async function openPrimaryLiveLogs() {
   await page.getByRole("tab", { name: "日志工作台", exact: true }).click();
   await page.getByRole("heading", { name: "日志工作台", exact: true }).waitFor();
-  await page.getByRole("combobox", { name: "选择日志任务", exact: true }).click();
-  await page.getByRole("option", { name: /实时缺口模拟任务 A/ }).click();
-  await page.keyboard.press("Escape");
+  await chooseTask(primaryTask.name, "选择任务");
+}
+
+async function chooseTask(name, button) {
+  await page.getByRole("button", { name: button, exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "选择日志任务", exact: true });
+  await picker.getByText(name, { exact: true }).click();
+  await picker.getByRole("button", { name: "确认切换", exact: true }).click();
+  await picker.waitFor({ state: "hidden" });
 }
 
 async function assertNoHorizontalOverflow(width, label) {
@@ -264,9 +270,7 @@ try {
   assert.equal(await page.getByText("STALE_RANGE_TEST", { exact: true }).count(), 0, "关闭后的陈旧读取不得写入页面");
 
   // 任务切换会卸载旧范围；主任务的迟到 socket 与读取均不能污染任务 B。
-  await page.getByRole("combobox", { name: "选择日志任务", exact: true }).click();
-  await page.getByRole("option", { name: /实时缺口模拟任务 B/ }).click();
-  await page.keyboard.press("Escape");
+  await chooseTask(secondaryTask.name, "切换任务");
   await page.getByText(/实时缺口模拟任务 B/).first().waitFor();
   assert.equal(await page.getByRole("button", { name: "查看省略范围", exact: true }).count(), 0, "切换任务后不得保留旧任务缺口入口");
   await page.getByRole("button", { name: "继续视图", exact: true }).count().catch(() => 0);

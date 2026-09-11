@@ -13,7 +13,7 @@ import CommandHistory from "../commands/CommandHistory.vue";
 import CoredumpMonitorControl from "./CoredumpMonitorControl.vue";
 import { useCoredumpMonitorStatus } from "./useCoredumpMonitorStatus";
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource; canEdit?: boolean }>();
+const props = defineProps<{ task?: Task; templates: Template[]; initialWorkspace?: string; initialResource?: Resource; canEdit?: boolean; userId?: string }>();
 const emit = defineEmits<{ saved: [] }>();
 const permissions = usePermissions();
 const canSave = computed(() => (!props.task || props.canEdit === true) && permissions.can(props.task ? "tasks:write" : "tasks:create"));
@@ -454,7 +454,7 @@ async function save() {
         </el-form>
       </el-tab-pane>
       <el-tab-pane v-if="props.task && permissions.can('logs:read')" label="实时打印" name="live"
-        ><LiveLogs v-if="open && workspace === 'live'" :task-id="props.task.id" :can-send="permissions.can('commands:send')" @history="workspace = 'archives'"
+        ><LiveLogs v-if="open && workspace === 'live'" :task-id="props.task.id" :can-send="props.canEdit && permissions.can('commands:send')" :user-id="props.userId" @history="workspace = 'archives'"
       /></el-tab-pane>
       <el-tab-pane v-if="props.task && permissions.can('logs:read')" label="小时归档" name="archives"
         ><LogArchives

@@ -1,5 +1,6 @@
 // 统一 API 边界：负责认证、幂等键、字段白名单和可关联服务端日志的错误信息。
 import type {
+  LogFile,
   CommandExecution,
   CoredumpExport,
   CoredumpFile,
@@ -268,6 +269,7 @@ export const api = {
   logHours: (id: string, date?: string, page = 1) => request<Page<LogHour>>(`/tasks/${id}/log-hours${query(page, 24, { date })}`),
   // 缺口阅读器关闭或切换任务时取消读取，避免失效查询继续占用连接。
   fileContent: (id: string, offset = 0, limit = 65536, signal?: AbortSignal) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`, { signal }),
+  logFile: (id: string) => request<LogFile>(`/log-files/${encodeURIComponent(id)}`),
   command: (id: string, command: InitialCommand) =>
     request<CommandExecution>(`/tasks/${id}/commands`, {
       method: "POST",

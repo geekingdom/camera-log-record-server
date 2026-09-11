@@ -46,6 +46,10 @@ button:focus-visible, a:focus-visible { outline: 2px solid #087f72; outline-offs
 .topbar-actions { gap: 22px; }
 .refresh-time { font-size: 11px; color: #8a969b; font-variant-numeric: tabular-nums; }
 .workspace { width: 100%; max-width: 1800px; padding: 0 36px 32px; margin: 0 auto; flex: 1; }
+/* 日志工作台优先分配可用屏幕给终端，侧栏伸缩时跟随网格宽度，不固定正文宽度。 */
+.workspace.logs-workspace-shell { max-width: none; padding: 0 20px 12px; }
+.logs-workspace-shell .page-head { padding: 10px 0 8px; }
+.logs-workspace-shell .page-head h1 { font-size: 16px; line-height: 24px; }
 .page-head { justify-content: space-between; padding: 34px 0 28px; gap: 16px; }
 .page-head > div { display: flex; gap: 10px; }
 .page-head .el-button + .el-button { margin-left: 0; }

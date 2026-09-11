@@ -180,13 +180,13 @@ def test_search_cancellation_signals_thread_and_waits_before_removing_scratch(tm
         async def archive(*_args, **_kwargs):
             return tmp_path / "archive.tar.gz", True
 
-        def search_limited(_path, _scanner, _file, _limit, cancelled, _archive_member=None):
+        def search_limited(_path, _scanner, _file, _limit, _text_limit, cancelled, _archive_member=None):
             entered.set()
             release.wait()
             if cancelled():
                 saw_cancelled.set()
             thread_exited.set()
-            return []
+            return [], 0, False
 
         original_rmtree = jobs.shutil.rmtree
 
@@ -234,7 +234,7 @@ async def test_search_discards_each_temporary_snapshot_before_next_file(tmp_path
         return path, True
 
     monkeypatch.setattr(jobs, "_archive", archive)
-    monkeypatch.setattr(jobs, "_search_limited", lambda *_args: [])
+    monkeypatch.setattr(jobs, "_search_limited", lambda *_args: ([], 0, False))
     job = {"id": "sequential", "files": [file.copy(), file.copy()], "keyword": "needle",
         "start": "2026-09-08T00:00:00+00:00", "end": "2026-09-10T00:00:00+00:00"}
     assert (await jobs._search(repo, job))["results"] == []

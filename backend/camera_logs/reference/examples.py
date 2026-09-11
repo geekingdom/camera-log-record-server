@@ -113,11 +113,16 @@ def response_example(path, method, status):
             return "<二进制 .tar.gz 或 .zip；支持 Range: bytes=0-1048575>"
         return {"fileId": "file-example", "sessionId": "session-example", "data": "bG9nCg==", "nextOffset": 4}
     if path.endswith("/results"):
-        return page({"fileId": "file-example", "offset": 0, "length": 4, "receivedAt": STAMP,
-                     "data": "bG9nCg==", "text": "log\n"}) | {"truncated": False, "status": "SUCCEEDED"}
+        return page({"fileId": "file-example", "offset": 6, "lineStartFileId": "file-example",
+                     "lineStartOffset": 0, "text": "[DSP] ERROR device disconnected"}) | {
+                         "truncated": False, "status": "SUCCEEDED"}
     if path.endswith("/log-hours"):
         return page({"hourId": STAMP, "hour": STAMP, "status": "READY", "integrity": "VERIFIED",
                      "files": [{"id": "file-example", "bytes": 1024}], "bytes": 1024, "archiveBytes": 512})
+    if "/log-files/" in path:
+        return {"id": "file-example", "taskId": "task-example", "status": "READY", "bytes": 10485760,
+                "nodeId": "collector-01", "runId": "run-example", "sessionId": "session-example",
+                "archiveName": "设备日志-192.0.2.10-20260911-0800-0900.tar.gz"}
     if path.endswith("/command-executions"):
         return page(COMMAND | {"kind": "SCHEDULED", "commandId": "periodic-example", "command": "ps",
                                "commandSource": "SNAPSHOT", "attempt": 2, "totalExecutions": 5,
