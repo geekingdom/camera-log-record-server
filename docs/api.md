@@ -148,7 +148,7 @@ POST /api/v1/tasks/{taskId}/resume
 
 ## 设备认证记录
 
-`GET /api/v1/resources/{resourceId}/authentication-records` 使用 `tasks:read` 权限。可同时传 `result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR`、`start/end` 带时区 ISO 8601 时间范围及 `identityChanged=true|false`；省略对应参数表示不限制该条件，时间范围为左闭右开。响应采用标准 `items/total/page/pageSize`，每项含认证时间、触发来源、结果和型号/序列号前后值；首次认证 `initialAuthentication=true` 且不计为设备更换，认证失败不修改身份。软删除不删除认证记录；部署前未保存的逐次认证结果不推测补造。
+`GET /api/v1/resources/{resourceId}/authentication-records` 使用 `tasks:read` 权限。可同时传 `result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR`、`start/end` 带时区 ISO 8601 时间范围及 `identityChanged=true|false`；省略对应参数表示不限制该条件，时间范围为左闭右开。响应按 `createdAt,id` 稳定倒序：界面与兼容调用继续使用 `items/total/page/pageSize`，长期历史调用可传上一页返回的 `nextCursor`，该路径不执行全量计数，响应中的 `total` 为 `null`。游标不能和大于 1 的 `page` 同时使用。每项含认证时间、触发来源、结果和型号/序列号前后值；首次认证 `initialAuthentication=true` 且不计为设备更换，认证失败不修改身份。软删除不删除认证记录；部署前未保存的逐次认证结果不推测补造。
 
 ## 命令与模板
 

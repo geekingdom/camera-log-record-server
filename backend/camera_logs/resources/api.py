@@ -13,7 +13,12 @@ from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_owner
 from camera_logs.resources.address_claim import claim_address, release_address
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
-from camera_logs.resources.authentication_records import record_authentication
+from camera_logs.resources.authentication_records import (
+    after_cursor_clause,
+    decode_cursor,
+    encode_cursor,
+    record_authentication,
+)
 from camera_logs.resources.health import grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.models import CoredumpMonitorStatus, ResourceInput, ResourcePatch
@@ -127,10 +132,12 @@ def install_resource_routes(app, repo, listing):
     async def authentication_records(identifier: str, user: User, page: int = Query(1, ge=1),
                                      pageSize: int = Query(20, ge=1, le=100), result: str | None = None,
                                      start: str | None = None, end: str | None = None,
-                                     identityChanged: bool | None = None):
-        """分页读取认证历史；软删资源仍可读取既有安全记录。"""
+                                     identityChanged: bool | None = None, cursor: str | None = Query(None, max_length=1024)):
+        """分页读取认证历史；游标路径避免长期记录翻深页时扫描并丢弃前页结果。"""
         authorize(user, "tasks:read")
         await repo().get("resources", identifier)
+        if cursor and page != 1:
+            raise HTTPException(422, "使用认证记录游标时 page 必须为 1")
         query = {"resourceId": identifier}
         if result:
             if result not in {"SUCCESS", "AUTH_FAILED", "OFFLINE", "ERROR"}:
@@ -148,9 +155,23 @@ def install_resource_routes(app, repo, listing):
             if lower.tzinfo is None or upper.tzinfo is None or upper <= lower:
                 raise HTTPException(422, "时间范围必须带时区且结束晚于开始")
             query["createdAt"] = {"$gte": lower.astimezone(UTC), "$lt": upper.astimezone(UTC)}
+        if cursor:
+            created_at, last_id = decode_cursor(cursor, identifier)
+            query = {"$and": [query, after_cursor_clause(created_at, last_id)]}
+        database_cursor = repo().db.authentication_records.find(query, {"_id": 0}).sort(
+            [("createdAt", -1), ("id", -1)]
+        )
+        if cursor:
+            # 多取一条仅用于判断是否还有下一页，游标请求不执行全量 count_documents。
+            records = [item async for item in database_cursor.limit(pageSize + 1)]
+            has_more = len(records) > pageSize
+            records = records[:pageSize]
+            return {"items": [public(item) for item in records], "total": None, "page": 1,
+                    "pageSize": pageSize, "nextCursor": encode_cursor(records[-1]) if has_more else None}
         total = await repo().db.authentication_records.count_documents(query)
-        cursor = repo().db.authentication_records.find(query, {"_id": 0}).sort([("createdAt", -1), ("id", -1)]).skip((page - 1) * pageSize).limit(pageSize)
-        return {"items": [public(item) async for item in cursor], "total": total, "page": page, "pageSize": pageSize}
+        records = [public(item) async for item in database_cursor.skip((page - 1) * pageSize).limit(pageSize)]
+        return {"items": records, "total": total, "page": page, "pageSize": pageSize,
+                "nextCursor": encode_cursor(records[-1]) if len(records) == pageSize else None}
 
     @app.get("/api/v1/resources/{identifier}/coredump-monitor", response_model=CoredumpMonitorStatus)
     async def coredump_monitor_status(identifier: str, user: User):

@@ -114,9 +114,25 @@ class Repository:
         await self.db.jobs.create_index([("nodeId", 1), ("status", 1), ("createdAt", 1), ("id", 1)])
         await self.db.authentication_records.create_index("id", unique=True)
         await self.db.authentication_records.create_index(
-            [("resourceId", 1), ("result", 1), ("identityChanged", 1), ("createdAt", -1)]
+            [("resourceId", 1), ("result", 1), ("identityChanged", 1), ("createdAt", -1), ("id", -1)],
+            name="authentication_records_resource_result_identity_time",
         )
-        await self.db.authentication_records.create_index([("resourceId", 1), ("createdAt", -1), ("id", -1)])
+        # 认证记录会随周期探测持续累积。四个索引分别覆盖无筛选、仅结果、仅身份
+        # 变化和两项筛选；时间及 ID 尾键同时服务稳定倒序游标，避免深页 skip 扫描。
+        await self.db.authentication_records.create_index(
+            [("resourceId", 1), ("createdAt", -1), ("id", -1)],
+        )
+        await self.db.authentication_records.create_index(
+            [("resourceId", 1), ("result", 1), ("createdAt", -1), ("id", -1)],
+            name="authentication_records_resource_result_time",
+        )
+        await self.db.authentication_records.create_index(
+            [("resourceId", 1), ("identityChanged", 1), ("createdAt", -1), ("id", -1)],
+            name="authentication_records_resource_identity_time",
+        )
+        # 认证历史按最近一次状态观测保留三个月；无 expiresAt 的旧记录不受 TTL 影响。
+        await self.db.authentication_records.create_index("expiresAt", expireAfterSeconds=0,
+                                                           name="authentication_records_expires_at")
         await self.db.commands.create_index([("taskId", 1), ("createdAt", -1)])
         await self.db.commands.create_index([("taskId", 1), ("commandId", 1), ("createdAt", -1)])
         await self.db.commands.create_index([("taskId", 1), ("kind", 1), ("createdAt", -1)])

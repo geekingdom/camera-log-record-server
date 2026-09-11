@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 from camera_logs.common.database import now
-from camera_logs.resources.authentication_records import record_authentication
+from camera_logs.resources.authentication_records import encode_cursor, record_authentication
 from camera_logs.resources.health import _apply_success
 
 pytest_plugins = ("test_resources",)
@@ -65,3 +65,37 @@ def test_deleted_resource_remains_readable_and_reader_requires_authentication(re
     resource_client.portal.call(repo.db.authentication_records.insert_one, {"id": "history", "resourceId": "camera", "result": "OFFLINE", "identityChanged": False, "createdAt": now()})
     assert resource_client.get("/api/v1/resources/camera/authentication-records").status_code == 200
     assert resource_client.get("/api/v1/resources/camera/authentication-records", headers={"Authorization": "Bearer bad"}).status_code == 401
+
+
+def test_authentication_history_cursor_paginates_without_count(resource_client):
+    """长期认证历史使用排序键游标，跨相同时间戳不重复且不依赖全量计数。"""
+    repo, resource = resource_client.app.state.repo, _resource()
+    resource_client.portal.call(repo.db.resources.insert_one, resource)
+    stamp = now()
+    records = [{"id": identifier, "resourceId": "camera", "result": "SUCCESS", "identityChanged": False,
+                "createdAt": stamp} for identifier in ("c", "b", "a")]
+    resource_client.portal.call(repo.db.authentication_records.insert_many, records)
+    first = resource_client.get("/api/v1/resources/camera/authentication-records", params={"pageSize": 2})
+    assert first.status_code == 200
+    payload = first.json()
+    assert [item["id"] for item in payload["items"]] == ["c", "b"]
+    assert payload["nextCursor"]
+
+    second = resource_client.get("/api/v1/resources/camera/authentication-records", params={
+        "pageSize": 2, "cursor": payload["nextCursor"]})
+    assert second.status_code == 200
+    assert [item["id"] for item in second.json()["items"]] == ["a"]
+    assert second.json()["total"] is None
+    assert second.json()["nextCursor"] is None
+
+
+def test_authentication_history_rejects_foreign_or_malformed_cursor(resource_client):
+    """游标必须绑定原资源且格式错误统一返回 422。"""
+    repo, resource = resource_client.app.state.repo, _resource()
+    resource_client.portal.call(repo.db.resources.insert_one, resource)
+    stamp = now()
+    record = {"id": "a", "resourceId": "camera", "result": "SUCCESS", "identityChanged": False, "createdAt": stamp}
+    resource_client.portal.call(repo.db.authentication_records.insert_one, record)
+    foreign = encode_cursor(record | {"resourceId": "other"})
+    assert resource_client.get("/api/v1/resources/camera/authentication-records", params={"cursor": foreign}).status_code == 422
+    assert resource_client.get("/api/v1/resources/camera/authentication-records", params={"cursor": "%%%"}).status_code == 422
