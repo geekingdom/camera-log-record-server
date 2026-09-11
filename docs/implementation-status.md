@@ -1,8 +1,10 @@
 # 当前状态总表
 
-核对日期：2026-09-11。本轮核对起点为 `b5c6ffb`；用户明确继续完整平台目标后，接续前端模块化及导航稳定性，并修复截图发现的窄屏资源表格遮挡。数据库请求已在上一轮验证及提交，不重复实施。最新源码和远端同步以Git为准。下方 CI 属于历史证据，不能证明本轮修改通过。先前阶段与实验描述已移至 [本轮前历史快照](history/2026-09-10-before-node-dashboard.md)。
+核对日期：2026-09-11。本轮核对起点为 `5a0ff89`；继续完整平台目标，核查采集连接、行时间戳及小时归档，修复Telnet协商阶段取消/超时的TCP泄漏。前端导航和数据库请求已提交，不重复实施。最新源码和远端同步以Git为准。下方 CI 属于历史证据，不能证明本轮修改通过。先前阶段与实验描述已移至 [本轮前历史快照](history/2026-09-10-before-node-dashboard.md)。
 
-## 当前状态：导航刷新与窄屏资源表格已修复
+## 当前状态：Telnet协商取消连接收尾已修复
+
+`collection/connections.py`在connection_made时捕获writer，把open_connection协商阶段纳入失败清理；取消路径有界独立关闭，二次取消立即abort，后台异常自行记录，原始异常不被覆盖。保留LogTelnetClient协议和批量接收优化。真实本地TCP回归确认取消/超时后EOF，旧`5a0ff89`在同一取消测试明确EOF超时。全量1161项通过，最终测试补强后3项及Ruff/diff通过；本机Worker已重载，health正常、心跳0.915秒。重载前确认RUNNING任务和活动日志作业均0，未操作34/35。验证及测试收尾修正见[Telnet协商清理](history/2026-09-11-telnet-connect-cleanup.md)。
 
 最终慢轮询浏览器回归确认：一次响应阻塞跨过下一个5秒周期，不增加并发任务查询；期间切页后只补一次最终刷新。独立复审已确认原轮询并发缺口关闭。
 
@@ -116,7 +118,7 @@
 | R05 表单、初始化排序、正整数定时参数、IME、密码保留 | `common/models.py`、`TaskEditor.vue`、`CommandEditor.vue`，已实现 | 模型/表单测试，历史浏览器冒烟 | 二次确认见 R16 | 统一交互验收 |
 | R06 模板 CRUD/版本/独立副本与计数 | 模板模块、命令编辑器，已实现 | 模板/任务测试 | 目标服务器待部署；软删同创建者名称继续占用 | 目标部署后验证模板到任务流程 |
 | R07 逐路隔离、有序写入、重复正文保留及行首上海时间 | `collection/collector.py`、`collection/runtime.py`、`logs/storage.py`、`collection/line_prefix.py`，部分验收 | 存储/故障测试及短时摘要报告；ANSI CSI/OSC、CRLF跨包精确字节与重复正文回归，连接/存储/归档联合43项通过 | 500 路全天未证明；SSH PTY 不证明跨独立流时序 | 独立源序号验收 |
-| R08 SSH 按凭据连接、不以变化指纹拦截，各协议保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`；`verify_ssh_lifecycle.py`显式ID、端点分页预检及finally停止 | 既有34/35实机证据保留，见[35实机记录](history/2026-09-10-ssh-35-lifecycle.md)；本轮真实telnetlib3服务端覆盖首连和空闲重连的两次login/password、初始化、预算1到2及停止两socket EOF，相邻17项通过 | 长期背压、集群迁移未验收；真实Telnet硬件未联调；35的13.651秒含检测与重连全过程，不是纯检测延迟 | 继续集群与真实网络故障验收；实机生命周期仅在空闲窗口验证 |
+| R08 SSH 按凭据连接、不以变化指纹拦截，各协议保活及十秒空闲重连 | `collection/connections.py`、`collector.py`、`runtime.py`；新增Telnet协商期可观测writer与有界清理 | 34/35历史实机证据保留；真实Telnet登录/重连/预算/EOF回归；本轮旧版协商取消EOF超时、新版通过，全量1161及最后3项通过 | 长期背压、集群迁移未验收；真实Telnet硬件未联调；35的13.651秒含检测与重连全过程，不是纯检测延迟 | 继续集群与真实网络故障验收；实机生命周期仅在空闲窗口验证 |
 | R09 初始化/定时队列、断线续计、重启归零、发送预算 | `commands/reservation.py`、`collection/runtime.py`，数据库原子性已实现 | 祖先提交`92e01d6`及真实Mongo验证；新增真实Telnet重连测试同run两session各执行一次、预算2，MongoMock回调仅证明续计语义 | socket 不属于数据库事务，设备执行结果仍可未知 | 保持 UNKNOWN、不补发；勿重复实现预算事务 |
 | R10 手动优先、不跨会话、断线拒绝与审计 | `commands/manual_submission.py` 将入队、幂等映射和审计同事务提交；已加载本机API | 历史真实副本集证明审计失败/取消整体回滚、同键并发返回同一命令、提交确认丢失后只读恢复、停止后同键重放；临时数据已清理 | 最终 DB 检查至 socket 写入仍需物理隔离；历史 PENDING 仅重放，不补造审计 | 继续 R11 接管隔离 |
 | R11 幂等启停、受控重启、租约/代次隔离 | `tasks/editing.py` 编辑、资源声明、停止操作、审计同事务，安全排队编辑保留RUNNING；Worker已知失败保持STOPPED | `175b938` Linux CI 34328314712通过；真实副本集回滚/竞争/确认丢失与排队调度验证；本机API/Worker已更新，34实机暂停恢复停止通过 | 跨节点物理隔离未证明 | 继续旧实例接管隔离，目标Worker部署需受控维护 |

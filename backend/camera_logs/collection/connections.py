@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 CLOSE_TIMEOUT_SECONDS = 10
+TELNET_CONNECT_TIMEOUT_SECONDS = 30
 # 海康设备单台最多允许五个 SSH 会话。按事件循环隔离信号量，避免测试或
 # 多个 Worker 进程之间错误共享 asyncio 对象；进程级限制由每个 Worker 独立执行。
 MAX_SSH_CONNECTIONS_PER_ENDPOINT = 5
@@ -260,24 +261,68 @@ def _log_telnet_client(**kwargs):
     return LogTelnetClient(**kwargs)
 
 
+def _observed_telnet_client(holder: dict[str, Any]):
+    """创建保留原始批量接收能力的工厂，并在 TCP 接通时登记 writer。
+
+    telnetlib3 在 ``open_connection`` 返回前会等待协议协商；超时或取消可能发生在
+    此窗口。提前保存 writer 才能主动关闭已经连通、却还没有交给调用方的 TCP。
+    """
+    def factory(**kwargs):
+        client = _log_telnet_client(**kwargs)
+        original = client.connection_made
+
+        def observed(transport):
+            original(transport)
+            holder["writer"] = client.writer
+
+        client.connection_made = observed
+        return client
+
+    return factory
+
+
+async def _cleanup_failed_telnet_connection(writer: Any | None, error: BaseException) -> None:
+    """尽力收尾建连或登录失败的 Telnet writer，始终保留原始异常。"""
+    if writer is None:
+        return
+    async def close_safely() -> None:
+        try:
+            await _close_telnet_writer(writer)
+        except BaseException:
+            # 后台收尾必须自行消费异常，避免二次取消后遗留未读取 Task exception。
+            logger.exception("Telnet 建连失败后的连接收尾异常")
+
+    if not isinstance(error, asyncio.CancelledError):
+        await close_safely()
+        return
+    # 当前调用已取消时，独立收尾不能再次被同一取消信号中断。
+    cleanup = asyncio.create_task(close_safely())
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        # 二次取消立即中止底层传输；后台任务仍会有界结束并自行消费其异常。
+        _abort_transport(writer)
+
+
 async def _connect_telnet(task: Mapping[str, Any], host: str, port: int) -> Connection:
+    """建立 Telnet 会话；协议协商尚未返回 writer 时也可回收已接通 TCP。"""
     import telnetlib3
 
-    reader, writer = await asyncio.wait_for(
-        telnetlib3.open_connection(host=host, port=port, encoding=False,
-                                 client_factory=_log_telnet_client), timeout=30)
-    username, password = task.get("username"), task.get("password")
+    observed: dict[str, Any] = {}
+    writer = None
     try:
+        reader, writer = await asyncio.wait_for(
+            telnetlib3.open_connection(host=host, port=port, encoding=False,
+                                     client_factory=_observed_telnet_client(observed)),
+            timeout=TELNET_CONNECT_TIMEOUT_SECONDS,
+        )
+        username, password = task.get("username"), task.get("password")
         prefix = b""
         if username and password:
             prefix = await _telnet_login(reader, writer, str(username), str(password), task)
         return _TelnetConnection(reader, writer, prefix=prefix, interval=float(task.get("telnetKeepaliveInterval", 30)))
-    except BaseException:
-        # 登录失败的根因必须返回给调用方；清理失败只记录并强制中止传输。
-        try:
-            await _close_telnet_writer(writer)
-        except BaseException:
-            logger.exception("Telnet 登录失败后的连接收尾异常")
+    except BaseException as error:
+        await _cleanup_failed_telnet_connection(writer or observed.get("writer"), error)
         raise
 
 
