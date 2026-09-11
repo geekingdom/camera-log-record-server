@@ -124,6 +124,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_audited_mutations.py
       - name: 验证资源地址并发唯一与事务回滚
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_address.py
+      - name: 验证手动设备认证历史与审计原子提交
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_manual_authentication_audit.py
       - name: 验证管理配置正式接口审计回滚与来源权限
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_admin_audit_transactions.py
       - name: 验证任务控制并发幂等与审计事务
