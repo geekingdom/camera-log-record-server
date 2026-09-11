@@ -7,13 +7,18 @@ services:
     command: ["sh", "-ec", "mkdir -p /data/data /data/service-logs; chown 10001:10001 /data /data/data /data/service-logs"]
     volumes: ["${HOST_LOG_ROOT:-worker-data}:/data"]
   worker:
-    build: {context: .., dockerfile: deploy/worker.Dockerfile}
+    build:
+      context: ..
+      dockerfile: deploy/worker.Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-http://af.hikvision.com.cn/artifactory/api/pypi/pypi/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-af.hikvision.com.cn}
     env_file: ${DEPLOY_ENV_FILE:-../.env.worker}
     environment:
       MONGO_URI: ${MONGO_URI:?请填写与后端相同的MongoDB副本集}
       NODE_ID: ${NODE_ID:?请填写稳定且唯一的节点ID}
       NODE_URL: ${NODE_URL:?请填写后端可达的节点URL}
-      NODE_PORT: ${NODE_PORT:-8001}
+      NODE_PORT: ${NODE_PORT:-18081}
       HOST_PROC_ROOT: /host/proc
       LOG_ROOT: /var/lib/camera-logs/data
       KNOWN_HOSTS: /etc/camera-logs/known_hosts

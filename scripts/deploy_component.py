@@ -64,7 +64,8 @@ def validate(component, config):
                 raise ValueError()
         except (ValueError, TypeError) as error:
             raise ValueError("ENCRYPTION_KEY 必须是与后端一致的 Fernet 密钥") from error
-        port = int(values.get("NODE_PORT" if component == "worker" else "API_PORT", "8000"))
+        default_port = "18081" if component == "worker" else "18080"
+        port = int(values.get("NODE_PORT" if component == "worker" else "API_PORT", default_port))
         if not 1 <= port <= 65535:
             raise ValueError("服务端口必须在 1 到 65535 之间")
         if component == "worker":

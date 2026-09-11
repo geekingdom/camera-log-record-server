@@ -1,6 +1,6 @@
 // 内置文档只读取服务端目录；它必须沿用平台的 Cookie 与服务 Token 认证边界。
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { describeSchema, loadApiReference } from "./apiReference";
+import { describeObjectFields, describeSchema, loadApiReference } from "./apiReference";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -31,5 +31,19 @@ describe("内置接口目录", () => {
     expect(describeSchema({ type: "array", items: { type: "integer", minimum: 1 }, maxItems: 3 }, schemas, false)).toEqual({
       type: "array<integer>", constraints: "可选 · 最多 3 项",
     });
+  });
+
+  it("递归列出嵌套对象与数组元素的正式字段说明", () => {
+    const schemas = {
+      Command: { type: "object", required: ["command"], properties: {
+        command: { type: "string", description: "发送给设备的一条单行命令正文。" },
+      } },
+    };
+    expect(describeObjectFields({ type: "object", properties: {
+      initialCommands: { type: "array", description: "初始化命令列表。", items: { $ref: "#/components/schemas/Command" } },
+    } }, schemas)).toEqual([
+      expect.objectContaining({ path: "initialCommands", description: "初始化命令列表。" }),
+      expect.objectContaining({ path: "initialCommands[].command", description: "发送给设备的一条单行命令正文。", required: true }),
+    ]);
   });
 });

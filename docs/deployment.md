@@ -41,7 +41,9 @@
 
 `ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN`、`INTERNAL_TOKEN` 在同一平台的后端与所有采集节点之间必须一致。独立节点配置故意不自动生成另一套密钥。
 
-独立后端默认只监听 `127.0.0.1:8000`；分机部署将 `API_BIND_IP` 改为内网 IP 或 `0.0.0.0`。`FORWARDED_ALLOW_IPS` 填前端代理实际来源 IP/CIDR，支持逗号分隔。前端容器中的 `127.0.0.1` 指向自身，`BACKEND_UPSTREAM` 应使用后端可达地址。平台白名单限制浏览器/API 客户端来源，不限制设备或串口目标。
+Docker 镜像构建默认使用公司 pip 制品库，可通过 `PIP_INDEX_URL` 与 `PIP_TRUSTED_HOST` 自定义；两项只用于构建依赖，不会进入运行容器环境。外部 CI 示例：`PIP_INDEX_URL=https://pypi.org/simple PIP_TRUSTED_HOST=pypi.org ./deploy-all.sh`。
+
+独立后端默认只监听 `127.0.0.1:18080`；分机部署将 `API_BIND_IP` 改为内网 IP 或 `0.0.0.0`。`FORWARDED_ALLOW_IPS` 填前端代理实际来源 IP/CIDR，支持逗号分隔。前端容器中的 `127.0.0.1` 指向自身，`BACKEND_UPSTREAM` 应使用后端可达地址。平台白名单限制浏览器/API 客户端来源，不限制设备或串口目标。
 
 ## 服务器 A 平台与服务器 B Worker
 
@@ -65,7 +67,7 @@ sudo ./deploy-worker.sh --env-file /etc/camera-logs/worker-b.env
 
 `DATABASE_HOST` 必须是 A 对 B 可达的 IPv4 或 DNS 名称，`DATABASE_BIND_IP` 不得只为 `127.0.0.1`。初始化脚本将公布地址和 `MONGO_PORT_1/2/3` 写入 `rs.conf()`，因此 A、B 和 API 都必须能访问同一地址及三个端口。A 的防火墙应只允许 B、A 本机和需要访问数据库的受控内网来源连接 27017、27018、27019；不要将 MongoDB 无约束暴露到公网。B 也可接入已有原生 A 的单成员 `rs0` URI，不必重建数据库，但成员地址仍必须为 B 可达的非回环地址。
 
-两份带 `DEPLOY_TOPOLOGY=multi-host` 的配置都会自动进行跨机预检，也可显式附加 `--multi-host`。预检拒绝 `mongo1`、`mongo2`、`mongo3`、`api`、`worker` 等 Compose 私网名称。B 的 `NODE_URL` 必须是 API 从 A 主动访问 B 的稳定 HTTP 地址，并与 `NODE_PORT` 一致；它不能填写 `http://worker:8001`。B 的 `HOST_LOG_ROOT` 必须是 B 本机的非根绝对路径，不能与 A 或另一台 Worker 共用。B 入口只启动已有的 `worker.yml`，不启动数据库、API 或前端。
+两份带 `DEPLOY_TOPOLOGY=multi-host` 的配置都会自动进行跨机预检，也可显式附加 `--multi-host`。预检拒绝 `mongo1`、`mongo2`、`mongo3`、`api`、`worker` 等 Compose 私网名称。B 的 `NODE_URL` 必须是 API 从 A 主动访问 B 的稳定 HTTP 地址，并与 `NODE_PORT` 一致；它不能填写 `http://worker:18081`。B 的 `HOST_LOG_ROOT` 必须是 B 本机的非根绝对路径，不能与 A 或另一台 Worker 共用。B 入口只启动已有的 `worker.yml`，不启动数据库、API 或前端。
 
 四个共享值 `MONGO_URI`、`ENCRYPTION_KEY`、`BOOTSTRAP_TOKEN`、`INTERNAL_TOKEN` 必须在 A 的 API 与每个 Worker 上逐字相同。Worker 初始化刻意不会生成这四项，避免节点接入时产生无法解密既有设备密码的新密钥。`DATABASE_NAME` 必须与 `MONGO_URI` 路径中的库名逐字相同，预检会拒绝不一致的 B 配置。
 
@@ -88,9 +90,9 @@ docker compose --env-file /etc/camera-logs/worker-b.env --project-name camera-lo
 | `API_DATA_ROOT` | `api-data` 命名卷 | `/srv/camera-logs/api`，后端服务日志和临时文件根目录 |
 | `MONGO_DATA_1/2/3` | `mongo1-data` 等命名卷 | `/srv/camera-logs/mongo1`、`mongo2`、`mongo3`；独立数据库的三个目录必须不同 |
 | `RETENTION_DAYS` | `7` | 默认日志保留天数；已保存的后台配置优先于环境默认值 |
-| `FRONTEND_PORT` | `5173` | 平台 HTTP 对外访问端口 |
-| `API_PORT` | `8000` | 独立后端监听端口 |
-| `NODE_PORT` | `8001` | 独立节点监听端口，须与公布的 `NODE_URL` 一致 |
+| `FRONTEND_PORT` | `5175` | 平台 HTTP 对外访问端口 |
+| `API_PORT` | `18080` | 独立后端监听端口 |
+| `NODE_PORT` | `18081` | 独立节点监听端口，须与公布的 `NODE_URL` 一致 |
 | `NODE_ID` | 独立节点必填 | 同一平台稳定唯一，例如 `collector-01` |
 | `NODE_CAPACITY` | `100` | 节点采集容量默认值；按磁盘与实际压测能力调整 |
 

@@ -235,6 +235,90 @@ def test_ssh_shell_setup_cancellation_closes_owned_client(monkeypatch, tmp_path)
     assert client.closed
 
 
+def test_ssh_connection_pool_limits_each_endpoint_to_five_sessions(monkeypatch):
+    """同一设备超过五路时等待名额，关闭任一路后才允许第六路建连。"""
+    class Process:
+        def close(self):
+            pass
+
+    class Client:
+        def __init__(self):
+            self.closed = False
+            self.process = Process()
+
+        async def create_process(self, **_kwargs):
+            return self.process
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+    clients = []
+
+    async def fake_connect(*_args, **_kwargs):
+        client = Client()
+        clients.append(client)
+        return client
+
+    monkeypatch.setitem(sys.modules, "asyncssh", SimpleNamespace(connect=fake_connect))
+
+    async def scenario():
+        tasks = [asyncio.create_task(_connect_ssh({"username": "u", "password": "p"}, "198.51.100.7", 22)) for _ in range(6)]
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert len(clients) == 5
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(tasks[5]), timeout=.01)
+        first = await tasks[0]
+        await first.close()
+        sixth = await asyncio.wait_for(tasks[5], timeout=.5)
+        for task in tasks[1:5]:
+            await (await task).close()
+        await sixth.close()
+
+    asyncio.run(scenario())
+
+
+def test_ssh_connection_pool_releases_slot_after_connect_failure(monkeypatch):
+    """建连失败必须在底层清理完成后归还名额，后续连接不能永久饥饿。"""
+    attempts = 0
+
+    async def fake_connect(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionResetError("synthetic connect failure")
+        return Client()
+
+    class Process:
+        def close(self):
+            pass
+
+    class Client:
+        async def create_process(self, **_kwargs):
+            return Process()
+
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            return None
+
+    monkeypatch.setitem(sys.modules, "asyncssh", SimpleNamespace(connect=fake_connect))
+
+    async def scenario():
+        with pytest.raises(ConnectionResetError):
+            await _connect_ssh({"username": "u", "password": "p"}, "198.51.100.8", 22)
+        connection = await asyncio.wait_for(
+            _connect_ssh({"username": "u", "password": "p"}, "198.51.100.8", 22), timeout=.2,
+        )
+        await connection.close()
+
+    asyncio.run(scenario())
+
+
 def test_default_ssh_connection_allows_first_connection_and_changed_host_key():
     """默认模式不登记指纹，同一端口更换设备公钥后仍按账号密码成功连接。"""
     class Server(asyncssh.SSHServer):

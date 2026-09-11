@@ -171,7 +171,7 @@ def _replace_value(path: Path, key: str, value: str):
 
 def initialize_multi_host(path: Path):
     """将常规全平台配置标记为跨机，并预置 A 数据库与本机 Worker 所需字段。"""
-    additions = """\n# 跨机拓扑：服务器A完整平台，服务器B仅Worker；部署器会以管理员密码URL编码生成认证MONGO_URI。\nDEPLOY_TOPOLOGY=multi-host\n# 填写服务器A对B可达的IPv4或DNS地址；DATABASE_BIND_IP可为A内网IPv4或0.0.0.0。\nDATABASE_HOST=\nDATABASE_BIND_IP=\nMONGO_PORT_1=27017\nMONGO_PORT_2=27018\nMONGO_PORT_3=27019\n# A的API和前端代理也必须使用可达地址，不能保留容器服务名。\nAPI_BIND_IP=\nAPI_PORT=8000\nBACKEND_UPSTREAM=\nFORWARDED_ALLOW_IPS=\n# A本机Worker必须使用A可达的稳定地址，不能保留worker容器名。\nNODE_ID=collector-a-01\nNODE_URL=\nNODE_PORT=8001\nNODE_BIND_IP=0.0.0.0\n"""
+    additions = """\n# 跨机拓扑：服务器A完整平台，服务器B仅Worker；部署器会以管理员密码URL编码生成认证MONGO_URI。\nDEPLOY_TOPOLOGY=multi-host\n# 填写服务器A对B可达的IPv4或DNS地址；DATABASE_BIND_IP可为A内网IPv4或0.0.0.0。\nDATABASE_HOST=\nDATABASE_BIND_IP=\nMONGO_PORT_1=27017\nMONGO_PORT_2=27018\nMONGO_PORT_3=27019\n# A的API和前端代理也必须使用可达地址，不能保留容器服务名。\nAPI_BIND_IP=\nAPI_PORT=18080\nBACKEND_UPSTREAM=\nFORWARDED_ALLOW_IPS=\n# A本机Worker必须使用A可达的稳定地址，不能保留worker容器名。\nNODE_ID=collector-a-01\nNODE_URL=\nNODE_PORT=18081\nNODE_BIND_IP=0.0.0.0\n"""
     with path.open("a", encoding="utf-8") as output:
         output.write(additions)
     path.chmod(0o600)

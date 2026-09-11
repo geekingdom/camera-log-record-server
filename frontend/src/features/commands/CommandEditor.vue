@@ -126,23 +126,24 @@ defineExpose({ validate });
   </div>
   <el-collapse v-if="initial.length"
     ><el-collapse-item title="初始化高级设置" name="advanced">
-      <div class="advanced-header" aria-hidden="true"><span>序号</span><span>提示符</span><span>发送后延时（秒）</span><span>等待超时（秒）</span></div>
-      <div class="advanced-help">提示符匹配后才继续；延时是命令写入后的等待时间；超时是等待提示符的最长时间。</div>
       <div v-for="(item, index) in initial" :key="index" class="advanced-row">
-        <span>{{ index + 1 }}</span
-        ><el-input v-model="item.prompt" placeholder="提示符（可选）" :aria-label="`初始化命令 ${index + 1} 提示符`" />
+        <span class="advanced-number">命令 {{ index + 1 }}</span>
+        <label class="advanced-field"><el-tooltip content="可选。等待设备后续输出包含此文本；留空不等待提示符。按字面匹配，不是正则表达式。"><span>提示符匹配（可选）</span></el-tooltip>
+        <el-input v-model="item.prompt" placeholder="例如 #" :aria-label="`初始化命令 ${index + 1} 提示符`" /></label>
+        <label class="advanced-field"><el-tooltip content="当前命令处理结束后、发送下一条初始化命令前的等待时间。0 表示不额外等待。"><span>发送后延时（秒）</span></el-tooltip>
         <el-input-number
           v-model="item.delaySeconds"
           :min="0"
           :max="3600"
           :aria-label="`初始化命令 ${index + 1} 发送后延时秒数`"
-        />
+        /></label>
+        <label class="advanced-field"><el-tooltip content="配置提示符时，等待该提示符的最长时间；留空提示符时此项不生效。"><span>提示符等待超时（秒）</span></el-tooltip>
         <el-input-number
           v-model="item.timeoutSeconds"
           :min="1"
           :max="3600"
           :aria-label="`初始化命令 ${index + 1} 等待超时秒数`"
-        />
+        /></label>
       </div> </el-collapse-item
   ></el-collapse>
   <h3>定时命令</h3>
@@ -189,15 +190,16 @@ defineExpose({ validate });
 <style scoped>
 .initial-row,
 .command-entry,
-.advanced-row,
-.advanced-header {
+.advanced-row {
   display: flex;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
 }
-.advanced-header { color: #718084; font-size: 12px; }
-.advanced-help { color: #8a9699; font-size: 12px; margin: -2px 0 10px 28px; line-height: 1.5; }
+.advanced-row { display: grid; grid-template-columns: 60px minmax(0, 1fr) 170px 180px; align-items: end; }
+.advanced-field { display: flex; flex-direction: column; min-width: 0; gap: 6px; font-size: 12px; color: #526367; }
+.advanced-field .el-input-number { width: 100%; min-width: 0; }
+.advanced-number { align-self: center; font-size: 12px; color: #526367; }
 .initial-row .el-input,
 .command-entry .el-input {
   flex: 1;
@@ -227,7 +229,8 @@ defineExpose({ validate });
     grid-column: 1/-1;
   }
   .advanced-row {
-    flex-wrap: wrap;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
+  .advanced-number, .advanced-field:first-of-type { grid-column: 1 / -1; }
 }
 </style>

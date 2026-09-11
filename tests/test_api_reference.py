@@ -35,6 +35,37 @@ def test_reference_covers_every_public_http_route_and_websocket(client):
                 TypeAdapter(route.body_field.field_info.annotation).validate_python(example)
 
 
+def test_reference_has_real_chinese_descriptions_for_every_input_parameter_and_nested_field(client):
+    """公开目录不得再把未描述字段交给前端猜测，嵌套命令也必须有业务语义。"""
+    reference = client.get("/api/v1/api-reference").json()
+    schemas = reference["schemas"]
+
+    def resolve(schema):
+        if "$ref" in schema:
+            return resolve(schemas[schema["$ref"].rsplit("/", 1)[-1]])
+        return schema
+
+    def assert_described(schema):
+        schema = resolve(schema)
+        for name, field in schema.get("properties", {}).items():
+            assert field.get("description"), f"missing description for request field {name}"
+            assert_described(field)
+        if isinstance(schema.get("items"), dict):
+            assert_described(schema["items"])
+        for key in ("anyOf", "oneOf", "allOf"):
+            for member in schema.get(key, []):
+                assert_described(member)
+
+    for operation in reference["operations"]:
+        for parameter in operation["parameters"]:
+            assert parameter.get("description"), f"missing description for parameter {operation['id']} {parameter['name']}"
+        if operation["requestSchema"]:
+            assert_described(operation["requestSchema"])
+    task_create = next(item for item in reference["operations"] if item["id"] == "POST /api/v1/tasks")
+    assert task_create["requestSchema"]
+    assert schemas["InitialCommand"]["properties"]["prompt"]["description"] == "命令发送后需要等待设备输出匹配的可选提示符。"
+
+
 def test_reference_requires_authentication_and_is_available_to_read_only_token(client):
     token = client.post("/api/v1/service-tokens", json={"name": "文档令牌", "userId": "builtin-admin"}).json()["token"]
     assert client.get("/api/v1/api-reference", headers={"Authorization": "Bearer " + token}).status_code == 200

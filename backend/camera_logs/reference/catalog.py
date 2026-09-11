@@ -1,5 +1,6 @@
 """从实际OpenAPI路径构造完整目录，补齐权限、中文分组及第三方调用说明。"""
 
+from camera_logs.reference.descriptions import describe_parameter, described_schemas
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
@@ -130,7 +131,8 @@ def request_headers(path, method, schema, idempotent):
 def catalog(app):
     """完整枚举公共HTTP接口，再补充OpenAPI没有表达的WebSocket握手与消息。"""
     spec = app.openapi()
-    schemas = spec.get("components", {}).get("schemas", {})
+    # 文档目录使用独立副本补齐中文语义，不能污染 FastAPI 用于接口校验的 OpenAPI 缓存。
+    schemas = described_schemas(spec.get("components", {}).get("schemas", {}))
     operations = []
     for path, methods in spec["paths"].items():
         for method, definition in methods.items():
@@ -142,7 +144,8 @@ def catalog(app):
             title = SPECIAL.get(path.split("/")[-1], TITLES.get(method, verb) + group(path))
             idempotent = method == "post" and (path.split("/")[-1] in {"resources", "tasks", "command-templates", "downloads", "log-searches", "commands", "coredump-exports"})
             headers = request_headers(path, verb, schema, idempotent)
-            parameters = [{**item, "example": schema_example(item.get("schema", {}), schemas, item["name"])}
+            parameters = [{**item, "description": describe_parameter(item),
+                           "example": schema_example(item.get("schema", {}), schemas, item["name"])}
                           for item in definition.get("parameters", [])]
             operations.append({"id": f"{verb} {path}", "method": verb, "path": path, "title": title,
                                "group": group(path), "description": definition.get("description", "按当前权限执行操作，响应字段随状态变化。"),
@@ -151,7 +154,7 @@ def catalog(app):
                                "responseStatus": code, "responseExample": response_example(path, verb, code)})
     operations.append({"id": "WS /api/v1/tasks/{task_id}/logs", "method": "WS", "path": "/api/v1/tasks/{task_id}/logs",
                        "title": "订阅任务实时日志", "group": "日志查询", "description": next(item["text"] for item in GUIDES if item["title"] == "实时日志"),
-                       "permission": "logs:read", "headers": {}, "parameters": [{"name": "task_id", "in": "path", "required": True, "schema": {"type": "string"}, "example": "task-example"}],
+                       "permission": "logs:read", "headers": {}, "parameters": [{"name": "task_id", "in": "path", "required": True, "schema": {"type": "string", "description": describe_parameter({"name": "task_id"})}, "description": describe_parameter({"name": "task_id"}), "example": "task-example"}],
                        "requestSchema": None, "requestExample": {"token": "<SERVICE_TOKEN>", "cursor": ""},
                        "responseStatus": 101, "responseExample": {"type": "data", "fileId": "file-example", "offset": 0, "data": "bG9nCg==", "cursor": "<续传游标>"}})
     return {"version": "1.0", "guides": GUIDES, "operations": operations, "schemas": schemas,

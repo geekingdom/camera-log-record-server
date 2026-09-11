@@ -30,7 +30,7 @@ def test_deploy_environment_is_private_and_uses_distinct_random_credentials(tmp_
     assert values["ADMIN_PASSWORD"] == "asdf!234"
     assert values["SESSION_SECONDS"] == "28800" and values["SESSION_COOKIE_SECURE"] == "false"
     assert values["COLLECTOR_NODE_ID"] == "compose-worker-1"
-    assert values["COLLECTOR_NODE_URL"] == "http://worker:8001"
+    assert values["COLLECTOR_NODE_URL"] == "http://worker:18081"
     if os.name == "posix":
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
@@ -58,6 +58,20 @@ def test_compose_declares_restart_log_rotation_and_frontend_healthcheck():
     assert compose.count("restart: unless-stopped") == 6
     assert "driver: local" in compose and 'max-size: "10m"' in compose and 'max-file: "3"' in compose
     assert "frontend:" in compose and "wget -q -O /dev/null http://127.0.0.1/" in compose
+
+
+def test_docker_build_supports_company_pip_default_and_external_ci_override():
+    """生产镜像默认内网源，CI 必须能显式覆盖为公网 PyPI。"""
+    for filename in ("api.Dockerfile", "worker.Dockerfile"):
+        source = (root / "deploy" / filename).read_text(encoding="utf-8")
+        assert "ARG PIP_INDEX_URL=http://af.hikvision.com.cn/" in source
+        assert "ARG PIP_TRUSTED_HOST=af.hikvision.com.cn" in source
+        assert '--index-url "$PIP_INDEX_URL"' in source
+    compose = (root / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "PIP_INDEX_URL: ${PIP_INDEX_URL:-http://af.hikvision.com.cn/" in compose
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "PIP_INDEX_URL: https://pypi.org/simple" in workflow
+    assert 'PIP_INDEX_URL=https://pypi.org/simple' in workflow
 
 
 def test_single_host_compose_uses_empty_volume_initializers_and_authenticated_clients():

@@ -59,6 +59,13 @@ export interface SchemaDescription {
   constraints: string;
 }
 
+export interface SchemaFieldDescription extends SchemaDescription {
+  name: string;
+  path: string;
+  description: string;
+  required: boolean;
+}
+
 // OpenAPI 既会直接给出类型，也会通过 $ref、anyOf 表达 Optional；统一展开后再生成可读约束。
 function resolveReference(schema: ReferenceSchema, schemas: Record<string, unknown>): ReferenceSchema {
   if (!schema.$ref) return schema;
@@ -112,6 +119,27 @@ export function describeSchema(
     schema.maxItems !== undefined && `最多 ${schema.maxItems} 项`,
   ].filter(Boolean).join(" · ");
   return { type, constraints };
+}
+
+/** 递归展开请求对象，令嵌套命令、白名单规则和分页结构也能逐字段阅读。 */
+export function describeObjectFields(
+  source: ReferenceSchema | undefined,
+  schemas: Record<string, unknown>,
+  prefix = "",
+): SchemaFieldDescription[] {
+  const schema = objectSchema(source, schemas);
+  const rows: SchemaFieldDescription[] = [];
+  for (const [name, field] of Object.entries(schema.properties ?? {})) {
+    const path = prefix ? `${prefix}.${name}` : name;
+    const required = Boolean(schema.required?.includes(name));
+    const detail = describeSchema(field, schemas, required);
+    const resolved = objectSchema(field, schemas);
+    rows.push({ name, path, ...detail, required, description: resolved.description ?? field.description ?? "" });
+    if (resolved.properties) rows.push(...describeObjectFields(field, schemas, path));
+    if (resolved.type === "array" && objectSchema(resolved.items, schemas).properties)
+      rows.push(...describeObjectFields(resolved.items, schemas, `${path}[]`));
+  }
+  return rows;
 }
 
 export const loadApiReference = () => request<ApiReferenceCatalog>("/api-reference");

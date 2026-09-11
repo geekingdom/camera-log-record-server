@@ -36,9 +36,9 @@ async def test_configured_admission_and_capacity_apply_before_connections(tmp_pa
 
 
 async def test_worker_reports_configured_capacity_above_100(tmp_path):
-    """Worker 心跳应保留有效的大容量配置，不能被旧的 100 常量截断。"""
+    """后台容量必须覆盖环境默认100，心跳不能再静默截断管理员配置。"""
     repo = Repository(AsyncMongoMockClient().db, Settings(
-        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_capacity=500))
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_capacity=100))
     await repo.initialize()
     node_id = repo.settings.node_id
     await repo.db.node_configs.insert_one({"id": node_id, "capacity": 250, "accepting": True, "url": repo.settings.node_url})

@@ -59,7 +59,7 @@ def test_single_component_deploy_keeps_other_services_untouched(monkeypatch, tmp
     assert ("venv", "backend", Path("/python312")) in calls
     assert ("publish", "backend", files["backend"]) in calls
     assert all(not (call[0] == "publish" and call[1] != "backend") for call in calls)
-    assert ("health", "http://127.0.0.1:8000/health") in calls
+    assert ("health", "http://127.0.0.1:18080/health") in calls
 
 
 def test_repeated_init_does_not_replace_existing_config(monkeypatch, tmp_path):

@@ -91,7 +91,7 @@ if [[ "$docker_installed" == true && "$EUID" -ne 0 ]]; then
     exit 1
   fi
   # 仅保留会影响 Compose 展开和健康检查的非敏感覆盖，避免新 Docker 组会话丢失端口等部署参数。
-  exec sudo --preserve-env=COMPOSE_PROJECT_NAME,DEPLOY_HEALTH_TIMEOUT,FRONTEND_PORT,COMPOSE_MONGO_URI,DATABASE_NAME,COLLECTOR_NODE_ID,COLLECTOR_NODE_URL,KNOWN_HOSTS_FILE,HOST_LOG_ROOT,API_DATA_ROOT "$root/deploy.sh" --component "$component" --env-file "$env_file"
+  exec sudo --preserve-env=COMPOSE_PROJECT_NAME,DEPLOY_HEALTH_TIMEOUT,FRONTEND_PORT,COMPOSE_MONGO_URI,DATABASE_NAME,COLLECTOR_NODE_ID,COLLECTOR_NODE_URL,KNOWN_HOSTS_FILE,HOST_LOG_ROOT,API_DATA_ROOT,PIP_INDEX_URL,PIP_TRUSTED_HOST "$root/deploy.sh" --component "$component" --env-file "$env_file"
 fi
 # systemd 主机除了容器 restart 策略，还必须启用 Docker daemon 的开机启动。
 # 在已有 Docker 的服务器上也执行；容器内/非 systemd 环境由宿主机管理 Docker。

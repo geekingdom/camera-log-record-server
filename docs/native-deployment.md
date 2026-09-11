@@ -91,7 +91,7 @@ sudo bash ./deploy-native.sh frontend --config /etc/camera-logs/native.env
 MONGO_BIND_IP=127.0.0.1,10.42.0.10
 MONGO_ADVERTISED_HOST=10.42.0.10
 NODE_BIND_IP=10.42.0.10
-NODE_URL=http://10.42.0.10:8001
+NODE_URL=http://10.42.0.10:18081
 MONGO_URI=mongodb://...@10.42.0.10:27017/camera_logs?replicaSet=rs0&authSource=admin
 ```
 
@@ -116,7 +116,7 @@ sudo chmod 0600 /etc/camera-logs/worker-b.env
 sudo bash ./deploy-native-worker.sh --config /etc/camera-logs/worker-b.env
 ```
 
-B 的 `MONGO_URI` 指向 A 的公告地址；`NODE_BIND_IP` 和 `NODE_URL` 使用 B 的私网地址，例如 `10.42.0.11` 与 `http://10.42.0.11:8001`。部署器会在 B 通过该 URI 查询本节点新鲜心跳；失败时检查 A 到 B 的 `8001` 连通性、B 到 A 的 `27017` 连通性、两边防火墙及相同的共享应用密钥。B 的 `LOG_ROOT` 是 B 本地日志目录，不能假定与 A 的物理磁盘共享。
+B 的 `MONGO_URI` 指向 A 的公告地址；`NODE_BIND_IP` 和 `NODE_URL` 使用 B 的私网地址，例如 `10.42.0.11` 与 `http://10.42.0.11:18081`。部署器会在 B 通过该 URI 查询本节点新鲜心跳；失败时检查 A 到 B 的 `18081` 连通性、B 到 A 的 `27017` 连通性、两边防火墙及相同的共享应用密钥。B 的 `LOG_ROOT` 是 B 本地日志目录，不能假定与 A 的物理磁盘共享。
 
 ## 重跑、运维与限制
 

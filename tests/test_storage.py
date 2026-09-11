@@ -51,6 +51,22 @@ async def test_shared_hour_directory_reuses_one_tar_and_keeps_indexes_outside(tm
     assert all((one.path.parent / member["indexName"]).exists() for member in metadata["members"])
 
 
+async def test_hour_archive_name_contains_safe_task_ip_and_shanghai_hour_range(tmp_path):
+    """小时包文件名必须能直接识别任务、设备和上海自然小时范围。"""
+    writer = HourlyWriter(
+        "task-id", "run", "session", tmp_path, storage_identity="device",
+        task_name="现场/主机:日志", device_ip="2001:db8::34",
+    )
+    # UTC 01:05 对应上海 09:05，归档范围应为 09:00-10:00。
+    await writer.write(b"line\n", received_at=datetime(2026, 9, 8, 1, 5, tzinfo=UTC))
+    archive = await writer.close()
+
+    assert archive.path.name == (
+        "现场-主机-日志-2001-db8--34-20260908090000-20260908100000.tar.gz"
+    )
+    assert archive.path.exists()
+
+
 async def test_same_named_tasks_use_full_ids_in_separate_hour_directories(tmp_path):
     """同名任务的完整 ID 必须进入目录，避免共享小时包而混淆下载范围。"""
     instant = datetime(2026, 9, 8, 1, 0, tzinfo=UTC)

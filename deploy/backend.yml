@@ -7,12 +7,17 @@ services:
     command: ["sh", "-ec", "mkdir -p /data/data /data/service-logs; chown 10001:10001 /data /data/data /data/service-logs"]
     volumes: ["${API_DATA_ROOT:-api-data}:/data"]
   api:
-    build: {context: .., dockerfile: deploy/api.Dockerfile}
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-http://af.hikvision.com.cn/artifactory/api/pypi/pypi/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-af.hikvision.com.cn}
     env_file: ${DEPLOY_ENV_FILE:-../.env.backend}
     environment:
       MONGO_URI: ${MONGO_URI:?请填写可达的MongoDB副本集地址}
       API_BIND_IP: ${API_BIND_IP:-127.0.0.1}
-      API_PORT: ${API_PORT:-8000}
+      API_PORT: ${API_PORT:-18080}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       LOG_ROOT: /var/lib/camera-logs/data
     command: ["sh", "-ec", "exec uvicorn camera_logs.main:app --host \"$$API_BIND_IP\" --port \"$$API_PORT\""]
