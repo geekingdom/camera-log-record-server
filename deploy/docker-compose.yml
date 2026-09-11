@@ -168,7 +168,7 @@ services:
       DATABASE_NAME: ${DATABASE_NAME:-camera_logs}
       LOG_ROOT: /var/lib/camera-logs/data
       NODE_ID: ${COLLECTOR_NODE_ID:-compose-worker-1}
-      NODE_URL: ${COLLECTOR_NODE_URL:-http://worker:18081}
+      NODE_URL: ${COLLECTOR_NODE_URL:-http://worker:${NODE_PORT:-18081}}
       NODE_PORT: ${NODE_PORT:-18081}
       HOST_PROC_ROOT: /host/proc
       NFS_ROOT: ${NFS_ROOT:-/srv/camera-logs/nfs-coredump}

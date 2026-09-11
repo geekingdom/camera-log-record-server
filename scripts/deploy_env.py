@@ -49,7 +49,7 @@ def create_environment(path: Path, component: str = "all") -> None:
         raise ValueError("未知部署组件")
     else:
         values.update(HOST_LOG_ROOT="worker-data", API_DATA_ROOT="api-data", FRONTEND_PORT="5175",
-                      API_PORT="18080", COLLECTOR_NODE_ID="compose-worker-1", COLLECTOR_NODE_URL="http://worker:18081", NODE_PORT="18081",
+                      API_PORT="18080", COLLECTOR_NODE_ID="compose-worker-1", NODE_PORT="18081", COLLECTOR_NODE_URL="http://worker:${NODE_PORT}",
                       MONGO_DATA_1="mongo1-data", MONGO_DATA_2="mongo2-data", MONGO_DATA_3="mongo3-data",
                       NFS_ROOT="/srv/camera-logs/nfs-coredump", NFS_SERVER_IP="",
                       MONGO_ROOT_USERNAME="camera_admin", MONGO_ROOT_PASSWORD=secrets.token_urlsafe(36),
