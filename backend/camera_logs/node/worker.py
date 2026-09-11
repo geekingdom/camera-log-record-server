@@ -285,6 +285,13 @@ class Worker:
     async def tick(self):
         """更新资源心跳、处理期望状态并分发作业，不在本周期等待耗时归档。"""
         from camera_logs.collection.connections import connect
+        from camera_logs.collection.ssh_admission import SshAdmission
+
+        async def admitted_connect(config):
+            """每次实际SSH建连独立占位，任务副本中的内部对象不入库或发送设备。"""
+            if config.get("protocol") == "SSH":
+                config = dict(config) | {"_sshAdmission": SshAdmission(self.repo, config)}
+            return await connect(config)
         root = self.repo.settings.log_root
         root.mkdir(parents=True, exist_ok=True)
         if (self.telemetry_task is None or self.telemetry_task.done()) and (
@@ -406,7 +413,7 @@ class Worker:
                 # 调度心跳可能已经过期，建连前以本周期磁盘值复核；保留排队任务直到空间恢复。
                 if not accepting or len(self.active) >= capacity:
                     continue
-                self.active[task["id"]] = SessionRuntime(self.repo, task, connect)
+                self.active[task["id"]] = SessionRuntime(self.repo, task, admitted_connect)
             elif runtime is None and task["status"] not in ("STOPPED", "BLOCKED"):
                 await self.repo.db.tasks.update_one(owner_filter(task),
                     {"$set": {"status": "BLOCKED", "error": "运行实例已丢失，等待隔离确认"}})

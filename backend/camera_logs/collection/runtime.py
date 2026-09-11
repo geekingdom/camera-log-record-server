@@ -25,6 +25,7 @@ from camera_logs.collection.coredump_lease import (
 )
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
+from camera_logs.collection.ssh_admission import SshCapacityError, SshSlotUncertain
 from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
@@ -51,6 +52,7 @@ class SessionRuntime:
         self.pending_executions = {}
         self.input_bytes = 0
         self.error = None
+        self.connection_uncertain = None
         self.started_at = now()
         self.debug_passwords = PshPasswordProvider(repo.settings)
         # 目录水位不能只依赖下一块日志触发；设备停止输出后的尾块同样需要发布。
@@ -242,6 +244,7 @@ class SessionRuntime:
         if state == "CONNECTING" and not changed.matched_count:
             raise OwnershipLost("建连前任务归属或准入已失效")
         if state == "COLLECTING" and changed.matched_count:
+            await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {"error": None}})
             await self.repo.db.operations.update_many({"taskId": self.task["id"], "desiredState": "RUNNING", "status": "PENDING"},
                 {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
         logger.info("采集状态变化", extra={"context": {"taskId": self.task["id"], "state": state}})
@@ -418,6 +421,13 @@ class SessionRuntime:
             except PshSwitchError as exc:
                 self.error = str(exc)
                 break
+            except SshSlotUncertain as exc:
+                self.connection_uncertain = exc
+                self.error = str(exc)
+                break
+            except SshCapacityError as exc:
+                await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {"error": str(exc)}})
+                logger.info("等待设备SSH连接名额 task=%s", self.task["id"])
             except Exception as exc:
                 logger.exception("采集会话异常 task=%s", self.task["id"])
                 import asyncssh
@@ -483,6 +493,9 @@ class SessionRuntime:
             await asyncio.gather(self.background, return_exceptions=True)
         if failure:
             raise failure
+        if getattr(self, "connection_uncertain", None):
+            # 工厂可能尚未返回连接对象，不能用空collector连接伪造关闭收据。
+            raise self.connection_uncertain
 
     async def _stop_collector(self):
         """握手失败在连接和文件已关闭后作为运行错误返回，不误标为隔离失败。"""

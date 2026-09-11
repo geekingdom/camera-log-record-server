@@ -50,6 +50,11 @@ async def accepted_restart(repo, task, session):
 async def finish_blocked_run(repo, task, session, *, restart, operation_id=None, evidence=None):
     """在调用方事务内收尾已证实关闭的运行；不删除后继锁，不提前完成重启。"""
     task_id, run_id, timestamp = task["id"], task.get("runId"), now()
+    from camera_logs.collection.ssh_admission import release_task_slots
+
+    # 调用方已验证精确关闭收据或管理员物理隔离证明；失联超时本身不会进入此处。
+    if task.get("protocol") == "SSH":
+        await release_task_slots(repo, task, session=session)
     foreign = await repo.db.endpoint_locks.find_one(
         {"taskId": task_id, "runId": {"$ne": run_id}}, session=session,
     )

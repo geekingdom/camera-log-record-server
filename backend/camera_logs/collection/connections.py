@@ -20,7 +20,7 @@ CLOSE_TIMEOUT_SECONDS = 10
 # 海康设备单台最多允许五个 SSH 会话。按事件循环隔离信号量，避免测试或
 # 多个 Worker 进程之间错误共享 asyncio 对象；进程级限制由每个 Worker 独立执行。
 MAX_SSH_CONNECTIONS_PER_ENDPOINT = 5
-_ssh_limiters: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Semaphore]] = weakref.WeakKeyDictionary()
+_ssh_limiters: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]] = weakref.WeakKeyDictionary()
 
 
 class Connection(Protocol):
@@ -30,10 +30,13 @@ class Connection(Protocol):
 
 
 class _SshConnection:
-    def __init__(self, client: Any, process: Any, *, release_slot: Any | None = None) -> None:
+    def __init__(self, client: Any, process: Any, *, release_slot: Any | None = None,
+                 admission: Any | None = None) -> None:
         self._client, self._process = client, process
-        self._release_slot = release_slot
+        self._release_slot = release_slot if admission is None else None
         self._slot_released = False
+        self._admission = admission
+        self._transport_closed = False
         _tcp_keepalive(client)
 
     async def read(self, size: int = 65536) -> bytes:
@@ -49,19 +52,24 @@ class _SshConnection:
         """关闭 shell 与 SSH 传输；确认失败时强制中止且保留原始异常。"""
         try:
             # shell 收尾异常也不能跳过底层连接的关闭和确认。
-            try:
-                self._process.close()
-            finally:
-                self._client.close()
-            await asyncio.wait_for(self._client.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS)
+            if not self._transport_closed:
+                try:
+                    self._process.close()
+                finally:
+                    self._client.close()
+                await asyncio.wait_for(self._client.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS)
+                self._transport_closed = True
+            if self._admission is not None:
+                await self._admission.release()
+                self._admission = None
         except BaseException:
             _abort_transport(self._client)
             raise
-        finally:
+        else:
             self._release_connection_slot()
 
     def _release_connection_slot(self) -> None:
-        """关闭成功或失败都只释放一次并唤醒等待中的建连请求。"""
+        """关闭确认后仅释放一次；未知关闭不能唤醒下一路建连。"""
         if self._slot_released:
             return
         self._slot_released = True
@@ -167,12 +175,20 @@ async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connect
     """创建 SSH shell；严格指纹校验仅在部署明确启用时生效。"""
     import asyncssh
 
-    slot = _ssh_slot(host, port)
-    # 等待名额也设置上限，避免设备长期满载时创建无界挂起任务。
-    await asyncio.wait_for(slot.acquire(), timeout=30)
-    slot_acquired = True
-
     client = None
+    admission = task.get("_sshAdmission")
+    # 平台以跨节点原子名额为准，独立工具仍有事件循环内的五连接保护。
+    slot = _ssh_slot(host, port) if admission is None else None
+    if slot is not None:
+        await asyncio.wait_for(slot.acquire(), timeout=30)
+    admission_acquired = False
+
+    class ObservedClient(getattr(asyncssh, "SSHClient", object)):
+        """TCP接通即保存句柄，认证尚未结束时取消也能明确关闭传输。"""
+        def connection_made(self, connection):
+            nonlocal client
+            client = connection
+
     try:
         known_hosts = None
         if task.get("verifyHostKey", False):
@@ -181,52 +197,60 @@ async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connect
             if not known_hosts_path or not known_hosts_path.is_file():
                 raise ValueError("严格SSH主机指纹校验需要有效的knownHosts文件")
             known_hosts = str(known_hosts_path)
+        if admission is not None:
+            await admission.acquire()
+            admission_acquired = True
         client = await asyncio.wait_for(asyncssh.connect(
             host, port=port, username=task["username"], password=task["password"],
             known_hosts=known_hosts, encoding=None, keepalive_interval=15, keepalive_count_max=3,
+            client_factory=ObservedClient,
         ), timeout=30)
         process = await asyncio.wait_for(
             client.create_process(term_type=task.get("termType", "vt100"), encoding=None), timeout=30
         )
-        connection = _SshConnection(client, process, release_slot=slot.release)
-        # 成功后关闭路径接管名额，异常路径的 finally 不得提前释放。
-        slot_acquired = False
-        return connection
+        return _SshConnection(client, process, release_slot=slot.release if slot else None, admission=admission)
     except BaseException as error:
         # create_process 失败或取消时，连接已经由本函数取得，必须主动回收。
         if client:
             if isinstance(error, asyncio.CancelledError):
-                # 已取消的建连协程不能可靠地等待 wait_closed；把收尾交给独立任务，
-                # 名额在其完成回调才归还，避免第六路抢在旧 SSH 释放前建立。
+                # 独立收尾不受原建连取消传播；确认失败不能提前释放任何名额。
                 cleanup = asyncio.create_task(_cleanup_failed_ssh_client(client))
-                cleanup.add_done_callback(lambda _future: slot.release())
-                slot_acquired = False
+                try:
+                    closed = await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    closed = False
             else:
-                await _cleanup_failed_ssh_client(client)
-        raise
-    finally:
-        # 必须在 client 清理完成后才归还名额。否则第六路可能在旧底层 SSH
-        # 仍未释放时建立，瞬时超过设备允许的五连接限制。
-        if slot_acquired:
+                closed = await _cleanup_failed_ssh_client(client)
+            if not closed:
+                if admission is not None:
+                    from .ssh_admission import SshSlotUncertain
+                    raise SshSlotUncertain(host, "") from error
+                raise
+        if admission_acquired:
+            await admission.release()
+        if slot is not None:
             slot.release()
+        raise
 
 
 def _ssh_slot(host: str, port: int) -> asyncio.Semaphore:
-    """返回当前 Worker 对指定 SSH 端点的五连接租约池。"""
+    """独立调用适配器时按设备地址共享五连接池，不因端口变化另开额度。"""
     loop = asyncio.get_running_loop()
     pools = _ssh_limiters.setdefault(loop, {})
-    return pools.setdefault((host, port), asyncio.Semaphore(MAX_SSH_CONNECTIONS_PER_ENDPOINT))
+    return pools.setdefault(host, asyncio.Semaphore(MAX_SSH_CONNECTIONS_PER_ENDPOINT))
 
 
-async def _cleanup_failed_ssh_client(client: Any) -> None:
+async def _cleanup_failed_ssh_client(client: Any) -> bool:
     """Shell 建立失败后有界回收底层 SSH；取消路径也必须留下可执行的收尾。"""
     try:
         client.close()
         await asyncio.wait_for(client.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS)
+        return True
     except BaseException:
         # close 本身也可能失败；此时强制中止且不覆盖原始建连失败。
         logger.exception("SSH shell 创建失败后的连接收尾异常")
         _abort_transport(client)
+        return False
 
 
 def _log_telnet_client(**kwargs):
