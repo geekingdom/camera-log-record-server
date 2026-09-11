@@ -100,6 +100,13 @@ jobs:
         run: python scripts/verify_user_auth.py --isolated --url http://127.0.0.1:15173 --env-file .env
       - name: 验证真实副本集隔离事务和心跳冲突
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_isolation_transaction.py
+      - name: 验证跨进程设备SSH五连接名额
+        # spawn子进程需要真实脚本路径，不能像普通事务验证器一样从stdin执行。
+        run: |
+          docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml cp scripts/verify_ssh_admission.py api:/tmp/verify_ssh_admission.py
+          docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python /tmp/verify_ssh_admission.py
+      - name: 验证真实SSH连接限额与关闭释放
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_ssh_socket_admission.py
       - name: 验证调度取消和租约接管的事务一致性
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_scheduler_transaction.py
       - name: 验证定时预算与执行记录事务一致性

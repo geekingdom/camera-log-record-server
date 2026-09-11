@@ -19,3 +19,7 @@ verify_node_registration.py不再硬编码节点ID和URL。缺少显式参数时
 ## 持续验收补充
 
 手动设备认证审计的真实Mongo验证器加入container-smoke，与既有事务验证采用相同stdin执行方式。本机以stdin执行六种故障组合通过，随机数据库与临时文件已删除。部署测试20项、工作流结构解析及diff检查通过。该步骤尚待新提交远端运行，不把本机结果写成CI结果。
+
+## 修复提交的远端结果
+
+10579f3对应[CI34569446838](https://github.com/geekingdom/camera-log-record-server/actions/runs/34569446838)七项全部成功。节点登记、手动认证审计及多路真实协议验收步骤成功；日志中8路分别verified=true，最终cleanupVerified=true、passed=true。合成采集参数为8路、每路1200行/秒、60秒，运行中并发实时订阅和搜索。隔离容器与测试卷清理步骤成功。原生、独立组件、NFS及前端浏览器作业同时通过。此前上文的“待新提交”已在此运行完成，不再作为当前阻塞；物理多机及500路全天验收仍未完成。
