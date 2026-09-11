@@ -501,5 +501,6 @@ def create_worker_app(settings=None):
 
 if __name__ == "__main__":
     import os
+
     import uvicorn
     uvicorn.run(create_worker_app(), host="0.0.0.0", port=int(os.getenv("NODE_PORT", "18081")))

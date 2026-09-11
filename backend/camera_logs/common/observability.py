@@ -231,7 +231,10 @@ class RequestLoggingMiddleware:
                 app = scope.get("app")
                 repo = getattr(getattr(app, "state", None), "repo", None)
                 path = request.url.path
-                recordable = (request.method not in {"GET", "HEAD"} or final_status >= 400)
+                # API 请求全部留下可检索的访问事件：查询、下载、写操作和失败请求
+                # 都必须能按 requestId 关联排障。仅记录路径、状态和大小，不读取正文、查询
+                # 参数或请求头，避免日志事件携带设备密码、令牌及大体量日志内容。
+                recordable = path.startswith("/api/v1/")
                 # 取消中的协程不能再等待数据库 I/O，否则 finally 可能覆盖调用方的取消语义。
                 cancelled = failure is not None and isinstance(failure, asyncio.CancelledError)
                 if repo and not cancelled and path.startswith("/api/v1/") and recordable:
@@ -245,6 +248,7 @@ class RequestLoggingMiddleware:
                         "clientIp": getattr(request.client, "host", None), "method": request.method,
                         "route": getattr(scope.get("route"), "path", None) or path, "httpStatus": final_status,
                         "outcome": outcome, "level": level, "responseComplete": complete,
+                        "responseBytes": sent_bytes,
                         "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
                         "taskId": request.path_params.get("task_id") if hasattr(request, "path_params") else None,
                         "reason": redact_text(str(safe_error or failure)) if (safe_error or failure) else None,

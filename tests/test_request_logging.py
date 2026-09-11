@@ -170,3 +170,21 @@ def test_api_request_events_record_write_requests_and_safe_4xx_reason(client):
     validation = client.portal.call(repo.db.request_events.find_one, {"httpStatus": 422})
     assert write is not None
     assert validation["reason"] == "输入校验失败"
+
+
+def test_api_request_events_record_successful_reads_without_request_secrets(client):
+    """成功的 API 查询也必须进入请求事件，便于按 requestId 还原完整操作轨迹。"""
+    response = client.get("/api/v1/tasks", headers={"X-Request-ID": "successful-read"})
+    assert response.status_code == 200, response.text
+    event = client.portal.call(
+        client.app.state.repo.db.request_events.find_one,
+        {"requestId": "successful-read"},
+    )
+    assert event is not None
+    assert event["method"] == "GET"
+    assert event["route"] == "/api/v1/tasks"
+    assert event["httpStatus"] == 200
+    assert event["outcome"] == "SUCCEEDED"
+    assert event["responseComplete"] is True
+    assert event["responseBytes"] == len(response.content)
+    assert "query" not in event and "headers" not in event and "body" not in event
