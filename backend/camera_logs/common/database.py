@@ -130,6 +130,8 @@ class Repository:
             [("resourceId", 1), ("identityChanged", 1), ("createdAt", -1), ("id", -1)],
             name="authentication_records_resource_identity_time",
         )
+        await self.db.authentication_records.create_index("expiresAt", expireAfterSeconds=0,
+                                                           name="authentication_records_expires_at")
         await self.db.commands.create_index([("taskId", 1), ("createdAt", -1)])
         await self.db.commands.create_index([("taskId", 1), ("commandId", 1), ("createdAt", -1)])
         await self.db.commands.create_index([("taskId", 1), ("kind", 1), ("createdAt", -1)])

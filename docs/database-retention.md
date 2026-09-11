@@ -10,7 +10,7 @@
 
 | 配置项 | 集合 | 时间字段 | 默认 | 清理边界 |
 | --- | --- | ---: | ---: | --- |
-| `AUTHENTICATION_RECORD_RETENTION_DAYS` | `authentication_records` | `createdAt` | 90 | 默认仅保留最近三个月；按认证历史时间清理 |
+| `AUTHENTICATION_RECORD_RETENTION_DAYS` | `authentication_records` | `createdAt` | 90 | 默认仅保留最近三个月；认证记录同时写入 `expiresAt` 并由 TTL 索引清理 |
 | `AUDIT_RECORD_RETENTION_DAYS` | `audit` | `createdAt` | 0 | 按用户操作时间清理 |
 | `RUNTIME_EVENT_RETENTION_DAYS` | `events` | `createdAt` | 0 | 按运行事件时间清理 |
 | `COMMAND_HISTORY_RETENTION_DAYS` | `commands` | `createdAt` | 0 | 只允许 `SUCCEEDED`、`FAILED`、`CANCELLED`、`UNKNOWN` |

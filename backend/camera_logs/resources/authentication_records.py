@@ -3,7 +3,7 @@
 import base64
 import binascii
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
 
@@ -57,8 +57,10 @@ async def record_authentication(repo, resource, *, source: str, result: str, bef
     initial = result == "SUCCESS" and before.get("authenticatedAt") is None
     timestamp = completed_at or now()
     identity_changed = result == "SUCCESS" and not initial and (model_before, serial_before) != (model_after, serial_after)
+    retention_days = int(getattr(repo.settings, "authentication_record_retention_days", 90) or 90)
     await repo.db.authentication_records.insert_one({
-        "id": new_id(), "resourceId": resource["id"], "createdAt": timestamp, "source": source, "result": result,
+        "id": new_id(), "resourceId": resource["id"], "createdAt": timestamp,
+        "expiresAt": timestamp + timedelta(days=retention_days), "source": source, "result": result,
         "modelBefore": model_before, "modelAfter": model_after,
         "serialBefore": serial_before, "serialAfter": serial_after,
         "identityChanged": identity_changed, "initialAuthentication": initial,
