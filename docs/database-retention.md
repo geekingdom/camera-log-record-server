@@ -61,7 +61,7 @@
 
 ## 升级已有数据
 
-索引由 API/Worker 的 `Repository.initialize()` 幂等安装。旧认证记录缺少过期时间时，部署后在工程环境执行：
+索引由 API/Worker 的 `Repository.initialize()` 幂等安装。旧认证记录缺少过期时间或值为 `null` 时，部署后在工程环境执行：
 
 ```sh
 python scripts/backfill_authentication_expiry.py

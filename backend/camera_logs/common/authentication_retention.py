@@ -9,7 +9,8 @@ async def backfill_authentication_expiry(db, days: int, *, apply: bool = False,
     if days <= 0 or not 1 <= batch_size <= 1000 or not 1 <= max_records <= 100_000:
         raise ValueError("保留天数须为正数，每批1至1000条，单次上限1至100000条")
     scanned = updated = 0
-    query = {"expiresAt": {"$exists": False}, "createdAt": {"$type": "date"}}
+    # Mongo 的 null 等值同时匹配缺失字段；两者都不能触发 TTL，需按首次时间补齐。
+    query = {"expiresAt": None, "createdAt": {"$type": "date"}}
     # 使用游标而非 _id > 上次值，兼容旧记录同时存在字符串和 ObjectId 主键。
     cursor = db.authentication_records.find(query, {"createdAt": 1}).sort("_id", 1).limit(
         max_records).batch_size(batch_size)
@@ -18,7 +19,7 @@ async def backfill_authentication_expiry(db, days: int, *, apply: bool = False,
             scanned += 1
             if apply:
                 result = await db.authentication_records.update_one(
-                    {"_id": row["_id"], "expiresAt": {"$exists": False}, "createdAt": row["createdAt"]},
+                    {"_id": row["_id"], "expiresAt": None, "createdAt": row["createdAt"]},
                     {"$set": {"expiresAt": row["createdAt"] + timedelta(days=days)}})
                 updated += result.modified_count
     finally:

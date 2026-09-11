@@ -30,6 +30,19 @@ async def test_backfill_preview_batches_and_retry_preserve_existing_expiry():
 
 
 @pytest.mark.asyncio
+async def test_null_expiry_is_previewed_and_backfilled_once():
+    db = AsyncMongoMockClient().db
+    stamp = datetime(2026, 9, 11, tzinfo=UTC)
+    await db.authentication_records.insert_one({"_id": "null", "createdAt": stamp, "expiresAt": None})
+    assert (await backfill_authentication_expiry(db, 90))["eligible"] == 1
+    assert (await db.authentication_records.find_one({"_id": "null"}))["expiresAt"] is None
+    assert (await backfill_authentication_expiry(db, 90, apply=True))["updated"] == 1
+    row = await db.authentication_records.find_one({"_id": "null"})
+    assert row["expiresAt"].replace(tzinfo=UTC) == stamp + timedelta(days=90)
+    assert (await backfill_authentication_expiry(db, 90, apply=True))["updated"] == 0
+
+
+@pytest.mark.asyncio
 async def test_disabled_retention_cannot_silently_expire_history():
     with pytest.raises(ValueError):
         await backfill_authentication_expiry(AsyncMongoMockClient().db, 0, apply=True)
