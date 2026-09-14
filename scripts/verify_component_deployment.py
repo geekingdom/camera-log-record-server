@@ -16,6 +16,8 @@ from urllib.parse import quote
 from urllib.request import urlopen
 from uuid import uuid4
 
+from component_diagnostics import diagnose_process_failure
+
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENTS = ("database", "backend", "worker", "frontend")
 
@@ -123,7 +125,7 @@ asyncio.run(verify())'''
     return False
 
 
-def deploy_component(component, project, env_file, timeout):
+def deploy_component(component, project, env_file, timeout, *, secret_values=()):
     """通过正式独立入口启动单一组件，并使用私有环境文件和随机项目名。"""
     command = ["bash", str(ROOT / f"deploy-{component}.sh"), "--env-file", str(env_file)]
     environment = compose_environment(env_file) | {
@@ -134,8 +136,9 @@ def deploy_component(component, project, env_file, timeout):
                             timeout=timeout + 60)
     if result.returncode:
         resolved_project = f"{project}-{component}"
-        raise RuntimeError(f"{component} 独立部署失败，退出码 {result.returncode}；"
-                           f"容器状态：{component_states(resolved_project)}")
+        diagnostic = diagnose_process_failure(f"{component} 独立部署", result.returncode,
+                                              result.stdout, result.stderr, secrets=secret_values)
+        raise RuntimeError(f"{diagnostic}；容器状态：{component_states(resolved_project)}")
 
 
 def restart_component(project, component, env_file):
@@ -229,15 +232,19 @@ def verify(timeout):
         }
         for name in COMPONENTS:
             write_environment(environments[name], values[name])
+        # 包括本轮所有组件及继承环境的凭据，防止跨组件错误回显同一副本集口令。
+        sensitive_keys = ("PASSWORD", "TOKEN", "SECRET", "KEY", "URI", "USERNAME")
+        secret_values = tuple(value for mapping in (os.environ, *values.values()) for key, value in mapping.items()
+                              if value and any(marker in key.upper() for marker in sensitive_keys))
         before = {name: environments[name].read_bytes() for name in COMPONENTS}
         for name in COMPONENTS:
-            deploy_component(name, project_base, environments[name], timeout)
+            deploy_component(name, project_base, environments[name], timeout, secret_values=secret_values)
         deadline = time.monotonic() + timeout
         check(http_ready("http://127.0.0.1:18000/health", deadline=deadline), "后端健康接口未恢复")
         check(http_ready("http://127.0.0.1:15174/api/v1/auth/me", allow_unauthorized=True, deadline=deadline),
               "前端未能经 Linux host 网关代理后端")
         for name in COMPONENTS:
-            deploy_component(name, project_base, environments[name], timeout)
+            deploy_component(name, project_base, environments[name], timeout, secret_values=secret_values)
         check(all(environments[name].read_bytes() == before[name] for name in COMPONENTS), "重复部署改写了环境配置")
         for name in COMPONENTS:
             restart_component(projects[name], name, environments[name])

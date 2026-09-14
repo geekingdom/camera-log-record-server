@@ -160,7 +160,7 @@ export const api = {
   resources: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string },
+    filters?: { search?: string; model?: string; subSerialNumber?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string },
   ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
   resource: (id: string) => request<Resource>(`/resources/${id}`),
   /** 监控历史按资源读取；仅拼接已定义参数，避免把 undefined 送入服务端。 */

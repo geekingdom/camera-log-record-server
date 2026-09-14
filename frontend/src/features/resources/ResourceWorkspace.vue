@@ -20,6 +20,8 @@ const loadResourceMetrics = () => import("./ResourceMetricsDialog.vue");
 const emit = defineEmits<{ tasks: [Resource]; createTask: [Resource] }>();
 const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
+const model = ref("");
+const subSerialNumber = ref("");
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
 const coredumpOpen = ref(false), coredumpResource = ref<Resource>();
 const authenticationRecordsOpen = ref(false), authenticationRecordsResource = ref<Resource>();
@@ -47,12 +49,14 @@ const serialServerCount = computed(() => resources.value.filter(resource => reso
 const deletedOnPage = computed(() => resources.value.filter(resource => resource.deletedAt).length);
 async function load() {
   const current = ++generation; loading.value = true;
-  try { const data = await api.resources(page.value, 20, {
+  try { const filters = {
     search: search.value.trim() || undefined,
+    model: model.value.trim() || undefined,
+    subSerialNumber: subSerialNumber.value.trim() || undefined,
     kind: kind.value,
     includeDeleted: includeDeleted.value ? "true" : undefined,
     createdBy: showAll.value ? createdBy.value || undefined : props.userId,
-  }); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
+  }; const data = await api.resources(page.value, 20, filters); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
   catch (error) { if (current === generation) ElMessage.error(error instanceof Error ? error.message : "读取资源失败"); }
   finally { if (current === generation) loading.value = false; }
 }
@@ -159,12 +163,24 @@ defineExpose({ reload: load });
     <div class="resource-stat"><span>本页串口服务器</span><strong>{{ serialServerCount.toLocaleString() }}</strong><small>{{ deletedOnPage }} 项已删除</small></div>
   </section>
   <div class="resource-toolbar" role="search">
+    <div class="resource-filter-fields">
     <el-input v-model="search" aria-label="搜索资源" placeholder="搜索名称或 IP" :prefix-icon="Search" clearable @keyup.enter="filter" />
+    <el-input v-model="model" aria-label="设备型号" placeholder="设备型号" clearable maxlength="256" @clear="filter" @keyup.enter="filter" />
+    <el-input v-model="subSerialNumber" aria-label="设备序列号" placeholder="设备序列号" clearable maxlength="256" @clear="filter" @keyup.enter="filter" />
     <el-select v-model="kind" aria-label="按资源类型筛选" clearable placeholder="全部资源" @change="filter"><el-option label="海康网络设备" value="HIKVISION_NETWORK" /><el-option label="串口服务器" value="SERIAL_SERVER" /></el-select>
-    <el-checkbox :model-value="showAll" @change="changeScope">查看全部</el-checkbox>
     <CreatorFilter v-if="showAll" v-model="createdBy" @change="filter" />
-    <el-checkbox v-model="includeDeleted" @change="filter">包含已删除资源</el-checkbox>
-    <el-button @click="filter">筛选</el-button><ResourceBatchDelete :items="selected" :disabled="batchDeleting" :selection-generation="selectionGeneration" @processing="batchDeleting = $event" @completed="completeBatch" /><el-button v-if="props.canCreate" type="primary" :icon="Plus" @click="edit()">新建资源</el-button>
+    </div>
+    <div class="resource-toolbar-footer">
+      <div class="resource-filter-options">
+        <el-checkbox :model-value="showAll" @change="changeScope">查看全部</el-checkbox>
+        <el-checkbox v-model="includeDeleted" @change="filter">包含已删除资源</el-checkbox>
+      </div>
+      <div class="resource-filter-actions">
+        <el-button :icon="Search" @click="filter">筛选</el-button>
+        <ResourceBatchDelete :items="selected" :disabled="batchDeleting" :selection-generation="selectionGeneration" @processing="batchDeleting = $event" @completed="completeBatch" />
+        <el-button v-if="props.canCreate" type="primary" :icon="Plus" @click="edit()">新建资源</el-button>
+      </div>
+    </div>
   </div>
   <el-table ref="table" row-key="id" reserve-selection :data="resources" v-loading="loading" scrollbar-always-on class="data-table resource-table" empty-text="暂无设备资源" @selection-change="updateSelection">
     <el-table-column type="selection" width="48" :selectable="canBulkDelete" />
@@ -206,6 +222,18 @@ defineExpose({ reload: load });
     :listeners="{ 'update:modelValue': (value: boolean) => metricsOpen = value }" />
 </template>
 <style scoped>
+/* 按工具栏实际可用宽度换行，侧栏折叠与窄屏都不能压缩按钮或覆盖相邻控件。 */
+.resource-toolbar { display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
+.resource-filter-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 10px; min-width: 0; }
+.resource-filter-fields > .el-input, .resource-filter-fields > .el-select, .resource-filter-fields > :deep(.creator-filter) { width: 100%; min-width: 0; }
+.resource-filter-fields :deep(.creator-filter .el-select) { width: 100%; }
+.resource-toolbar-footer, .resource-filter-options, .resource-filter-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.resource-toolbar-footer { justify-content: space-between; gap: 10px 16px; }
+.resource-filter-actions { margin-left: auto; max-width: 100%; }
+.resource-filter-actions :deep(.el-button) { flex-shrink: 0; margin-left: 0; }
+.resource-filter-actions :deep(.resource-batch-delete) { flex-wrap: wrap; max-width: 100%; }
+.resource-filter-actions :deep(.bulk-delete-result) { max-width: 320px; }
+@media (max-width: 480px) { .resource-filter-actions { margin-left: 0; } }
 .resource-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
 .resource-actions :deep(.el-button + .el-button) { margin-left: 0; }
 </style>

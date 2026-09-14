@@ -1,5 +1,6 @@
 """第三方资源发现、组合过滤及关联任务摘要的权限回归。"""
 # ruff: noqa: F811
+import pytest
 from test_resources import resource_client  # noqa: F401
 
 
@@ -63,3 +64,37 @@ def test_user_bound_service_token_sees_all_tasks_in_shared_resource(resource_cli
     assert resource["taskCount"] == 2
     assert [task["id"] for task in resource["tasks"]] == ["allowed", "secret"]
     assert resource["tasksTruncated"] is False
+
+
+@pytest.mark.parametrize("filters,expected", [
+    ({"model": "vx3"}, {"matching", "other-serial"}),
+    ({"subSerialNumber": "a154"}, {"matching", "other-model"}),
+    ({"model": "vx3", "subSerialNumber": "a154"}, {"matching"}),
+    ({"model": "(test)+", "subSerialNumber": "[01]"}, {"literal"}),
+    ({"model": "vx3", "subSerialNumber": "a154", "createdBy": "other"}, set()),
+    ({"model": "vx3", "subSerialNumber": "a154", "includeDeleted": "true"}, {"matching", "deleted"}),
+    ({"model": "vx3", "kind": "SERIAL_SERVER"}, set()),
+])
+def test_resource_model_serial_fuzzy_filters_are_literal_and_intersect(resource_client, filters, expected):
+    """型号、序列号支持不区分大小写的部分匹配；组合条件不扩大所有者与软删除范围。"""
+    records = [
+        ("matching", "iDS-2CD7T46G2/VX3-IS", "GA1548684", "owner"),
+        ("other-serial", "iDS-2CD7T46G2/VX3-IS", "GB0000000", "other"),
+        ("other-model", "DS-2CD", "GA1549999", "owner"),
+        ("literal", "camera(test)+", "SN[01]", "owner"),
+        ("regex-decoy", "cameratesttt", "SN0", "owner"),
+        ("empty", "", "", "owner"),
+        ("deleted", "iDS-2CD7T46G2/VX3-IS", "GA1540000", "owner"),
+    ]
+    repo = resource_client.app.state.repo
+    resource_client.portal.call(repo.db.resources.insert_many, [
+        {"id": identifier, "name": "资源筛选验证", "kind": "HIKVISION_NETWORK", "ip": f"192.0.2.{index}",
+         "model": model, "subSerialNumber": serial, "createdBy": owner,
+         "deletedAt": "2026-09-14T00:00:00Z" if identifier == "deleted" else None}
+        for index, (identifier, model, serial, owner) in enumerate(records, 1)
+    ])
+    response = resource_client.get("/api/v1/resources", params=filters)
+    assert response.status_code == 200
+    result = response.json()
+    assert {item["id"] for item in result["items"]} == expected
+    assert result["total"] == len(expected)

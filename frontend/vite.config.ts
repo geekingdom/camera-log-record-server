@@ -26,6 +26,19 @@ export default defineConfig({
   optimizeDeps: {
     include: ["element-plus/es", ...componentStyles],
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          // 资源趋势弹窗本身是异步组件；图表层和其 Canvas 渲染依赖均只在打开弹窗后
+          // 才解析。按稳定库边界拆分可降低单块体积，且不会让主入口预加载图表依赖。
+          if (id.includes("/node_modules/zrender/")) return "zrender";
+          if (id.includes("/node_modules/echarts/")) return "echarts";
+          return undefined;
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": { target: "http://127.0.0.1:8000", ws: true },

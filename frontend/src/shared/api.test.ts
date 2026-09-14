@@ -5,6 +5,22 @@ import { api } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
 
+describe("设备身份模糊筛选 API", () => {
+  it("独立编码型号和序列号，并保留已有组合条件", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0 })));
+    vi.stubGlobal("fetch", fetch);
+    await api.resources(1, 20, {
+      model: "G2/VX3+", subSerialNumber: "GA[154]", search: "大厅", createdBy: "operator", includeDeleted: "true",
+    });
+    const params = new URL(fetch.mock.calls[0][0], "http://localhost").searchParams;
+    expect(Object.fromEntries(params)).toEqual({
+      page: "1", pageSize: "20", model: "G2/VX3+", subSerialNumber: "GA[154]", search: "大厅",
+      createdBy: "operator", includeDeleted: "true",
+    });
+  });
+});
+
 describe("阻塞任务重新启动 API", () => {
   it("提交隔离确认并保留服务端 detail 中的错误码", async () => {
     vi.stubGlobal("crypto", { randomUUID: () => "request-key" });

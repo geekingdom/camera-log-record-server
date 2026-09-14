@@ -202,6 +202,21 @@ def test_verifier_worker_restart_probe_checks_local_health_and_mongo_heartbeat(m
     assert kwargs["env"]["DEPLOY_ENV_FILE"] == str(environment)
 
 
+def test_failed_component_deploy_keeps_diagnostic_without_echoing_secret(monkeypatch, tmp_path):
+    """部署前失败也应保留故障类别，stderr 中临时凭据必须先脱敏。"""
+    env_file = tmp_path / ".database.env"
+    env_file.write_text("MONGO_ROOT_PASSWORD=private-component-password\n", encoding="utf-8")
+    monkeypatch.setattr(verifier.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(
+        command, 1, "", "toomanyrequests: registry rate limit; private-component-password"))
+    monkeypatch.setattr(verifier, "component_states", lambda _project: "未发现容器")
+    with pytest.raises(RuntimeError) as caught:
+        verifier.deploy_component("database", "test-project", env_file, 1,
+                                  secret_values=("private-component-password",))
+    message = str(caught.value)
+    assert "Registry 限流" in message and "未发现容器" in message
+    assert "private-component-password" not in message
+
+
 def test_verifier_cleanup_checks_labeled_objects_and_removes_root_owned_bind_content(monkeypatch, tmp_path):
     """清理只检查随机项目 label，并用一次性容器清空可能由 Mongo 创建的挂载内容。"""
     calls = []
