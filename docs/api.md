@@ -253,7 +253,7 @@ GET /api/v1/runtime-events?cursor=&pageSize=50&type=COREDUMP_MOUNT
 
 `level` 只能是 `DEBUG`、`INFO`、`WARNING` 或 `ERROR`；`outcome` 只能是 `PENDING`、`SUCCEEDED`、`FAILED`、`CANCELLED` 或 `UNKNOWN`，其他值返回 422。旧事件没有持久化这些字段时，服务端按与页面相同的规则在数据库聚合中推导后筛选和计数；分页完成后才批量补齐操作者、任务、资源、模板、节点、作业和命令名称。返回条目可包含 `summary`、`level`、`outcome`、`actorName`、`targetName`、`taskName`、`deviceIp`、`requestId`、`clientIp`、`reason`、`runId`、`sessionId` 和 `nodeId`。摘要为中文；例如 `CONNECTION_GAP` 显示为“采集连接中断”，其结果为 `UNKNOWN`、级别为 `WARNING`。
 
-请求事件仅记录 `/api/v1/` 下的非 `GET`/`HEAD` 请求，或状态码不低于 400 的读取请求；健康检查和普通读取不会进入该集合。请求成功发送完毕时，HTTP 202 为 `PENDING`，其他 2xx 为 `SUCCEEDED`，4xx/5xx 为 `FAILED`；响应未完整发送时为 `UNKNOWN`。持久化有短暂超时且失败不会改变原请求结果；已取消请求不会在清理阶段等待写入。事件不保存 query、header、请求/响应 body 或设备日志正文，失败原因仅来自已脱敏的安全错误文本。`request_events` 以 `createdAt` 建立 30 天 TTL，另建 `requestId` 和 `(taskId, createdAt)` 索引；该 TTL 不作用于设备日志、下载或归档。
+请求事件记录 `/api/v1/` 下的所有 HTTP 请求，包括成功的 `GET`/`HEAD` 查询和下载；健康检查不在该路径下，不进入该集合。请求成功发送完毕时，HTTP 202 为 `PENDING`，其他 2xx 为 `SUCCEEDED`，4xx/5xx 为 `FAILED`；响应未完整发送时为 `UNKNOWN`。数据库持久化最多等待 0.2 秒，失败不改变原请求结果；已取消请求不会在清理阶段等待写入。因此数据库异常时，可查询的请求事件可能缺失，不能把它视为所有故障请求均可靠落库的保证。事件不保存 query、header、请求/响应 body 或设备日志正文，失败原因仅来自已脱敏的安全错误文本。`request_events` 以 `createdAt` 建立 30 天 TTL，另建 `requestId` 和 `(taskId, createdAt)` 索引；该 TTL 不作用于设备日志、下载或归档。
 
 时间范围必须成对提供、带 UTC 时区或偏移、长度大于零且不超过 31 天。旧的连接缺口事件使用 `detectedAt`，接口会按其发生时间稳定排序，并返回统一的 `createdAt` 供显示。上述事件接口不读取设备日志正文或口令。
 

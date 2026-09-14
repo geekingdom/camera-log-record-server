@@ -279,24 +279,37 @@ class HourlyWriter:
             "logName": segment.log.name, "indexName": segment.index.name, "indexSha256": index_hash,
             "indexBytes": segment.index.stat().st_size}
 
+    def _prepare_archive(self, segments: list[_Segment]) -> tuple[Path, list[dict]]:
+        """在线程中扫描已有小时包并读取索引摘要，保持调用方传入的分卷顺序。"""
+        target = self._target(segments[0].hour, self._base(segments[0].hour))
+        return target, [self._segment_manifest(segment) for segment in segments]
+
     async def _publish_pending_locked(self, *, background: bool) -> list[HourArchive] | None:
         if not self._pending:
             return []
-        segments, self._pending = self._pending, []
         await self._archive_slots.acquire()
+        segments, self._pending = self._pending, []
         task = asyncio.create_task(self._archive(segments))
         if background:
             self._archive_tasks.add(task)
             task.add_done_callback(self._archive_done)
             return None
         try:
-            return await task
-        finally:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # 线程准备不能随调用方取消；转为受跟踪后台任务，由后续收尾等待并发布结果。
+            self._archive_tasks.add(task)
+            task.add_done_callback(self._archive_done)
+            raise
+        except Exception:
             self._archive_slots.release()
+            raise
+        self._archive_slots.release()
+        return result
 
     async def _archive(self, segments: list[_Segment]) -> list[HourArchive]:
-        target = self._target(segments[0].hour, self._base(segments[0].hour))
-        await compress_hour([self._segment_manifest(segment) for segment in segments], target)
+        target, manifests = await asyncio.to_thread(self._prepare_archive, segments)
+        await compress_hour(manifests, target)
         return [HourArchive(self.task_id, self.run_id, self.session_id, segment.hour.astimezone(UTC), target,
             segment.size, segment.digest, segment.first, segment.last, segment.log, segment.log.name, segment.index)
             for segment in segments]
@@ -311,7 +324,7 @@ class HourlyWriter:
 
     async def _await_archives_locked(self) -> None:
         if self._archive_tasks:
-            await asyncio.gather(*tuple(self._archive_tasks), return_exceptions=True)
+            await asyncio.shield(asyncio.gather(*tuple(self._archive_tasks), return_exceptions=True))
 
     async def rotate(self, now: datetime | None = None) -> HourArchive | None:
         async with self._lock:
