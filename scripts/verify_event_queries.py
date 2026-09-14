@@ -54,6 +54,24 @@ async def main() -> None:
               "核心转储失败的Mongo筛选与展示不一致")
         check(cancellations["total"] == 1 and cancellations["items"][0]["summary"] == "核心转储导出已取消",
               "核心转储取消的Mongo筛选与展示不一致")
+        await db.audit.insert_many([
+            {"action": action, "targetId": "device-audit", "createdAt": stamp}
+            for action in (
+                "authenticate_resource_credentials_rejected", "authenticate_resource_device_error",
+                "slave-ssh-bootstrap-host-attempt", "slave-ssh-bootstrap-temporary-attempt",
+                "slave-ssh-service-ready", "slave-ssh-connected",
+            )
+        ])
+        device_query = {"targetId": "device-audit"}
+        failures = await event_page(db, "audit", device_query | {"outcome": "FAILED", "level": "ERROR"}, 1, 10)
+        unknown = await event_page(db, "audit", device_query | {"outcome": "UNKNOWN", "level": "WARNING"}, 1, 10)
+        success = await event_page(db, "audit", device_query | {"outcome": "SUCCEEDED"}, 1, 10)
+        check(failures["total"] == 2 and all(item["summary"].startswith("设备身份认证失败") for item in failures["items"]),
+              "认证失败的Mongo筛选与中文展示不一致")
+        check(unknown["total"] == 2 and all(item["summary"].endswith("等待确认") for item in unknown["items"]),
+              "主从引导尝试不能按成功事件返回")
+        check(success["total"] == 2 and {item["action"] for item in success["items"]} == {
+            "slave-ssh-service-ready", "slave-ssh-connected"}, "主从成功筛选混入了尚未确认或失败动作")
         print("事件聚合验证通过：随机数据库已完成派生筛选、分页和优先级检查")
     finally:
         await client.drop_database(database_name)

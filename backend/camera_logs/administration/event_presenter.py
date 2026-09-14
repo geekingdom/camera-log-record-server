@@ -37,6 +37,13 @@ ACTION_SUMMARIES = {
     "resource_health_stop:AUTH_FAILED": "设备认证失败，系统停止关联采集",
     "resource_health_stop:OFFLINE": "设备离线，系统停止关联采集",
     "resource_health_stop:ERROR": "设备认证检查异常，系统停止关联采集",
+    "authenticate_resource_succeeded": "设备身份认证成功",
+    "authenticate_resource_credentials_rejected": "设备身份认证失败：凭据被拒绝",
+    "authenticate_resource_device_error": "设备身份认证失败：离线或设备异常",
+    "slave-ssh-bootstrap-host-attempt": "借用主机连接引导从机SSH服务，等待确认",
+    "slave-ssh-bootstrap-temporary-attempt": "通过临时连接引导从机SSH服务，等待确认",
+    "slave-ssh-service-ready": "从机共享SSH服务已就绪",
+    "slave-ssh-connected": "已进入指定从机SSH会话",
 }
 EVENT_SUMMARIES = {
     "CONNECTION_GAP": "采集连接中断", "USER_PAUSED": "任务已暂停",
@@ -45,6 +52,7 @@ EVENT_SUMMARIES = {
     "CLOCK_ROLLBACK": "服务器时间回拨",
     "IDLE_TIMEOUT": "采集日志空闲超时", "READ_ERROR": "采集连接读取失败",
     "COREDUMP_MOUNT": "核心转储挂载状态变化",
+    "SLAVE_SSH_BOOTSTRAP": "从机SSH连接与引导状态",
 }
 COREDUMP_MOUNT_SUMMARIES = {
     "UNMOUNTED": "核心转储 NFS 已卸载",
@@ -58,8 +66,16 @@ COREDUMP_MOUNT_OUTCOMES = {
 }
 _PRESSURE_EVENTS = {"DISK_PRESSURE_CHANGED", "WRITE_PRESSURE_CHANGED"}
 _TERMINAL_OUTCOMES = {"PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"}
-ACTION_OUTCOMES = {"login_failed": "FAILED", "coredump_export_failed": "FAILED",
-                   "coredump_export_cancelled": "CANCELLED"}
+# 数据库派生筛选复用此表，旧审计无需回填也能与列表保持相同结果。
+# 管理命令尝试不证明设备已提供SSH服务，只有后续ready事件才可判为成功。
+ACTION_OUTCOMES = {
+    "login_failed": "FAILED", "coredump_export_failed": "FAILED",
+    "coredump_export_cancelled": "CANCELLED",
+    "authenticate_resource_credentials_rejected": "FAILED",
+    "authenticate_resource_device_error": "FAILED",
+    "slave-ssh-bootstrap-host-attempt": "UNKNOWN",
+    "slave-ssh-bootstrap-temporary-attempt": "UNKNOWN",
+}
 _TARGET_COLLECTIONS = {
     "tasks": {"id": 1, "name": 1, "ip": 1}, "resources": {"id": 1, "name": 1, "ip": 1},
     "templates": {"id": 1, "name": 1}, "users": {"id": 1, "username": 1, "displayName": 1},

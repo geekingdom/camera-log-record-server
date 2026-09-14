@@ -10,6 +10,7 @@ import httpx
 
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
+from camera_logs.collection.slave_events import record_slave_bootstrap_event
 from camera_logs.collection.slave_shell import ShellBootstrap, SlaveLoginError
 from camera_logs.collection.ssh_admission import SshSlotUncertain
 from camera_logs.common.database import now
@@ -23,6 +24,11 @@ REMOTE_BOOTSTRAP_TIMEOUT_SECONDS = 55
 
 class SlaveBootstrapUncertain(ConnectionError):
     """跨节点引导响应未知；租约必须保留至远端有界动作窗口结束。"""
+
+    def __init__(self, message, *, host_task_id=None, host_node_id=None):
+        super().__init__(message)
+        self.host_task_id = host_task_id
+        self.host_node_id = host_node_id
 
 
 def dropbear_command(port):
@@ -118,12 +124,19 @@ async def borrow_host(worker, config, port):
         if host["nodeId"] == repo.settings.node_id:
             try:
                 if await bootstrap_on_host(worker, host["id"], config, port):
+                    await record_slave_bootstrap_event(
+                        repo, config, phase="HOST_BORROWED", outcome="UNKNOWN", level="WARNING",
+                        message="已通过主机采集连接提交扩展SSH引导，等待服务就绪确认", port=port,
+                        host_task_id=host["id"], host_node_id=host.get("nodeId"),
+                    )
                     return True
             except OwnershipLost:
                 logger.warning("借用主机连接引导已失效 task=%s hostTask=%s", config["id"], host["id"])
                 continue
             except (OSError, TimeoutError, ConnectionError) as error:
-                raise SlaveBootstrapUncertain("本机主机引导结果未知") from error
+                raise SlaveBootstrapUncertain(
+                    "本机主机引导结果未知", host_task_id=host["id"], host_node_id=host.get("nodeId"),
+                ) from error
         else:
             try:
                 node = await repo.db.nodes.find_one({"id": host["nodeId"]})
@@ -135,14 +148,24 @@ async def borrow_host(worker, config, port):
                     # 取消此 await 不能吞掉 CancelledError；但请求已交给网络后远端可能
                     # 继续执行，finally必须据此保留资源租约，直到整体执行上限过去。
                     config["_bootstrapRemoteRequestStarted"] = True
+                    config["_bootstrapRemoteHostTaskId"] = host["id"]
+                    config["_bootstrapRemoteHostNodeId"] = host.get("nodeId")
                     response = await client.post(node["url"].rstrip("/") + f"/internal/slave-ssh/{host['id']}",
                                                  json=payload, headers={"Authorization": "Bearer " + repo.settings.internal_token})
                     if response.status_code == 200:
                         body = response.json()
                         if not isinstance(body, dict) or not isinstance(body.get("bootstrapped"), bool):
-                            raise SlaveBootstrapUncertain("远端主机引导响应格式未知")
+                            raise SlaveBootstrapUncertain(
+                                "远端主机引导响应格式未知",
+                                host_task_id=host["id"], host_node_id=host.get("nodeId"),
+                            )
                         config["_bootstrapRemoteRequestStarted"] = False
                         if body["bootstrapped"]:
+                            await record_slave_bootstrap_event(
+                                repo, config, phase="HOST_BORROWED", outcome="UNKNOWN", level="WARNING",
+                                message="远端主机已提交扩展SSH引导，等待服务就绪确认", port=port,
+                                host_task_id=host["id"], host_node_id=host.get("nodeId"),
+                            )
                             return True
                         # 主机运行不存在、正在初始化等明确未执行场景可以安全临时回退。
                         continue
@@ -150,10 +173,15 @@ async def borrow_host(worker, config, port):
                     if response.status_code == 409:
                         config["_bootstrapRemoteRequestStarted"] = False
                         continue
-                    raise SlaveBootstrapUncertain(f"远端主机引导返回未知状态 {response.status_code}")
+                    raise SlaveBootstrapUncertain(
+                        f"远端主机引导返回未知状态 {response.status_code}",
+                        host_task_id=host["id"], host_node_id=host.get("nodeId"),
+                    )
             except (OSError, TimeoutError, httpx.HTTPError, ValueError) as error:
                 # 客户端超时、断连或响应损坏时，远端可能仍在主机命令队列中；不能回退再发一次。
-                raise SlaveBootstrapUncertain("远端主机引导响应未知") from error
+                raise SlaveBootstrapUncertain(
+                    "远端主机引导响应未知", host_task_id=host["id"], host_node_id=host.get("nodeId"),
+                ) from error
     return False
 
 
@@ -174,6 +202,10 @@ async def ensure_service(worker, config, port, direct_connect):
         if acquired.matched_count:
             break
         if time.monotonic() >= deadline:
+            await record_slave_bootstrap_event(
+                repo, config, phase="WAITING_FOR_LEASE", outcome="FAILED", level="WARNING",
+                message="等待同资源从机SSH引导租约超时", port=port,
+            )
             raise SlaveLoginError("等待同资源从机SSH引导超时，将稍后重试")
         await asyncio.sleep(1)
 
@@ -208,16 +240,51 @@ async def ensure_service(worker, config, port, direct_connect):
                     await bootstrap.ensure_ash()
                     await bootstrap.command(dropbear_command(port))
                     await repo.audit("system", "slave-ssh-bootstrap-temporary-attempt", config["id"])
+                    await record_slave_bootstrap_event(
+                        repo, config, phase="TEMPORARY_BOOTSTRAPPED", outcome="UNKNOWN", level="WARNING",
+                        message="已通过临时连接提交扩展SSH引导，等待服务就绪确认", port=port,
+                    )
                 finally:
                     await close_bootstrap(bootstrap, config)
             if not await ssh_service_available(config["ip"], port):
+                await record_slave_bootstrap_event(
+                    repo, config, phase="SERVICE_NOT_READY", outcome="FAILED", level="WARNING",
+                    message="从机扩展SSH服务未就绪", port=port,
+                )
                 raise SlaveLoginError("从机扩展SSH服务未就绪，将在重连时重新恢复")
             await repo.audit("system", "slave-ssh-service-ready", config["id"])
+            await record_slave_bootstrap_event(
+                repo, config, phase="SERVICE_READY", outcome="SUCCEEDED", level="INFO",
+                message="从机扩展SSH服务已就绪", port=port,
+            )
     except SlaveBootstrapUncertain as error:
         # 远端执行的整体时间上限短于120秒租约。保留本token到期，避免当前或新代次在
         # 无法确认远端是否仍在主机命令队列时再创建临时bootstrap。
         uncertain = True
+        await record_slave_bootstrap_event(
+            repo, config, phase="REMOTE_RESULT_UNKNOWN", outcome="UNKNOWN", level="WARNING",
+            message="跨节点主机引导结果未知，保留资源引导租约", port=port,
+            host_task_id=error.host_task_id, host_node_id=error.host_node_id,
+        )
         raise SlaveLoginError("跨节点主机引导结果未知，等待租约到期后再重试") from error
+    except asyncio.CancelledError:
+        if attempt and attempt.get("_bootstrapRemoteRequestStarted"):
+            await record_slave_bootstrap_event(
+                repo, config, phase="REMOTE_RESULT_UNKNOWN", outcome="UNKNOWN", level="WARNING",
+                message="跨节点主机引导请求已取消，保留资源引导租约", port=port,
+                host_task_id=attempt.get("_bootstrapRemoteHostTaskId"),
+                host_node_id=attempt.get("_bootstrapRemoteHostNodeId"),
+            )
+        raise
+    except TimeoutError:
+        remote_started = bool(attempt and attempt.get("_bootstrapRemoteRequestStarted"))
+        await record_slave_bootstrap_event(
+            repo, config, phase="BOOTSTRAP_TIMEOUT", outcome="UNKNOWN" if remote_started else "FAILED",
+            level="WARNING", message="从机SSH引导在规定时间内未完成", port=port,
+            host_task_id=attempt.get("_bootstrapRemoteHostTaskId") if attempt else None,
+            host_node_id=attempt.get("_bootstrapRemoteHostNodeId") if attempt else None,
+        )
+        raise
     finally:
         try:
             selector = {"id": config["resourceId"], "slaveSshBootstrap.token": token}
@@ -250,6 +317,10 @@ async def connect_slave(worker, config, direct_connect):
         await active_task(repo, config)
         await repo.db.tasks.update_one(owner_filter(config), {"$set": {"effectiveSshPort": port, "slaveConnectedAt": now()}})
         await repo.audit("system", "slave-ssh-connected", config["id"])
+        await record_slave_bootstrap_event(
+            repo, config, phase="SLAVE_CONNECTED", outcome="SUCCEEDED", level="INFO",
+            message="已进入指定从机SSH会话", port=port,
+        )
         return shell
     except BaseException as error:
         await close_bootstrap(shell, config)

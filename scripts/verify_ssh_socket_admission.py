@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import asyncssh
 from camera_logs.collection.connections import connect
-from camera_logs.collection.ssh_admission import SshAdmission, SshCapacityError
+from camera_logs.collection.ssh_admission import SshAdmission, SshCapacityError, normalize_ssh_endpoint
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
 from cryptography.fernet import Fernet
@@ -100,6 +100,7 @@ async def verify(uri: str) -> dict[str, object]:
             server_host_keys=[asyncssh.generate_private_key("ssh-ed25519")],
         )
         port = server.get_port()
+        endpoint = normalize_ssh_endpoint("127.0.0.1", port)
         entries = [task(f"socket-{index}", port, f"worker-{index % 2}") for index in range(6)]
         admissions = [SshAdmission(repo, item) for item in entries]
         attempts = await asyncio.gather(
@@ -108,21 +109,24 @@ async def verify(uri: str) -> dict[str, object]:
             return_exceptions=True,
         )
         accepted = [value for value in attempts if not isinstance(value, BaseException)]
+        # 在任何断言之前登记已建立连接，失败验收也必须主动关闭实际socket。
+        connections.extend(accepted)
         rejected = [value for value in attempts if isinstance(value, BaseException)]
         if len(accepted) != 5 or len(rejected) != 1 or not isinstance(rejected[0], SshCapacityError):
             raise AssertionError(f"六路并发 SSH 准入结果错误 attempts={attempts!r}")
-        connections.extend(accepted)
         await wait_for(lambda: tracker.active, 5)
         if tracker.peak != 5:
             raise AssertionError(f"实际 SSH shell 峰值应为5，实际为{tracker.peak}")
-        slot = await repo.db.ssh_connection_slots.find_one({"_id": "127.0.0.1"})
+        slot = await repo.db.ssh_connection_slots.find_one({"_id": endpoint})
         if not slot or len(slot.get("claims", [])) != 5:
             raise AssertionError(f"五路 SSH 建连后的名额不正确 slot={slot!r}")
 
         # 一个关闭收据完成后才允许第六个任务重新申请并建立实际 shell。
         await connections.pop().close()
         await wait_for(lambda: tracker.active, 4)
-        sixth = await connect(dict(entries[-1]) | {"_sshAdmission": SshAdmission(repo, entries[-1])})
+        rejected_entry = next(item for item, attempt in zip(entries, attempts, strict=True)
+                              if isinstance(attempt, SshCapacityError))
+        sixth = await connect(dict(rejected_entry) | {"_sshAdmission": SshAdmission(repo, rejected_entry)})
         connections.append(sixth)
         await wait_for(lambda: tracker.active, 5)
 
@@ -130,11 +134,11 @@ async def verify(uri: str) -> dict[str, object]:
             await connection.close()
         connections.clear()
         await wait_for(lambda: tracker.active, 0)
-        released = await repo.db.ssh_connection_slots.find_one({"_id": "127.0.0.1"})
+        released = await repo.db.ssh_connection_slots.find_one({"_id": endpoint})
         if not released or released.get("claims") != []:
             raise AssertionError(f"全部 socket 关闭后 Mongo 名额未清空 slot={released!r}")
         return {"passed": True, "temporaryDatabase": database_name, "acceptedShells": 5,
-                "rejectedSixth": True, "reopenedAfterClose": True, "finalClaims": 0,
+                "rejectedSixth": True, "reopenedAfterClose": True, "perEndpointClaims": True, "finalClaims": 0,
                 "serverConnections": tracker.active, "noDeviceAccess": True, "noLogWrites": True}
     finally:
         for connection in connections:

@@ -56,13 +56,14 @@ class _CloseFailsConnection(_QueueConnection):
 class _TemporaryBootstrapConnection(_QueueConnection):
     """临时主机引导连接；dropbear 命令写入后保持命令响应未完成。"""
 
-    def __init__(self, *, block_close=False):
+    def __init__(self, *, block_close=False, complete_command=False):
         super().__init__()
         self.command_written = asyncio.Event()
         self.read_cancelled = asyncio.Event()
         self.close_started = asyncio.Event()
         self.close_finish = asyncio.Event()
         self.block_close = block_close
+        self.complete_command = complete_command
         self.queue.put_nowait(b"BusyBox main built-in shell (ash)\r\n# ")
 
     async def read(self, size):
@@ -76,6 +77,10 @@ class _TemporaryBootstrapConnection(_QueueConnection):
         await super().write(data)
         if data.startswith(b"/usr/sbin/dropbear"):
             self.command_written.set()
+            if self.complete_command:
+                marker = re.search(rb"(__SLAVE_BOOT_[0-9a-f]+):%s", data)
+                assert marker is not None
+                await self.queue.put(b"\n" + marker.group(1) + b":0\n")
 
     async def close(self):
         self.closed = True
@@ -384,6 +389,10 @@ async def test_unknown_cross_node_bootstrap_keeps_lease_and_never_falls_back_to_
     with pytest.raises(Exception, match="结果未知"):
         await ensure_service(SimpleNamespace(repo=repo), config, 18080, direct)
     direct.assert_not_awaited()
+    event = await repo.db.events.find_one({"type": "SLAVE_SSH_BOOTSTRAP"})
+    assert event is not None
+    assert (event["phase"], event["outcome"], event["level"]) == ("REMOTE_RESULT_UNKNOWN", "UNKNOWN", "WARNING")
+    assert event["taskId"] == config["id"] and event["port"] == 18080
     resource = await repo.db.resources.find_one({"id": "resource"})
     lease = resource["slaveSshBootstrap"]
     assert lease["expiresAt"].replace(tzinfo=now().tzinfo) > now() and lease.get("uncertainAt") is not None
@@ -395,6 +404,26 @@ async def test_unknown_cross_node_bootstrap_keeps_lease_and_never_falls_back_to_
         {"$set": {"slaveSshBootstrap": {"token": "new", "expiresAt": now()}}},
     )
     assert acquired.matched_count == 0
+
+
+async def test_temporary_bootstrap_service_not_ready_records_fixed_failure_event(tmp_path, monkeypatch):
+    """临时命令已提交但扩展端口无SSH横幅时，保留可检索失败事件而不写设备输出。"""
+    from camera_logs.collection import slave_ssh
+
+    repo, config = _repo(tmp_path), _config()
+    await _insert_running(repo, config)
+    connection = _TemporaryBootstrapConnection(complete_command=True)
+    monkeypatch.setattr(slave_ssh, "ssh_service_available", AsyncMock(return_value=False))
+    monkeypatch.setattr(slave_ssh, "borrow_host", AsyncMock(return_value=False))
+
+    with pytest.raises(slave_ssh.SlaveLoginError, match="未就绪"):
+        await ensure_service(SimpleNamespace(repo=repo), config, 18080, AsyncMock(return_value=connection))
+
+    events = [item async for item in repo.db.events.find({"type": "SLAVE_SSH_BOOTSTRAP"})]
+    assert [(item["phase"], item["outcome"]) for item in events] == [
+        ("TEMPORARY_BOOTSTRAPPED", "UNKNOWN"), ("SERVICE_NOT_READY", "FAILED"),
+    ]
+    assert "secret" not in str(events)
 
 
 async def test_cancelled_remote_request_preserves_lease_and_propagates_cancellation(tmp_path, monkeypatch):
@@ -428,6 +457,9 @@ async def test_cancelled_remote_request_preserves_lease_and_propagates_cancellat
         await task
     resource = await repo.db.resources.find_one({"id": "resource"})
     assert resource["slaveSshBootstrap"].get("uncertainAt") is not None
+    event = await repo.db.events.find_one({"type": "SLAVE_SSH_BOOTSTRAP", "phase": "REMOTE_RESULT_UNKNOWN"})
+    assert event is not None
+    assert event["hostTaskId"] == "host" and event["hostNodeId"] == "remote"
 
 
 @pytest.mark.parametrize("body, raises", [
