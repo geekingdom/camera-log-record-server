@@ -63,7 +63,7 @@ try {
   assert.equal(await page.getByText("Dsp_Main 最新值", { exact: true }).count(), 1, "PID变化后仅有一个同名进程摘要");
   assert.equal(await page.getByText(/Dsp_Main \(PID/).count(), 0, "进程对象不显示PID后缀");
   await page.getByText("比率", { exact: true }).click();
-  await page.getByRole("heading", { name: "内存变化率（%）" }).waitFor();
+  await page.getByRole("heading", { name: "内存比率（初始有效值 = 100%）" }).waitFor();
   await page.mouse.move(10, 10);
   await page.locator(".metrics-toolbar input:focus").evaluateAll(elements => elements.forEach(element => element.blur()));
   await page.waitForTimeout(300);

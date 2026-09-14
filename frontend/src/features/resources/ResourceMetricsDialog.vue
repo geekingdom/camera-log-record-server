@@ -155,7 +155,7 @@ function applyCustomRange() {
 }
 function togglePause() { paused.value = !paused.value; scheduleRefresh(); if (!paused.value) void load(); }
 function selectMetric(unit: "KB" | "%") { selectedUnit.value = unit; axisWindow.value = {}; void nextTick(renderCharts); }
-/** 切换仅改变内存图展示方式；相对变化率的基准来自当前已查询的完整样本。 */
+/** 切换仅改变内存图展示方式；100%基准来自当前已查询的完整样本。 */
 function selectMemoryDisplay(mode: "absolute" | "relative") { memoryDisplayMode.value = mode; axisWindow.value = {}; void nextTick(renderCharts); }
 function exportCsv() {
   const blob = new Blob([metricsCsv(samples.value)], { type: "text/csv;charset=utf-8" });
@@ -183,7 +183,7 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
   <el-dialog v-model="open" :title="`${props.resource?.name ?? '资源'} · CPU 与内存趋势`" width="min(1100px, 96vw)" destroy-on-close class="resource-metrics-dialog">
     <div class="metrics-toolbar">
       <el-radio-group :model-value="selectedUnit" aria-label="监控指标" @change="selectMetric"><el-radio-button value="KB">内存</el-radio-button><el-radio-button value="%">CPU</el-radio-button></el-radio-group>
-      <el-tooltip v-if="selectedUnit === 'KB'" content="比率以当前查询范围内每条曲线的首个有效采样为基准；缩放图表不会改变基准，刷新或重新查询后会按新范围计算。" :popper-style="{ maxWidth: 'min(320px, calc(100vw - 24px))', whiteSpace: 'normal' }">
+      <el-tooltip v-if="selectedUnit === 'KB'" content="比率 = 当前值 ÷ 首个有效采样值 × 100%，首个有效值为100%；缩放不改变基准，刷新或重新查询后按新范围计算。" :popper-style="{ maxWidth: 'min(320px, calc(100vw - 24px))', whiteSpace: 'normal' }">
         <el-radio-group :model-value="memoryDisplayMode" aria-label="内存图展示方式" @change="selectMemoryDisplay"><el-radio-button value="absolute">原始数值</el-radio-button><el-radio-button value="relative">比率</el-radio-button></el-radio-group>
       </el-tooltip>
       <el-radio-group :model-value="preset" aria-label="监控历史时间范围" @change="choosePreset">
@@ -197,7 +197,7 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
     </div>
     <div v-if="preset === 'custom'" class="metrics-custom-range"><el-date-picker v-model="customRange" type="datetimerange" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" :teleported="false" /><el-button type="primary" @click="applyCustomRange">查询</el-button></div>
     <el-alert v-if="error" type="error" show-icon :title="error" :closable="false" class="metrics-alert" />
-    <el-alert v-if="zeroBaselineNames.length" type="warning" show-icon :closable="false" class="metrics-alert" :title="`以下曲线的首个有效采样为 0，无法计算变化率：${zeroBaselineNames.join('、')}`" />
+    <el-alert v-if="zeroBaselineNames.length" type="warning" show-icon :closable="false" class="metrics-alert" :title="`以下曲线的首个有效采样为 0，无法计算比率：${zeroBaselineNames.join('、')}`" />
     <div class="metrics-summary" aria-label="资源监控摘要">
       <div v-for="item in summaries" :key="item.key"><span>{{ item.name }} 最新值</span><strong>{{ number(item.value, item.unit) }}</strong><small>{{ delta(item.delta, item.unit) }}</small></div>
       <div><span>采样状态</span><strong>{{ samples.length }} 条</strong><small>{{ issueCount ? `${issueCount} 条异常` : '无异常样本' }}</small></div>
@@ -206,7 +206,7 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
     <div v-loading="loading" class="metrics-content">
       <el-empty v-if="!loading && !error && !hasMetrics" description="所选时间范围内暂无资源监控数据" />
       <template v-else>
-        <section class="metrics-chart-section"><h3>{{ selectedUnit === 'KB' ? (memoryDisplayMode === 'relative' ? '内存变化率（%）' : `内存（${activeDisplayUnit}）`) : 'CPU（%）' }}</h3><div ref="chartElement" class="metrics-chart" :aria-label="selectedUnit === 'KB' ? (memoryDisplayMode === 'relative' ? '内存变化率图' : '内存趋势图') : 'CPU 趋势图'" /></section>
+        <section class="metrics-chart-section"><h3>{{ selectedUnit === 'KB' ? (memoryDisplayMode === 'relative' ? '内存比率（初始有效值 = 100%）' : `内存（${activeDisplayUnit}）`) : 'CPU（%）' }}</h3><div ref="chartElement" class="metrics-chart" :aria-label="selectedUnit === 'KB' ? (memoryDisplayMode === 'relative' ? '内存比率图' : '内存趋势图') : 'CPU 趋势图'" /></section>
       </template>
     </div>
   </el-dialog>
