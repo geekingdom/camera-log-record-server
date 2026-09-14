@@ -5,6 +5,9 @@ export type EventLevel = "INFO" | "WARNING" | "ERROR";
 export type EventOutcome = "SUCCEEDED" | "FAILED" | "PENDING" | "CANCELLED" | "UNKNOWN";
 
 export interface EventBase {
+  sourceName?: string;
+  sourceDetail?: string;
+  sourceKind?: string;
   createdAt?: string;
   detectedAt?: string;
   summary?: string;

@@ -193,7 +193,8 @@ class Worker:
             return
         await self.repo.db.operations.update_many({"taskId": task["id"], "desiredState": "PAUSED", "status": "PENDING"},
             {"$set": {"status": "SUCCEEDED", "completedAt": now()}})
-        await self.repo.db.events.insert_one({"taskId": task["id"], "runId": task["runId"], "type": "USER_PAUSED", "createdAt": now()})
+        await self.repo.db.events.insert_one({"taskId": task["id"], "runId": task["runId"], "nodeId": self.repo.settings.node_id,
+            "type": "USER_PAUSED", "createdAt": now()})
         self.discard_closed(runtime)
 
     async def pause_pending(self, task):
@@ -209,7 +210,8 @@ class Worker:
             {"$set": {"status": "SUCCEEDED", "completedAt": now()}},
         )
         await self.repo.db.events.insert_one(
-            {"taskId": task["id"], "runId": task["runId"], "type": "USER_PAUSED", "createdAt": now()}
+            {"taskId": task["id"], "runId": task["runId"], "nodeId": self.repo.settings.node_id,
+             "type": "USER_PAUSED", "createdAt": now()}
         )
 
     async def release(self, runtime):

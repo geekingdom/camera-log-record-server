@@ -47,12 +47,13 @@ async def test_monitor_recovers_missing_mount_without_repeating_debug():
 
     async def report(status, error):
         events.append(status)
-        if len(events) == 2:
+        if events == ["MOUNTED", "REMOUNTING", "MOUNTED"]:
             raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
         await monitor_mount(send, report, "10.0.0.1:/srv/core/10.0.0.34", interval=0)
     assert commands == ["debug", "gdbcfg", "mount", "mount", "gdbcfg", "mount"]
+    assert events == ["MOUNTED", "REMOUNTING", "MOUNTED"]
 
 
 async def test_failed_debug_is_not_retried_in_same_session():

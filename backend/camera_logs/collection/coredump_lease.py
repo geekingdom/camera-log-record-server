@@ -14,15 +14,28 @@ from camera_logs.common.ownership import owner_filter
 
 async def record_coredump_status(repo, task, collector, status, error, logger):
     """记录挂载事件和任务可见状态；记录失败不应中断日志接收或挂载重试。"""
+    session_id = collector.session_id
+    mounted_signature = (session_id, status, error)
+    if status != "MOUNTED":
+        collector.last_coredump_mounted = None
+    repeated_mounted = status == "MOUNTED" and mounted_signature == getattr(collector, "last_coredump_mounted", None)
+    if not repeated_mounted:
+        try:
+            await repo.db.events.insert_one({"type": "COREDUMP_MOUNT", "taskId": task["id"],
+                "runId": task["runId"], "sessionId": session_id,
+                "nodeId": repo.settings.node_id, "status": status, "error": error, "createdAt": now()})
+        except Exception:  # 可选监控状态不能反向中断日志会话。
+            logger.exception("coredump 事件记录失败 task=%s", task["id"])
+        else:
+            # 只有成功发布才允许抑制同会话的下一次正常挂载确认。
+            if status == "MOUNTED":
+                collector.last_coredump_mounted = mounted_signature
     try:
-        await repo.db.events.insert_one({"type": "COREDUMP_MOUNT", "taskId": task["id"],
-            "runId": task["runId"], "sessionId": collector.session_id,
-            "nodeId": repo.settings.node_id, "status": status, "error": error, "createdAt": now()})
         await repo.db.tasks.update_one(owner_filter(task), {"$set": {
             "coredumpMountStatus": status, "coredumpMountError": error,
             "coredumpMountRunId": task["runId"], "coredumpCheckedAt": now()}})
     except Exception:  # 可选监控状态不能反向中断日志会话。
-        logger.exception("coredump 状态记录失败 task=%s", task["id"])
+        logger.exception("coredump 任务状态记录失败 task=%s", task["id"])
 
 
 def _eligible_coredump_task_query(resource_id, *, exclude_task_id=None):

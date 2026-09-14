@@ -172,6 +172,57 @@ async def test_debug_events_persist_task_recovery_state_without_run_latch(tmp_pa
     assert stored_task["debugPhase"] == "RECOVERED"
     assert stored_task["commandBlocked"] is False and stored_task["debugError"] == failure
     assert [(event["phase"], event["commandBlocked"]) for event in events] == [("FAILED", True), ("RECOVERED", False)]
+    assert {event["nodeId"] for event in events} == {repo.settings.node_id}
+
+
+async def test_debug_already_ash_deduplicates_only_unchanged_session_confirmation(tmp_path):
+    """同会话重复 ASH 确认不刷屏，握手阶段变化和新会话仍应完整留痕。"""
+    repo, task = await repository(tmp_path)
+    runtime = object.__new__(SessionRuntime)
+    runtime.repo, runtime.task = repo, task
+    runtime.collector = SimpleNamespace(session_id="debug-session")
+    confirmation = {"mode": "ASH", "commandBlocked": False, "debugError": None}
+
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("FAILED", {"mode": "PSH", "commandBlocked": True, "debugError": "调试失败"})
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("RECOVERED", {"mode": "ASH", "commandBlocked": False, "debugError": None})
+    runtime.collector.session_id = "next-session"
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+
+    events = [event async for event in repo.db.events.find({"taskId": task["id"]})]
+    assert [event["phase"] for event in events] == ["ALREADY_ASH", "FAILED", "ALREADY_ASH", "RECOVERED", "ALREADY_ASH"]
+    assert (await repo.get("tasks", task["id"]))["debugPhase"] == "ALREADY_ASH"
+
+
+async def test_debug_already_ash_retries_after_event_insert_failure(tmp_path):
+    """确认事件写入失败不得占用去重缓存，下一次通知必须重试持久化。"""
+    repo, task = await repository(tmp_path)
+    runtime = object.__new__(SessionRuntime)
+    runtime.collector = SimpleNamespace(session_id="debug-session")
+    original_insert = repo.db.events.insert_one
+    calls = 0
+
+    async def insert_one(document):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("模拟事件存储失败")
+        return await original_insert(document)
+
+    runtime.repo = SimpleNamespace(
+        settings=repo.settings,
+        db=SimpleNamespace(events=SimpleNamespace(insert_one=insert_one), tasks=repo.db.tasks),
+    )
+    runtime.task = task
+    confirmation = {"mode": "ASH", "commandBlocked": False, "debugError": None}
+    with pytest.raises(OSError, match="模拟事件存储失败"):
+        await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+
+    assert calls == 2
+    assert await repo.db.events.count_documents({"taskId": task["id"], "phase": "ALREADY_ASH"}) == 1
 
 
 @pytest.mark.usefixtures("mock_reservation_transaction")

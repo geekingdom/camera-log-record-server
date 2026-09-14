@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 
+from camera_logs.administration.event_sources import event_source, event_source_documents
 from camera_logs.common.database import public
 from camera_logs.common.observability import redact, redact_text
 
@@ -55,14 +56,38 @@ EVENT_SUMMARIES = {
     "SLAVE_SSH_BOOTSTRAP": "从机SSH连接与引导状态",
 }
 COREDUMP_MOUNT_SUMMARIES = {
+    "MOUNTED": "核心转储 NFS 已挂载",
+    "REMOUNTING": "检测到核心转储 NFS 挂载丢失，准备重新挂载",
+    "FAILED": "核心转储 NFS 挂载失败",
     "UNMOUNTED": "核心转储 NFS 已卸载",
     "UNMOUNT_SKIPPED": "核心转储 NFS 跳过卸载，结果未确认",
     "UNMOUNT_FAILED": "核心转储 NFS 卸载失败",
 }
 COREDUMP_MOUNT_OUTCOMES = {
+    "MOUNTED": "SUCCEEDED",
+    "REMOUNTING": "PENDING",
+    "FAILED": "FAILED",
     "UNMOUNTED": "SUCCEEDED",
     "UNMOUNT_SKIPPED": "UNKNOWN",
     "UNMOUNT_FAILED": "FAILED",
+}
+DEBUG_MODE_SUMMARIES = {
+    "ALREADY_ASH": "已确认设备处于 ASH 模式",
+    "STARTED": "开始切换设备调试模式",
+    "CHALLENGE_RECEIVED": "已收到 PSH 调试挑战，正在切换",
+    "ASH_READY": "已切换至 ASH 模式",
+    "FAILED": "设备调试模式切换失败",
+    "RECOVERED": "设备调试命令通道已恢复",
+    "BLOCKED": "设备调试模式未恢复，命令已阻断",
+}
+DEBUG_MODE_OUTCOMES = {
+    "ALREADY_ASH": "SUCCEEDED",
+    "STARTED": "PENDING",
+    "CHALLENGE_RECEIVED": "PENDING",
+    "ASH_READY": "SUCCEEDED",
+    "FAILED": "FAILED",
+    "RECOVERED": "SUCCEEDED",
+    "BLOCKED": "UNKNOWN",
 }
 _PRESSURE_EVENTS = {"DISK_PRESSURE_CHANGED", "WRITE_PRESSURE_CHANGED"}
 _TERMINAL_OUTCOMES = {"PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"}
@@ -109,6 +134,8 @@ def event_outcome(item: dict) -> str:
     if event_type in _PRESSURE_EVENTS:
         return "SUCCEEDED" if item.get("level") == "NORMAL" else "UNKNOWN"
     if event_type == "DEBUG_MODE":
+        if item.get("phase") in DEBUG_MODE_OUTCOMES:
+            return DEBUG_MODE_OUTCOMES[item["phase"]]
         return "FAILED" if item.get("debugError") else "SUCCEEDED"
     return "SUCCEEDED"
 
@@ -135,6 +162,8 @@ def _summary(item: dict) -> str:
         return redact_text(str(item["summary"]))
     if item.get("action"):
         return ACTION_SUMMARIES.get(item["action"], "执行管理操作")
+    if item.get("type") == "DEBUG_MODE" and item.get("phase") in DEBUG_MODE_SUMMARIES:
+        return DEBUG_MODE_SUMMARIES[item["phase"]]
     if item.get("type") == "COREDUMP_MOUNT" and item.get("status") in COREDUMP_MOUNT_SUMMARIES:
         return COREDUMP_MOUNT_SUMMARIES[item["status"]]
     if item.get("type"):
@@ -168,6 +197,7 @@ async def present_events(db, items: Iterable[dict]) -> list[dict]:
     target_ids = {str(item["targetId"]) for item in raw_items if item.get("targetId")}
     task_ids = {str(item["taskId"]) for item in raw_items if item.get("taskId")} | target_ids
     users = await _documents_by_id(db, "users", actor_ids | target_ids)
+    source_tokens, source_nodes = await event_source_documents(db, raw_items)
     documents = {name: await _documents_by_id(db, name, task_ids if name == "tasks" else target_ids)
                  for name in _TARGET_COLLECTIONS if name != "users"}
     documents["users"] = users
@@ -212,5 +242,6 @@ async def present_events(db, items: Iterable[dict]) -> list[dict]:
                     item["taskId"] = linked_task["id"]
                     item["taskName"] = linked_task.get("name") or linked_task["id"]
                     item["deviceIp"] = linked_task.get("ip")
+        item.update(event_source(item, users=users, tokens=source_tokens, nodes=source_nodes, task=task))
         result.append(item)
     return result

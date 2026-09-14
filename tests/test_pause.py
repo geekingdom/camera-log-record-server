@@ -31,6 +31,8 @@ async def test_pause_releases_connection_but_resume_preserves_run_and_budget(tmp
     runtime.stop.assert_awaited_once()
     assert (await repo.get("tasks", "task"))["status"] == "PAUSED"
     assert await repo.db.endpoint_locks.count_documents({}) == 1
+    event = await repo.db.events.find_one({"taskId": "task", "type": "USER_PAUSED"})
+    assert event["nodeId"] == repo.settings.node_id
     await repo.db.tasks.update_one({"id": "task"}, {"$set": {"desiredState": "RUNNING"}})
     await schedule_once(repo)
     assert (await repo.get("tasks", "task"))["status"] == "PAUSED"
@@ -54,6 +56,8 @@ async def test_pause_pending_assignment_preserves_lock_without_marking_blocked(t
     assert paused["status"] == "PAUSED" and paused["nodeId"] is None
     assert await repo.db.endpoint_locks.count_documents({}) == 1
     assert (await repo.get("operations", "pause"))["status"] == "SUCCEEDED"
+    event = await repo.db.events.find_one({"taskId": "pending", "type": "USER_PAUSED"})
+    assert event["nodeId"] == repo.settings.node_id
 
 
 async def test_pause_stops_real_runtime_without_reconnect_and_preserves_run_lock_and_budget(tmp_path):

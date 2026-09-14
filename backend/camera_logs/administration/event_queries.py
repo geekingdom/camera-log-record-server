@@ -5,6 +5,7 @@ import inspect
 from camera_logs.administration.event_presenter import (
     ACTION_OUTCOMES,
     COREDUMP_MOUNT_OUTCOMES,
+    DEBUG_MODE_OUTCOMES,
     present_events,
 )
 from camera_logs.common.database import public
@@ -38,8 +39,12 @@ def _derived_fields() -> dict:
          "then": "UNKNOWN"},
         {"case": {"$in": ["$type", _PRESSURE_EVENTS]}, "then": {
             "$cond": [{"$eq": ["$level", "NORMAL"]}, "SUCCEEDED", "UNKNOWN"]}},
-        {"case": {"$eq": ["$type", "DEBUG_MODE"]}, "then": {
-            "$cond": [{"$in": [{"$ifNull": ["$debugError", None]}, [None, False, 0, ""]]}, "SUCCEEDED", "FAILED"]}},
+        {"case": {"$eq": ["$type", "DEBUG_MODE"]}, "then": {"$switch": {"branches": [
+            {"case": {"$eq": ["$phase", phase]}, "then": result}
+            for phase, result in DEBUG_MODE_OUTCOMES.items()
+        ], "default": {"$cond": [
+            {"$in": [{"$ifNull": ["$debugError", None]}, [None, False, 0, ""]]}, "SUCCEEDED", "FAILED"
+        ]}}}},
     ], "default": "SUCCEEDED"}}
     level = {"$switch": {"branches": [
         {"case": {"$in": ["$type", _PRESSURE_EVENTS]}, "then": {"$switch": {"branches": [

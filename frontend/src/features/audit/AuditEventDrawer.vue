@@ -4,6 +4,7 @@ import { computed } from "vue";
 import { CircleAlert, Copy, Fingerprint, Network, Timer } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import type { EventBase } from "./api";
+import { eventSource } from "./eventSource";
 
 const props = defineProps<{
   row?: EventBase;
@@ -76,6 +77,8 @@ async function copyRequestId() {
       <section class="detail-section">
         <h4><Network :size="16" /> 请求上下文</h4>
         <dl class="detail-grid">
+          <dt>操作者/来源</dt><dd>{{ eventSource(row).name }}</dd>
+          <dt>来源说明</dt><dd>{{ eventSource(row).detail }}</dd>
           <dt>操作者</dt><dd>{{ value(row.actorName || row.actor) }}</dd>
           <dt>来源 IP</dt><dd>{{ value(row.clientIp) }}</dd>
           <dt>路由</dt><dd>{{ value(row.route) }}</dd>

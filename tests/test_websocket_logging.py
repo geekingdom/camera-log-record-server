@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from camera_logs.common import observability
+from camera_logs.common.request_context import current_request_context
 from fastapi import HTTPException
 from starlette.websockets import WebSocketDisconnect
 from test_api import client  # noqa: F401
@@ -14,12 +15,15 @@ from test_api import client  # noqa: F401
 async def test_websocket_close_records_route_actor_and_no_payload(monkeypatch, close_code):
     recorded = Mock()
     monkeypatch.setattr(observability, "logging", SimpleNamespace(getLogger=lambda *_: recorded))
-    scope = {"type": "websocket", "path": "/api/v1/tasks/task/logs", "headers": [], "state": {}}
+    scope = {"type": "websocket", "path": "/api/v1/tasks/task/logs", "headers": [], "state": {},
+             "client": ("198.51.100.9", 443)}
+    contexts = []
 
     async def app(scope, receive, send):
         scope["route"] = SimpleNamespace(path="/api/v1/tasks/{task_id}/logs")
         scope["path_params"] = {"task_id": "task"}
         scope["state"]["actor"] = {"id": "operator", "token": "never-log-identity-secret"}
+        contexts.append(current_request_context())
         await receive()
         await send({"type": "websocket.accept"})
         await send({"type": "websocket.send", "text": "never-log-device-text"})
@@ -32,6 +36,9 @@ async def test_websocket_close_records_route_actor_and_no_payload(monkeypatch, c
     context = recorded.log.call_args.kwargs["extra"]["context"]
     assert context["closeCode"] == close_code
     assert context["actor"] == "operator" and context["requestId"]
+    assert context["clientIp"] == "198.51.100.9"
+    assert contexts == [{"requestId": context["requestId"], "clientIp": "198.51.100.9"}]
+    assert current_request_context() == {}
     assert context["route"] == "/api/v1/tasks/{task_id}/logs"
     assert context["targets"] == {"task_id": "task"}
     assert context["framesSent"] == 1
@@ -65,6 +72,31 @@ def test_live_endpoint_accepts_plain_and_tls_websocket_schemes(client, scheme): 
     with client.websocket_connect(f"{scheme}://testserver/api/v1/tasks/scheme-task/logs") as socket:
         socket.send_json({"token": "test-admin-token"})
         assert socket.receive_json() == {"type": "status", "status": "STOPPED"}
+
+
+def test_live_subscription_audit_keeps_websocket_request_context_for_service_token(client):  # noqa: F811
+    """首帧服务账号认证后的订阅审计必须保留用户、令牌和连接来源关联。"""
+    user = client.post("/api/v1/users", json={
+        "username": "websocket-audit", "displayName": "实时订阅账号",
+        "password": "websocket-audit-password", "scopes": ["logs:read"],
+    }).json()
+    token = client.post("/api/v1/service-tokens", json={
+        "name": "实时订阅令牌", "userId": user["id"], "expiresInDays": 1,
+    }).json()
+    repo = client.app.state.repo
+    client.portal.call(repo.db.tasks.insert_one, {"id": "websocket-audit-task", "status": "STOPPED"})
+
+    with client.websocket_connect("/api/v1/tasks/websocket-audit-task/logs") as socket:
+        socket.send_json({"token": token["token"]})
+        assert socket.receive_json() == {"type": "status", "status": "STOPPED"}
+
+    audit = client.portal.call(repo.db.audit.find_one, {
+        "action": "live_subscribe", "targetId": "websocket-audit-task",
+    })
+    assert audit["actor"] == user["id"]
+    assert audit["serviceTokenId"] == token["id"]
+    assert audit["requestId"]
+    assert audit["clientIp"]
 
 
 def test_real_endpoint_rejection_is_attributed_without_token(client, monkeypatch):  # noqa: F811

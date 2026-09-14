@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RefreshCw, RotateCcw, Search, SlidersHorizontal } from "lucide-vue-next";
 import { auditApi, type AuditEvent, type EventBase, type EventLevel, type EventOutcome, type EventPage, type QueryFilters, type RequestEvent, type RuntimeEvent } from "./api";
 import AuditEventDrawer from "./AuditEventDrawer.vue";
+import { eventSource } from "./eventSource";
 
 type Tab = "audit" | "runtime" | "request";
 type Row = AuditEvent | RuntimeEvent | RequestEvent;
@@ -90,10 +91,6 @@ function summary(row: Row) {
 function target(row: Row) {
   if (activeTab.value === "request") return (row as RequestEvent).route || "-";
   return row.targetName || row.taskName || row.targetId || row.taskId || "-";
-}
-
-function actorValue(row: Row) {
-  return (row as AuditEvent | RequestEvent).actorName || (row as AuditEvent | RequestEvent).actor || "未记录";
 }
 
 async function load() {
@@ -207,7 +204,7 @@ void load();
         <el-table-column label="事件摘要" min-width="245" show-overflow-tooltip><template #default="{ row }"><div class="summary-cell"><strong>{{ summary(row) }}</strong><small v-if="row.reason">{{ row.reason }}</small></div></template></el-table-column>
         <el-table-column label="级别 / 结果" min-width="132"><template #default="{ row }"><div class="tag-stack"><el-tooltip :content="row.level || '未记录'"><el-tag :type="levelType(row.level)" effect="plain">{{ row.level ? levelLabel(row.level) : "未记录" }}</el-tag></el-tooltip><el-tooltip v-if="row.outcome" :content="row.outcome"><el-tag :type="outcomeType(row.outcome)" effect="plain">{{ outcomeLabel(row.outcome) }}</el-tag></el-tooltip><el-tag v-else-if="activeTab === 'request'" :type="Number(row.httpStatus) >= 500 ? 'danger' : Number(row.httpStatus) >= 400 ? 'warning' : 'success'" effect="plain">{{ row.httpStatus || "未记录" }}</el-tag></div></template></el-table-column>
         <el-table-column label="对象" min-width="180" show-overflow-tooltip><template #default="{ row }"><div class="object-cell"><strong>{{ target(row) }}</strong><small>{{ row.deviceIp || row.taskId || row.nodeId || "未记录" }}</small></div></template></el-table-column>
-        <el-table-column label="操作者 / 来源" min-width="168"><template #default="{ row }"><div class="object-cell"><strong>{{ actorValue(row) }}</strong><small>{{ row.clientIp || "未记录" }}</small></div></template></el-table-column>
+        <el-table-column label="操作者 / 来源" min-width="200" show-overflow-tooltip><template #default="{ row }"><div class="object-cell"><strong>{{ eventSource(row).name }}</strong><small>{{ eventSource(row).detail }}</small></div></template></el-table-column>
         <el-table-column label="时间" min-width="178"><template #default="{ row }"><span class="event-time">{{ rowTime(row) }}</span><small v-if="row.requestId" class="request-short">{{ row.requestId }}</small></template></el-table-column>
       </el-table>
       <div v-if="hasRows || total > pageSize" class="audit-pagination"><span>{{ total }} 条记录</span><el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="sizes, prev, pager, next" /></div>

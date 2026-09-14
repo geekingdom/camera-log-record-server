@@ -87,6 +87,9 @@ async def monitor_mount(send, report, target, *, interval: float = 60, guard=Non
                 except TimeoutError:
                     pass
             if not mounted:
+                if not first:
+                    # 原挂载已确认丢失，先留下重挂阶段，恢复后的 MOUNTED 不会被正常轮询去重。
+                    await report("REMOUNTING", None)
                 if first and cleanup is not None:
                     # 等待租约时 target 可能已切到跨节点赢家；尝试前才固定实际来源用于收尾。
                     cleanup.configure(target())

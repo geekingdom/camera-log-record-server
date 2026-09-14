@@ -58,6 +58,7 @@ class SessionRuntime:
         self.error = None
         self.connection_uncertain = None
         self.resource_monitor_task = None
+        self.last_already_ash = None
         self.started_at = now()
         self.debug_passwords = PshPasswordProvider(repo.settings)
         # 目录水位不能只依赖下一块日志触发；设备停止输出后的尾块同样需要发布。
@@ -68,10 +69,16 @@ class SessionRuntime:
         """记录调试模式切换阶段，只保存任务身份与模式，不保存密文或解密口令。"""
         command_blocked = bool(details.get("commandBlocked", False))
         debug_error = details.get("debugError")
-        await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"],
-            "sessionId": self.collector.session_id, "type": "DEBUG_MODE", "phase": event,
-            "mode": details["mode"], "commandBlocked": command_blocked,
-            "debugError": debug_error, "createdAt": now()})
+        session_id = self.collector.session_id
+        confirmation = (session_id, details["mode"], debug_error, command_blocked)
+        repeated_confirmation = event == "ALREADY_ASH" and confirmation == getattr(self, "last_already_ash", None)
+        if not repeated_confirmation:
+            await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"], "nodeId": self.repo.settings.node_id,
+                "sessionId": session_id, "type": "DEBUG_MODE", "phase": event,
+                "mode": details["mode"], "commandBlocked": command_blocked,
+                "debugError": debug_error, "createdAt": now()})
+            # 只有审计已落库的重复 ASH 确认才能去重；其他握手阶段开启新的确认周期。
+            self.last_already_ash = confirmation if event == "ALREADY_ASH" else None
         if not getattr(self, "retired", False):
             await self.repo.db.tasks.update_one(owner_filter(self.task),
                 {"$set": {"shellMode": details["mode"], "debugPhase": event,

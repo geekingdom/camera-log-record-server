@@ -7,6 +7,7 @@ import secrets
 import socket
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -79,7 +80,8 @@ async def stop(process: asyncio.subprocess.Process) -> None:
 async def main() -> None:
     """启动隔离服务、准备无设备夹具、运行浏览器并回收所有临时资源。"""
     configured = Settings()
-    if not (configured.mongo_uri.startswith("mongodb://127.0.0.1") or configured.mongo_uri.startswith("mongodb://localhost")):
+    mongo_address = urlsplit(configured.mongo_uri)
+    if mongo_address.scheme != "mongodb" or mongo_address.hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("浏览器验收仅允许本机 MongoDB，拒绝配置的远程数据库")
     database = f"audit_browser_{uuid4().hex}"
     if database == configured.database_name:

@@ -91,7 +91,7 @@ async function createConflictRequest() {
   const result = await page.evaluate(async () => {
     const username = `audit-browser-${crypto.randomUUID().slice(0, 8)}`;
     const body = { username, displayName: "隔离验收账号", password: "AuditBrowser!234", isAdmin: false,
-      scopes: ["tasks:read"], resourceIds: null, enabled: true };
+      scopes: ["tasks:read"], enabled: true };
     const headers = { "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" };
     const first = await fetch("/api/v1/users", { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(body) });
     const second = await fetch("/api/v1/users", { method: "POST", credentials: "same-origin", headers, body: JSON.stringify(body) });
@@ -138,7 +138,9 @@ async function verifyWorkspace() {
   await page.getByRole("heading", { name: "运行事件", exact: true }).waitFor();
   await page.getByText("采集连接中断", { exact: true }).waitFor();
   await page.getByText("隔离连接演示任务", { exact: true }).waitFor();
+  await page.getByText("采集节点：isolated-browser", { exact: true }).waitFor();
   await selectFirstRecord("运行事件详情");
+  await page.locator(".audit-event-drawer").getByText("节点 ID：isolated-browser", { exact: true }).waitFor();
   await prepareScreenshot();
   await page.screenshot({ path: `${screenshots}/audit-workspace-runtime-detail.png`, fullPage: true });
   await page.keyboard.press("Escape");

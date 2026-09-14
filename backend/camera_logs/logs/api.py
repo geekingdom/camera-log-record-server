@@ -19,6 +19,7 @@ from camera_logs.access_policy.policy import apply_ip_permissions
 from camera_logs.common.database import now, public
 from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.security import actor, authenticate, authorize
+from camera_logs.common.websocket_logging import bind_websocket_actor
 from camera_logs.logs.download_sessions import download_actor
 from camera_logs.logs.hour_catalog import summarize_hours
 from camera_logs.logs.job_submission import cancel_job, submit_job
@@ -210,7 +211,7 @@ def install_log_routes(app):
 
             user = await current_identity()
             # 中间件只读取已鉴权的主体标识，绝不保留客户端首帧中的原始令牌。
-            ws.state.actor = user
+            bind_websocket_actor(ws.scope, user)
             authorize(user, "logs:read", task_id)
             await repo().audit(user["id"], "live_subscribe", task_id)
             cursor = hello.get("cursor")
