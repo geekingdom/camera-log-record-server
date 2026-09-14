@@ -2,7 +2,8 @@
 // 管理员排障工作区：三类事件共享筛选、分页和会话边界，详情优先呈现可行动的关联信息。
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { RefreshCw, RotateCcw, Search, SlidersHorizontal } from "lucide-vue-next";
-import { auditApi, type AuditEvent, type EventBase, type EventLevel, type EventOutcome, type EventPage, type QueryFilters, type RequestEvent, type RuntimeEvent } from "./api";
+import { auditApi, type AuditEvent, type EventBase, type EventLevel, type EventOutcome, type QueryFilters, type RequestEvent, type RuntimeEvent } from "./api";
+import { EventCursorPager } from "./eventPager";
 import AuditEventDrawer from "./AuditEventDrawer.vue";
 import { eventSource } from "./eventSource";
 
@@ -11,7 +12,9 @@ type Row = AuditEvent | RuntimeEvent | RequestEvent;
 
 const activeTab = ref<Tab>("audit");
 const rows = ref<Row[]>([]);
-const total = ref(0);
+const pager = new EventCursorPager<Row>();
+const total = ref<number | null>(null);
+const counting = ref(false);
 const page = ref(1);
 const pageSize = ref(50);
 const loading = ref(false);
@@ -19,7 +22,7 @@ const denied = ref(false);
 const error = ref("");
 const selected = ref<Row>();
 const detailOpen = ref(false);
-const dateRange = ref<[Date, Date]>();
+const dateRange = ref<[Date, Date]>([new Date(Date.now() - 24 * 60 * 60 * 1000), new Date()]);
 const primary = ref("");
 const taskId = ref("");
 const actor = ref("");
@@ -36,7 +39,6 @@ const tabTitle = computed(() => ({ audit: "审计记录", runtime: "运行事件
 const primaryLabel = computed(() => ({ audit: "操作", runtime: "事件类型", request: "请求方法" })[activeTab.value]);
 const primaryPlaceholder = computed(() => ({ audit: "例如 control:PAUSED", runtime: "例如 CONNECTION_GAP", request: "例如 POST" })[activeTab.value]);
 const drawerTitle = computed(() => `${tabTitle.value}详情`);
-const hasRows = computed(() => rows.value.length > 0);
 const filters = computed<QueryFilters>(() => {
   const range = dateRange.value;
   const shared = {
@@ -53,6 +55,8 @@ const filters = computed<QueryFilters>(() => {
     ...shared, method: primary.value.trim(), taskId: taskId.value.trim(), route: route.value.trim(), status: status.value.trim(), clientIp: clientIp.value.trim(), outcome: outcome.value,
   };
 });
+const appliedFilters = ref<QueryFilters>(filters.value);
+let totalGeneration = 0;
 
 function formatTime(value: unknown) {
   if (typeof value !== "string") return "-";
@@ -93,25 +97,23 @@ function target(row: Row) {
   return row.targetName || row.taskName || row.targetId || row.taskId || "-";
 }
 
-async function load() {
+async function load(cursor = "", index = 0) {
   const current = ++generation;
   const tab = activeTab.value;
   loading.value = true;
   denied.value = false;
   error.value = "";
   try {
-    const result: EventPage<Row> = tab === "audit"
-      ? await auditApi.auditEvents(page.value, pageSize.value, filters.value)
-      : tab === "runtime"
-        ? await auditApi.runtimeEvents(page.value, pageSize.value, filters.value)
-        : await auditApi.requestEvents(page.value, pageSize.value, filters.value);
+    const snapshot = appliedFilters.value;
+    const fetchPage = (value: string) => tab === "audit" ? auditApi.auditEventsCursor(value, pageSize.value, snapshot)
+      : tab === "runtime" ? auditApi.runtimeEventsCursor(value, pageSize.value, snapshot)
+        : auditApi.requestEventsCursor(value, pageSize.value, snapshot);
+    await pager.fetch(fetchPage, cursor, index);
     if (current !== generation) return;
-    rows.value = result.items;
-    total.value = result.total;
+    rows.value = pager.items;
+    page.value = pager.page;
   } catch (reason) {
     if (current !== generation) return;
-    rows.value = [];
-    total.value = 0;
     if (reason instanceof Error && "status" in reason && reason.status === 403) denied.value = true;
     else error.value = reason instanceof Error ? reason.message : "读取事件失败";
   } finally {
@@ -122,12 +124,18 @@ async function load() {
 function applyFilters() {
   selected.value = undefined;
   detailOpen.value = false;
-  if (page.value !== 1) page.value = 1;
-  else void load();
+  pager.invalidate();
+  rows.value = [];
+  page.value = 1;
+  appliedFilters.value = filters.value;
+  total.value = null;
+  totalGeneration += 1;
+  counting.value = false;
+  void load();
 }
 
 function resetFilters() {
-  dateRange.value = undefined;
+  dateRange.value = [new Date(Date.now() - 24 * 60 * 60 * 1000), new Date()];
   primary.value = "";
   taskId.value = "";
   actor.value = "";
@@ -151,12 +159,26 @@ function setRange(hours: number) {
   applyFilters();
 }
 
+async function countTotal() {
+  if (counting.value) return;
+  const request = ++totalGeneration;
+  counting.value = true;
+  const tab = activeTab.value;
+  try {
+    const result = tab === "audit" ? await auditApi.auditEventsCursor("", pageSize.value, appliedFilters.value, true)
+      : tab === "runtime" ? await auditApi.runtimeEventsCursor("", pageSize.value, appliedFilters.value, true)
+        : await auditApi.requestEventsCursor("", pageSize.value, appliedFilters.value, true);
+    if (request === totalGeneration && tab === activeTab.value) total.value = result.total;
+  } catch (reason) { if (request === totalGeneration) error.value = reason instanceof Error ? reason.message : "统计失败"; }
+  finally { if (request === totalGeneration) counting.value = false; }
+}
+
 watch(activeTab, () => {
   primary.value = "";
   applyFilters();
 });
-watch([page, pageSize], () => void load());
-onBeforeUnmount(() => { generation += 1; });
+watch(pageSize, () => applyFilters());
+onBeforeUnmount(() => { generation += 1; totalGeneration += 1; pager.invalidate(); });
 void load();
 </script>
 
@@ -168,7 +190,7 @@ void load();
         <h2>{{ tabTitle }}</h2>
         <p>按追踪编号、执行结果和关联对象定位平台行为。</p>
       </div>
-      <el-tooltip content="刷新当前事件列表"><el-button :icon="RefreshCw" aria-label="刷新当前事件列表" :loading="loading" @click="load" /></el-tooltip>
+      <el-tooltip content="刷新当前事件列表"><el-button :icon="RefreshCw" aria-label="刷新当前事件列表" :loading="loading" @click="() => load()" /></el-tooltip>
     </header>
 
     <el-tabs v-model="activeTab" class="audit-tabs">
@@ -207,7 +229,15 @@ void load();
         <el-table-column label="操作者 / 来源" min-width="200" show-overflow-tooltip><template #default="{ row }"><div class="object-cell"><strong>{{ eventSource(row).name }}</strong><small>{{ eventSource(row).detail }}</small></div></template></el-table-column>
         <el-table-column label="时间" min-width="178"><template #default="{ row }"><span class="event-time">{{ rowTime(row) }}</span><small v-if="row.requestId" class="request-short">{{ row.requestId }}</small></template></el-table-column>
       </el-table>
-      <div v-if="hasRows || total > pageSize" class="audit-pagination"><span>{{ total }} 条记录</span><el-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="total" :page-sizes="[20, 50, 100]" layout="sizes, prev, pager, next" /></div>
+      <div class="audit-pagination">
+        <el-select v-model="pageSize" aria-label="每页条数" style="width:110px"><el-option :value="20" label="20 条/页" /><el-option :value="50" label="50 条/页" /><el-option :value="100" label="100 条/页" /></el-select>
+        <span>第 {{ page }} 页{{ total === null ? "" : `，共 ${total} 条` }}</span>
+        <div>
+          <el-button :loading="counting" @click="countTotal">统计总数</el-button>
+          <el-button :disabled="!pager.hasPrevious || loading" @click="load(pager.starts[pager.index - 1], pager.index - 1)">上一页</el-button>
+          <el-button :disabled="!pager.hasNext || loading" @click="load(pager.current?.nextCursor ?? '', pager.index + 1)">下一页</el-button>
+        </div>
+      </div>
     </template>
 
     <AuditEventDrawer v-model="detailOpen" :row="selected" :title="drawerTitle" />

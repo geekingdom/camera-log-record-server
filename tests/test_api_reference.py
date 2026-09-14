@@ -5,6 +5,19 @@ from pydantic import TypeAdapter
 from test_api import client  # noqa: F401
 
 
+def test_management_event_cursor_contract_is_documented(client):
+    """站内目录必须解释空游标首屏、按需统计和保持旧调用的兼容边界。"""
+    reference = client.get("/api/v1/api-reference").json()
+    for path in ("audit-events", "runtime-events", "request-events"):
+        operation = next(item for item in reference["operations"] if item["id"] == f"GET /api/v1/{path}")
+        parameters = {item["name"]: item for item in operation["parameters"]}
+        assert "游标" in parameters["cursor"]["description"]
+        assert "总数" in parameters["includeTotal"]["description"]
+    guide = next(item["text"] for item in reference["guides"] if item["title"] == "管理事件游标分页")
+    for term in ("nextCursor", "hasMore", "includeTotal=true", "422", "快照"):
+        assert term in guide
+
+
 def test_reference_blocked_restart_permission_and_pending_contract(client):
     """恢复文档明确普通恢复与管理员隔离的边界，不能以202冒充采集成功。"""
     reference = client.get("/api/v1/api-reference").json()

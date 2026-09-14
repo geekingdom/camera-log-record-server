@@ -8,7 +8,12 @@ from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, generate_latest
 from pydantic import BaseModel, Field
 
-from camera_logs.administration.event_queries import event_page, runtime_event_page
+from camera_logs.administration.event_queries import (
+    event_cursor_page,
+    event_page,
+    runtime_event_cursor_page,
+    runtime_event_page,
+)
 from camera_logs.administration.isolation import confirm_node_isolation
 from camera_logs.common.database import public
 from camera_logs.common.observability import redact
@@ -90,6 +95,8 @@ def install_admin_routes(app):
         user: User,
         page: int = Query(1, ge=1),
         pageSize: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(default=None, max_length=4096),
+        includeTotal: bool = Query(default=False),
         action: str | None = Query(default=None, max_length=128), level: Annotated[EventLevel | None, Query()] = None,
         outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
         actor_id: str | None = Query(default=None, alias="actor", max_length=128),
@@ -105,6 +112,10 @@ def install_admin_routes(app):
         }.items() if value}
         if stamp := _utc_range(start, end):
             query["createdAt"] = stamp
+        if cursor is not None:
+            if page != 1:
+                raise HTTPException(422, "游标分页不能与大于1的页码同时使用")
+            return await event_cursor_page(db, "audit", query, cursor, pageSize, include_total=includeTotal)
         return await event_page(db, "audit", query, page, pageSize)
 
     @app.get("/api/v1/runtime-events")
@@ -113,6 +124,8 @@ def install_admin_routes(app):
         user: User,
         page: int = Query(1, ge=1),
         pageSize: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(default=None, max_length=4096),
+        includeTotal: bool = Query(default=False),
         task_id: str | None = Query(default=None, alias="taskId", max_length=128),
         node_id: str | None = Query(default=None, alias="nodeId", max_length=128),
         event_type: str | None = Query(default=None, alias="type", max_length=128), level: Annotated[EventLevel | None, Query()] = None,
@@ -126,10 +139,18 @@ def install_admin_routes(app):
         query = {key: value for key, value in {
             "taskId": task_id, "nodeId": node_id, "type": event_type, "level": level, "outcome": outcome, "requestId": request_id,
         }.items() if value}
-        return await runtime_event_page(db, query, page, pageSize, time_range=_utc_range(start, end))
+        time_range = _utc_range(start, end)
+        if cursor is not None:
+            if page != 1:
+                raise HTTPException(422, "游标分页不能与大于1的页码同时使用")
+            return await runtime_event_cursor_page(
+                db, query, cursor, pageSize, time_range=time_range, include_total=includeTotal,
+            )
+        return await runtime_event_page(db, query, page, pageSize, time_range=time_range)
 
     @app.get("/api/v1/request-events")
     async def request_events(request: Request, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
+                             cursor: str | None = Query(default=None, max_length=4096), includeTotal: bool = Query(default=False),
                              method: str | None = Query(default=None, max_length=16), route: str | None = Query(default=None, max_length=256),
                              status: int | None = Query(default=None, ge=100, le=599), level: Annotated[EventLevel | None, Query()] = None,
                              outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
@@ -140,6 +161,12 @@ def install_admin_routes(app):
         query = {key: value for key, value in {"method": method, "route": route, "httpStatus": status,
                  "level": level, "outcome": outcome, "requestId": request_id, "clientIp": client_ip, "taskId": task_id}.items() if value is not None}
         if stamp := _utc_range(start, end): query["createdAt"] = stamp
+        if cursor is not None:
+            if page != 1:
+                raise HTTPException(422, "游标分页不能与大于1的页码同时使用")
+            return await event_cursor_page(
+                request.app.state.repo.db, "request_events", query, cursor, pageSize, include_total=includeTotal,
+            )
         return await event_page(request.app.state.repo.db, "request_events", query, page, pageSize)
 
     @app.get("/metrics")

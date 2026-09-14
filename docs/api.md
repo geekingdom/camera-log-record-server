@@ -241,6 +241,16 @@ GET /api/v1/request-events?method=POST&route=%2Fapi%2Fv1%2Ftasks&status=202&requ
 
 `audit-events` 可按 `action`、`actor`、`taskId`（审计目标）、`level`、`outcome`、`requestId` 和时间范围筛选；`runtime-events` 可按 `taskId`、`nodeId`、`type`、`level`、`outcome`、`requestId` 和时间范围筛选。`request-events` 可按 `method`、`route`、`status`（HTTP 状态）、`level`、`outcome`、`requestId`、`clientIp`、`taskId` 和时间范围筛选。
 
+三类接口支持可选游标分页：`cursor=`表示首屏，后续传入上页的`nextCursor`，并保持相同筛选与时间范围。响应为`items`、`pageSize`、`hasMore`、`nextCursor`及`total`；默认`total:null`，仅`includeTotal=true`额外统计匹配条件的精确总数。默认读取至多`pageSize+1`条匹配记录判断下一页，不执行深层skip或精确count；低选择性派生条件仍可能扫描较多候选。游标绑定集合、筛选和时间兼容模式，错误或跨条件游标返回422，不能与`page>1`同时使用。未传cursor的旧page/pageSize调用保持不变。游标不提供跨请求快照；新增事件需刷新首屏，TTL删除的记录不会补回。
+
+```http
+GET /api/v1/runtime-events?cursor=&pageSize=50&type=COREDUMP_MOUNT
+```
+
+```json
+{"items":[{"type":"COREDUMP_MOUNT","status":"MOUNTED","summary":"核心转储 NFS 已挂载","outcome":"SUCCEEDED","sourceKind":"NODE","sourceName":"采集节点：collector-01"}],"pageSize":50,"hasMore":false,"nextCursor":null,"total":null}
+```
+
 `level` 只能是 `DEBUG`、`INFO`、`WARNING` 或 `ERROR`；`outcome` 只能是 `PENDING`、`SUCCEEDED`、`FAILED`、`CANCELLED` 或 `UNKNOWN`，其他值返回 422。旧事件没有持久化这些字段时，服务端按与页面相同的规则在数据库聚合中推导后筛选和计数；分页完成后才批量补齐操作者、任务、资源、模板、节点、作业和命令名称。返回条目可包含 `summary`、`level`、`outcome`、`actorName`、`targetName`、`taskName`、`deviceIp`、`requestId`、`clientIp`、`reason`、`runId`、`sessionId` 和 `nodeId`。摘要为中文；例如 `CONNECTION_GAP` 显示为“采集连接中断”，其结果为 `UNKNOWN`、级别为 `WARNING`。
 
 请求事件仅记录 `/api/v1/` 下的非 `GET`/`HEAD` 请求，或状态码不低于 400 的读取请求；健康检查和普通读取不会进入该集合。请求成功发送完毕时，HTTP 202 为 `PENDING`，其他 2xx 为 `SUCCEEDED`，4xx/5xx 为 `FAILED`；响应未完整发送时为 `UNKNOWN`。持久化有短暂超时且失败不会改变原请求结果；已取消请求不会在清理阶段等待写入。事件不保存 query、header、请求/响应 body 或设备日志正文，失败原因仅来自已脱敏的安全错误文本。`request_events` 以 `createdAt` 建立 30 天 TTL，另建 `requestId` 和 `(taskId, createdAt)` 索引；该 TTL 不作用于设备日志、下载或归档。

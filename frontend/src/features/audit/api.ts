@@ -2,7 +2,8 @@
 import { request } from "../../shared/api";
 
 export type EventLevel = "INFO" | "WARNING" | "ERROR";
-export type EventOutcome = "SUCCEEDED" | "FAILED" | "PENDING" | "CANCELLED" | "UNKNOWN";
+export type EventOutcome =
+  "SUCCEEDED" | "FAILED" | "PENDING" | "CANCELLED" | "UNKNOWN";
 
 export interface EventBase {
   sourceName?: string;
@@ -53,6 +54,13 @@ export interface EventPage<T> {
   page: number;
   pageSize: number;
 }
+export interface CursorEventPage<T> {
+  items: T[];
+  pageSize: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  total: number | null;
+}
 
 export interface QueryFilters {
   action?: string;
@@ -72,13 +80,35 @@ export interface QueryFilters {
 }
 
 function query(page: number, pageSize: number, filters: QueryFilters) {
-  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
-  for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+  const params = new URLSearchParams({
+    page: String(page),
+    pageSize: String(pageSize),
+  });
+  for (const [key, value] of Object.entries(filters))
+    if (value) params.set(key, value);
   return params;
 }
 
-function list<T>(path: string, page: number, pageSize: number, filters: QueryFilters) {
+function list<T>(
+  path: string,
+  page: number,
+  pageSize: number,
+  filters: QueryFilters,
+) {
   return request<EventPage<T>>(`${path}?${query(page, pageSize, filters)}`);
+}
+function cursorList<T>(
+  path: string,
+  cursor: string,
+  pageSize: number,
+  filters: QueryFilters,
+  includeTotal = false,
+) {
+  const params = new URLSearchParams({ cursor, pageSize: String(pageSize) });
+  if (includeTotal) params.set("includeTotal", "true");
+  for (const [key, value] of Object.entries(filters))
+    if (value) params.set(key, value);
+  return request<CursorEventPage<T>>(`${path}?${params}`);
 }
 
 export const auditApi = {
@@ -88,4 +118,43 @@ export const auditApi = {
     list<RuntimeEvent>("/runtime-events", page, pageSize, filters),
   requestEvents: (page: number, pageSize: number, filters: QueryFilters) =>
     list<RequestEvent>("/request-events", page, pageSize, filters),
+  auditEventsCursor: (
+    cursor: string,
+    pageSize: number,
+    filters: QueryFilters,
+    includeTotal = false,
+  ) =>
+    cursorList<AuditEvent>(
+      "/audit-events",
+      cursor,
+      pageSize,
+      filters,
+      includeTotal,
+    ),
+  runtimeEventsCursor: (
+    cursor: string,
+    pageSize: number,
+    filters: QueryFilters,
+    includeTotal = false,
+  ) =>
+    cursorList<RuntimeEvent>(
+      "/runtime-events",
+      cursor,
+      pageSize,
+      filters,
+      includeTotal,
+    ),
+  requestEventsCursor: (
+    cursor: string,
+    pageSize: number,
+    filters: QueryFilters,
+    includeTotal = false,
+  ) =>
+    cursorList<RequestEvent>(
+      "/request-events",
+      cursor,
+      pageSize,
+      filters,
+      includeTotal,
+    ),
 };

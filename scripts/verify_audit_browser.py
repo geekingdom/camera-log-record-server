@@ -6,6 +6,7 @@ import os
 import secrets
 import socket
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -106,6 +107,11 @@ async def main() -> None:
                 "type": "CONNECTION_GAP", "taskId": "audit-browser-task", "nodeId": "isolated-browser",
                 "createdAt": now(), "reason": "隔离验收模拟：连续十秒未收到输出，已请求重新连接",
             })
+            await mongo[database].audit.insert_many([
+                {"action": "cursor-browser", "actor": "system", "createdAt": now() - timedelta(seconds=index + 1),
+                 "targetId": f"isolated-event-{index}"}
+                for index in range(55)
+            ])
             vite_code = (
                 "import {createServer} from 'vite';"
                 f"const server=await createServer({{server:{{host:'127.0.0.1',port:{vite_port},strictPort:true,proxy:{{'/api':{{target:'http://127.0.0.1:{api_port}',ws:true}}}}}}}});"

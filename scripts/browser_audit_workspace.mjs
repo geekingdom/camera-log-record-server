@@ -124,10 +124,15 @@ async function verifyWorkspace() {
     await page.getByRole("tab", { name: "审计与事件", exact: true }).click();
   });
   await page.getByRole("heading", { name: "审计记录", exact: true }).waitFor();
+  await page.getByRole("combobox", { name: "每页条数", exact: true }).waitFor();
+  await page.getByText("第 1 页", { exact: false }).waitFor();
   await page.getByRole("button", { name: "近 24 小时", exact: true }).click();
   await waitForApi("/api/v1/audit-events", async () => {
     await page.getByRole("button", { name: "查询", exact: true }).click();
   });
+  const auditQuery = await page.evaluate(() => performance.getEntriesByType("resource").map(entry => entry.name).filter(name => name.includes("/api/v1/audit-events")).at(-1));
+  if (!auditQuery || !new URL(auditQuery).searchParams.has("cursor")) throw new Error("审计首屏未使用 cursor 分页请求");
+  await verifyCursorPaging();
   await selectFirstRecord("审计记录详情");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "审计记录详情", exact: true }).waitFor({ state: "hidden" });
@@ -160,6 +165,54 @@ async function verifyWorkspace() {
   await selectFirstRecord("请求记录详情");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "请求记录详情", exact: true }).waitFor({ state: "hidden" });
+}
+
+async function verifyCursorPaging() {
+  const records = page.locator(".audit-workspace .el-table__row");
+  await page.waitForFunction(() => document.querySelectorAll(".audit-workspace .el-table__row").length === 50);
+  const firstPage = await records.allTextContents();
+  if (firstPage.length !== 50) throw new Error("隔离分页夹具不足一页");
+  await page.getByLabel("按操作筛选", { exact: true }).fill("未提交的筛选");
+  const pattern = "**/api/v1/audit-events?**";
+  await page.route(pattern, async route => {
+    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { message: "模拟翻页暂时失败" } }) });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "下一页", exact: true }).click();
+  await page.getByText("模拟翻页暂时失败", { exact: false }).waitFor();
+  if (JSON.stringify(await records.allTextContents()) !== JSON.stringify(firstPage)) throw new Error("翻页失败清除了当前成功页");
+  const response = await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "下一页", exact: true }).click());
+  if (new URL(response.url()).searchParams.has("action")) throw new Error("续页错误使用未提交的筛选");
+  await page.getByText("第 2 页", { exact: false }).waitFor();
+  const secondPage = await records.allTextContents();
+  if (!secondPage.length || secondPage.some(row => firstPage.includes(row))) throw new Error("续页出现重复行或丢失尾页");
+  await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "上一页", exact: true }).click());
+  await page.getByText("第 1 页", { exact: false }).waitFor();
+  if (JSON.stringify(await records.allTextContents()) !== JSON.stringify(firstPage)) throw new Error("上一页未恢复原始首屏");
+  const counted = await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "统计总数", exact: true }).click());
+  if (new URL(counted.url()).searchParams.get("includeTotal") !== "true" || (await counted.json()).total < 55)
+    throw new Error("按需总数未请求完整匹配数量");
+  await page.getByLabel("按操作筛选", { exact: true }).fill("");
+  let releaseCount;
+  let markStarted;
+  const heldCount = new Promise(resolve => { releaseCount = resolve; });
+  const countStarted = new Promise(resolve => { markStarted = resolve; });
+  await page.route(pattern, async route => {
+    markStarted();
+    await heldCount;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ items: [], total: 99999, hasMore: false, nextCursor: null, pageSize: 50 }) });
+  }, { times: 1 });
+  const lateResponse = page.waitForResponse(response => isApiResponse(response, "/api/v1/audit-events") && new URL(response.url()).searchParams.get("includeTotal") === "true");
+  await page.getByRole("button", { name: "统计总数", exact: true }).click();
+  await countStarted;
+  try {
+    await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "查询", exact: true }).click());
+    await page.waitForFunction(() => [...document.querySelectorAll(".audit-pagination button")].some(button => button.textContent.includes("统计总数") && !button.classList.contains("is-loading")), null, { timeout: 3000 });
+  } finally {
+    releaseCount();
+    await (await lateResponse).finished();
+  }
+  await page.waitForTimeout(100);
+  if ((await page.locator(".audit-pagination").innerText()).includes("99999")) throw new Error("迟到统计覆盖新筛选");
 }
 
 try {

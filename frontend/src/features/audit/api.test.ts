@@ -14,6 +14,21 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("审计工作区认证", () => {
+  it.each(["auditEventsCursor", "runtimeEventsCursor", "requestEventsCursor"] as const)("%s 显式空游标且默认不统计总数", async method => {
+    fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ items: [], total: null, pageSize: 20, hasMore: false, nextCursor: null }))));
+    await auditApi[method]("", 20, { requestId: "request-example" });
+    const first = new URL(fetchMock.mock.calls[0][0], "http://localhost").searchParams;
+    expect(first.has("cursor")).toBe(true);
+    expect(first.get("cursor")).toBe("");
+    expect(first.has("page")).toBe(false);
+    expect(first.get("includeTotal")).not.toBe("true");
+    await auditApi[method]("opaque-cursor", 20, { requestId: "request-example" }, true);
+    const counted = new URL(fetchMock.mock.calls[1][0], "http://localhost").searchParams;
+    expect(counted.get("cursor")).toBe("opaque-cursor");
+    expect(counted.get("includeTotal")).toBe("true");
+    expect(counted.get("requestId")).toBe("request-example");
+  });
+
   it.each(["auditEvents", "runtimeEvents", "requestEvents"] as const)("%s 保留 Cookie 且不发送空 Bearer", async method => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, page: 1, pageSize: 50 })));
     await auditApi[method](1, 50, { actor: "管理员 & 运维" });

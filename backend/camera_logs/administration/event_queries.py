@@ -2,6 +2,11 @@
 
 import inspect
 
+from camera_logs.administration.event_cursor import (
+    after_event_cursor_clause,
+    decode_event_cursor,
+    encode_event_cursor,
+)
 from camera_logs.administration.event_presenter import (
     ACTION_OUTCOMES,
     COREDUMP_MOUNT_OUTCOMES,
@@ -90,6 +95,109 @@ async def _derived_page(db, collection: str, database_query: dict, derived: dict
                 item["createdAt"] = item["detectedAt"]
     return {"items": await present_events(db, [public(item) for item in items]),
             "total": count_rows[0]["total"] if count_rows else 0, "page": page, "pageSize": page_size}
+
+
+def _and_clause(query: dict, clause: dict | None) -> dict:
+    """不覆盖已有 ``$or`` 条件地追加游标范围，保持调用方原筛选语义。"""
+    if clause is None:
+        return query
+    return {"$and": [query, clause]}
+
+
+async def _present_cursor_page(db, collection: str, query: dict, *, legacy_time: bool, page_size: int,
+                               include_total: bool, items: list[dict], count_pipeline: list[dict] | None = None) -> dict:
+    """从原始文档生成游标后再脱敏展示，避免 ``public`` 丢失 BSON ``_id``。"""
+    has_more = len(items) > page_size
+    visible = items[:page_size]
+    next_cursor = None
+    if has_more and visible:
+        last = visible[-1]
+        event_time = last.get("_eventTime") if legacy_time else last.get("createdAt")
+        next_cursor = encode_event_cursor(
+            collection=collection, query=query, legacy_time=legacy_time,
+            event_time=event_time, identifier=last.get("_id"),
+        )
+    for item in visible:
+        if legacy_time and item.get("createdAt") is None and item.get("_eventTime") is not None:
+            item["createdAt"] = item["_eventTime"]
+        item.pop("_eventTime", None)
+        item.pop("_derivedOutcome", None)
+        item.pop("_derivedLevel", None)
+    if include_total:
+        if count_pipeline is None:
+            total = await db[collection].count_documents(split_derived_filters(query)[0])
+        else:
+            rows = await _aggregate(db, collection, count_pipeline)
+            total = rows[0]["total"] if rows else 0
+    else:
+        total = None
+    return {
+        "items": await present_events(db, [public(item) for item in visible]),
+        "pageSize": page_size,
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+        "total": total,
+    }
+
+
+async def event_cursor_page(db, collection: str, query: dict, cursor: str, page_size: int, *,
+                            include_total: bool = False) -> dict:
+    """按 ``createdAt,_id`` 续读普通管理事件，默认避免 count 与深层 skip。"""
+    anchor = decode_event_cursor(cursor, collection=collection, query=query, legacy_time=False) if cursor else None
+    database_query, derived = split_derived_filters(query)
+    clause = after_event_cursor_clause(time_field="createdAt", event_time=anchor.event_time,
+                                       identifier=anchor.identifier) if anchor else None
+    filtered = _and_clause(database_query, clause)
+    if not derived:
+        items = [item async for item in db[collection].find(filtered).sort(
+            [("createdAt", -1), ("_id", -1)]).limit(page_size + 1)]
+        return await _present_cursor_page(db, collection, query, legacy_time=False, page_size=page_size,
+                                          include_total=include_total, items=items)
+
+    outcome_fields, level_fields = _derived_fields()
+    match = {"_derivedLevel" if name == "level" else "_derivedOutcome": value for name, value in derived.items()}
+    prefix = [{"$match": filtered}, {"$sort": {"createdAt": -1, "_id": -1}},
+              {"$addFields": outcome_fields}, {"$addFields": level_fields}, {"$match": match}]
+    items = await _aggregate(db, collection, prefix + [{"$limit": page_size + 1}])
+    count_pipeline = ([{"$match": database_query}, {"$addFields": outcome_fields},
+                       {"$addFields": level_fields}, {"$match": match}, {"$count": "total"}]
+                      if include_total else None)
+    return await _present_cursor_page(db, collection, query, legacy_time=False, page_size=page_size,
+                                      include_total=include_total, items=items, count_pipeline=count_pipeline)
+
+
+async def runtime_event_cursor_page(db, query: dict, cursor: str, page_size: int, *, time_range=None,
+                                    include_total: bool = False) -> dict:
+    """按实际事件时间续读运行事件，兼容旧 ``detectedAt`` 记录且不改变旧页码接口。"""
+    legacy = await db.events.find_one({"createdAt": None, "detectedAt": {"$ne": None}}, {"_id": 1})
+    database_query = dict(query)
+    if time_range:
+        if legacy is None:
+            database_query["createdAt"] = time_range
+        else:
+            database_query["$or"] = [{"createdAt": time_range}, {"createdAt": None, "detectedAt": time_range}]
+    if legacy is None:
+        return await event_cursor_page(db, "events", database_query, cursor, page_size, include_total=include_total)
+
+    anchor = decode_event_cursor(cursor, collection="events", query=database_query, legacy_time=True) if cursor else None
+    source_query, derived = split_derived_filters(database_query)
+    outcome_fields, level_fields = _derived_fields()
+    cursor_clause = after_event_cursor_clause(time_field="_eventTime", event_time=anchor.event_time,
+                                              identifier=anchor.identifier) if anchor else None
+    match = {"_derivedLevel" if name == "level" else "_derivedOutcome": value for name, value in derived.items()}
+    prefix = [{"$match": source_query}, {"$addFields": {"_eventTime": {"$ifNull": ["$createdAt", "$detectedAt"]}}}]
+    if cursor_clause:
+        prefix.append({"$match": cursor_clause})
+    pipeline = prefix + [{"$sort": {"_eventTime": -1, "_id": -1}}]
+    if derived:
+        pipeline.extend([{ "$addFields": outcome_fields}, {"$addFields": level_fields}, {"$match": match}])
+    items = await _aggregate(db, "events", pipeline + [{"$limit": page_size + 1}])
+    count_pipeline = None
+    if include_total and derived:
+        count_pipeline = ([{"$match": source_query}, {"$addFields": outcome_fields},
+                           {"$addFields": level_fields}, {"$match": match}, {"$count": "total"}])
+    return await _present_cursor_page(db, "events", database_query, legacy_time=True, page_size=page_size,
+                                      include_total=include_total, items=items, count_pipeline=count_pipeline)
 
 
 async def event_page(db, collection, query, page, page_size):
