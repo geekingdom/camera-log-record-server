@@ -19,6 +19,16 @@ def test_password_spaces_are_preserved():
     assert task.password == "  secret  "
 
 
+def test_ssh_target_defaults_to_host_and_rejects_slaves_for_non_ssh_protocols():
+    """从机目标只适用于 SSH，省略字段时兼容既有任务的主机采集语义。"""
+    base = {"name": "test", "ip": "127.0.0.1", "port": 22, "resourceId": "device",
+            "username": "root", "password": "secret"}
+    assert TaskCreate(protocol="SSH", **base).sshTarget == "HOST"
+    assert TaskCreate(protocol="SSH", sshTarget="SLAVE_2", **base).sshTarget == "SLAVE_2"
+    with pytest.raises(ValidationError, match="SSH"):
+        TaskCreate(protocol="TELNET_DEVICE", sshTarget="SLAVE_1", **base)
+
+
 def test_task_rejects_removed_coredump_monitor_input():
     """Coredump 开关已迁移到资源，任务请求携带旧字段必须被拒绝。"""
     with pytest.raises(ValidationError, match="Coredump"):

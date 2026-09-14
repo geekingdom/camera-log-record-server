@@ -44,6 +44,19 @@ def test_network_ip_locked_but_duplicate_port_allowed(client, protocol):
     assert changed.status_code == 422
 
 
+def test_ssh_target_is_saved_and_editable_without_changing_resource(client):
+    """SSH 主从目标属于任务连接配置，编辑时保留并通过既有资源绑定检查。"""
+    seed_resource(client)
+    created = create(client, sshTarget="SLAVE_1")
+    assert created.status_code == 201, created.text
+    assert created.json()["sshTarget"] == "SLAVE_1"
+    edited = client.patch(f'/api/v1/tasks/{created.json()["id"]}', json={
+        "version": 1, "sshTarget": "SLAVE_3",
+    })
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["sshTarget"] == "SLAVE_3"
+
+
 def test_serial_resource_only_serial_protocol_and_own_ip(client):
     seed_resource(client, "serial", kind="SERIAL_SERVER", ip="10.0.0.8")
     assert create(client, resourceId="serial", ip="10.0.0.8").status_code == 422

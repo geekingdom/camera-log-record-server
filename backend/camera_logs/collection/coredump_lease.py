@@ -26,9 +26,12 @@ async def record_coredump_status(repo, task, collector, status, error, logger):
 
 
 def _eligible_coredump_task_query(resource_id, *, exclude_task_id=None):
-    """返回可复用既有采集连接的资源级监控候选，串口和停止任务永不参与。"""
+    """返回可复用既有主机采集连接的资源级监控候选，串口和 SSH 从机永不参与。"""
     query = {"resourceId": resource_id, "status": "COLLECTING", "desiredState": "RUNNING",
-             "resourceDeleted": {"$ne": True}, "protocol": {"$in": ["SSH", "TELNET_DEVICE"]}}
+             "resourceDeleted": {"$ne": True}, "$or": [
+                 {"protocol": "TELNET_DEVICE"},
+                 {"protocol": "SSH", "$or": [{"sshTarget": {"$exists": False}}, {"sshTarget": "HOST"}]},
+             ]}
     if exclude_task_id is not None:
         query["id"] = {"$ne": exclude_task_id}
     return query

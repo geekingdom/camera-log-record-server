@@ -366,6 +366,8 @@ class SessionRuntime:
                 config["pshSerialCharacterInterval"] = self.repo.settings.psh_serial_character_interval
                 self.started_at = now()
                 reset = {"shellMode": "UNKNOWN", "debugPhase": None, "commandBlocked": False, "debugError": None,
+                         "effectiveSshPort": config.get("port") if config.get("protocol") == "SSH" and config.get("sshTarget", "HOST") == "HOST" else None,
+                         "slaveConnectedAt": None,
                          "coredumpMountStatus": None, "coredumpMountError": None, "coredumpMountRunId": None,
                          "coredumpCheckedAt": None}
                 admitted = await self.repo.db.tasks.update_one(
@@ -381,7 +383,7 @@ class SessionRuntime:
                 session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
                                     "sessionId": self.collector.session_id}
                 await self.collector.start()
-                if config.get("protocol") in {"SSH", "TELNET_DEVICE"}:
+                if config.get("protocol") in {"SSH", "TELNET_DEVICE"} and config.get("sshTarget", "HOST") == "HOST":
                     self.resource_monitor_task = asyncio.create_task(monitor_session(self, self.collector))
                 delay = 1
                 await self.collector.wait_closed()

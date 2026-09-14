@@ -2,7 +2,10 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, timedelta
+
+from pymongo import ReturnDocument
 
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
@@ -19,6 +22,17 @@ HEALTH_SCAN_INTERVAL_SECONDS = 1
 HEALTH_CONCURRENCY = 8
 
 
+def failure_backoff_seconds(failures: int) -> int:
+    """返回连续周期认证失败后的下一次探测间隔，成功清零后恢复一分钟。"""
+    if failures < 10:
+        return 60
+    if failures < 22:
+        return 300
+    if failures < 46:
+        return 3600
+    return 86400
+
+
 def _not_after(first, second):
     """比较 Mongo 可能返回的无时区旧时间与统一 UTC 时间，避免测试库和旧数据类型冲突。"""
     if getattr(first, "tzinfo", None) is None:
@@ -31,7 +45,16 @@ def _not_after(first, second):
 def _result_filter(snapshot):
     """健康请求只有持有租约令牌时才可提交；直接单元调用兼容无租约快照。"""
     query = {"id": snapshot["id"], "deletedAt": None}
-    if "healthLeaseToken" in snapshot:
+    if snapshot.get("manualHealthResult"):
+        query.update({
+            "version": snapshot.get("version"),
+            "passwordEncrypted": snapshot.get("passwordEncrypted", ""),
+            "$or": [
+                {"healthRevision": snapshot["healthRevision"]}
+                if "healthRevision" in snapshot else {"healthRevision": {"$exists": False}},
+            ],
+        })
+    elif "healthLeaseToken" in snapshot:
         query.update(healthRevision=snapshot["healthRevision"], healthLeaseToken=snapshot["healthLeaseToken"])
     return query
 
@@ -64,8 +87,9 @@ async def _commit_health_result(repo, snapshot, changes, session):
     if "healthLeaseToken" in snapshot:
         # 网络请求已经完成，且查询条件仍匹配原令牌时才可交还领取权。
         update["$unset"] = {"healthLeaseUntil": "", "healthLeaseStartedAt": "", "healthLeaseToken": ""}
-    changed = await repo.db.resources.find_one_and_update(_result_filter(snapshot), update, session=session)
-    return changed is not None
+    return await repo.db.resources.find_one_and_update(
+        _result_filter(snapshot), update, return_document=ReturnDocument.AFTER, session=session,
+    )
 
 
 async def check_resource(repo, snapshot):
@@ -86,108 +110,144 @@ async def check_resource(repo, snapshot):
         await _apply_success(repo, snapshot, metadata)
 
 
+async def _apply_failure_commit(repo, snapshot, status, *, source, advance_failure, session):
+    """在调用方事务内提交认证失败、任务停止和同一来源的认证历史。"""
+    timestamp = now()
+    failures = int(snapshot.get("healthFailureCount", 0)) + 1 if advance_failure else int(snapshot.get("healthFailureCount", 0))
+    changed = await _commit_health_result(
+        repo, snapshot,
+        {"healthStatus": status, "healthCheckedAt": timestamp,
+         "healthFailureCount": failures,
+         "nextHealthCheckAt": timestamp + timedelta(seconds=failure_backoff_seconds(failures))
+         if advance_failure else snapshot.get("nextHealthCheckAt", timestamp)},
+        session,
+    )
+    if not changed:
+        return False
+    await record_authentication(repo, changed, source=source, result=status, before=snapshot,
+                                after=changed, message=status, completed_at=timestamp, session=session)
+    query = task_resource_query(snapshot["id"])
+    async for task in repo.db.tasks.find(query, session=session):
+        # 用户暂停意图一经落库即由 Worker 自行收尾，认证失败不能覆盖预算、会话或控制操作。
+        if task.get("desiredState") == "PAUSED" or task.get("status") in {"PAUSED", "WAITING_DEVICE"}:
+            if task.get("status") == "WAITING_DEVICE":
+                await repo.db.tasks.update_one({"id": task["id"], "status": "WAITING_DEVICE"},
+                                               {"$set": {"resumeWaiting.waitingReason": status}}, session=session)
+            continue
+        previous_state = task.get("desiredState")
+        if previous_state not in {"RUNNING", "PAUSED"}:
+            marker = task.get("resourceHealthRecovery")
+            if marker and marker.get("resourceId") == snapshot["id"] and (
+                    marker.get("reason") != status or marker.get("authorizedAt") is not None):
+                reason = marker.get("reason") if marker.get("reason") in {"AUTH_FAILED", "ERROR"} else status
+                new_marker = marker | {"reason": reason, "observedAt": timestamp}
+                new_marker.pop("authorizedAt", None)
+                await repo.db.tasks.update_one(
+                    {"id": task["id"], "resourceHealthRecovery": marker},
+                    {"$set": {"resourceHealthRecovery": new_marker}}, session=session,
+                )
+            continue
+        update = {"desiredState": "STOPPED", "restartRequested": False, "updatedAt": timestamp,
+                  "resourceHealthRecovery": {"resourceId": snapshot["id"], "stoppedAt": timestamp,
+                                             "desiredState": previous_state, "reason": status}}
+        await repo.db.tasks.update_one(
+            {"id": task["id"], "controlClaimVersion": task.get("controlClaimVersion")},
+            {"$set": update}, session=session,
+        )
+        await repo.db.operations.update_many(
+            {"taskId": task["id"], "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
+            {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session,
+        )
+        operation_id = new_id()
+        await repo.db.operations.insert_one({
+            "id": operation_id, "taskId": task["id"], "desiredState": "STOPPED", "action": "system-resource-health-stop",
+            "actor": "system", "status": "PENDING", "createdAt": timestamp,
+        }, session=session)
+        await repo.db.tasks.update_one({"id": task["id"], "desiredState": "STOPPED"},
+                                       {"$set": {"controlOperationId": operation_id}}, session=session)
+    if source == "PERIODIC" and snapshot.get("healthStatus") != status:
+        await repo.audit("system", "resource_health_stop:" + status, snapshot["id"], session=session)
+    return True
+
+
 async def _apply_failure(repo, snapshot, status):
     """保存失败类别并受控停止关联采集；只有原本运行的任务才有恢复资格。"""
-    timestamp = now()
-
     async def commit(session):
-        changed = await _commit_health_result(
-            repo, snapshot,
-            {"healthStatus": status, "healthCheckedAt": timestamp,
-             "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS)},
-            session,
-        )
-        if not changed:
-            return False
-        await record_authentication(repo, snapshot, source="PERIODIC", result=status, before=snapshot,
-                                    after=snapshot, message=status, completed_at=timestamp, session=session)
-        query = task_resource_query(snapshot["id"])
-        async for task in repo.db.tasks.find(query, session=session):
-            # 用户暂停意图一经落库即由 Worker 自行收尾，周期离线不能覆盖预算、会话或控制操作。
-            if task.get("desiredState") == "PAUSED" or task.get("status") in {"PAUSED", "WAITING_DEVICE"}:
-                if task.get("status") == "WAITING_DEVICE":
-                    await repo.db.tasks.update_one({"id": task["id"], "status": "WAITING_DEVICE"},
-                                                   {"$set": {"resumeWaiting.waitingReason": status}}, session=session)
-                continue
-            previous_state = task.get("desiredState")
-            if previous_state not in {"RUNNING", "PAUSED"}:
-                # 已停止任务没有连接可回收；重复离线不应覆盖手动控制操作或制造无限系统操作。
-                marker = task.get("resourceHealthRecovery")
-                if marker and marker.get("resourceId") == snapshot["id"] and (
-                        marker.get("reason") != status or marker.get("authorizedAt") is not None):
-                    # 凭据或认证协议失败必须等待用户更新；后续离线不能降低这项恢复门槛。
-                    reason = marker.get("reason") if marker.get("reason") in {"AUTH_FAILED", "ERROR"} else status
-                    new_marker = marker | {"reason": reason, "observedAt": timestamp}
-                    new_marker.pop("authorizedAt", None)
-                    await repo.db.tasks.update_one(
-                        {"id": task["id"], "resourceHealthRecovery": marker},
-                        {"$set": {"resourceHealthRecovery": new_marker}},
-                        session=session,
-                    )
-                continue
-            recovery = previous_state in {"RUNNING", "PAUSED"}
-            update = {"desiredState": "STOPPED", "restartRequested": False, "updatedAt": timestamp}
-            if recovery:
-                update["resourceHealthRecovery"] = {"resourceId": snapshot["id"], "stoppedAt": timestamp,
-                                                     "desiredState": previous_state, "reason": status}
-            await repo.db.tasks.update_one(
-                {"id": task["id"], "controlClaimVersion": task.get("controlClaimVersion")},
-                {"$set": update}, session=session,
-            )
-            await repo.db.operations.update_many(
-                {"taskId": task["id"], "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
-                {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session,
-            )
-            operation_id = new_id()
-            await repo.db.operations.insert_one({
-                "id": operation_id, "taskId": task["id"], "desiredState": "STOPPED", "action": "system-resource-health-stop",
-                "actor": "system", "status": "PENDING", "createdAt": timestamp,
-            }, session=session)
-            await repo.db.tasks.update_one({"id": task["id"], "desiredState": "STOPPED"},
-                                           {"$set": {"controlOperationId": operation_id}}, session=session)
-        if snapshot.get("healthStatus") != status:
-            await repo.audit("system", "resource_health_stop:" + status, snapshot["id"], session=session)
-        return True
+        return await _apply_failure_commit(repo, snapshot, status, source="PERIODIC", advance_failure=True, session=session)
 
     await audited_mutations.mutation_transaction(repo, commit)
+
+
+async def _apply_success_commit(repo, snapshot, metadata, *, source, session, authorize_user_recovery=False):
+    """在调用方事务内提交成功健康状态、身份切换和来源明确的认证记录。"""
+    timestamp = now()
+    changed = await _commit_health_result(
+        repo, snapshot,
+        {"healthStatus": "ONLINE", "healthCheckedAt": timestamp,
+         "healthFailureCount": 0,
+         "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS),
+         **({**metadata, "authenticatedAt": timestamp, "updatedAt": timestamp}
+            if any(snapshot.get(key) != value for key, value in metadata.items()) else {})},
+        session,
+    )
+    if not changed:
+        return False
+    await record_authentication(repo, changed, source=source, result="SUCCESS", before=snapshot,
+                                after=changed, completed_at=timestamp, session=session)
+    if storage_identity(snapshot) != storage_identity(changed):
+        identity = storage_identity(changed)
+        async for task in repo.db.tasks.find(task_resource_query(snapshot["id"]), session=session):
+            await _transition_identity_task(repo, task, snapshot["id"], identity, timestamp, session)
+    if snapshot.get("healthStatus") == "OFFLINE":
+        await _authorize_offline_recoveries(repo, snapshot["id"], timestamp, session)
+    if authorize_user_recovery:
+        await grant_after_user_authentication(repo, changed, session)
+    # 显式 resume 的设备探测成功，只把同一暂停运行恢复至 PAUSED，领取层再沿用 runId。
+    async for task in repo.db.tasks.find({"resourceId": snapshot["id"], "status": "WAITING_DEVICE",
+                                          "desiredState": "RUNNING"}, session=session):
+        waiting = task.get("resumeWaiting")
+        same_paused_run = waiting and waiting.get("pausedRunId") == task.get("runId")
+        replaced_device = waiting and waiting.get("identityChangedAt") and not task.get("runId")
+        if waiting and (same_paused_run or replaced_device) and waiting.get("generation") == task.get("generation") \
+                and _not_after(waiting.get("requestedAt"), snapshot.get("healthLeaseStartedAt", timestamp)):
+            await repo.db.tasks.update_one({"id": task["id"], "status": "WAITING_DEVICE", "resumeWaiting": waiting},
+                                           {"$set": {"status": "PAUSED", "updatedAt": timestamp},
+                                            "$unset": {"resumeWaiting": ""}}, session=session)
+    return True
 
 
 async def _apply_success(repo, snapshot, metadata):
     """认证成功更新健康；仅 OFFLINE 后的同设备系统停止可自动取得恢复资格。"""
-    timestamp = now()
     async def commit(session):
-        changed = await _commit_health_result(
-            repo, snapshot,
-            {"healthStatus": "ONLINE", "healthCheckedAt": timestamp,
-             "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS),
-             **({**metadata, "authenticatedAt": timestamp, "updatedAt": timestamp}
-                if any(snapshot.get(key) != value for key, value in metadata.items()) else {})},
-            session,
-        )
-        if not changed:
-            return False
-        await record_authentication(repo, snapshot, source="PERIODIC", result="SUCCESS", before=snapshot,
-                                    after=snapshot | metadata, completed_at=timestamp, session=session)
-        if storage_identity(snapshot) != storage_identity(snapshot | metadata):
-            identity = storage_identity(snapshot | metadata)
-            async for task in repo.db.tasks.find(task_resource_query(snapshot["id"]), session=session):
-                await _transition_identity_task(repo, task, snapshot["id"], identity, timestamp, session)
-        if snapshot.get("healthStatus") == "OFFLINE":
-            await _authorize_offline_recoveries(repo, snapshot["id"], timestamp, session)
-        # 显式 resume 的设备探测成功，只把同一暂停运行恢复至 PAUSED，领取层再沿用 runId。
-        async for task in repo.db.tasks.find({"resourceId": snapshot["id"], "status": "WAITING_DEVICE",
-                                              "desiredState": "RUNNING"}, session=session):
-            waiting = task.get("resumeWaiting")
-            same_paused_run = waiting and waiting.get("pausedRunId") == task.get("runId")
-            replaced_device = waiting and waiting.get("identityChangedAt") and not task.get("runId")
-            if waiting and (same_paused_run or replaced_device) and waiting.get("generation") == task.get("generation") \
-                    and _not_after(waiting.get("requestedAt"), snapshot.get("healthLeaseStartedAt", timestamp)):
-                await repo.db.tasks.update_one({"id": task["id"], "status": "WAITING_DEVICE", "resumeWaiting": waiting},
-                                               {"$set": {"status": "PAUSED", "updatedAt": timestamp},
-                                                "$unset": {"resumeWaiting": ""}}, session=session)
-        return True
+        return await _apply_success_commit(repo, snapshot, metadata, source="PERIODIC", session=session)
 
     await audited_mutations.mutation_transaction(repo, commit)
+
+
+async def apply_manual_result(repo, snapshot, *, status, metadata, actor,
+                              authorize_tasks: Callable[[object], Awaitable[None]] | None = None):
+    """提交空请求体手动认证结果；任务授权和状态写入在同一事务中完成。"""
+    from fastapi import HTTPException
+
+    action = "authenticate_resource_succeeded" if status == "SUCCESS" else (
+        "authenticate_resource_credentials_rejected" if status == "AUTH_FAILED" else "authenticate_resource_device_error"
+    )
+
+    async def commit(session):
+        if authorize_tasks is not None:
+            await authorize_tasks(session)
+        if status == "SUCCESS":
+            changed = await _apply_success_commit(
+                repo, snapshot, metadata, source="MANUAL", session=session, authorize_user_recovery=True,
+            )
+        else:
+            changed = await _apply_failure_commit(
+                repo, snapshot, status, source="MANUAL", advance_failure=False, session=session,
+            )
+        if not changed:
+            raise HTTPException(409, "资源配置或健康状态已变化，请刷新后重试")
+
+    await audited_mutations.audited_mutation(repo, actor, action, snapshot["id"], commit)
 
 
 async def _authorize_offline_recoveries(repo, resource_id, timestamp, session):

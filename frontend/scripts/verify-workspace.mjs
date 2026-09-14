@@ -15,6 +15,8 @@ const scripts = [
   "browser_resource_authentication_records", "browser_node_dashboard",
   "browser_live_terminal_workbench", "browser_archive_viewer", "browser_live_ranges", "browser_resource_metrics",
   "browser_resource_monitor_settings",
+  "browser_ssh_target_editor",
+  "browser_resource_manual_authentication",
 ];
 const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: true } });
 try {

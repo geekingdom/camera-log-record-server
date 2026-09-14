@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
-from camera_logs.collection.ssh_admission import normalize_ssh_address
 from camera_logs.common.config import Settings
 from pymongo import AsyncMongoClient
 
@@ -42,23 +41,24 @@ class SshSlotObserver:
         self.database = self.client[settings.database_name]
 
     async def count(self, task):
-        """按任务、运行和代次统计名额，旧会话不得被误算为当前连接。"""
-        slot = await self.database.ssh_connection_slots.find_one(
-            {"_id": normalize_ssh_address(task["ip"])}, {"claims": 1}
-        )
-        return sum(
-            claim.get("taskId") == str(task.get("id"))
-            and claim.get("runId") == str(task.get("runId"))
-            and claim.get("generation") == task.get("generation")
-            for claim in (slot or {}).get("claims", [])
-        )
+        """按不可变运行身份跨端点统计名额，兼容旧IP键及端口编辑后的实际占位。"""
+        return await self._count_claims({
+            "taskId": str(task.get("id")), "runId": str(task.get("runId")),
+            "generation": task.get("generation"),
+        })
 
     async def count_task(self, task):
-        """统计该任务在同一设备上的全部运行代次，供停止后遗留检查使用。"""
-        slot = await self.database.ssh_connection_slots.find_one(
-            {"_id": normalize_ssh_address(task["ip"])}, {"claims": 1}
-        )
-        return sum(claim.get("taskId") == str(task.get("id")) for claim in (slot or {}).get("claims", []))
+        """统计该任务在全部端点的所有运行代次，供停止后遗留检查使用。"""
+        return await self._count_claims({"taskId": str(task.get("id"))})
+
+    async def _count_claims(self, owner):
+        """逐个读取命中 owner 的有限端点文档，不依赖任务当前端口推断旧占位位置。"""
+        total = 0
+        cursor = self.database.ssh_connection_slots.find({"claims": {"$elemMatch": owner}}, {"claims": 1})
+        async for slot in cursor:
+            total += sum(all(claim.get(key) == value for key, value in owner.items())
+                         for claim in slot.get("claims", []))
+        return total
 
     async def idle_timeout_recorded(self, task, session_id, started_at):
         """只读确认本次命令后的旧会话确实触发了持久化空闲超时事件。"""
@@ -153,7 +153,7 @@ def select_tasks(all_tasks, task_ids):
         for other in all_tasks:
             if other.get("id") == task["id"]:
                 continue
-            if other.get("ip") != task.get("ip"):
+            if other.get("ip") != task.get("ip") or other.get("port") != task.get("port"):
                 continue
             if other.get("nodeId") is not None or other.get("status") in ACTIVE_STATUSES:
                 raise ValueError(f"任务 {task['id']} 的端点已有其他活动任务: {other.get('id')}")

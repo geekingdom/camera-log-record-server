@@ -18,7 +18,7 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 CLOSE_TIMEOUT_SECONDS = 10
 TELNET_CONNECT_TIMEOUT_SECONDS = 30
-# 海康设备单台最多允许五个 SSH 会话。按事件循环隔离信号量，避免测试或
+# 海康设备每个IP和端口最多允许五个 SSH 会话。按事件循环隔离信号量，避免测试或
 # 多个 Worker 进程之间错误共享 asyncio 对象；进程级限制由每个 Worker 独立执行。
 MAX_SSH_CONNECTIONS_PER_ENDPOINT = 5
 _ssh_limiters: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]] = weakref.WeakKeyDictionary()
@@ -243,10 +243,11 @@ async def _connect_ssh(task: Mapping[str, Any], host: str, port: int) -> Connect
 
 
 def _ssh_slot(host: str, port: int) -> asyncio.Semaphore:
-    """独立调用适配器时按设备地址共享五连接池，不因端口变化另开额度。"""
+    """独立调用适配器按IP和端口共享五连接池，与Mongo端点名额保持一致。"""
     loop = asyncio.get_running_loop()
     pools = _ssh_limiters.setdefault(loop, {})
-    return pools.setdefault(host, asyncio.Semaphore(MAX_SSH_CONNECTIONS_PER_ENDPOINT))
+    endpoint = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    return pools.setdefault(endpoint, asyncio.Semaphore(MAX_SSH_CONNECTIONS_PER_ENDPOINT))
 
 
 async def _cleanup_failed_ssh_client(client: Any) -> bool:

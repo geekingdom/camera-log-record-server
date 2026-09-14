@@ -77,6 +77,7 @@ FIELD_DESCRIPTIONS = {
     "scheduledCommands": "按各自次数和间隔独立执行的定时命令配置列表。",
     "scopes": "账户或 IP 规则被授予的平台权限标识列表。",
     "serialServerResourceId": "Telnet 串口任务可选关联的已登记串口服务器资源标识。",
+    "sshTarget": "SSH 日志采集任务类型：HOST 为主机，SLAVE_1、SLAVE_2、SLAVE_3 分别为从机 1、2、3；仅 SSH 可选择从机。",
     "sharedWith": "可读取此命令模板的指定有效用户标识列表。",
     "sharedWithAll": "是否将模板共享给全部有效平台用户，仅管理员可启用。",
     "sourceTemplateId": "创建或编辑任务时复制命令配置的来源模板标识。",
@@ -90,6 +91,15 @@ FIELD_DESCRIPTIONS = {
     "userId": "服务账号绑定并实时继承权限的既有平台用户标识。",
     "username": "登录设备或平台账户使用的用户名。",
     "version": "当前配置版本号，用于乐观锁并发修改校验。",
+}
+
+# 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
+OPERATION_DESCRIPTIONS = {
+    ("POST", "/api/v1/resources/{identifier}/authenticate"): (
+        "空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；认证失败会记录状态并可能停止关联任务，"
+        "但不推进周期认证失败计数。该操作要求 resources:write、tasks:control 及资源所有权；非管理员不能影响其他用户关联的任务。"
+        "携带完整 ResourceInput 时仅用于编辑器凭据预览，不改变保存资源的健康状态或任务，因此不要求 tasks:control。"
+    ),
 }
 
 PARAMETER_DESCRIPTIONS = {
@@ -169,3 +179,8 @@ def describe_parameter(parameter: dict[str, Any]) -> str:
         return PARAMETER_DESCRIPTIONS[name]
     except KeyError as exc:
         raise RuntimeError(f"开放接口参数缺少中文说明: {name}") from exc
+
+
+def describe_operation(method: str, path: str, fallback: str) -> str:
+    """返回需要额外表达请求体语义的正式操作说明，其余路径沿用 FastAPI 描述。"""
+    return OPERATION_DESCRIPTIONS.get((method, path), fallback)

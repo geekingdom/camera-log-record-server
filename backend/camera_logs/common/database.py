@@ -44,6 +44,7 @@ def public(document):
             "resourceMonitorLeaseRunId",
             "resourceMonitorLeaseGeneration",
             "resourceMonitorLeaseNodeId",
+            "slaveSshBootstrap",
         }
     }
 

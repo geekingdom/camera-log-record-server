@@ -8,6 +8,7 @@ from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.resources.health import (
     check_resource,
+    failure_backoff_seconds,
     grant_after_user_authentication,
     health_loop,
     health_once,
@@ -22,6 +23,48 @@ def _repo(tmp_path):
     settings = Settings(encryption_key="4SkbHRtubkER4lQFz_4Zj0z3Yb6t86M5A_d9o8RwSgI=", bootstrap_token="test",
                         log_root=tmp_path / "logs", start_background=False)
     return Repository(AsyncMongoMockClient().db, settings)
+
+
+@pytest.mark.parametrize(("failures", "seconds"), [
+    (1, 60), (9, 60), (10, 300), (21, 300), (22, 3600), (45, 3600), (46, 86400),
+])
+def test_periodic_authentication_failure_backoff_boundaries(failures, seconds):
+    """连续周期失败按累计次数切换退避段，成功后的零计数回到一分钟。"""
+    assert failure_backoff_seconds(failures) == seconds
+    assert failure_backoff_seconds(0) == 60
+
+
+def test_periodic_failure_count_persists_and_success_resets_to_one_minute(tmp_path, monkeypatch):
+    """周期失败的累计计数跨快照保存，认证成功才清零并恢复正常间隔。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.70", "username": "admin",
+            "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None,
+            "healthFailureCount": 9,
+        })
+
+        async def rejected(**_kwargs):
+            raise PermissionError("bad")
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
+        before = now()
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        failed = await repo.db.resources.find_one({"id": "camera"})
+        assert failed["healthFailureCount"] == 10
+        assert 295 <= (failed["nextHealthCheckAt"].replace(tzinfo=before.tzinfo) - before).total_seconds() <= 305
+
+        monkeypatch.setattr(
+            "camera_logs.resources.health.authenticate_network_resource",
+            lambda **_kwargs: asyncio.sleep(0, result={"model": "", "subSerialNumber": "", "softwareVersion": "V"}),
+        )
+        before = now()
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        succeeded = await repo.db.resources.find_one({"id": "camera"})
+        assert succeeded["healthFailureCount"] == 0
+        assert 55 <= (succeeded["nextHealthCheckAt"].replace(tzinfo=before.tzinfo) - before).total_seconds() <= 65
+
+    asyncio.run(scenario())
 
 
 def test_auth_failure_marks_resource_and_stops_only_running_tasks(tmp_path, monkeypatch):

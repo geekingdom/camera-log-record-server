@@ -6,6 +6,7 @@ import { Search } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import type { Task } from "../../shared/types";
 import { taskStatusLabel, taskStatusTone, taskStatusLabels } from "../tasks/taskStatus";
+import { sshTargetLabel } from "../tasks/sshTarget";
 import LogResourceFilter from "./LogResourceFilter.vue";
 
 const open = defineModel<boolean>({ default: false });
@@ -138,7 +139,7 @@ onBeforeUnmount(() => { generation += 1; });
             <small class="picker-task-id">ID: {{ row.id }}</small>
           </template>
         </el-table-column>
-        <el-table-column label="协议" min-width="120"><template #default="{ row }">{{ row.protocol }}</template></el-table-column>
+        <el-table-column label="协议" min-width="140"><template #default="{ row }">{{ row.protocol }}<template v-if="row.protocol === 'SSH'"> · {{ sshTargetLabel(row.sshTarget) }}</template></template></el-table-column>
         <el-table-column label="目标" min-width="180"><template #default="{ row }">{{ row.ip }}:{{ row.port }}</template></el-table-column>
         <el-table-column label="状态" min-width="110">
           <template #default="{ row }"><el-tag size="small" :type="taskStatusTone(row.status)">{{ taskStatusLabel(row.status) }}</el-tag></template>

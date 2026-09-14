@@ -38,6 +38,21 @@ describe("认证记录游标 API", () => {
   });
 });
 
+describe("资源列表即时认证 API", () => {
+  it("只向已有资源认证路径发送空请求体", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ model: "DS-2CD" }), { status: 200 }));
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.authenticateSavedResource("resource id");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/resources/resource%20id/authenticate", expect.objectContaining({
+      method: "POST", credentials: "same-origin",
+    }));
+    expect(fetchMock.mock.calls[0][1].body).toBeUndefined();
+  });
+});
+
 describe("资源监控历史 API", () => {
   it("编码资源标识并只传递已定义的游标和时间范围", async () => {
     vi.stubGlobal("sessionStorage", { getItem: () => null });

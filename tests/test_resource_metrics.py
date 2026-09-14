@@ -368,6 +368,25 @@ async def test_sample_runtime_disabled_guard_never_writes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_resource_monitor_guard_rejects_ssh_slave_but_keeps_legacy_host(monkeypatch):
+    """资源级采样只可复用主机 SSH；缺省 sshTarget 的历史任务仍按 HOST 兼容。"""
+    from camera_logs.resource_metrics import runtime
+
+    database = AsyncMongoMockClient().db
+    rt = _runtime(database)
+    collector = SimpleNamespace(_closed=asyncio.Event())
+    rt.collector = collector
+    rt.task["sshTarget"] = "SLAVE_2"
+    assert await runtime._guard(rt, collector) is None
+    rt.task.pop("sshTarget")
+    await database.tasks.insert_one({"id": "t", "runId": "r", "resourceId": "x", "protocol": "SSH",
+                                    "desiredState": "RUNNING", "status": "COLLECTING"})
+    await database.resources.insert_one({"id": "x", "deletedAt": None, "healthStatus": "ONLINE",
+                                        "enableResourceMonitor": True})
+    assert await runtime._guard(rt, collector) is not None
+
+
+@pytest.mark.asyncio
 async def test_monitor_loop_recovers_after_one_failed_cycle(monkeypatch):
     """单轮异常被记录后，下一周期仍会重新采样。"""
     from camera_logs.resource_metrics import runtime

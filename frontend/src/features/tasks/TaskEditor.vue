@@ -6,6 +6,7 @@ import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { usePermissions } from "../../shared/permissions";
 import type { Resource, Task, Template } from "../../shared/types";
+import { normalizeSshTarget, sshTargetOptions } from "./sshTarget";
 import CommandEditor from "../commands/CommandEditor.vue";
 import LiveLogs from "../logs/LiveLogs.vue";
 import LogArchives from "../logs/LogArchives.vue";
@@ -19,6 +20,7 @@ const blank = (): Task => ({
   id: "",
   name: "",
   protocol: "SSH",
+  sshTarget: "HOST",
   ip: "",
   port: 22,
   username: "",
@@ -163,6 +165,7 @@ watch(
       };
       if (current !== generation) return;
       loaded.password = "";
+      loaded.sshTarget = normalizeSshTarget(loaded.protocol, loaded.sshTarget);
       form.value = structuredClone(loaded);
       original.value = structuredClone(loaded);
     } catch (error) {
@@ -180,6 +183,7 @@ watch(
       form.value.port =
         protocol === "SSH" ? 22 : protocol === "TELNET_DEVICE" ? 23 : undefined;
     if (protocol !== "TELNET_SERIAL") clearPassword.value = false;
+    form.value.sshTarget = normalizeSshTarget(protocol, form.value.sshTarget);
   },
 );
 watch([linkedResource, serial], ([resource]) => {
@@ -317,6 +321,11 @@ async function save() {
                     label="Telnet 串口"
                     value="TELNET_SERIAL" /></el-select
               ></el-form-item>
+              <el-form-item v-if="form.protocol === 'SSH'" label="日志采集任务类型">
+                <el-select v-model="form.sshTarget">
+                  <el-option v-for="option in sshTargetOptions" :key="option.value" :label="option.label" :value="option.value" />
+                </el-select>
+              </el-form-item>
               <el-form-item v-if="!serial" label="设备资源" prop="resourceId">
                 <el-select v-model="form.resourceId" :loading="resourceLoading" :disabled="Boolean(props.task?.resourceId)" placeholder="选择已认证的海康设备">
                   <el-option v-for="item in resources.filter(resource => resource.kind === 'HIKVISION_NETWORK')" :key="item.id" :label="`${item.name} · ${item.ip}`" :value="item.id" />

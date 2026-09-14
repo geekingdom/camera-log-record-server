@@ -1,7 +1,7 @@
 """接口文档的合成请求与响应示例；禁止读取实际账号、设备或运行配置。"""
 
 STAMP = "2026-09-09T10:00:00+00:00"
-TASK = {"id": "task-example", "resourceId": "resource-example", "name": "大厅日志", "protocol": "SSH",
+TASK = {"id": "task-example", "resourceId": "resource-example", "name": "大厅日志", "protocol": "SSH", "sshTarget": "HOST",
         "ip": "192.0.2.10", "port": 22, "status": "STOPPED", "desiredState": "STOPPED",
         "createdBy": "user-example", "createdByName": "集成账号", "version": 1}
 RESOURCE = {"id": "resource-example", "name": "大厅设备", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.10",
@@ -70,7 +70,7 @@ def request_example(schema, schemas):
     if name == "CoredumpExportCreate":
         return {"fileIds": ["coredump-example"]}
     if name == "TaskPatch":
-        return {"version": 1, "name": "更新后的任务名称"}
+        return {"version": 1, "name": "更新后的任务名称", "sshTarget": "SLAVE_1"}
     return schema_example(schema, schemas)
 
 

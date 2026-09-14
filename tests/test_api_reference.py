@@ -64,6 +64,9 @@ def test_reference_has_real_chinese_descriptions_for_every_input_parameter_and_n
     task_create = next(item for item in reference["operations"] if item["id"] == "POST /api/v1/tasks")
     assert task_create["requestSchema"]
     assert schemas["InitialCommand"]["properties"]["prompt"]["description"] == "命令发送后需要等待设备输出匹配的可选提示符。"
+    ssh_target = schemas["TaskCreate"]["properties"]["sshTarget"]
+    assert "SSH" in ssh_target["description"] and "从机" in ssh_target["description"]
+    assert task_create["requestExample"]["sshTarget"] == "HOST"
 
 
 def test_reference_requires_authentication_and_is_available_to_read_only_token(client):
@@ -111,6 +114,17 @@ def test_reference_documents_actual_session_and_download_authentication_paths(cl
     }
 
 
+def test_reference_distinguishes_saved_credential_authentication_from_editor_preview(client):
+    """资源行空请求认证会改变健康状态，编辑器完整输入预览不得被误解为同一操作。"""
+    operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
+    authentication = operations["POST /api/v1/resources/{identifier}/authenticate"]
+    for text in ("空请求体", "已保存", "健康状态", "停止关联任务", "完整 ResourceInput", "预览"):
+        assert text in authentication["description"]
+    for text in ("resources:write", "tasks:control", "他人关联任务", "完整ResourceInput仅预览"):
+        assert text in authentication["permission"]
+    assert operations["POST /api/v1/resources/authenticate"]["permission"] == "resources:create"
+
+
 def test_reference_response_examples_preserve_route_specific_contracts(client):
     """代表字段可省略，但不能用另一类端点的响应结构替代当前路由。"""
     operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
@@ -139,6 +153,7 @@ def test_reference_response_examples_preserve_route_specific_contracts(client):
     task = operations["GET /api/v1/tasks"]["responseExample"]["items"][0]
     resource = operations["GET /api/v1/resources"]["responseExample"]["items"][0]
     assert task["createdBy"] == resource["createdBy"] == "user-example"
+    assert task["sshTarget"] == "HOST"
 
 
 def test_reference_guides_document_inherited_permissions_owner_contract_and_template_sharing(client):

@@ -89,6 +89,7 @@ class TemplateCreate(CommandConfig):
 class TaskCreate(TemplateCreate):
     """创建采集任务时的设备连接参数、认证信息及可选模板来源快照。"""
     protocol: Literal["SSH", "TELNET_DEVICE", "TELNET_SERIAL"]
+    sshTarget: Literal["HOST", "SLAVE_1", "SLAVE_2", "SLAVE_3"] = "HOST"
     ip: str
     port: int = Field(ge=1, le=65535, strict=True)
     username: str = Field(default="", max_length=256)
@@ -118,9 +119,11 @@ class TaskCreate(TemplateCreate):
 
     @model_validator(mode="after")
     def credentials(self):
-        """SSH 与 Telnet 设备必须有账号密码；串口设备可不需要认证。"""
+        """SSH 与 Telnet 设备必须有账号密码，且从机目标只由 SSH 使用。"""
         if self.protocol != "TELNET_SERIAL" and (not self.username.strip() or not self.password):
             raise ValueError("SSH 和 Telnet 设备必须填写用户名和密码")
+        if self.protocol != "SSH" and self.sshTarget != "HOST":
+            raise ValueError("仅 SSH 任务可选择从机日志采集目标")
         return self
 
 
@@ -130,6 +133,7 @@ class TaskPatch(Model):
     name: str | None = None
     description: str | None = None
     protocol: Literal["SSH", "TELNET_DEVICE", "TELNET_SERIAL"] | None = None
+    sshTarget: Literal["HOST", "SLAVE_1", "SLAVE_2", "SLAVE_3"] | None = None
     ip: str | None = None
     port: int | None = None
     username: str | None = None

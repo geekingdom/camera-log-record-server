@@ -288,7 +288,7 @@ class Collector:
         idle_timeout = float(self.task.get("logIdleTimeoutSeconds", 10))
         try:
             assert self._connection is not None
-            while self._accepting_commands:
+            while self._accepting_commands or getattr(self._connection, "has_buffered_data", False):
                 try:
                     # 已有待写数据时按原批截止时间缩短等待，避免末尾小包再延长整个窗口。
                     read_timeout = min(.1, max(.001, flush_deadline - asyncio.get_running_loop().time())) if pending else .1

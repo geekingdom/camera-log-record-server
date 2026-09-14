@@ -69,13 +69,12 @@ def test_select_tasks_requires_explicit_ids_and_rejects_another_active_endpoint_
         verify.select_tasks([selected], ["missing"])
 
 
-def test_select_tasks_rejects_another_active_task_on_same_ip_with_different_ssh_port():
-    """设备 SSH 名额按 IP 而非端口计，实机脚本不能遗漏另一 SSH 端口的活动任务。"""
+def test_select_tasks_allows_another_active_task_on_same_ip_with_different_ssh_port():
+    """不同端口拥有独立SSH名额，实机脚本不应阻止另一端点的验证。"""
     selected = valid_task()
     other = valid_task() | {"id": "task-b", "port": 2222, "status": "COLLECTING",
                             "desiredState": "RUNNING", "nodeId": "worker"}
-    with pytest.raises(ValueError, match="其他活动任务"):
-        verify.select_tasks([selected, other], ["task-a"])
+    assert verify.select_tasks([selected, other], ["task-a"]) == [selected]
 
 
 def test_cleanup_stops_every_explicit_task_after_an_individual_failure():

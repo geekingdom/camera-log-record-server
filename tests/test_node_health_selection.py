@@ -71,3 +71,23 @@ async def test_scheduler_assigns_pending_task_to_lower_cost_node(tmp_path):
     await repo.db.nodes.insert_many([node("busy", cpu=85, memory=80), node("quiet", cpu=10, memory=10)])
     await schedule_once(repo)
     assert (await repo.db.tasks.find_one({"id": "task-0"}))["nodeId"] == "quiet"
+
+
+@pytest.mark.usefixtures("mock_claim_transaction")
+async def test_ssh_slave_does_not_require_coredump_nfs_for_schedule_or_claim(tmp_path):
+    """SSH 从机不运行资源级 Coredump，调度和领取都不能要求 NFS 节点。"""
+    repo = await _repository(tmp_path)
+    await _insert_pending_tasks(repo, 1)
+    await repo.db.tasks.update_one(
+        {"id": "task-0"},
+        {"$set": {"resourceId": "resource", "protocol": "SSH", "sshTarget": "SLAVE_1"}},
+    )
+    await repo.db.resources.insert_one({
+        "id": "resource", "ip": "127.0.0.1", "deletedAt": None,
+        "healthStatus": "ONLINE", "enableCoredumpMonitor": True,
+    })
+    await repo.db.nodes.insert_one(node("without-nfs") | {"capabilities": {"coredumpNfs": False}})
+
+    await schedule_once(repo)
+
+    assert (await repo.db.tasks.find_one({"id": "task-0"}))["nodeId"] == "without-nfs"

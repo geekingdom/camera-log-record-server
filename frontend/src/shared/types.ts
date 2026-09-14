@@ -111,10 +111,13 @@ export interface ScheduledCommandProgress extends ScheduledCommand {
   id: string;
   attempts: number;
 }
+/** SSH 日志来源：主机或设备公开的三个从机通道。 */
+export type SshTarget = "HOST" | "SLAVE_1" | "SLAVE_2" | "SLAVE_3";
 export interface Task {
   id: string;
   name: string;
   protocol: Protocol;
+  sshTarget?: SshTarget;
   ip?: string;
   port?: number;
   username?: string;

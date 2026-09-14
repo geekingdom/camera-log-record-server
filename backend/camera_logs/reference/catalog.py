@@ -1,6 +1,6 @@
 """从实际OpenAPI路径构造完整目录，补齐权限、中文分组及第三方调用说明。"""
 
-from camera_logs.reference.descriptions import describe_parameter, described_schemas
+from camera_logs.reference.descriptions import describe_operation, describe_parameter, described_schemas
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
@@ -84,6 +84,8 @@ def permission(path, method):
     if "/resources" in path:
         if method == "GET":
             return "tasks:read"
+        if path == "/api/v1/resources/{identifier}/authenticate" and method == "POST":
+            return "resources:write + 仅创建者或admin；空请求体另需tasks:control且非管理员不得影响他人关联任务，完整ResourceInput仅预览"
         if method == "POST":
             return "resources:create"
         return "resources:write + 仅创建者或admin" + (" + tasks:control" if method == "DELETE" else "")
@@ -151,7 +153,9 @@ def catalog(app):
                            "example": schema_example(item.get("schema", {}), schemas, item["name"])}
                           for item in definition.get("parameters", [])]
             operations.append({"id": f"{verb} {path}", "method": verb, "path": path, "title": title,
-                               "group": group(path), "description": definition.get("description", "按当前权限执行操作，响应字段随状态变化。"),
+                               "group": group(path), "description": describe_operation(
+                                   verb, path, definition.get("description", "按当前权限执行操作，响应字段随状态变化。"),
+                               ),
                                "permission": permission(path, verb), "headers": headers, "parameters": parameters,
                                "requestSchema": schema, "requestExample": request_example(schema, schemas) if schema else None,
                                "responseStatus": code, "responseExample": response_example(path, verb, code)})

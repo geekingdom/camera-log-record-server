@@ -2,7 +2,7 @@
 // 资源是设备身份入口；软删除后仍可进入所属任务查询和下载历史日志。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { Activity, Archive, ChartLine, Edit3, Eye, FileArchive, History, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
+import { Activity, Archive, ChartLine, Edit3, Eye, FileArchive, History, KeyRound, Network, Plus, Search, Server, Trash2 } from "lucide-vue-next";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { Resource, ResourceKind } from "../../shared/types";
@@ -28,6 +28,7 @@ const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoade
 const showAll = ref(Boolean(props.isAdmin));
 const createdBy = ref("");
 const deleting = ref(new Set<string>());
+const authenticating = ref(new Set<string>());
 const selected = ref<Resource[]>([]);
 const batchDeleting = ref(false);
 const selectionGeneration = ref(0);
@@ -76,6 +77,9 @@ function healthTone(value?: Resource["healthStatus"]) {
 }
 function owns(resource?: Resource) { return Boolean(resource && canManageOwnedRecord(props.userId, props.isAdmin, resource.createdBy)); }
 function permitted(resource?: Resource) { return Boolean(props.canWrite && owns(resource)); }
+function canAuthenticate(resource?: Resource) {
+  return Boolean(resource && resource.kind === "HIKVISION_NETWORK" && !resource.deletedAt && permitted(resource) && props.canControl);
+}
 function canBulkDelete(resource?: Resource) { return Boolean(!batchDeleting.value && resource && !resource.deletedAt && permitted(resource) && props.canControl); }
 function updateSelection(items: Resource[]) { selected.value = items.filter(canBulkDelete); }
 function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt); }
@@ -102,6 +106,22 @@ async function remove(resource: Resource) {
     await load();
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : "删除资源失败"); }
   finally { const next = new Set(deleting.value); next.delete(resource.id); deleting.value = next; }
+}
+async function authenticate(resource: Resource) {
+  if (!canAuthenticate(resource) || authenticating.value.has(resource.id)) return;
+  if (!(await confirmAction(`确认立即认证设备资源“${resource.name}”？将使用已保存的 HTTP 凭据检查设备并更新认证状态；失败可能停止关联采集任务。`, "确认设备认证"))) return;
+  authenticating.value = new Set(authenticating.value).add(resource.id);
+  try {
+    await api.authenticateSavedResource(resource.id);
+    ElMessage.success(`设备资源“${resource.name}”认证成功`);
+    await load();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "设备认证失败");
+    // 手动认证失败同样由服务端更新健康状态与关联任务，列表必须立即反映最终状态。
+    await load();
+  } finally {
+    const next = new Set(authenticating.value); next.delete(resource.id); authenticating.value = next;
+  }
 }
 async function completeBatch(entries: BulkOperationEntry[]) {
   const failed = new Set(entries.filter(entry => entry.status !== "success").map(entry => entry.id));
@@ -159,6 +179,7 @@ defineExpose({ reload: load });
     <el-table-column label="操作" width="364" :fixed="narrowViewport ? false : 'right'"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看认证记录"><el-button text :icon="History" aria-label="查看认证记录" @click="viewAuthenticationRecords(row)" /></el-tooltip>
+      <el-tooltip v-if="canAuthenticate(row)" content="立即认证设备"><el-button text :icon="KeyRound" aria-label="立即认证设备" :loading="authenticating.has(row.id)" :disabled="authenticating.has(row.id)" @click="authenticate(row)" /></el-tooltip>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看 coredump 文件"><el-button text :icon="FileArchive" aria-label="查看 coredump 文件" @click="viewCoredumps(row)" /></el-tooltip>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK' && row.enableResourceMonitor && !row.deletedAt" content="查看 CPU 与内存趋势"><el-button text :icon="ChartLine" aria-label="查看 CPU 与内存趋势" @click="viewMetrics(row)" /></el-tooltip>
       <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>

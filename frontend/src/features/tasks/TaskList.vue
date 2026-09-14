@@ -13,6 +13,7 @@ import { canManageOwnedRecord } from "../../shared/ownership";
 import { runSequentially, type BulkOperationEntry } from "../../shared/bulkOperations";
 import CreatorFilter from "../../shared/CreatorFilter.vue";
 import BlockedRestartDialog from "./BlockedRestartDialog.vue";
+import { sshTargetLabel } from "./sshTarget";
 
 const loadTaskDiagnostics = () => import("./TaskDiagnostics.vue");
 
@@ -162,7 +163,7 @@ const rows = computed(() => props.items);
       ><template #default="{ row }"
         ><el-tag size="small" effect="plain">{{
           protocolLabels[row.protocol] ?? row.protocol
-        }}</el-tag
+        }}<template v-if="row.protocol === 'SSH'"> · {{ sshTargetLabel(row.sshTarget) }}</template></el-tag
         ><span class="connection-address"
           >{{ row.ip }}:{{ row.port }}</span
         ></template

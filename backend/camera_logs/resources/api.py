@@ -19,7 +19,7 @@ from camera_logs.resources.authentication_records import (
     encode_cursor,
     record_authentication,
 )
-from camera_logs.resources.health import grant_after_user_authentication
+from camera_logs.resources.health import apply_manual_result, grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.models import CoredumpMonitorStatus, ResourceInput, ResourcePatch
 
@@ -229,7 +229,10 @@ def install_resource_routes(app, repo, listing):
         owner = await repo().db.tasks.find_one({
             "id": resource.get("coredumpLeaseTaskId"), "resourceId": identifier,
             "runId": resource.get("coredumpLeaseRunId"), "generation": resource.get("coredumpLeaseGeneration"),
-            "nodeId": resource.get("coredumpLeaseNodeId"), "protocol": {"$in": ["SSH", "TELNET_DEVICE"]},
+            "nodeId": resource.get("coredumpLeaseNodeId"), "$or": [
+                {"protocol": "TELNET_DEVICE"},
+                {"protocol": "SSH", "$or": [{"sshTarget": {"$exists": False}}, {"sshTarget": "HOST"}]},
+            ],
             "desiredState": "RUNNING", "status": "COLLECTING", "resourceDeleted": {"$ne": True},
         }, {"id": 1, "name": 1, "coredumpMountStatus": 1, "coredumpMountRunId": 1})
         if owner is None:
@@ -283,12 +286,36 @@ def install_resource_routes(app, repo, listing):
         return await _resource_view(repo, result, user)
 
     @app.post("/api/v1/resources/{identifier}/authenticate")
-    async def authenticate_existing_resource(identifier: str, body: ResourceInput, user: User):
-        """编辑资源的认证预览只能访问该已授权资源的固定地址。"""
+    async def authenticate_existing_resource(identifier: str, user: User, body: ResourceInput | None = None):
+        """认证已有资源；空请求体只使用服务端已保存的密文凭据。"""
         authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
         authorize_owner(user, old)
-        if old.get("deletedAt") or body.ip != old["ip"] or body.kind != old["kind"]:
+        if old.get("deletedAt"):
+            raise HTTPException(409, "资源地址、类型已变化或资源已删除")
+        saved_credentials = body is None
+        if saved_credentials:
+            # 空请求体的结果会停止或授权恢复关联任务，必须具备任务控制权限。
+            authorize(user, "tasks:control")
+
+            async def authorize_tasks(session):
+                """事务内再次拒绝非管理员影响认证期间新增的他人关联任务。"""
+                if user.get("isAdmin") or "*" in user["scopes"]:
+                    return
+                foreign = {"$and": [task_resource_query(identifier), {"createdBy": {"$ne": user["id"]}}]}
+                if await repo().db.tasks.find_one(foreign, session=session):
+                    raise HTTPException(403, "资源关联其他用户创建的任务，仅管理员可立即认证")
+
+        if body is None:
+            if old["kind"] == "SERIAL_SERVER":
+                return {}
+            body = ResourceInput(
+                name=old["name"], kind=old["kind"], ip=old["ip"], username=old["username"],
+                password=repo().decrypt(old.get("passwordEncrypted", "")), authType=old["authType"],
+                enableCoredumpMonitor=old.get("enableCoredumpMonitor", False),
+                enableResourceMonitor=old.get("enableResourceMonitor", False),
+            )
+        if body.ip != old["ip"] or body.kind != old["kind"]:
             raise HTTPException(409, "资源地址、类型已变化或资源已删除")
         if old["kind"] == "SERIAL_SERVER":
             return {}
@@ -296,9 +323,17 @@ def install_resource_routes(app, repo, listing):
             metadata = await _verified_metadata(body)
         except HTTPException as error:
             result = "AUTH_FAILED" if error.status_code == 401 else "OFFLINE" if error.status_code == 503 else "ERROR"
-            await record_manual_authentication(old, user, result=result, before=old, after=old, message=result)
+            if saved_credentials:
+                await apply_manual_result(repo(), old | {"manualHealthResult": True},
+                                          status=result, metadata={}, actor=user["id"], authorize_tasks=authorize_tasks)
+            else:
+                await record_manual_authentication(old, user, result=result, before=old, after=old, message=result)
             raise
-        await record_manual_authentication(old, user, result="SUCCESS", before=old, after=old | metadata)
+        if saved_credentials:
+            await apply_manual_result(repo(), old | {"manualHealthResult": True},
+                                      status="SUCCESS", metadata=metadata, actor=user["id"], authorize_tasks=authorize_tasks)
+        else:
+            await record_manual_authentication(old, user, result="SUCCESS", before=old, after=old | metadata)
         return metadata
 
     @app.patch("/api/v1/resources/{identifier}")
@@ -334,7 +369,8 @@ def install_resource_routes(app, repo, listing):
         if checked.kind == "HIKVISION_NETWORK":
             update.update(username=checked.username, authType=checked.authType,
                           passwordEncrypted=repo().encrypt(password), authenticatedAt=now(),
-                          healthStatus="ONLINE", healthCheckedAt=now(), **metadata)
+                          healthStatus="ONLINE", healthCheckedAt=now(), healthFailureCount=0,
+                          nextHealthCheckAt=now() + timedelta(seconds=60), **metadata)
         async def commit(session):
             """版本 CAS 与审计共享会话；凭据和设备元信息已在事务外准备。"""
             changed = await repo().db.resources.find_one_and_update(

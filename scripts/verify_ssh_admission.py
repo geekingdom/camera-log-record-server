@@ -1,8 +1,8 @@
 """在真实 MongoDB 副本集验证跨进程 SSH 连接名额。
 
 脚本只建立随机临时数据库中的名额元数据，不连接设备、不创建 socket，也不读取
-平台任务。两个独立进程同时占用同一 IP 的不同端口，用来确认五个名额属于设备
-网络地址而非某个 Worker 或端口。所有占位在 finally 中随临时数据库删除。
+平台任务。两个独立进程同时占用同一IP和端口，用来确认五个名额属于端点而非某个
+Worker；随后确认另一端口拥有独立额度。所有占位在 finally 中随临时数据库删除。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pymongo import AsyncMongoClient
 
 def task(identifier: str, *, address: str, port: int, run: str | None = None,
          generation: int = 1, node: str = "verify-node") -> dict[str, Any]:
-    """构造仅含名额身份的虚拟任务，端口只用于证明它不参与配额键。"""
+    """构造仅含名额身份的虚拟任务，端口是端点配额键的一部分。"""
     return {"id": identifier, "ip": address, "port": port, "runId": run or f"{identifier}-run",
             "generation": generation, "nodeId": node, "protocol": "SSH"}
 
@@ -64,8 +64,8 @@ async def verify(uri: str) -> dict[str, object]:
             raise RuntimeError("SSH 名额跨进程验证需要 MongoDB 副本集")
 
         address = "198.51.100.19"
-        entries = [task(f"same-ip-{index}", address=address, port=port, node=f"node-{index % 2}")
-                   for index, port in enumerate((22, 23, 2200, 2222, 2022), start=1)]
+        entries = [task(f"same-endpoint-{index}", address=address, port=18080, node=f"node-{index % 2}")
+                   for index in range(1, 6)]
         context = get_context("spawn")
         barrier, output = context.Barrier(3), context.Queue()
         for group in (entries[:3], entries[3:]):
@@ -85,28 +85,31 @@ async def verify(uri: str) -> dict[str, object]:
             except Empty as error:
                 raise AssertionError("SSH 名额验证子进程没有返回结果") from error
         if len({token for item in outcomes for token in item["tokens"]}) != 5:
-            raise AssertionError(f"同 IP 名额 token 不是五个唯一值 outcomes={outcomes!r}")
+            raise AssertionError(f"同端点名额 token 不是五个唯一值 outcomes={outcomes!r}")
 
         settings = Settings(_env_file=None, mongo_uri=uri, database_name=database_name,
                             encryption_key=Fernet.generate_key().decode(), start_background=False)
         repo = Repository(client[database_name], settings)
-        slot = await repo.db.ssh_connection_slots.find_one({"_id": address})
+        slot = await repo.db.ssh_connection_slots.find_one({"_id": f"{address}:18080"})
         if not slot or len(slot.get("claims", [])) != 5:
-            raise AssertionError(f"同 IP 不同端口未共享五个名额 slot={slot!r}")
+            raise AssertionError(f"同端点五个名额不正确 slot={slot!r}")
         try:
-            await SshAdmission(repo, task("sixth", address=address, port=10022)).acquire()
+            await SshAdmission(repo, task("sixth", address=address, port=18080)).acquire()
         except SshCapacityError:
             pass
         else:
-            raise AssertionError("同 IP 已有五路占位时第六路仍被允许")
+            raise AssertionError("同端点已有五路占位时第六路仍被允许")
+
+        if not await SshAdmission(repo, task("other-port", address=address, port=18081)).acquire():
+            raise AssertionError("同IP另一端口未获得独立名额")
 
         # 将所有占位伪造为陈旧值后再次申请；无 TTL/时间回收策略必须仍拒绝第六路。
         old = now() - timedelta(days=365)
         await repo.db.ssh_connection_slots.update_one(
-            {"_id": address}, {"$set": {"updatedAt": old, "claims.$[].claimedAt": old}},
+            {"_id": f"{address}:18080"}, {"$set": {"updatedAt": old, "claims.$[].claimedAt": old}},
         )
         try:
-            await SshAdmission(repo, task("stale-sixth", address=address, port=10023)).acquire()
+            await SshAdmission(repo, task("stale-sixth", address=address, port=18080)).acquire()
         except SshCapacityError:
             pass
         else:
@@ -117,7 +120,7 @@ async def verify(uri: str) -> dict[str, object]:
         await releasable.acquire()
         if not await releasable.release():
             raise AssertionError("明确 token 释放没有修改名额")
-        if not await SshAdmission(repo, task("release-successor", address="198.51.100.20", port=2022)).acquire():
+        if not await SshAdmission(repo, task("release-successor", address="198.51.100.20", port=22)).acquire():
             raise AssertionError("释放 token 后不能重新申请名额")
 
         # 相同任务 ID 的不同 run/generation 可共存；释放旧身份不得带走后继 claim。
@@ -132,7 +135,7 @@ async def verify(uri: str) -> dict[str, object]:
         if not isolated or [claim["token"] for claim in isolated.get("claims", [])] != [successor_token]:
             raise AssertionError(f"旧运行释放影响了后继名额 slot={isolated!r}")
         return {"passed": True, "temporaryDatabase": database_name, "crossProcess": True,
-                "sameIpPorts": [item["port"] for item in entries], "unknownClaimsRetained": True,
+                "endpointPort": 18080, "independentPort": 18081, "unknownClaimsRetained": True,
                 "exactReleaseIsolation": True, "noDeviceAccess": True}
     finally:
         for process in processes:

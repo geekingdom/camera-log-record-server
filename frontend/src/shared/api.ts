@@ -125,6 +125,7 @@ const taskFields = [
   "name",
   "description",
   "protocol",
+  "sshTarget",
   "ip",
   "port",
   "username",
@@ -197,6 +198,10 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(input),
     }),
+  /** 资源列表只触发服务端使用已保存密文凭据的认证，绝不将密码读回浏览器。 */
+  authenticateSavedResource: (resourceId: string) => request<ResourceAuthentication>(
+    `/resources/${encodeURIComponent(resourceId)}/authenticate`, { method: "POST" },
+  ),
   authenticationRecords: (resourceId: string, page = 1, filters?: {
     result?: AuthenticationRecordResult;
     start?: string;

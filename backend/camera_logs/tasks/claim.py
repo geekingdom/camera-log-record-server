@@ -21,6 +21,19 @@ class _ClaimRejected(RuntimeError):
     """CAS 未命中时触发事务回滚，防止预先创建的运行锁单独提交。"""
 
 
+def requires_coredump_nfs(task, resource):
+    """仅资源级 Coredump 的可执行主机任务要求节点具备 NFS 能力。
+
+    历史 SSH 任务缺少 ``sshTarget`` 时继续解释为主机；SSH 从机只采集其自身日志，
+    不会持有资源级 Coredump 租约，因此不能因资源开关被错误排除在非 NFS 节点外。
+    """
+    if not resource or not resource.get("enableCoredumpMonitor") or resource.get("coredumpLeaseTarget"):
+        return False
+    if task.get("protocol") == "TELNET_DEVICE":
+        return True
+    return task.get("protocol") == "SSH" and task.get("sshTarget", "HOST") == "HOST"
+
+
 async def claim_transaction(repo, callback):
     """以快照读取和多数确认提交一次领取事务，驱动可在冲突时重试回调。"""
     async with repo.db.client.start_session() as session:
@@ -108,9 +121,7 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             if resource is None or resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
                 return None
             resource_ip = resource.get("ip")
-            if (resource.get("enableCoredumpMonitor") and not resource.get("coredumpLeaseTarget")
-                    and current.get("protocol") in {"SSH", "TELNET_DEVICE"}
-                    and not (node.get("capabilities") or {}).get("coredumpNfs")):
+            if requires_coredump_nfs(current, resource) and not (node.get("capabilities") or {}).get("coredumpNfs"):
                 return None
 
         # 写入同一配置记录使并发管理员编辑与领取产生事务冲突，重试时复核新规则。

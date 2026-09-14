@@ -41,6 +41,9 @@ async def _guard(runtime: Any, collector: Any) -> dict[str, Any] | None:
     task = runtime.task
     if task.get("protocol") not in {"SSH", "TELNET_DEVICE"}:
         return None
+    # 历史 SSH 任务缺省即主机；从机连接只能采集其任务日志，不能发送资源级监控命令。
+    if task.get("protocol") == "SSH" and task.get("sshTarget", "HOST") != "HOST":
+        return None
     current = await runtime.repo.db.tasks.find_one(
         {**owner_filter(task), "desiredState": "RUNNING", "status": "COLLECTING"}, {"id": 1}
     )

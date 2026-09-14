@@ -266,11 +266,18 @@ class Worker:
         from camera_logs.collection.connections import connect
         from camera_logs.collection.ssh_admission import SshAdmission
 
-        async def admitted_connect(config):
+        async def direct_connect(config):
             """每次实际SSH建连独立占位，任务副本中的内部对象不入库或发送设备。"""
             if config.get("protocol") == "SSH":
                 config = dict(config) | {"_sshAdmission": SshAdmission(self.repo, config)}
             return await connect(config)
+
+        async def admitted_connect(config):
+            """主机保持原端口直连；仅从机进入共享扩展端口和嵌套SSH握手。"""
+            if config.get("protocol") == "SSH" and config.get("sshTarget", "HOST") != "HOST":
+                from camera_logs.collection.slave_ssh import connect_slave
+                return await connect_slave(self, config, direct_connect)
+            return await direct_connect(config)
         root = self.repo.settings.log_root
         root.mkdir(parents=True, exist_ok=True)
         self.telemetry.start_if_idle()

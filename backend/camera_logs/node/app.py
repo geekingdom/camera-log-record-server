@@ -66,6 +66,8 @@ def create_worker_app(settings=None):
                                 listener.stop()
 
     app = FastAPI(title="采集节点内部服务", lifespan=lifespan)
+    from camera_logs.node.slave_routes import install_slave_routes
+    install_slave_routes(app, settings)
 
     @app.get("/health")
     async def health():

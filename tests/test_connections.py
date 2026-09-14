@@ -281,6 +281,45 @@ def test_ssh_connection_pool_limits_each_endpoint_to_five_sessions(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_ssh_connection_pool_isolated_by_port(monkeypatch):
+    """独立适配器的本地保护也按端点拆分，另一端口不应等待已满端口释放。"""
+    class Process:
+        def close(self):
+            return None
+
+    class Client:
+        async def create_process(self, **_kwargs):
+            return Process()
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    calls = []
+
+    async def fake_connect(_host, *, port, **_kwargs):
+        calls.append(port)
+        return Client()
+
+    monkeypatch.setitem(sys.modules, "asyncssh", SimpleNamespace(connect=fake_connect))
+
+    async def scenario():
+        first = await asyncio.gather(*(
+            _connect_ssh({"username": "u", "password": "p"}, "198.51.100.17", 18080)
+            for _ in range(5)
+        ))
+        second = await asyncio.wait_for(
+            _connect_ssh({"username": "u", "password": "p"}, "198.51.100.17", 18081), timeout=.2,
+        )
+        assert calls.count(18080) == 5 and calls.count(18081) == 1
+        for connection in [*first, second]:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
 def test_ssh_connection_pool_releases_slot_after_connect_failure(monkeypatch):
     """建连失败必须在底层清理完成后归还名额，后续连接不能永久饥饿。"""
     attempts = 0

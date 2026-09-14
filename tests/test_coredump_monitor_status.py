@@ -16,6 +16,7 @@ pytest_plugins = ("test_resources",)
         ({}, {"runId": "other-run"}, {}),
         ({}, {"generation": 9}, {}),
         ({}, {"protocol": "TELNET_SERIAL"}, {}),
+        ({}, {"sshTarget": "SLAVE_1"}, {}),
         ({"enableCoredumpMonitor": False}, {}, {}),
         ({}, {"desiredState": "STOPPED"}, {}),
         ({}, {}, {"heartbeat": now() - timedelta(seconds=16)}),

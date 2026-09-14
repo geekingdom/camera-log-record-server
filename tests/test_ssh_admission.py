@@ -9,6 +9,7 @@ from camera_logs.collection.ssh_admission import (
     SshCapacityError,
     SshSlotUncertain,
     normalize_ssh_address,
+    normalize_ssh_endpoint,
     release_task_slots,
 )
 from camera_logs.common.config import Settings
@@ -30,15 +31,41 @@ async def _repo():
 
 
 @pytest.mark.asyncio
-async def test_same_ip_different_ports_share_exactly_five_ssh_slots():
+async def test_same_ip_different_ports_each_allow_five_ssh_slots():
     repo = await _repo()
-    admissions = [SshAdmission(repo, _task(index, port=22 + index)) for index in range(6)]
-    tokens = await asyncio.gather(*(item.acquire() for item in admissions[:5]))
-    assert len(set(tokens)) == 5
+    first_port = [SshAdmission(repo, _task(index, port=18080)) for index in range(6)]
+    second_port = [SshAdmission(repo, _task(index + 10, port=18081)) for index in range(5)]
+    tokens = await asyncio.gather(*(item.acquire() for item in first_port[:5]), *(item.acquire() for item in second_port))
+    assert len(set(tokens)) == 10
     with pytest.raises(SshCapacityError, match="名额已满"):
-        await admissions[5].acquire()
-    slot = await repo.db.ssh_connection_slots.find_one({"_id": "192.0.2.9"})
-    assert len(slot["claims"]) == 5
+        await first_port[5].acquire()
+    assert len((await repo.db.ssh_connection_slots.find_one({"_id": "192.0.2.9:18080"}))["claims"]) == 5
+    assert len((await repo.db.ssh_connection_slots.find_one({"_id": "192.0.2.9:18081"}))["claims"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_legacy_ip_claims_still_occupy_default_ssh_port_only():
+    """升级前未记录端口的占位按22保守保留，不能挤占新增扩容端口。"""
+    repo = await _repo()
+    legacy = [{"taskId": f"old-{index}", "runId": "old-run", "generation": 1,
+               "nodeId": "old", "token": f"old-{index}"} for index in range(5)]
+    await repo.db.ssh_connection_slots.insert_one({"_id": "192.0.2.9", "claims": legacy})
+    with pytest.raises(SshCapacityError):
+        await SshAdmission(repo, _task(22, port=22)).acquire()
+    assert await SshAdmission(repo, _task(18080, port=18080)).acquire()
+
+
+@pytest.mark.asyncio
+async def test_recovery_release_covers_actual_and_legacy_endpoint_claims():
+    """运行后编辑端口或旧版本占位时，关闭收据仍按运行身份清掉所有准确遗留项。"""
+    repo = await _repo()
+    task = _task(1, port=18080)
+    owner = {"taskId": task["id"], "runId": task["runId"], "generation": task["generation"]}
+    await repo.db.ssh_connection_slots.insert_one({"_id": "192.0.2.9", "claims": [owner | {"token": "legacy"}]})
+    await repo.db.ssh_connection_slots.insert_one({"_id": "192.0.2.9:18080", "claims": [owner | {"token": "actual", "port": 18080}]})
+    assert await release_task_slots(repo, task | {"port": 22}) == 2
+    assert (await repo.db.ssh_connection_slots.find_one({"_id": "192.0.2.9"}))["claims"] == []
+    assert (await repo.db.ssh_connection_slots.find_one({"_id": "192.0.2.9:18080"}))["claims"] == []
 
 
 @pytest.mark.asyncio
@@ -67,6 +94,8 @@ async def test_explicit_task_release_requires_exact_run_and_generation():
 
 def test_ssh_admission_normalizes_ip_and_rejects_hostname():
     assert normalize_ssh_address("2001:0db8::9") == "2001:db8::9"
+    assert normalize_ssh_endpoint("2001:0db8::9", 18080) == "[2001:db8::9]:18080"
+    assert normalize_ssh_endpoint("192.0.2.9", 22) == "192.0.2.9"
     with pytest.raises(ValueError, match="IPv4 或 IPv6"):
         normalize_ssh_address("camera.example.test")
 

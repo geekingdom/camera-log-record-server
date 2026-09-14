@@ -15,7 +15,7 @@ from camera_logs.node.health import rank_nodes
 from camera_logs.node.resource_routing import routing_config
 from camera_logs.resources.health import reconcile_authorized_recoveries
 from camera_logs.resources.lifecycle import reconcile_deleted_resources
-from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task
+from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task, requires_coredump_nfs
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,7 @@ async def schedule_once(repo, lease=None):
                  if not node_configs.get(node["id"], {}).get("deletedAt")]
         resource = await db.resources.find_one({"id": task.get("resourceId")}) if task.get("resourceId") else None
         routing_task = task | {"resourceIp": resource["ip"] if resource else task.get("ip"),
-                               "requiresNfs": bool(resource and resource.get("enableCoredumpMonitor")
-                                                   and not resource.get("coredumpLeaseTarget")
-                                                   and task.get("protocol") in {"SSH", "TELNET_DEVICE"})}
+                               "requiresNfs": requires_coredump_nfs(task, resource)}
         candidates = rank_nodes(nodes, occupancy, routing_task)
         if not candidates:
             if task["status"] != "PAUSED":
