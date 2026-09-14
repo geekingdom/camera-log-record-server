@@ -11,6 +11,7 @@ import { api } from "../../shared/api";
 import type { Resource, ResourceMetricSample } from "../../shared/types";
 import { metricIssueCount, metricSeries, metricSummaries, metricsCsv, validMetricRange } from "./resourceMetrics";
 import { memoryPrecision, memoryUnit, metricAxis } from "./metricAxis";
+import { relativeMetricSeries } from "./metricRelative";
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
@@ -25,6 +26,7 @@ const paused = ref(false);
 const error = ref("");
 const chartElement = ref<HTMLElement>();
 const selectedUnit = ref<"KB" | "%">("KB");
+const memoryDisplayMode = ref<"absolute" | "relative">("absolute");
 const axisWindow = ref<{ start?: number; end?: number; selected?: Record<string, boolean> }>({});
 let chart: echarts.ECharts | undefined;
 let refreshTimer: number | undefined;
@@ -33,12 +35,17 @@ let observer: ResizeObserver | undefined;
 
 const cpu = computed(() => metricSeries(samples.value, "%"));
 const memory = computed(() => metricSeries(samples.value, "KB"));
+const relativeMemory = computed(() => relativeMetricSeries(memory.value));
 const summaries = computed(() => metricSummaries(selectedUnit.value === "KB" ? memory.value : cpu.value));
 const issueCount = computed(() => metricIssueCount(samples.value));
 const latestAt = computed(() => samples.value.map(item => item.sampledAt).sort().at(-1));
 const hasMetrics = computed(() => cpu.value.length > 0 || memory.value.length > 0);
-const activeSeries = computed(() => selectedUnit.value === "KB" ? memory.value : cpu.value);
-const activeDisplayUnit = computed(() => selectedUnit.value === "KB" ? memoryUnit(activeSeries.value, axisWindow.value).unit : "%");
+const activeSeries = computed(() => selectedUnit.value === "KB"
+  ? (memoryDisplayMode.value === "relative" ? relativeMemory.value.series : memory.value) : cpu.value);
+const activeChartUnit = computed<"KB" | "%">(() => selectedUnit.value === "KB" && memoryDisplayMode.value === "relative" ? "%" : selectedUnit.value);
+const activeDisplayUnit = computed(() => activeChartUnit.value === "KB" ? memoryUnit(activeSeries.value, axisWindow.value).unit : "%");
+const zeroBaselineNames = computed(() => selectedUnit.value === "KB" && memoryDisplayMode.value === "relative"
+  ? relativeMemory.value.zeroBaselineNames : []);
 
 /** 当前选择范围始终转换为 ISO UTC，默认最近一小时，服务端再执行最终范围校验。 */
 function selectedRange(): { start: Date; end: Date } {
@@ -79,13 +86,13 @@ function zoomRange() {
     ? { start: 0, end: 100 } : { startValue: axisWindow.value.start, endValue: axisWindow.value.end };
 }
 function updateAxis() {
-  const option = chartOption(activeSeries.value, selectedUnit.value);
+  const option = chartOption(activeSeries.value, activeChartUnit.value);
   chart?.setOption({ yAxis: option.yAxis, tooltip: option.tooltip });
 }
 function renderCharts() {
   if (!chartElement.value) return;
   chart ??= echarts.init(chartElement.value);
-  chart.setOption(chartOption(activeSeries.value, selectedUnit.value), true);
+  chart.setOption(chartOption(activeSeries.value, activeChartUnit.value), true);
   chart.off("legendselectchanged"); chart.off("datazoom");
   chart.on("legendselectchanged", (event: unknown) => { const selected = (event as { selected?: Record<string, boolean> }).selected; axisWindow.value = { ...axisWindow.value, selected }; updateAxis(); });
   chart.on("datazoom", (event: unknown) => {
@@ -148,6 +155,8 @@ function applyCustomRange() {
 }
 function togglePause() { paused.value = !paused.value; scheduleRefresh(); if (!paused.value) void load(); }
 function selectMetric(unit: "KB" | "%") { selectedUnit.value = unit; axisWindow.value = {}; void nextTick(renderCharts); }
+/** 切换仅改变内存图展示方式；相对变化率的基准来自当前已查询的完整样本。 */
+function selectMemoryDisplay(mode: "absolute" | "relative") { memoryDisplayMode.value = mode; axisWindow.value = {}; void nextTick(renderCharts); }
 function exportCsv() {
   const blob = new Blob([metricsCsv(samples.value)], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -159,6 +168,7 @@ watch(() => [open.value, props.resource?.id] as const, ([visible]) => {
   generation += 1;
   if (visible) {
     paused.value = false;
+    memoryDisplayMode.value = "absolute";
     void nextTick(observeCharts);
     loading.value = false; reload();
   } else {
@@ -173,17 +183,21 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
   <el-dialog v-model="open" :title="`${props.resource?.name ?? '资源'} · CPU 与内存趋势`" width="min(1100px, 96vw)" destroy-on-close class="resource-metrics-dialog">
     <div class="metrics-toolbar">
       <el-radio-group :model-value="selectedUnit" aria-label="监控指标" @change="selectMetric"><el-radio-button value="KB">内存</el-radio-button><el-radio-button value="%">CPU</el-radio-button></el-radio-group>
+      <el-tooltip v-if="selectedUnit === 'KB'" content="比率以当前查询范围内每条曲线的首个有效采样为基准；缩放图表不会改变基准，刷新或重新查询后会按新范围计算。" :popper-style="{ maxWidth: 'min(320px, calc(100vw - 24px))', whiteSpace: 'normal' }">
+        <el-radio-group :model-value="memoryDisplayMode" aria-label="内存图展示方式" @change="selectMemoryDisplay"><el-radio-button value="absolute">原始数值</el-radio-button><el-radio-button value="relative">比率</el-radio-button></el-radio-group>
+      </el-tooltip>
       <el-radio-group :model-value="preset" aria-label="监控历史时间范围" @change="choosePreset">
         <el-radio-button value="30m">最近 30 分钟</el-radio-button><el-radio-button value="1h">最近 1 小时</el-radio-button><el-radio-button value="custom">自定义</el-radio-button>
       </el-radio-group>
       <div class="metrics-commands">
         <el-tooltip content="刷新趋势"><el-button circle :icon="RefreshCw" aria-label="刷新趋势" :loading="loading" @click="load" /></el-tooltip>
         <el-tooltip :content="paused ? '恢复自动刷新' : '暂停自动刷新'"><el-button circle :icon="paused ? Play : Pause" :aria-label="paused ? '恢复自动刷新' : '暂停自动刷新'" @click="togglePause" /></el-tooltip>
-        <el-button :icon="Download" :disabled="!samples.length" @click="exportCsv">导出 CSV</el-button>
+        <el-tooltip content="导出原始采样值，不受图表比率展示影响"><el-button :icon="Download" :disabled="!samples.length" @click="exportCsv">导出 CSV</el-button></el-tooltip>
       </div>
     </div>
     <div v-if="preset === 'custom'" class="metrics-custom-range"><el-date-picker v-model="customRange" type="datetimerange" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" :teleported="false" /><el-button type="primary" @click="applyCustomRange">查询</el-button></div>
     <el-alert v-if="error" type="error" show-icon :title="error" :closable="false" class="metrics-alert" />
+    <el-alert v-if="zeroBaselineNames.length" type="warning" show-icon :closable="false" class="metrics-alert" :title="`以下曲线的首个有效采样为 0，无法计算变化率：${zeroBaselineNames.join('、')}`" />
     <div class="metrics-summary" aria-label="资源监控摘要">
       <div v-for="item in summaries" :key="item.key"><span>{{ item.name }} 最新值</span><strong>{{ number(item.value, item.unit) }}</strong><small>{{ delta(item.delta, item.unit) }}</small></div>
       <div><span>采样状态</span><strong>{{ samples.length }} 条</strong><small>{{ issueCount ? `${issueCount} 条异常` : '无异常样本' }}</small></div>
@@ -192,7 +206,7 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
     <div v-loading="loading" class="metrics-content">
       <el-empty v-if="!loading && !error && !hasMetrics" description="所选时间范围内暂无资源监控数据" />
       <template v-else>
-        <section class="metrics-chart-section"><h3>{{ selectedUnit === 'KB' ? `内存（${activeDisplayUnit}）` : 'CPU（%）' }}</h3><div ref="chartElement" class="metrics-chart" :aria-label="selectedUnit === 'KB' ? '内存趋势图' : 'CPU 趋势图'" /></section>
+        <section class="metrics-chart-section"><h3>{{ selectedUnit === 'KB' ? (memoryDisplayMode === 'relative' ? '内存变化率（%）' : `内存（${activeDisplayUnit}）`) : 'CPU（%）' }}</h3><div ref="chartElement" class="metrics-chart" :aria-label="selectedUnit === 'KB' ? (memoryDisplayMode === 'relative' ? '内存变化率图' : '内存趋势图') : 'CPU 趋势图'" /></section>
       </template>
     </div>
   </el-dialog>

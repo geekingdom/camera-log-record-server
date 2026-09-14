@@ -39,7 +39,7 @@ await context.route("**/api/v1/**", async route => {
     if (failNextMetrics) { failNextMetrics = false; return json(route, { message: "模拟监控读取失败" }, 500); }
     if (!url.searchParams.get("cursor")) return json(route, {
       items: [
-        { sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 21, unit: "%" }, { id: "proc", name: "Dsp_Main", pid: 12, value: 2048, unit: "KB" }] },
+        { sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 21, unit: "%" }, { id: "process:dsp:99", name: "Dsp_Main", pid: 99, value: 2048, unit: "KB" }] },
         { sampledAt: "2026-09-11T00:01:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 18, unit: "%" }, { id: "proc", name: "Dsp_Main", pid: 12, value: 2010, unit: "KB" }] },
       ], nextCursor: "next-page",
     });
@@ -60,6 +60,28 @@ try {
   try { await page.getByText(/内存（(KB|MB|GB)）/, { exact: true }).waitFor(); }
   catch (cause) { throw new Error(`趋势弹窗未渲染：${JSON.stringify({ dialogs: await page.getByRole("dialog").allTextContents(), errors })}`, { cause }); }
   await page.locator(".metrics-chart canvas").first().waitFor();
+  assert.equal(await page.getByText("Dsp_Main 最新值", { exact: true }).count(), 1, "PID变化后仅有一个同名进程摘要");
+  assert.equal(await page.getByText(/Dsp_Main \(PID/).count(), 0, "进程对象不显示PID后缀");
+  await page.getByText("比率", { exact: true }).click();
+  await page.getByRole("heading", { name: "内存变化率（%）" }).waitFor();
+  await page.mouse.move(10, 10);
+  await page.locator(".metrics-toolbar input:focus").evaluateAll(elements => elements.forEach(element => element.blur()));
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: "output/playwright/resource-metrics-relative-1440.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(250);
+  await page.getByText("比率", { exact: true }).hover();
+  const rateHint = page.getByRole("tooltip").filter({ hasText: "首个有效采样" });
+  await rateHint.waitFor();
+  const hintBounds = await rateHint.boundingBox();
+  assert.ok(hintBounds && hintBounds.x >= 0 && hintBounds.x + hintBounds.width <= 390, "比率说明不得超出窄屏");
+  await page.mouse.move(10, 10);
+  await page.locator(":focus").evaluateAll(elements => elements.forEach(element => element.blur()));
+  await rateHint.waitFor({ state: "hidden" });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, "比率模式窄屏不得横向溢出");
+  await page.screenshot({ path: "output/playwright/resource-metrics-relative-390.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByText("原始数值", { exact: true }).click();
   assert.ok(await page.locator(".metrics-chart canvas").first().evaluate(canvas => canvas.width > 0 && canvas.height > 0), "CPU 图表 canvas 应可绘制");
   await page.getByText("CPU", { exact: true }).first().click();
   await page.getByText("CPU（%）", { exact: true }).waitFor();

@@ -6,7 +6,6 @@ export interface MetricSeries {
   key: string;
   name: string;
   unit: MetricUnit;
-  pid?: number;
   points: Array<[number, number | null]>;
 }
 export interface MetricSummary {
@@ -14,19 +13,69 @@ export interface MetricSummary {
   delta: number | null;
 }
 
+type SampleWithIdentity = ResourceMetricSample & {
+  identity?: { model?: string; subSerialNumber?: string };
+};
+
+interface DeviceIdentity {
+  model: string;
+  subSerialNumber: string;
+}
+
+function deviceIdentity(sample: ResourceMetricSample): DeviceIdentity {
+  const identity = (sample as SampleWithIdentity).identity;
+  return { model: identity?.model ?? "", subSerialNumber: identity?.subSerialNumber ?? "" };
+}
+
+function isProcessMetric(value: ResourceMetricValue): boolean {
+  return value.pid !== undefined || value.id.startsWith("process:");
+}
+
+function seriesKey(sample: ResourceMetricSample, value: ResourceMetricValue): string {
+  const identity = deviceIdentity(sample);
+  return isProcessMetric(value)
+    ? JSON.stringify(["process", value.name, identity])
+    : JSON.stringify(["metric", value.id, value.name, identity]);
+}
+
+function displayName(name: string, identity: DeviceIdentity, identityCount: number): string {
+  if (identityCount === 1) return name;
+  const model = identity.model === "" ? "未知型号" : JSON.stringify(identity.model);
+  const serial = identity.subSerialNumber === "" ? "未知序列号" : JSON.stringify(identity.subSerialNumber);
+  return `${name} [型号=${model}; 序列号=${serial}]`;
+}
+
 /** 将样本按完整展示身份聚合；缺失采样和身份变更均以空点断开曲线。 */
 export function metricSeries(samples: ResourceMetricSample[], unit: MetricUnit): MetricSeries[] {
   const ordered = [...samples].sort((left, right) => Date.parse(left.sampledAt) - Date.parse(right.sampledAt));
   const timestamps = ordered.map(sample => Date.parse(sample.sampledAt));
-  const values = new Map<string, { name: string; pid?: number; points: Map<number, number> }>();
-  ordered.forEach(sample => sample.values.filter(value => value.unit === unit).forEach(value => {
-    const identity = (sample as ResourceMetricSample & { identity?: { model?: string; subSerialNumber?: string } }).identity;
-    const key = `${value.id}:${value.name}:${value.pid ?? ""}:${identity?.model ?? ""}:${identity?.subSerialNumber ?? ""}`;
-    const existing = values.get(key) ?? { name: value.name, pid: value.pid, points: new Map<number, number>() };
-    existing.points.set(Date.parse(sample.sampledAt), value.value);
-    values.set(key, existing);
-  }));
-  return [...values.entries()].map(([key, value]) => {
+  const values = new Map<string, { name: string; identity: DeviceIdentity; points: Map<number, number> }>();
+  ordered.forEach(sample => {
+    const perSample = new Map<string, { name: string; value: number }>();
+    sample.values.filter(value => value.unit === unit).forEach(value => {
+      const key = seriesKey(sample, value);
+      const existing = perSample.get(key);
+      // 旧版同名进程按 PID 分条返回；仅在同一采样内累计，避免跨时间点重复计算。
+      perSample.set(key, {
+        name: value.name,
+        value: isProcessMetric(value) ? (existing?.value ?? 0) + value.value : value.value,
+      });
+    });
+    perSample.forEach((value, key) => {
+      const existing = values.get(key) ?? { name: value.name, identity: deviceIdentity(sample), points: new Map<number, number>() };
+      // 相同时间戳的不同样本延续原有覆盖语义，绝不将它们误作一次采样累加。
+      existing.points.set(Date.parse(sample.sampledAt), value.value);
+      values.set(key, existing);
+    });
+  });
+  const entries = [...values.entries()];
+  const identitiesByName = new Map<string, Set<string>>();
+  entries.forEach(([, value]) => {
+    const identities = identitiesByName.get(value.name) ?? new Set<string>();
+    identities.add(JSON.stringify(value.identity));
+    identitiesByName.set(value.name, identities);
+  });
+  return entries.map(([key, value]) => {
     const aligned = timestamps.map(timestamp => [timestamp, value.points.get(timestamp) ?? null] as [number, number | null]);
     const points: Array<[number, number | null]> = [];
     aligned.forEach((point, index) => {
@@ -37,7 +86,7 @@ export function metricSeries(samples: ResourceMetricSample[], unit: MetricUnit):
       }
       points.push(point);
     });
-    return { key, unit, name: value.pid === undefined ? value.name : `${value.name} (PID ${value.pid})`, pid: value.pid, points };
+    return { key, unit, name: displayName(value.name, value.identity, identitiesByName.get(value.name)?.size ?? 1), points };
   });
 }
 
@@ -64,11 +113,23 @@ export function validMetricRange(start: Date, end: Date, now = new Date()): bool
 /** 将结构化样本导出为可被表格软件读取的 RFC 4180 风格 CSV。 */
 export function metricsCsv(samples: ResourceMetricSample[]): string {
   const escape = (value: string | number | undefined | null) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-  const lines: Array<Array<string | number>> = [["sampledAt", "status", "id", "name", "pid", "value", "unit", "errorCode"]];
+  const lines: Array<Array<string | number>> = [["sampledAt", "status", "id", "name", "value", "unit", "errorCode"]];
   [...samples].sort((left, right) => Date.parse(left.sampledAt) - Date.parse(right.sampledAt)).forEach(sample => {
-    if (!sample.values.length) lines.push([sample.sampledAt, sample.status, "", "", "", "", "", sample.errorCode ?? ""]);
-    sample.values.forEach(value => lines.push([
-      sample.sampledAt, sample.status, value.id, value.name, value.pid ?? "", value.value, value.unit, sample.errorCode ?? "",
+    if (!sample.values.length) lines.push([sample.sampledAt, sample.status, "", "", "", "", sample.errorCode ?? ""]);
+    const perSample = new Map<string, { id: string; name: string; value: number; unit: MetricUnit }>();
+    sample.values.forEach((value, index) => {
+      const process = isProcessMetric(value);
+      const key = process ? `process:${value.name}:${value.unit}` : `metric:${index}`;
+      const existing = perSample.get(key);
+      perSample.set(key, {
+        id: process ? `process:${value.name}` : value.id,
+        name: value.name,
+        value: process ? (existing?.value ?? 0) + value.value : value.value,
+        unit: value.unit,
+      });
+    });
+    perSample.forEach(value => lines.push([
+      sample.sampledAt, sample.status, value.id, value.name, value.value, value.unit, sample.errorCode ?? "",
     ]));
   });
   return lines.map(line => line.map(escape).join(",")).join("\r\n");

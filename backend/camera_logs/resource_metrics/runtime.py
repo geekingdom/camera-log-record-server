@@ -204,13 +204,17 @@ async def sample_once(runtime: Any, collector: Any) -> None:
             failed("process-discovery", error)
         value_pattern = config["processValuePattern"]
         checked = 0
+        seen_pids: set[int] = set()
+        process_values: dict[str, dict[str, Any]] = {}
         for line in process_output.splitlines():
             fields = line.strip().split(None, 4)
             if len(fields) < 5 or not fields[0].isdigit():
                 continue
             pid, command = int(fields[0]), fields[4]
-            if pid <= 0:
+            # ps 在设备繁忙或命令实现异常时可能重复同一 PID；每轮只读取一次/proc。
+            if pid <= 0 or pid in seen_pids:
                 continue
+            seen_pids.add(pid)
             for rule in config["processRules"]:
                 if not rule["enabled"]:
                     continue
@@ -237,15 +241,15 @@ async def sample_once(runtime: Any, collector: Any) -> None:
                     rss = _match(value_pattern, status, [0.0])
                     if rss is None:
                         raise ResourceMonitorUnavailable("METRIC_NOT_FOUND")
-                    values.append(
-                        {
-                            "id": f"process:{rule['id']}:{pid}",
-                            "name": name,
-                            "value": _number(rss, unit="KB"),
-                            "unit": "KB",
-                            "pid": pid,
-                        }
-                    )
+                    value = _number(rss, unit="KB")
+                    # PID 会随重启变化，不可作为趋势序列身份；同名进程在本轮合并 VmRSS。
+                    aggregate = process_values.get(name)
+                    if aggregate is None:
+                        aggregate = {"id": f"process:{name}", "name": name, "value": value, "unit": "KB"}
+                        process_values[name] = aggregate
+                        values.append(aggregate)
+                    else:
+                        aggregate["value"] += value
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # noqa: BLE001 - 单个进程退出或超时不阻断后续PID。

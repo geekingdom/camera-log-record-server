@@ -29,7 +29,7 @@ export interface Resource extends ResourceAuthentication {
   createdBy?: string;
   createdByName?: string;
 }
-/** 资源监控样本内的单项 CPU 或内存值；pid 仅用于区分同类进程。 */
+/** 资源监控样本内的单项 CPU 或内存值；pid 仅兼容历史数据，进程对象按名称识别。 */
 export interface ResourceMetricValue {
   id: string;
   name: string;

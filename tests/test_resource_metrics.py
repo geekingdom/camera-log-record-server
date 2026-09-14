@@ -299,7 +299,7 @@ def _runtime(database):
 
 @pytest.mark.asyncio
 async def test_sample_runtime_isolates_item_and_pid_failures(monkeypatch):
-    """首项和一个 PID 失败时，其余指标及 PID 仍会进入同一结构化样本。"""
+    """首项和一个 PID 失败时，其余指标及同名进程聚合仍会进入结构化样本。"""
     from camera_logs.resource_metrics import runtime
 
     db = AsyncMongoMockClient().db
@@ -345,7 +345,8 @@ async def test_sample_runtime_isolates_item_and_pid_failures(monkeypatch):
     assert (
         sample["status"] == "PARTIAL"
         and sample["values"][0]["id"] == "slab"
-        and any(v.get("pid") == 2 for v in sample["values"])
+        and any(v["id"] == "process:Dsp_Main" and v["value"] == 9 and "pid" not in v
+               for v in sample["values"])
     )
 
 
@@ -455,5 +456,46 @@ async def test_bad_process_rule_does_not_exhaust_other_rules(monkeypatch):
     row = await db.resource_metric_hours.find_one({"resourceId": "x"})
     sample = row["samples"][0]
     assert sample["status"] == "PARTIAL"
-    assert {value["pid"] for value in sample["values"]} == {1, 2}
+    assert sample["values"] == [{"id": "process:Dsp_Main", "name": "Dsp_Main", "value": 18, "unit": "KB"}]
     assert len(sample["errors"]) == len(broken_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_memory_aggregates_same_display_name_and_ignores_duplicate_pid(monkeypatch):
+    """同名进程按展示名合并内存，重复 PID 只读取并累计一次，输出不暴露 PID。"""
+    from camera_logs.resource_metrics import runtime
+
+    db = AsyncMongoMockClient().db
+    rt = _runtime(db)
+    collector = SimpleNamespace(_closed=asyncio.Event())
+    rt.collector = collector
+    config = default_monitor_config()
+    config["items"] = []
+    config["processRules"] = [{
+        "id": "workers", "name": "工作进程", "pattern": r"worker-(\w+)", "nameGroup": 1, "enabled": True,
+    }]
+    await db.platform_settings.insert_one({"id": "platform", "resourceMonitor": config})
+
+    async def guard(*_):
+        return {"model": "M", "subSerialNumber": "S"}
+
+    status_calls = []
+
+    async def capture(_collector, command, _guard):
+        if command == "ps":
+            return "11 a 1 S worker-alpha\n12 a 1 S worker-alpha\n11 a 1 S worker-alpha"
+        status_calls.append(command)
+        return "VmRSS: 7 kB" if command.endswith("11/status") else "VmRSS: 13 kB"
+
+    async def ash(**_):
+        return None
+
+    collector.ensure_ash_for_monitor = ash
+    monkeypatch.setattr(runtime, "_guard", guard)
+    monkeypatch.setattr(runtime, "_capture", capture)
+    await runtime.sample_once(rt, collector)
+
+    row = await db.resource_metric_hours.find_one({"resourceId": "x"})
+    values = row["samples"][0]["values"]
+    assert values == [{"id": "process:alpha_工作进程", "name": "alpha_工作进程", "value": 20, "unit": "KB"}]
+    assert status_calls == ["cat /proc/11/status", "cat /proc/12/status"]
