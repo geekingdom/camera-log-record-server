@@ -23,17 +23,18 @@ def create_app(settings=None, db=None):
         """启动时验证密钥、初始化索引与调度器，关闭时按反向顺序释放资源。"""
         if not settings.encryption_key or not settings.bootstrap_token:
             raise RuntimeError("必须配置 ENCRYPTION_KEY 和 BOOTSTRAP_TOKEN；参见 .env.example")
-        client = None
-        database = db
-        if database is None:
-            client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True,
-                                      w="majority", journal=True)
-            database = client[settings.database_name]
-        repo = Repository(database, settings)
-        from camera_logs.common.observability import setup_logging
-        listener = setup_logging(settings.log_root.parent / "service-logs" / "api")
+        client = listener = None
         background = []
         try:
+            # 初始化也属于资源生命周期，目录或仓库构造失败仍须关闭已取得的客户端。
+            database = db
+            if database is None:
+                client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True,
+                                          w="majority", journal=True)
+                database = client[settings.database_name]
+            repo = Repository(database, settings)
+            from camera_logs.common.observability import setup_logging
+            listener = setup_logging(settings.log_root.parent / "service-logs" / "api")
             await repo.initialize()
             from camera_logs.users.sessions import initialize_admin
             await initialize_admin(repo)
@@ -56,9 +57,13 @@ def create_app(settings=None, db=None):
                     if background:
                         await asyncio.gather(*background, return_exceptions=True)
         finally:
-            if client:
-                await client.close()
-            listener.stop()
+            try:
+                if client is not None:
+                    await client.close()
+            finally:
+                # Mongo关闭抛错或取消也必须执行日志排空；异常链由服务管理器记录。
+                if listener is not None:
+                    listener.stop()
 
     app = FastAPI(title="设备日志记录服务", version="0.1.0", lifespan=lifespan)
     @app.middleware("http")

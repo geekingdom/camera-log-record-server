@@ -50,9 +50,10 @@ async def shutdown_runtime(worker, runtime, *, allow_release=True):
         await worker.finish_runtime(runtime, "release", already_stopped=True)
 
 
-async def shutdown_active_runtimes(worker, *, allow_release=True):
-    """按固定并发批次关闭会话，保证常规节点可在 Docker 优雅窗口内收尾。"""
-    runtimes = list(worker.active.values())
+async def shutdown_active_runtimes(worker, *, allow_release=True, excluded_task_ids: set[str] | None = None):
+    """按固定并发批次关闭未收尾会话，已有收尾任务不可重复停止。"""
+    excluded = excluded_task_ids or set()
+    runtimes = [runtime for task_id, runtime in worker.active.items() if task_id not in excluded]
     for index in range(0, len(runtimes), SHUTDOWN_CONCURRENCY):
         batch = runtimes[index : index + SHUTDOWN_CONCURRENCY]
         results = await asyncio.gather(
@@ -61,3 +62,19 @@ async def shutdown_active_runtimes(worker, *, allow_release=True):
         for runtime, result in zip(batch, results, strict=True):
             if isinstance(result, Exception):
                 logger.error("节点停止失败 task=%s error=%s", runtime.task["id"], result)
+
+
+async def shutdown_runtimes(worker, *, allow_release=True):
+    """并行等待既有收尾并关闭其余会话，取消时不留下脱离生命周期的关闭任务。"""
+    # 已有release可能等待最终落盘，正常退出不可重复stop或强制取消它，也不能阻塞其他连接关闭。
+    pending_releases = dict(worker.releases)
+    close_remaining = asyncio.create_task(
+        shutdown_active_runtimes(worker, allow_release=allow_release, excluded_task_ids=set(pending_releases))
+    )
+    results = await asyncio.gather(*pending_releases.values(), close_remaining, return_exceptions=True)
+    for task_id, result in zip(pending_releases, results, strict=False):
+        if isinstance(result, Exception):
+            logger.error("节点既有收尾失败 task=%s error_type=%s", task_id, type(result).__name__)
+    remaining = results[-1]
+    if isinstance(remaining, Exception):
+        logger.error("节点剩余会话收尾失败 error_type=%s", type(remaining).__name__)

@@ -288,6 +288,69 @@ async def test_controlled_shutdown_running_task_is_reclaimed_by_next_worker(tmp_
     assert restarted["runId"] != "run"
 
 
+async def test_controlled_shutdown_closes_active_connections_while_prior_release_is_pending(tmp_path, monkeypatch):
+    """已有收尾卡住时，退出仍须主动关闭其余采集连接，不能等待 Docker 强杀。"""
+    worker, repo, _runtime = await setup_worker(tmp_path, monkeypatch)
+    await repo.db.tasks.insert_one({
+        "id": "other", "runId": "other-run", "nodeId": "node", "generation": 1,
+        "status": "COLLECTING", "desiredState": "RUNNING",
+    })
+    await repo.db.runs.insert_one({"id": "other-run", "taskId": "other"})
+    await repo.db.endpoint_locks.insert_one({"taskId": "other", "runId": "other-run", "endpoint": "host:23"})
+    release_gate, stopped = asyncio.Event(), asyncio.Event()
+
+    async def pending_release():
+        await release_gate.wait()
+
+    async def stop_other():
+        stopped.set()
+
+    pending = asyncio.create_task(pending_release())
+    worker.releases["task"] = pending
+    worker.active["other"] = SimpleNamespace(
+        task={"id": "other", "runId": "other-run", "nodeId": "node", "generation": 1},
+        input_bytes=0, stopping=False, error=None, background_failure=lambda: None, stop=AsyncMock(side_effect=stop_other),
+    )
+    closing = asyncio.create_task(worker.close())
+    try:
+        await asyncio.wait_for(stopped.wait(), .2)
+        _runtime.stop.assert_not_awaited()
+        assert not pending.done() and not pending.cancelled()
+        assert (await repo.db.tasks.find_one({"id": "task"}))["status"] == "COLLECTING"
+        assert await repo.db.endpoint_locks.count_documents({"taskId": "task", "runId": "run"}) == 1
+    finally:
+        release_gate.set()
+        await asyncio.wait_for(closing, 1)
+
+
+async def test_controlled_shutdown_cancellation_cleans_up_parallel_runtime_closure(tmp_path, monkeypatch):
+    """退出被取消时，新增的剩余会话关闭任务必须一起取消，不能在 DB 关闭后继续运行。"""
+    worker, _repo, _runtime = await setup_worker(tmp_path, monkeypatch)
+    release_gate, shutdown_started, shutdown_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def pending_release():
+        await release_gate.wait()
+
+    async def slow_shutdown(*_args, **_kwargs):
+        shutdown_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            shutdown_cancelled.set()
+            raise
+
+    pending = asyncio.create_task(pending_release())
+    worker.releases["task"] = pending
+    monkeypatch.setattr("camera_logs.node.shutdown.shutdown_active_runtimes", slow_shutdown)
+    closing = asyncio.create_task(worker.close())
+    await asyncio.wait_for(shutdown_started.wait(), 1)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert pending.cancelled()
+    await asyncio.wait_for(shutdown_cancelled.wait(), 1)
+
+
 async def test_shutdown_limits_concurrent_runtime_closures(tmp_path, monkeypatch):
     """优雅退出允许并行关闭，但不会一次向全部设备发起无限并发收尾。"""
     worker, _repo, _runtime = await setup_worker(tmp_path, monkeypatch)

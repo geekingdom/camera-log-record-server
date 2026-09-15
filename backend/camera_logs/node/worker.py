@@ -19,7 +19,7 @@ from camera_logs.node.health import resource_pressure
 from camera_logs.node.input_admission import input_rate_blocked, input_rate_limit
 from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
-from camera_logs.node.shutdown import mark_unavailable_for_shutdown, shutdown_active_runtimes
+from camera_logs.node.shutdown import mark_unavailable_for_shutdown, shutdown_runtimes
 from camera_logs.node.telemetry_runtime import TelemetryRuntime
 from camera_logs.node.write_pressure import WritePressure, write_latency_blocked, write_latency_limit
 
@@ -473,8 +473,7 @@ class Worker:
             allow_release = False
         else:
             allow_release = True
-        await asyncio.gather(*self.releases.values(), return_exceptions=True)
-        await shutdown_active_runtimes(self, allow_release=allow_release)
+        await shutdown_runtimes(self, allow_release=allow_release)
         for job in self.jobs | set(self.manual_jobs.values()):
             job.cancel()
         tasks = [*self.jobs, *self.manual_jobs.values()]
