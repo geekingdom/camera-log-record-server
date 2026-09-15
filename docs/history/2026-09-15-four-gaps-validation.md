@@ -2,6 +2,8 @@
 
 本轮基线为4901021；下面是本轮实际证据，不代表500路全天容量或物理多节点隔离已验收。
 
+功能提交`4953970`已推送；[CI34917184543](https://github.com/geekingdom/camera-log-record-server/actions/runs/34917184543)核实为completed/success，后端、前端、完整容器、独立组件、原生部署、NFS及中文提交共七项全部成功。完整容器内新增的速率配置竞争和增长治理真实Mongo步骤均成功。后续文档整理不改变该功能提交的源码。
+
 ## 已执行
 
 - `verify_input_admission.py`：真实Mongo副本集在领取快照期间收紧配置，领取回滚且无孤立run/lock；放宽后恢复。
