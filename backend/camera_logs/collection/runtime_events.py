@@ -23,6 +23,30 @@ _RECONNECT_MESSAGES = {
 _EVENT_WRITE_TIMEOUT_SECONDS = 1.0
 
 
+async def record_debug_event(runtime: Any, event: str, details: dict[str, Any]) -> None:
+    """保存调试状态，只有成功落库的同会话 ASH 确认才可去重。"""
+    command_blocked = bool(details.get("commandBlocked", False))
+    debug_error = details.get("debugError")
+    session_id = runtime.collector.session_id
+    confirmation = (session_id, details["mode"], debug_error, command_blocked)
+    repeated = event == "ALREADY_ASH" and confirmation == getattr(runtime, "last_already_ash", None)
+    if not repeated:
+        await runtime.repo.db.events.insert_one({
+            "taskId": runtime.task["id"], "runId": runtime.task["runId"],
+            "nodeId": runtime.repo.settings.node_id, "sessionId": session_id,
+            "type": "DEBUG_MODE", "phase": event, "mode": details["mode"],
+            "commandBlocked": command_blocked, "debugError": debug_error, "createdAt": now(),
+        })
+        # 写入失败必须保留旧确认值，下次仍可尝试记录；其他阶段开启新的确认周期。
+        runtime.last_already_ash = confirmation if event == "ALREADY_ASH" else None
+    if not getattr(runtime, "retired", False):
+        await runtime.repo.db.tasks.update_one(owner_filter(runtime.task), {
+            "$set": {"shellMode": details["mode"], "debugPhase": event,
+                     "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()},
+        })
+    logger.info("设备调试模式交互 task=%s phase=%s mode=%s", runtime.task["id"], event, details["mode"])
+
+
 async def _current_owner(runtime: Any) -> bool:
     """确认回调仍属于当前运行，阻止已退役会话覆盖后继状态或制造事件。"""
     if getattr(runtime, "retired", False):

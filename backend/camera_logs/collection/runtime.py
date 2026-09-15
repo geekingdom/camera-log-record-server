@@ -23,7 +23,11 @@ from camera_logs.collection.coredump_lease import (
 )
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
-from camera_logs.collection.runtime_events import apply_runtime_state, record_runtime_event
+from camera_logs.collection.runtime_events import (
+    apply_runtime_state,
+    record_debug_event,
+    record_runtime_event,
+)
 from camera_logs.collection.runtime_monitors import (
     monitor_session,
     release_monitor_leases,
@@ -66,24 +70,8 @@ class SessionRuntime:
         self.background = asyncio.create_task(self.run())
 
     async def on_debug(self, event, details):
-        """记录调试模式切换阶段，只保存任务身份与模式，不保存密文或解密口令。"""
-        command_blocked = bool(details.get("commandBlocked", False))
-        debug_error = details.get("debugError")
-        session_id = self.collector.session_id
-        confirmation = (session_id, details["mode"], debug_error, command_blocked)
-        repeated_confirmation = event == "ALREADY_ASH" and confirmation == getattr(self, "last_already_ash", None)
-        if not repeated_confirmation:
-            await self.repo.db.events.insert_one({"taskId": self.task["id"], "runId": self.task["runId"], "nodeId": self.repo.settings.node_id,
-                "sessionId": session_id, "type": "DEBUG_MODE", "phase": event,
-                "mode": details["mode"], "commandBlocked": command_blocked,
-                "debugError": debug_error, "createdAt": now()})
-            # 只有审计已落库的重复 ASH 确认才能去重；其他握手阶段开启新的确认周期。
-            self.last_already_ash = confirmation if event == "ALREADY_ASH" else None
-        if not getattr(self, "retired", False):
-            await self.repo.db.tasks.update_one(owner_filter(self.task),
-                {"$set": {"shellMode": details["mode"], "debugPhase": event,
-                    "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()}})
-        logger.info("设备调试模式交互 task=%s phase=%s mode=%s", self.task["id"], event, details["mode"])
+        """委托事件模块保存调试阶段及会话级确认去重，不保存密文或口令。"""
+        await record_debug_event(self, event, details)
 
     async def on_coredump(self, status, error):
         """单独登记挂载事件，不覆盖采集状态或把敏感挂载命令写入审计。"""
