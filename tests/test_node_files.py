@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import tarfile
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
+from starlette.requests import Request
 
 
 def live_app(tmp_path, *, task_id="task", run_id="run", session_id="session", status="OPEN"):
@@ -115,3 +117,32 @@ def test_internal_read_uses_exact_shared_archive_member(tmp_path):
         missing = client.get("/internal/read/missing", headers={"Authorization": "Bearer node-secret"})
     assert base64.b64decode(response.json()["data"]) == b"second"
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_internal_download_holds_export_reader_until_body_is_consumed(tmp_path):
+    """节点响应创建后到最后一个字节发送前，维护可见的读者租约不得提前消失。"""
+    settings = Settings(encryption_key=Fernet.generate_key().decode(), internal_token="node-secret",
+                        log_root=tmp_path, node_id="node")
+    repo = Repository(AsyncMongoMockClient().db, settings)
+    output = tmp_path / "exports" / "download" / "hours.tar.gz"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"complete export")
+    await repo.db.jobs.insert_one({
+        "id": "download", "nodeId": "node", "kind": "DOWNLOAD", "status": "SUCCEEDED",
+        "resultPath": str(output), "filename": output.name, "outputExecutionState": "CLOSED",
+        "outputWriterNodeId": "node", "outputWriterClosedAt": datetime.now(UTC), "outputReaders": [],
+    })
+    app = FastAPI()
+    reads = install_node_routes(app, repo, SimpleNamespace(log_root=tmp_path))
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", "") == "/internal/downloads/{identifier}")
+    request = Request({"type": "http", "method": "GET", "path": "/internal/downloads/download", "headers": []})
+    try:
+        response = await endpoint("download", request, None)
+        claimed = await repo.db.jobs.find_one({"id": "download"})
+        assert len(claimed["outputReaders"]) == 1
+        assert b"".join([chunk async for chunk in response.body_iterator]) == b"complete export"
+        released = await repo.db.jobs.find_one({"id": "download"})
+        assert released["outputReaders"] == []
+    finally:
+        await reads.close()

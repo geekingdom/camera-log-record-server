@@ -18,7 +18,13 @@ from typing import Any
 import httpx
 
 from camera_logs.logs.archive_access import LimitedReader, copy_limited, read_limiter, snapshot
+from camera_logs.logs.export_locks import ExportLock
 from camera_logs.logs.export_output import write_zip
+from camera_logs.logs.export_writer import (  # noqa: F401 - 保留既有 writer helper 导入路径。
+    _begin_download_output,
+    _close_download_output,
+    _writer_filter,
+)
 from camera_logs.logs.hour_download import (
     Source,
     hour_export_name,
@@ -433,6 +439,7 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     """执行与数据库收尾分阶段；仅在确认取消后清理本作业产物。"""
     async with _jobs:
         job["_progress"] = JobProgress(repo, job)
+        writer_started = False
         try:
             try:
                 if await _cancelled(repo, job["id"]):
@@ -440,7 +447,26 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 if _expired(job):
                     update = {"status": "EXPIRED"}
                 else:
-                    result = await (_download(repo, job) if job["kind"] == "DOWNLOAD" else _search(repo, job))
+                    if job["kind"] == "DOWNLOAD":
+                        writer_lock = ExportLock(repo, job["id"])
+                        if not await writer_lock.acquire(blocking=True):
+                            raise RuntimeError("export writer lock unavailable")
+                        try:
+                            # 等待旧 writer 锁期间可能已被租约恢复；取得锁后必须重新 CAS，
+                            # 不能让过期执行者继续创建或覆盖导出目录。
+                            if not await _begin_download_output(repo, job):
+                                update = {"status": "FAILED", "error": "EXECUTION_OWNERSHIP_LOST"}
+                            else:
+                                writer_started = True
+                                result = await _download(repo, job)
+                        finally:
+                            await writer_lock.close()
+                        if not writer_started:
+                            # complete_job 会返回取消或租约恢复后的实际终态；不能由旧执行者
+                            # 直接返回失败而跳过可审计的 CAS 收尾。
+                            raise RuntimeError("execution ownership lost before output write")
+                    else:
+                        result = await _search(repo, job)
                     update = result | {"status": "SUCCEEDED", "progress": 100}
             except asyncio.CancelledError:
                 update = ({"status": "FAILED", "error": "WORKER_EXECUTION_LOST"}
@@ -448,6 +474,10 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             except Exception as error:  # noqa: BLE001 - 所有执行异常记录原因并尝试原子收尾
                 _log.exception("job failed id=%s kind=%s", job.get("id"), job.get("kind"))
                 update = {"status": "FAILED", "error": type(error).__name__}
+            if job["kind"] == "DOWNLOAD" and writer_started:
+                # _download 的 finally 已等待每个文件线程和临时目录删除；这一步之后
+                # 才允许维护器把失败、取消及过期目录列入回收候选。
+                await _close_download_output(repo, job)
             update["completedAt"] = datetime.now(UTC)
             confirmed = await complete_job(repo, job, update)
             if confirmed["status"] in ("CANCELLED", "EXPIRED"):

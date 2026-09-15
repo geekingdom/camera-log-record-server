@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
+from camera_logs.node.input_admission import input_rate_blocked, input_rate_limit
 from camera_logs.node.resource_routing import accepts_resource
 
 
@@ -46,6 +47,8 @@ def node_health(node, current=None):
     if not fresh(node.get("heartbeat"), current, 30):
         return {"status": "OFFLINE", "reasons": ["超过30秒未收到节点心跳"]}
     critical, warnings, unknown = [], [], []
+    if input_rate_blocked(node):
+        critical.append(f"日志输入速率达到准入上限或测量缺失（{input_rate_limit(node)} MiB/s）")
     if node.get("isolated"):
         critical.append("节点已隔离")
     if node.get("configurationMismatch"):
@@ -96,7 +99,7 @@ def rank_nodes(nodes, occupancy, task=None):
         if not fresh(node.get("heartbeat"), current) or not node.get("accepting") or node.get("isolated") \
                 or node.get("deletedAt") or node.get("configurationMismatch") or count >= capacity \
                 or (number(node.get("diskPercent")) or 0) >= 90 or (number(node.get("writeLatencyMs")) or 0) > 200 \
-                or resource_pressure(node, current):
+                or resource_pressure(node, current) or input_rate_blocked(node):
             continue
         sample = measurements(node, current)
         upload, download = (number(sample.get(key)) for key in ("networkUploadBytesPerSecond", "networkDownloadBytesPerSecond"))

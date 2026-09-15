@@ -29,6 +29,7 @@ FIELD_DESCRIPTIONS = {
     "enableCoredumpMonitor": "海康设备资源是否启用 Coredump NFS 监控；仅有正在采集的 SSH 或 Telnet 设备任务时执行。",
     "enableResourceMonitor": "海康设备资源是否启用每分钟 CPU 与内存采样；复用正在采集的设备连接。",
     "resourceMonitor": "管理员维护的设备 CPU 与内存采样配置，保存后下一轮采样生效。",
+    "recordRetention": "审计、运行事件及已结束运行明细的保留天数；0禁用对应维护，活动及不确定引用继续保护。",
     "items": "系统指标采样规则列表，每项指定命令、数值正则、名称和单位。",
     "pattern": "用于匹配设备响应的正则表达式；数值规则使用第一个捕获组。",
     "unit": "指标的显示单位，KB 表示内存，% 表示百分比。",
@@ -103,6 +104,12 @@ OPERATION_DESCRIPTIONS = {
 }
 
 PARAMETER_DESCRIPTIONS = {
+    "beforeFileId": "缺口前最后一个可靠帧所在的日志文件标识。",
+    "beforeOffset": "缺口前可靠帧的结束字节偏移，也是待补读的起点。",
+    "beforeSessionId": "缺口前可靠帧所属采集会话标识，必须与文件目录一致。",
+    "afterFileId": "缺口后第一个可靠帧所在的日志文件标识。",
+    "afterOffset": "缺口后可靠帧的起始字节偏移，不包含该偏移后的已展示内容。",
+    "afterSessionId": "缺口后可靠帧所属采集会话标识，允许与缺口前不同。",
     "action": "按审计操作类型筛选，例如 create_task 或 control:PAUSED。",
     "actor": "按执行该审计操作的平台用户标识筛选。",
     "clientIp": "按实际访问平台的调用方来源 IP 筛选请求记录。",

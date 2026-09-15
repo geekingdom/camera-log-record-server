@@ -38,6 +38,22 @@ def test_platform_and_node_capacity_accept_values_above_100(client):  # noqa: F8
     assert client.get("/api/v1/platform-settings").json()["clusterCapacity"] == 1200
 
 
+def test_growth_retention_is_versioned_validated_and_preserved(client):  # noqa: F811
+    """单独保存其它设置不覆盖记录保留策略，零值关闭且非法天数拒绝保存。"""
+    current = client.get("/api/v1/platform-settings").json()
+    assert current["recordRetention"] == {"auditDays": 90, "eventDays": 90, "runDays": 90}
+    policy = {"auditDays": 0, "eventDays": 30, "runDays": 180}
+    response = client.patch("/api/v1/platform-settings", json={
+        "retentionDays": 7, "version": current["version"], "recordRetention": policy})
+    assert response.status_code == 200, response.text
+    updated = client.patch("/api/v1/platform-settings", json={"retentionDays": 8, "version": response.json()["version"]})
+    assert updated.json()["recordRetention"] == policy
+    for bad in (-1, 3651, True, 1.5):
+        assert client.patch("/api/v1/platform-settings", json={
+            "retentionDays": 8, "version": updated.json()["version"],
+            "recordRetention": {"auditDays": bad}}).status_code == 422
+
+
 def test_retention_uses_stored_platform_configuration(client):  # noqa: F811
     """维护任务每次读取数据库配置，而不是固定使用进程启动时的环境值。"""
     repo = client.app.state.repo
@@ -61,6 +77,7 @@ def test_node_registration_does_not_create_heartbeat_and_merges_live_status(clie
         "id": "edge-a", "url": "https://edge-a.example.test:8443", "capacity": 24,
         "accepting": True, "version": 1, "registered": True, "online": False, "reportedAt": None,
         "isGeneralNode": True, "resourceNetworks": [],
+        "inputRateLimitMiB": 50,
     }]
 
     client.portal.call(client.app.state.repo.db.nodes.insert_one, {

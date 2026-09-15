@@ -16,6 +16,7 @@ from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.database import now
 from camera_logs.common.ownership import owner_filter
 from camera_logs.node.health import resource_pressure
+from camera_logs.node.input_admission import input_rate_blocked, input_rate_limit
 from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
 from camera_logs.node.telemetry_runtime import TelemetryRuntime
@@ -32,8 +33,8 @@ class Worker:
         self.manual_jobs = {}
         self.jobs = set()
         self.last_database_ok = time.monotonic()
-        self.last_bytes = 0
-        self.last_tick = time.monotonic()
+        from camera_logs.node.input_admission import InputRateMeter
+        self.input_rate = InputRateMeter()
         self.last_maintenance = 0.0
         self.maintenance_task = None
         self.releases = {}
@@ -313,13 +314,13 @@ class Worker:
             and write_latency["writeLatencyMs"] <= WRITE_LATENCY_LIMIT_MS
             and not resource_pressure({"telemetry": self.telemetry.value})
         )
-        current_bytes = sum(r.input_bytes for r in self.active.values())
-        tick = time.monotonic()
-        rate = max(0, current_bytes-self.last_bytes)/max(.01, tick-self.last_tick)
-        self.last_bytes, self.last_tick = current_bytes, tick
+        rate = self.input_rate.sample(self.active.values())
+        # 管理配置每周期重读；已分配但尚未建连的任务也必须等吞吐恢复。
+        accepting = accepting and not input_rate_blocked({"inputBytesPerSecond": rate}, config)
         await self.repo.db.nodes.update_one({"id": self.repo.settings.node_id}, {"$set": {
             "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "heartbeat": now(),
             "capacity": capacity, "activeTasks": len(self.active),
+            "inputRateLimitMiB": input_rate_limit(config),
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
             **write_latency,
             "configurationMismatch": mismatch,

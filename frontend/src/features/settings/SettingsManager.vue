@@ -8,6 +8,7 @@ import { confirmAction } from "../../shared/confirm";
 import { settingsApi, type NodeConfig, type NodeRegistration, type PlatformSettings } from "./api";
 import { MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, normalizeCapacity } from "./settingsForm";
 import ResourceMonitorSettings from "./ResourceMonitorSettings.vue";
+import RecordRetentionSettings from "./RecordRetentionSettings.vue";
 
 const loading = ref(false);
 const savingRetention = ref(false);
@@ -62,8 +63,8 @@ async function savePlatformSettings() {
 function openRegister(node?: NodeConfig) {
   editingNode.value = undefined;
   nodeForm.value = node
-    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting, isGeneralNode: node.isGeneralNode ?? true }
-    : { id: "", url: "", capacity: 10, accepting: true, isGeneralNode: true };
+    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting, inputRateLimitMiB: node.inputRateLimitMiB ?? 0, isGeneralNode: node.isGeneralNode ?? true }
+    : { id: "", url: "", capacity: 10, accepting: true, inputRateLimitMiB: 50, isGeneralNode: true };
   nodeNetworksText.value = (node?.resourceNetworks ?? []).join("\n");
   nodeDialog.value = true;
 }
@@ -72,6 +73,7 @@ function openEdit(node: NodeConfig) {
   editingNode.value = node;
   nodeForm.value = { id: node.id, url: node.url, capacity: node.capacity, accepting: node.accepting, isGeneralNode: node.isGeneralNode ?? true };
   nodeNetworksText.value = (node.resourceNetworks ?? []).join("\n");
+  nodeForm.value.inputRateLimitMiB = node.inputRateLimitMiB ?? 0;
   nodeDialog.value = true;
 }
 
@@ -88,6 +90,7 @@ async function saveNode() {
         version: editingNode.value.version,
         capacity: nodeForm.value.capacity,
         accepting: nodeForm.value.accepting,
+        inputRateLimitMiB: nodeForm.value.inputRateLimitMiB ?? 0,
         isGeneralNode: nodeForm.value.isGeneralNode ?? true,
         resourceNetworks,
       });
@@ -141,7 +144,7 @@ onMounted(() => void load());
         <div><h3>集群总并发上限</h3><p>所有节点同时运行的采集任务总数上限；节点容量仍会分别限制单节点并发。</p></div>
         <div class="retention-control"><el-input-number v-model="clusterCapacity" :min="1" :max="MAX_CLUSTER_CAPACITY" controls-position="right" aria-label="集群总并发上限" /><span>个任务</span><el-button type="primary" :loading="savingRetention" :disabled="savingRetention || !settings" :icon="Save" @click="savePlatformSettings">保存</el-button></div>
       </section>
-      <section class="settings-band node-heading"><div><h3>节点登记与准入</h3><p>已登记节点使用平台准入配置；未登记节点沿用部署配置。登记不会启动节点进程。</p></div><el-button type="primary" :icon="Plus" @click="openRegister">登记节点</el-button></section>
+      <section class="settings-band node-heading"><div><h3>节点登记与准入</h3><p>已登记节点使用平台准入配置；未登记节点沿用部署配置。登记不会启动节点进程。</p></div><el-button type="primary" :icon="Plus" @click="openRegister()">登记节点</el-button></section>
       <el-alert type="info" :closable="false" show-icon><template #title>在线状态由 worker 心跳计算。离线登记项需要使用相同节点 ID 部署并启动 worker。</template></el-alert>
       <el-table scrollbar-always-on v-loading="loading" :data="nodes" class="data-table settings-table" empty-text="暂无已发现节点">
         <el-table-column label="节点" min-width="190"><template #default="{ row }"><strong>{{ row.id }}</strong><span class="node-url">{{ row.url }}</span></template></el-table-column>
@@ -149,15 +152,18 @@ onMounted(() => void load());
         <el-table-column label="运行状态" width="112"><template #default="{ row }"><el-tag :type="row.online ? 'success' : 'info'">{{ row.online ? "在线" : "离线" }}</el-tag></template></el-table-column>
         <el-table-column label="准入" width="110"><template #default="{ row }"><el-tag v-if="row.registered" :type="row.accepting ? 'success' : 'warning'">{{ row.accepting ? "允许" : "暂停" }}</el-tag><span v-else class="settings-muted">未配置</span></template></el-table-column>
         <el-table-column label="容量" width="100"><template #default="{ row }">{{ row.capacity }}</template></el-table-column>
+        <el-table-column label="输入速率上限" width="140"><template #default="{ row }">{{ row.inputRateLimitMiB ? `${row.inputRateLimitMiB} MiB/s` : "未启用" }}</template></el-table-column>
         <el-table-column label="资源准入" min-width="210"><template #default="{ row }"><el-tag :type="row.isGeneralNode === false ? 'warning' : 'info'">{{ row.isGeneralNode === false ? "专用节点" : "通用节点" }}</el-tag><span v-if="row.isGeneralNode === false" class="node-url">{{ (row.resourceNetworks || []).join('、') }}</span></template></el-table-column>
         <el-table-column label="心跳信息" min-width="180"><template #default="{ row }"><span v-if="row.reportedAt">{{ new Date(row.reportedAt).toLocaleString("zh-CN", { hour12: false }) }}</span><span v-else class="settings-muted">尚未收到心跳</span><span v-if="row.urlMismatch" class="settings-warning">地址与 Worker NODE_URL 不一致</span></template></el-table-column>
         <el-table-column label="操作" width="148" fixed="right"><template #default="{ row }"><el-tooltip :content="row.registered ? '编辑节点准入与容量' : '使用此 Worker 心跳信息登记节点'"><el-button text :icon="row.registered ? Edit3 : Plus" :aria-label="row.registered ? '编辑节点配置' : '登记此节点'" @click="row.registered ? openEdit(row) : openRegister(row)">{{ row.registered ? "编辑" : "登记" }}</el-button></el-tooltip><el-tooltip :content="row.activeTasks ? '节点仍有活动采集任务' : '删除节点，保留历史日志'"><el-button text type="danger" :icon="Trash2" :loading="deletingNode === row.id" :disabled="Boolean(deletingNode) || Boolean(row.activeTasks)" :aria-label="`删除节点 ${row.id}`" @click="removeNode(row)" /></el-tooltip></template></el-table-column>
       </el-table>
       <ResourceMonitorSettings :settings="settings" :loading="loading" @saved="settings = $event" />
+      <RecordRetentionSettings :settings="settings" :loading="loading" @saved="settings = $event" />
     </template>
-    <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" destroy-on-close>
-      <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">单节点并发上限；实际值还受 worker 本机 NODE_CAPACITY 限制，系统采用两者较小值。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
+    <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" class="node-config-dialog" destroy-on-close>
+      <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">登记配置是运行时权威；仅未登记节点使用 Worker 的 NODE_CAPACITY 作为默认容量。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
       <el-form label-position="top"><el-form-item label="通用节点"><el-switch v-model="nodeForm.isGeneralNode" aria-label="通用节点" /></el-form-item><el-form-item v-if="nodeForm.isGeneralNode === false" label="允许接入的设备资源 IP / CIDR（每行一项）" required><el-input v-model="nodeNetworksText" type="textarea" :rows="4" aria-label="允许接入的设备资源地址" placeholder="10.41.203.35&#10;10.18.117.0/24" /></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="日志输入速率上限（MiB/s，0 为不限制）"><el-input-number v-model="nodeForm.inputRateLimitMiB" :min="0" :max="100000" :precision="0" aria-label="日志输入速率上限" controls-position="right" /></el-form-item></el-form>
       <template #footer><el-button @click="nodeDialog = false">取消</el-button><el-button type="primary" :loading="savingNode" :disabled="savingNode" :icon="ServerCog" @click="saveNode">保存配置</el-button></template>
     </el-dialog>
   </section>
@@ -174,5 +180,6 @@ onMounted(() => void load());
 .retention-control { flex-shrink: 0; }.settings-table { margin-top: 14px; }
 .node-url { display: block; margin-top: 5px; color: #829095; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 .settings-muted, .node-help { color: #829095; }.settings-warning { display: block; margin-top: 5px; color: #b54708; font-size: 12px; }.node-help { margin: 7px 0 0; font-size: 12px; }.settings-forbidden { display: grid; min-height: 280px; place-items: center; text-align: center; color: #718084; }.settings-forbidden h2 { margin: 14px 0 6px; color: #354548; }.settings-forbidden p { margin: 0; }
-@media (max-width: 700px) { .settings-band { align-items: flex-start; flex-direction: column; }.retention-control { width: 100%; }.retention-control .el-input-number { flex: 1; }.node-heading .el-button { align-self: stretch; } }
+:global(.node-config-dialog .el-dialog__body) { max-height: min(62vh, 620px); overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 700px) { .settings-band { align-items: flex-start; flex-direction: column; }.retention-control { width: 100%; }.retention-control .el-input-number { flex: 1; }.node-heading .el-button { align-self: stretch; }.node-config-dialog :deep(.el-dialog__footer) { display: flex; flex-wrap: wrap; gap: 8px; }.node-config-dialog :deep(.el-dialog__footer .el-button) { flex: 1 1 120px; margin-left: 0; } }
 </style>

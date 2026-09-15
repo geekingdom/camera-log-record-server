@@ -33,6 +33,8 @@ const omittedStart = byteLength(retainedText);
 const omittedEnd = byteLength(completeText);
 const requestedContent = [];
 const transportFaultRequests = [];
+const catalogRequests = [];
+const catalogIssue = { reason: "FILE_UNAVAILABLE", message: "中间目录文件已删除，无法补读。" };
 const sockets = new Map();
 let transportReadAttempt = 0;
 let staleReply;
@@ -69,6 +71,19 @@ await context.route("**/api/v1/**", async route => {
   if (pathname === `/api/v1/tasks/${primaryTask.id}`) return json(route, primaryTask);
   if (pathname === `/api/v1/tasks/${secondaryTask.id}`) return json(route, secondaryTask);
   if (pathname.endsWith("/log-hours")) return json(route, { items: [], total: 0, page: 1, pageSize: 24 });
+  if (pathname === `/api/v1/tasks/${primaryTask.id}/log-gap-catalog`) {
+    catalogRequests.push(Object.fromEntries(url.searchParams));
+    assert.equal(url.searchParams.get("beforeFileId"), "gap-node-a-file");
+    assert.equal(url.searchParams.get("afterFileId"), "gap-node-b-file");
+    if (!url.searchParams.get("cursor"))
+      return json(route, { items: [{ fileId: "gap-node-a-file", sessionId: "range-session", start: 0, end: 11 }], nextCursor: "next-page", unrecoverable: [catalogIssue] });
+    assert.equal(url.searchParams.get("cursor"), "next-page");
+    return json(route, { items: [{ fileId: "gap-node-b-file", sessionId: "range-session", start: 0, end: 11 }], nextCursor: null, unrecoverable: [catalogIssue] });
+  }
+  if (pathname === "/api/v1/log-files/gap-node-a-file/content")
+    return json(route, { fileId: "gap-node-a-file", sessionId: "range-session", data: encoded("NODE_A_GAP\n"), nextOffset: 11 });
+  if (pathname === "/api/v1/log-files/gap-node-b-file/content")
+    return json(route, { fileId: "gap-node-b-file", sessionId: "range-session", data: encoded("NODE_B_GAP\n"), nextOffset: 11 });
   if (pathname === "/api/v1/log-files/range-file/content") {
     const offset = Number(url.searchParams.get("offset"));
     const limit = Number(url.searchParams.get("limit"));
@@ -183,6 +198,9 @@ try {
     offset: omittedEnd + 16, cursor: "paused-cursor-forward-gap",
   }));
   socket.send(JSON.stringify({ type: "gap", message: "服务端未提供精确字节区间", cursor: "paused-cursor-server-gap" }));
+  socket.send(JSON.stringify({ type: "data", data: encoded("NODE_A_GAP\n"), fileId: "gap-node-a-file", sessionId: "range-session", offset: 0, cursor: "gap-before" }));
+  socket.send(JSON.stringify({ type: "gap", message: "跨节点目录补读", cursor: "gap-catalog" }));
+  socket.send(JSON.stringify({ type: "data", data: encoded("NODE_B_GAP\n"), fileId: "gap-node-b-file", sessionId: "range-session", offset: 0, cursor: "gap-after" }));
   await page.waitForTimeout(180);
   assert.equal(await consoleOutput.getByText("暂停期间收到的新行", { exact: true }).count(), 0, "暂停视图不得直接追加新行");
 
@@ -231,6 +249,19 @@ try {
     Array.from({ length: 6 }, () => ({ offset: omittedEnd, limit: 16 })),
     "错误和空页重试不得推进传输缺口的读取 cursor",
   );
+
+  // 未知 gap 以两端帧锚点查询分页目录，再按各 fileId 读取；节点位置不暴露给页面。
+  await dialog.getByRole("button", { name: "返回缺口列表", exact: true }).click();
+  const catalogRow = dialog.locator(".range-item").filter({ hasText: "跨节点目录补读" }).first();
+  await catalogRow.getByRole("button", { name: /读取.*范围/ }).click();
+  await dialog.getByText("NODE_A_GAP", { exact: true }).waitFor();
+  await dialog.getByText("目录片段 2 / 2", { exact: true }).waitFor();
+  assert.equal(await dialog.getByText(catalogIssue.message, { exact: true }).count(), 1,
+    "跨页返回相同目录问题时只能显示一条警告");
+  await dialog.getByRole("button", { name: "继续读取范围", exact: true }).click();
+  await dialog.getByText("NODE_B_GAP", { exact: false }).waitFor();
+  assert.equal(catalogRequests.length, 2, "跨节点目录必须按服务端 nextCursor 续页");
+  await dialog.getByRole("button", { name: "返回缺口列表", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await dialog.screenshot({ path: `${output}/live-ranges-390.png` });

@@ -294,7 +294,9 @@ async def test_export_cleanup_removes_only_expired_completed_terminal_local_down
         output.mkdir(parents=True)
         await repo.db.jobs.insert_one({"id": output.name, "nodeId": "node", "kind": "DOWNLOAD",
                                        "status": status, "expiresAt": now() - timedelta(seconds=1),
-                                       "completedAt": now() - timedelta(seconds=2)})
+                                       "completedAt": now() - timedelta(seconds=2),
+                                       "outputExecutionState": "CLOSED", "outputWriterNodeId": "node",
+                                       "outputWriterClosedAt": now() - timedelta(seconds=2), "outputLockProtocol": 1})
 
     assert await cleanup_exports(repo) == 3
     assert not any((tmp_path / "exports" / status.lower()).exists()
@@ -338,7 +340,9 @@ async def test_export_cleanup_rejects_symlinked_directory_even_when_its_job_is_e
     link.symlink_to(outside, target_is_directory=True)
     await repo.db.jobs.insert_one({"id": "eligible", "nodeId": "node", "kind": "DOWNLOAD",
                                    "status": "SUCCEEDED", "expiresAt": now() - timedelta(seconds=1),
-                                   "completedAt": now() - timedelta(seconds=2)})
+                                   "completedAt": now() - timedelta(seconds=2),
+                                   "outputExecutionState": "CLOSED", "outputWriterNodeId": "node",
+                                   "outputWriterClosedAt": now() - timedelta(seconds=2), "outputLockProtocol": 1})
 
     assert await cleanup_exports(repo) == 0
     assert link.is_symlink() and outside.exists()
@@ -354,7 +358,9 @@ async def test_export_cleanup_rejects_a_symlinked_log_root(tmp_path):
     repo = repository(linked_root)
     await repo.db.jobs.insert_one({"id": "eligible", "nodeId": "node", "kind": "DOWNLOAD",
                                    "status": "SUCCEEDED", "expiresAt": now() - timedelta(seconds=1),
-                                   "completedAt": now() - timedelta(seconds=2)})
+                                       "completedAt": now() - timedelta(seconds=2),
+                                       "outputExecutionState": "CLOSED", "outputWriterNodeId": "node",
+                                       "outputWriterClosedAt": now() - timedelta(seconds=2), "outputLockProtocol": 1})
 
     assert await cleanup_exports(repo) == 0
     assert output.exists()
@@ -368,7 +374,9 @@ async def test_export_cleanup_keeps_failed_lookup_and_continues_with_next_eligib
     eligible.mkdir()
     await repo.db.jobs.insert_one({"id": "eligible", "nodeId": "node", "kind": "DOWNLOAD",
                                    "status": "SUCCEEDED", "expiresAt": now() - timedelta(seconds=1),
-                                   "completedAt": now() - timedelta(seconds=2)})
+                                   "completedAt": now() - timedelta(seconds=2),
+                                   "outputExecutionState": "CLOSED", "outputWriterNodeId": "node",
+                                   "outputWriterClosedAt": now() - timedelta(seconds=2), "outputLockProtocol": 1})
     original_find_one = repo.db.jobs.find_one
 
     async def fail_first(query, *args, **kwargs):

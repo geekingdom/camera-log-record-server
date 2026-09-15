@@ -10,6 +10,7 @@ from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.node.health import resource_pressure
+from camera_logs.node.input_admission import input_rate_blocked
 from camera_logs.node.resource_routing import accepts_resource
 
 
@@ -129,6 +130,8 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             {"id": node_id}, {"$inc": {"assignmentRevision": 1}},
             return_document=ReturnDocument.AFTER, session=session,
         )
+        if input_rate_blocked(node, node_config if node_config is not None else node):
+            return None
         if node_config and (node_config.get("deletedAt") or not accepts_resource(node_config, resource_ip)):
             return None
 

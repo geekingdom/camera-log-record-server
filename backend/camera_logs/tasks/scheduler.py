@@ -12,6 +12,7 @@ from pymongo import ReturnDocument
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.node.health import rank_nodes
+from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.resource_routing import routing_config
 from camera_logs.resources.health import reconcile_authorized_recoveries
 from camera_logs.resources.lifecycle import reconcile_deleted_resources
@@ -77,7 +78,8 @@ async def schedule_once(repo, lease=None):
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
-        nodes = [node | routing_config(node_configs.get(node["id"], {})) for node in nodes
+        nodes = [node | routing_config(node_configs.get(node["id"], {}))
+                 | {"inputRateLimitMiB": input_rate_limit(node_configs.get(node["id"], node))} for node in nodes
                  if not node_configs.get(node["id"], {}).get("deletedAt")]
         resource = await db.resources.find_one({"id": task.get("resourceId")}) if task.get("resourceId") else None
         routing_task = task | {"resourceIp": resource["ip"] if resource else task.get("ip"),

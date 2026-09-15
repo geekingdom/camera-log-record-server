@@ -109,6 +109,13 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_ssh_socket_admission.py
       - name: 验证调度取消和租约接管的事务一致性
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_scheduler_transaction.py
+      - name: 验证节点速率动态配置与事务竞争
+        run: |
+          docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml cp scripts/verify_scheduler_transaction.py api:/tmp/verify_scheduler_transaction.py
+          docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml cp scripts/verify_input_admission.py api:/tmp/verify_input_admission.py
+          docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python /tmp/verify_input_admission.py
+      - name: 验证增长记录分段归档回滚及维护索引
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_growth_records.py
       - name: 验证定时预算与执行记录事务一致性
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_command_reservation.py
       - name: 验证手动命令并发准入事务

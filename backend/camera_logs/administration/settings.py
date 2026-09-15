@@ -22,7 +22,13 @@ from camera_logs.common.config import (
     MAX_NODE_CAPACITY,
 )
 from camera_logs.common.database import now
+from camera_logs.common.retention_config import RecordRetentionConfig, retention_config
 from camera_logs.common.security import actor, authorize
+from camera_logs.node.input_admission import (
+    DEFAULT_INPUT_RATE_LIMIT_MIB,
+    MAX_INPUT_RATE_LIMIT_MIB,
+    input_rate_limit,
+)
 from camera_logs.node.resource_routing import normalize_resource_networks, routing_config
 from camera_logs.resource_metrics.models import (
     ResourceMonitorConfig,
@@ -48,6 +54,7 @@ class PlatformSettingsPatch(SettingsModel):
     retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True)
     clusterCapacity: int | None = Field(default=None, ge=1, le=MAX_CLUSTER_CAPACITY, strict=True)
     resourceMonitor: ResourceMonitorConfig | None = None
+    recordRetention: RecordRetentionConfig | None = None
     version: int = Field(ge=1, strict=True)
 
 
@@ -58,6 +65,8 @@ class NodeRegistration(SettingsModel):
     url: str = Field(min_length=1, max_length=2048)
     capacity: int = Field(ge=1, le=MAX_NODE_CAPACITY, strict=True)
     accepting: bool = True
+    inputRateLimitMiB: int = Field(default=DEFAULT_INPUT_RATE_LIMIT_MIB, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
+                                    description="日志输入速率准入上限，单位MiB/s；0禁用，达到上限暂停分配新任务，不停止已有采集")
     isGeneralNode: bool = True
     resourceNetworks: list[str] = Field(default_factory=list, max_length=128)
 
@@ -116,6 +125,8 @@ class NodeConfigPatch(SettingsModel):
     version: int = Field(ge=1, strict=True)
     capacity: int | None = Field(default=None, ge=1, le=MAX_NODE_CAPACITY, strict=True)
     accepting: bool | None = None
+    inputRateLimitMiB: int | None = Field(default=None, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
+                                           description="节点日志输入准入上限MiB/s，0禁用；保存后调度立即读取新配置")
     isGeneralNode: bool | None = None
     resourceNetworks: list[str] | None = Field(default=None, max_length=128)
 
@@ -148,6 +159,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
         "accepting": config["accepting"],
         "version": config["version"],
         "registered": True,
+        "inputRateLimitMiB": input_rate_limit(config),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
         **routing_config(config),
@@ -170,6 +182,7 @@ def _public_discovered_node(node: dict) -> dict:
         "accepting": node.get("accepting", False),
         "version": 0,
         "registered": False,
+        "inputRateLimitMiB": input_rate_limit(node),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
         "activeTasks": node.get("activeTasks", 0),
@@ -192,6 +205,7 @@ async def _platform_settings(repo, *, session=None) -> dict:
         {"$setOnInsert": {"id": PLATFORM_SETTINGS_ID, "retentionDays": retention_days,
                            "clusterCapacity": cluster_capacity,
                            "resourceMonitor": default_monitor_config(),
+                           "recordRetention": retention_config(),
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
         upsert=True,
         return_document=ReturnDocument.AFTER,
@@ -210,6 +224,7 @@ def install_settings_routes(app):
         document = await _platform_settings(request.app.state.repo)
         result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "resourceMonitor", "version", "updatedAt")}
         result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
+        result["recordRetention"] = retention_config(document.get("recordRetention"))
         result["clusterCapacity"] = result["clusterCapacity"] or request.app.state.repo.settings.cluster_capacity
         return result
 
@@ -226,6 +241,8 @@ def install_settings_routes(app):
                 {"id": PLATFORM_SETTINGS_ID, "version": body.version},
                 {"$set": {"retentionDays": body.retentionDays, "updatedAt": now(),
                            **({"clusterCapacity": body.clusterCapacity} if body.clusterCapacity is not None else {}),
+                           **({"recordRetention": body.recordRetention.model_dump()}
+                              if body.recordRetention is not None else {}),
                            **({"resourceMonitor": parse_monitor_config(body.resourceMonitor.model_dump())}
                               if body.resourceMonitor is not None else {})},
                  "$inc": {"version": 1}},
@@ -241,6 +258,7 @@ def install_settings_routes(app):
         )
         result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "resourceMonitor", "version", "updatedAt")}
         result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
+        result["recordRetention"] = retention_config(document.get("recordRetention"))
         result["clusterCapacity"] = result["clusterCapacity"] or repo.settings.cluster_capacity
         return result
 

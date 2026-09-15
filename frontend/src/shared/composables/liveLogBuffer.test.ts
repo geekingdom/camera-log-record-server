@@ -83,6 +83,16 @@ describe("LiveLogBuffer", () => {
     expect(buffer.missingRanges[0]).not.toHaveProperty("start");
     expect(buffer.missingRanges[0]).not.toHaveProperty("end");
   });
+  it("anchors a server gap between reliable frames for cross-file catalog recovery", () => {
+    const buffer = new LiveLogBuffer();
+    buffer.ingest({ ...frame("before\n", 0), fileId: "node-a-file" });
+    buffer.ingest({ type: "gap", message: "expired" });
+    buffer.ingest({ ...frame("after\n", 0), fileId: "node-b-file" });
+    expect(buffer.missingRanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: "server", beforeFileId: "node-a-file", beforeOffset: 7,
+        beforeSessionId: "one", afterFileId: "node-b-file", afterOffset: 0, afterSessionId: "one" }),
+    ]));
+  });
   it("rejects an invalid offset before it can reset a continuous session", () => {
     const buffer = new LiveLogBuffer();
     buffer.ingest(frame("old", 0));

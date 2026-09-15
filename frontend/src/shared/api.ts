@@ -40,6 +40,8 @@ export const idempotencyKey = (): string => {
 export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; enabled: boolean; mustChangePassword: boolean; version?: number; builtin?: boolean; deletedAt?: string | null; }
 export interface UserPage { items: SessionUser[]; total: number; page: number; pageSize: number; }
 export interface IpPolicy { version: number; enabled: boolean; clientIp: string; rules: { label: string; network: string; scopes: string[] }[]; }
+export interface LogGapFragment { fileId: string; sessionId?: string; start: number; end: number; }
+export interface LogGapCatalog { items: LogGapFragment[]; nextCursor: string | null; unrecoverable: { reason: string; message: string }[]; }
 
 export class ApiError extends Error {
   constructor(
@@ -292,6 +294,12 @@ export const api = {
   logHours: (id: string, date?: string, page = 1) => request<Page<LogHour>>(`/tasks/${id}/log-hours${query(page, 24, { date })}`),
   // 缺口阅读器关闭或切换任务时取消读取，避免失效查询继续占用连接。
   fileContent: (id: string, offset = 0, limit = 65536, signal?: AbortSignal) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`, { signal }),
+  // 未知实时 gap 仅用前后可靠锚点查询已保存目录；正文仍按每个 fileId 的权限边界读取。
+  taskGapCatalog: (taskId: string, anchors: { beforeFileId: string; beforeOffset: number; beforeSessionId: string; afterFileId: string; afterOffset: number; afterSessionId: string }, cursor?: string, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ ...Object.fromEntries(Object.entries(anchors).map(([key, value]) => [key, String(value)])), limit: "100" });
+    if (cursor) params.set("cursor", cursor);
+    return request<LogGapCatalog>(`/tasks/${encodeURIComponent(taskId)}/log-gap-catalog?${params}`, { signal });
+  },
   logFile: (id: string) => request<LogFile>(`/log-files/${encodeURIComponent(id)}`),
   command: (id: string, command: InitialCommand) =>
     request<CommandExecution>(`/tasks/${id}/commands`, {

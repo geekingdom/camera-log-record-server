@@ -13,6 +13,7 @@ import logging
 import re
 import shutil
 import tarfile
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,8 +22,10 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.logs.compression import _hash_stream, compress_hour
+from camera_logs.logs.export_locks import ExportLock
 
 logger = logging.getLogger(__name__)
+EXPORT_CLEANUP_BATCH_SIZE = 100
 
 
 def _root(repo: Any) -> Path:
@@ -340,46 +343,149 @@ async def get_retention_days(repo: Any) -> int:
     return fallback
 
 
-async def cleanup_exports(repo: Any) -> int:
-    """清理已到期的本节点终态下载目录，不以目录 mtime 推断是否仍在执行。
+async def _remove_export_tree(path: Path) -> None:
+    """取消维护协程时仍等待删除线程退出，过期 token 接管不会与旧线程并行。"""
+    deletion = asyncio.create_task(asyncio.to_thread(shutil.rmtree, path))
+    cancelled = False
+    while not deletion.done():
+        try:
+            await asyncio.shield(deletion)
+        except asyncio.CancelledError:
+            # 每次取消都先 drain 同一个 rmtree 线程；不能启动第二个删除线程。
+            cancelled = True
+    await deletion
+    if cancelled:
+        raise asyncio.CancelledError
 
-    目录名必须精确对应作业 ID；缺少、损坏、远端、取消或活跃作业都保留。
-    物理路径只允许是 exports 目录的直系真实子目录，避免清理软链接或根外路径。
+
+async def _recover_expired_export_cleanup_claims(repo: Any, stamp: datetime) -> None:
+    """每轮最多恢复100个过期清理权，避免故障遗留记录占满一次维护。"""
+    stale = {
+        "nodeId": repo.settings.node_id,
+        "kind": "DOWNLOAD",
+        "status": {"$in": ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"]},
+        "outputLockProtocol": 1,
+        "outputCleanupState": "CLEANING",
+        "$or": [
+            {"outputCleanupLeaseUntil": {"$lte": stamp}},
+            {"outputCleanupLeaseUntil": {"$exists": False}},
+        ],
+    }
+    rows = [job async for job in repo.db.jobs.find(stale, {"id": 1}).sort(
+        [("outputCleanupLeaseUntil", 1), ("id", 1)]
+    ).limit(EXPORT_CLEANUP_BATCH_SIZE)]
+    for job in rows:
+        await repo.db.jobs.update_one(
+            {"id": job["id"], **stale},
+            {"$set": {"outputCleanupState": "IDLE"},
+             "$unset": {"outputCleanupToken": "", "outputCleanupLeaseUntil": ""}},
+        )
+
+
+async def cleanup_exports(repo: Any) -> int:
+    """受写入关闭证据和读者租约保护地回收已到期下载目录。
+
+    清理器先在作业行上 CAS 到 CLEANING；读者领取租约使用同一栅栏，故不能
+    在文件描述符已经打开后删除目录。WRITING 仅在取得同一内核排他锁后恢复，
+    旧作业、缺少归属元数据及未知状态保留，避免误删仍被旧进程写入的路径。
     """
     configured_root = Path(repo.settings.log_root)
-    if configured_root.is_symlink():
-        logger.warning("拒绝清理软链接日志根 path=%s", configured_root)
+    exports, scratch_root = configured_root / "exports", configured_root / "exports" / ".tmp"
+    if configured_root.is_symlink() or exports.is_symlink() or scratch_root.is_symlink():
+        logger.warning("拒绝清理包含软链接的导出根 path=%s", exports)
         return 0
-    exports = configured_root / "exports"
-    removed = 0
-    if exports.is_symlink() or not exports.is_dir():
-        if exports.is_symlink():
-            logger.warning("拒绝清理软链接导出根 path=%s", exports)
+    removed, stamp = 0, now()
+    await _recover_expired_export_cleanup_claims(repo, stamp)
+    active = {
+        "nodeId": repo.settings.node_id,
+        "kind": "DOWNLOAD",
+        "status": {"$in": ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"]},
+        "expiresAt": {"$lte": stamp},
+        "outputExecutionState": {"$in": ["CLOSED", "WRITING"]},
+        "outputWriterNodeId": repo.settings.node_id,
+        "outputLockProtocol": 1,
+    }
+    node = await repo.db.nodes.find_one({"id": repo.settings.node_id}, {"exportCleanupCursor": 1}) or {}
+    bookmark = node.get("exportCleanupCursor")
+    if not isinstance(bookmark, dict) or not isinstance(bookmark.get("expiresAt"), datetime) or not isinstance(bookmark.get("id"), str):
+        bookmark = None
+    query: dict[str, Any] = {**active, "outputCleanupState": {"$in": ["IDLE", None]}}
+    if bookmark is not None:
+        query = {"$and": [query, {"$or": [
+            {"expiresAt": {"$gt": bookmark["expiresAt"]}},
+            {"expiresAt": bookmark["expiresAt"], "id": {"$gt": bookmark["id"]}},
+        ]}]}
+    page = [job async for job in repo.db.jobs.find(query).sort(
+        [("expiresAt", 1), ("id", 1)]
+    ).limit(EXPORT_CLEANUP_BATCH_SIZE)]
+    if not page:
+        await repo.db.nodes.update_one(
+            {"id": repo.settings.node_id},
+            {"$set": {"exportCleanupCursor": None}},
+            upsert=True,
+        )
         return removed
-    exports_root = exports.resolve()
-    for path in exports.iterdir():
-        try:
-            if path.name == ".tmp" or path.is_symlink() or not path.is_dir():
+    for job in page:
+        candidate = {"id": job["id"], **active, "outputCleanupState": {"$in": ["IDLE", None]}}
+        for path in (exports / job["id"], scratch_root / job["id"]):
+            if not path.exists():
                 continue
-            resolved = path.resolve()
-            if resolved.parent != exports_root:
-                logger.warning("拒绝清理非直系导出目录 path=%s", path)
-                continue
-            job = await repo.db.jobs.find_one({"id": path.name})
-            if not job or job.get("nodeId") != repo.settings.node_id or job.get("kind") != "DOWNLOAD":
-                continue
-            if job.get("status") not in {"SUCCEEDED", "FAILED", "EXPIRED"}:
-                continue
-            expires_at, completed_at = job.get("expiresAt"), job.get("completedAt")
-            if not isinstance(expires_at, datetime) or not isinstance(completed_at, datetime):
-                continue
-            expires_at = expires_at.replace(tzinfo=UTC) if expires_at.tzinfo is None else expires_at
-            if expires_at > now():
-                continue
-            await asyncio.to_thread(shutil.rmtree, path)
-            removed += 1
-        except Exception:
-            logger.exception("导出产物清理失败 path=%s", path)
+            cleanup_token: str | None = None
+            completed = False
+            try:
+                expected_parent = scratch_root.resolve() if path.parent == scratch_root else exports.resolve()
+                if path.is_symlink() or not path.is_dir() or path.resolve().parent != expected_parent:
+                    continue
+                await repo.db.jobs.update_one(candidate, {"$pull": {"outputReaders": {"expiresAt": {"$lte": stamp}}}})
+                cleanup_token = uuid.uuid4().hex
+                claimed = await repo.db.jobs.update_one({**candidate,
+                    "outputReaders": {"$not": {"$elemMatch": {"expiresAt": {"$gt": stamp}}}}},
+                    {"$set": {"outputCleanupState": "CLEANING", "outputCleanupToken": cleanup_token,
+                              "outputCleanupLeaseUntil": stamp + timedelta(minutes=30)}},
+                )
+                if claimed.matched_count != 1:
+                    continue
+                lock = ExportLock(repo, job["id"])
+                if not await lock.acquire(blocking=False):
+                    continue
+                try:
+                    if job.get("outputExecutionState") == "WRITING":
+                        closed = await repo.db.jobs.update_one(
+                            {"id": job["id"], **active, "outputExecutionState": "WRITING",
+                             "outputCleanupState": "CLEANING", "outputCleanupToken": cleanup_token},
+                            {"$set": {"outputExecutionState": "CLOSED", "outputWriterClosedAt": now(),
+                                      "outputWriterClosureReason": "KERNEL_LOCK_RECOVERY"}},
+                        )
+                        if closed.matched_count != 1:
+                            continue
+                    await _remove_export_tree(path)
+                    other = scratch_root / job["id"] if path.parent == exports else exports / job["id"]
+                    if other.exists() and not other.is_symlink() and other.is_dir():
+                        await _remove_export_tree(other)
+                finally:
+                    await lock.close()
+                await repo.db.jobs.update_one(
+                    {"id": job["id"], **active, "outputExecutionState": "CLOSED",
+                     "outputCleanupState": "CLEANING", "outputCleanupToken": cleanup_token},
+                    {"$set": {"outputCleanupState": "CLEANED", "outputCleanedAt": now()}})
+                completed = True
+                removed += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("导出产物清理失败 path=%s", path)
+            finally:
+                if cleanup_token and not completed:
+                    await repo.db.jobs.update_one(
+                        {"id": job["id"], **active, "outputCleanupState": "CLEANING",
+                         "outputCleanupToken": cleanup_token},
+                        {"$set": {"outputCleanupState": "IDLE"}, "$unset": {"outputCleanupToken": "", "outputCleanupLeaseUntil": ""}})
+    last = page[-1]
+    await repo.db.nodes.update_one(
+        {"id": repo.settings.node_id},
+        {"$set": {"exportCleanupCursor": {"expiresAt": last["expiresAt"], "id": last["id"]}}},
+        upsert=True,
+    )
     return removed
 
 

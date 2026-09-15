@@ -29,12 +29,20 @@ export interface ResourceMonitorConfig {
   processValuePattern: string;
 }
 
+/** 增长型数据库记录的管理员保留策略；0 明确表示不自动归档或清理。 */
+export interface RecordRetentionConfig {
+  auditDays: number;
+  eventDays: number;
+  runDays: number;
+}
+
 export interface PlatformSettings {
   retentionDays: number;
   clusterCapacity?: number;
   version: number;
   updatedAt: string;
   resourceMonitor?: ResourceMonitorConfig;
+  recordRetention?: RecordRetentionConfig;
 }
 
 export interface NodeConfig {
@@ -42,6 +50,7 @@ export interface NodeConfig {
   url: string;
   capacity: number;
   accepting: boolean;
+  inputRateLimitMiB?: number;
   version: number;
   registered: boolean;
   online: boolean;
@@ -59,13 +68,14 @@ export interface NodeRegistration {
   url: string;
   capacity: number;
   accepting: boolean;
+  inputRateLimitMiB?: number;
   isGeneralNode?: boolean;
   resourceNetworks?: string[];
 }
 
 export const settingsApi = {
   platform: () => request<PlatformSettings>("/platform-settings"),
-  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; resourceMonitor?: ResourceMonitorConfig }) =>
+  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; resourceMonitor?: ResourceMonitorConfig; recordRetention?: RecordRetentionConfig }) =>
     request<PlatformSettings>("/platform-settings", {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },
@@ -80,7 +90,7 @@ export const settingsApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(body),
     }),
-  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks">) =>
+  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks" | "inputRateLimitMiB">) =>
     request<NodeConfig>(`/admin/nodes/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

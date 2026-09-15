@@ -18,7 +18,16 @@ export interface LiveLogRange {
   reason: "rate" | "transport" | "retention" | "server";
   lines?: number;
   message?: string;
+  // 服务端未知 gap 以两端已确认帧为锚点，目录接口据此跨文件定位，绝不猜测中间字节。
+  beforeFileId?: string;
+  beforeOffset?: number;
+  beforeSessionId?: string;
+  afterFileId?: string;
+  afterOffset?: number;
+  afterSessionId?: string;
 }
+
+interface LogAnchor { fileId: string; offset: number; sessionId?: string; }
 
 interface BytePiece {
   bytes: Uint8Array;
@@ -54,6 +63,8 @@ export class LiveLogBuffer {
   private rateStartedAt = 0;
   private linesThisSecond = 0;
   private nextRangeId = 1;
+  private lastAnchor: LogAnchor | undefined;
+  private pendingServerGap: LiveLogRange | undefined;
 
   // 任务切换时必须切断所有旧任务状态，新的订阅从空 cursor 和空字节队列开始。
   reset() {
@@ -71,6 +82,8 @@ export class LiveLogBuffer {
     this.rateStartedAt = 0;
     this.linesThisSecond = 0;
     this.nextRangeId = 1;
+    this.lastAnchor = undefined;
+    this.pendingServerGap = undefined;
   }
 
   // 用户“清空”只影响本地视图；保留 cursor/offset，后续帧仍能连续去重。
@@ -88,8 +101,13 @@ export class LiveLogBuffer {
     if (frame.type === "gap") {
       if (frame.cursor) this.cursor = frame.cursor;
       this.gaps += 1;
-      // 服务端 gap 通常没有可信 offset；保留提示但绝不猜测可补读边界。
-      this.addRange({ reason: "server", message: frame.message });
+      // gap 本身没有位置，只有前后已接收帧共同构成可核验的目录查询锚点。
+      this.pendingServerGap = this.addRange({
+        reason: "server", message: frame.message,
+        beforeFileId: this.lastAnchor?.fileId,
+        beforeOffset: this.lastAnchor?.offset,
+        beforeSessionId: this.lastAnchor?.sessionId,
+      });
       this.discardPartial("server");
       return;
     }
@@ -147,6 +165,16 @@ export class LiveLogBuffer {
       },
       now,
     );
+    if (frame.fileId && sourceStart !== undefined) {
+      const received = { fileId: frame.fileId, offset: sourceStart + bytes.byteLength, sessionId: frame.sessionId };
+      if (this.pendingServerGap) {
+        this.pendingServerGap.afterFileId = frame.fileId;
+        this.pendingServerGap.afterOffset = sourceStart;
+        this.pendingServerGap.afterSessionId = frame.sessionId;
+        this.pendingServerGap = undefined;
+      }
+      this.lastAnchor = received;
+    }
     if (frame.cursor) this.cursor = frame.cursor;
   }
 
@@ -160,6 +188,7 @@ export class LiveLogBuffer {
     this.sessionId = sessionId;
     this.discardPartial("transport");
     this.offsets.clear();
+    this.lastAnchor = undefined;
   }
 
   private rememberOffset(key: string, endOffset: number) {
@@ -336,7 +365,7 @@ export class LiveLogBuffer {
   }
 
   // 仅同来源且实际相邻/重叠的缺失段合并，已有范围的 id 在合并后保持稳定。
-  private addRange(range: Omit<LiveLogRange, "id">) {
+  private addRange(range: Omit<LiveLogRange, "id">): LiveLogRange {
     const compatible = this.missingRanges.filter(
       (candidate) =>
         candidate.reason === range.reason &&
@@ -368,12 +397,14 @@ export class LiveLogBuffer {
       }
       this.missingRanges.splice(this.missingRanges.indexOf(first), 1);
       this.missingRanges.push(first);
-      return;
+      return first;
     }
-    this.missingRanges.push({ id: String(this.nextRangeId++), ...range });
+    const added = { id: String(this.nextRangeId++), ...range };
+    this.missingRanges.push(added);
     if (this.missingRanges.length > MISSING_RANGE_LIMIT) {
       this.missingRanges.shift();
       this.droppedRangeCount += 1;
     }
+    return added;
   }
 }

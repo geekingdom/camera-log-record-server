@@ -5,8 +5,9 @@
 """
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from datetime import date as CalendarDate
-from datetime import datetime, timedelta
+from hashlib import sha256
 from time import perf_counter
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -21,6 +22,7 @@ from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.security import actor, authenticate, authorize
 from camera_logs.common.websocket_logging import bind_websocket_actor
 from camera_logs.logs.download_sessions import download_actor
+from camera_logs.logs.gap_catalog import catalog_cursor_page, catalog_gap_fragments
 from camera_logs.logs.hour_catalog import summarize_hours
 from camera_logs.logs.job_submission import cancel_job, submit_job
 from camera_logs.users.sessions import COOKIE, check_origin, session_identity
@@ -135,6 +137,50 @@ def install_log_routes(app):
         return await node_request(repo(), file["nodeId"], f"/internal/read/{identifier}",
                                   {"offset": offset, "limit": limit}, client=request.app.state.node_http,
                                   downstream=response)
+
+    @app.get("/api/v1/tasks/{task_id}/log-gap-catalog")
+    async def gap_catalog(task_id: str, user: User, beforeFileId: str = Query(min_length=1), beforeOffset: int = Query(ge=0),
+                          beforeSessionId: str = Query(min_length=1), afterFileId: str = Query(min_length=1),
+                          afterOffset: int = Query(ge=0), afterSessionId: str = Query(min_length=1),
+                          limit: int = Query(50, ge=1, le=100, description="本页最多返回的文件字节范围数，最大100"),
+                          cursor: str | None = Query(None, max_length=32, description="上页返回的短游标，有效期一小时；保持原前后锚点，失效后重新定位")):
+        """定位实时 gap 两端之间的已保存片段，文件正文仍由逐文件读取接口提供。"""
+        from camera_logs.logs.gap_snapshots import publish_gap_page, resolve_gap_cursor
+        authorize(user, "logs:read", task_id)
+        await repo().get("tasks", task_id)
+        cursor = await resolve_gap_cursor(repo(), task_id, cursor)
+        anchors = {"before": {"fileId": beforeFileId, "offset": beforeOffset, "sessionId": beforeSessionId},
+                   "after": {"fileId": afterFileId, "offset": afterOffset, "sessionId": afterSessionId}}
+        signing_key = sha256((repo().settings.encryption_key + "log-gap-catalog").encode()).digest()
+        saved_page = catalog_cursor_page(cursor, anchors, limit, signing_key)
+        if saved_page is not None:
+            return await publish_gap_page(repo(), task_id, saved_page)
+        before = await repo().db.files.find_one({"id": beforeFileId, "taskId": task_id, "status": {"$ne": "DELETED"}})
+        after = await repo().db.files.find_one({"id": afterFileId, "taskId": task_id, "status": {"$ne": "DELETED"}})
+        if not before or not after:
+            return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "CATALOG_UNAVAILABLE", "message": "缺口锚点文件已不可用。"}]}
+        if before.get("sessionId") != beforeSessionId or after.get("sessionId") != afterSessionId:
+            return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "SESSION_MISMATCH", "message": "缺口锚点的会话与文件目录不一致。"}]}
+        try:
+            first_hour = datetime.fromisoformat(str(before["hour"])).astimezone(UTC)
+            last_hour = datetime.fromisoformat(str(after["hour"])).astimezone(UTC)
+        except (KeyError, TypeError, ValueError):
+            return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "CATALOG_UNAVAILABLE", "message": "缺口锚点缺少可排序小时目录。"}]}
+        low, high = sorted((first_hour, last_hour))
+        if high - low > timedelta(hours=24):
+            return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "CATALOG_TOO_BROAD", "message": "缺口锚点超过 24 小时，无法建立有界目录快照。"}]}
+        query = {"taskId": task_id, "hour": {"$gte": low.isoformat(), "$lte": high.isoformat()}}
+        files = [file async for file in repo().db.files.find(query).limit(501)]
+        if len(files) > 500:
+            return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "CATALOG_TOO_BROAD", "message": "缺口目录超过 500 个文件，请缩小范围或通过小时归档查看。"}]}
+        # 锚点本身必须参加排序，即使旧记录的 hour 格式无法命中范围查询。
+        known = {file["id"] for file in files}
+        files.extend(file for file in (before, after) if file["id"] not in known)
+        page = catalog_gap_fragments(files, before_file_id=beforeFileId, before_offset=beforeOffset,
+                                     before_session_id=beforeSessionId, after_file_id=afterFileId,
+                                     after_offset=afterOffset, after_session_id=afterSessionId,
+                                     limit=limit, cursor=cursor, signing_key=signing_key)
+        return await publish_gap_page(repo(), task_id, page)
 
     @app.get("/api/v1/log-files/{identifier}")
     async def log_file(identifier: str, user: User):

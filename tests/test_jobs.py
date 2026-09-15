@@ -404,6 +404,35 @@ def test_concurrent_cancellation_cleans_completed_output(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_writer_rechecks_execution_ownership_after_waiting_for_export_lock(tmp_path, monkeypatch):
+    """旧 Worker 等待 flock 期间被取消后，取得锁也不能开始创建导出文件。"""
+    async def scenario():
+        settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
+        repo = Repository(AsyncMongoMockClient().db, settings)
+        async def audit(*_, **_kwargs): pass
+        repo.audit = audit
+        job = {"id": "late-writer", "kind": "DOWNLOAD", "status": "RUNNING", "files": []}
+        await repo.db.jobs.insert_one(job)
+
+        class LockAfterCancellation:
+            def __init__(self, _repo, _identifier): pass
+            async def acquire(self, *, blocking):
+                assert blocking
+                await repo.db.jobs.update_one({"id": "late-writer"}, {"$set": {"status": "CANCELLED"}})
+                return True
+            async def close(self): pass
+
+        async def must_not_write(*_args):
+            raise AssertionError("lost writer must not enter _download")
+
+        monkeypatch.setattr(jobs, "ExportLock", LockAfterCancellation)
+        monkeypatch.setattr(jobs, "_download", must_not_write)
+        assert (await run_job(repo, job))["status"] == "CANCELLED"
+        current = await repo.db.jobs.find_one({"id": "late-writer"})
+        assert current.get("outputExecutionState") is None
+    asyncio.run(scenario())
+
+
 def test_expired_running_job_does_not_start_work(tmp_path):
     async def scenario():
         settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")

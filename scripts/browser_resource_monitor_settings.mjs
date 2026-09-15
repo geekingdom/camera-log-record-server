@@ -55,6 +55,15 @@ try {
     await page.getByRole("tab", { name: "后台配置", exact: true }).click();
     const settings = page.getByRole("region", { name: "CPU 与内存监控配置", exact: true });
     await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).waitFor();
+    const retention = page.getByRole("region", { name: "增长记录保留策略", exact: true });
+    await retention.getByRole("spinbutton", { name: "审计记录保留天数", exact: true }).fill("30");
+    await retention.getByRole("button", { name: "保存策略", exact: true }).click();
+    await page.getByRole("dialog", { name: "确认保存保留策略", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
+    await page.getByText("增长记录保留策略已保存", { exact: true }).waitFor();
+    await page.getByRole("dialog", { name: "确认保存保留策略", exact: true }).waitFor({ state: "hidden" });
+    assert.deepEqual(writes.at(-1).recordRetention, { auditDays: 30, eventDays: 90, runDays: 90 });
+    await retention.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `output/playwright/record-retention-${width}.png`, fullPage: false });
     assert.equal(await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).inputValue(), config.items[0].command);
     assert.equal(await settings.getByRole("textbox", { name: "数值正则 1", exact: true }).inputValue(), config.items[0].pattern);
     await settings.getByRole("button", { name: "新增指标", exact: true }).click();
@@ -82,6 +91,9 @@ try {
     const nodeDialog = page.getByRole("dialog", { name: "登记节点", exact: true });
     await nodeDialog.getByRole("textbox").nth(0).fill(`dedicated-${width}`);
     await nodeDialog.getByRole("textbox").nth(1).fill("http://node.example.test:18081");
+    const rate = nodeDialog.getByRole("spinbutton", { name: "日志输入速率上限", exact: true });
+    assert.equal(await rate.inputValue(), "50");
+    await rate.fill("24");
     const general = nodeDialog.getByRole("switch", { name: "通用节点", exact: true });
     assert.equal(await general.getAttribute("aria-checked"), "true");
     await nodeDialog.locator('.el-switch:has(input[aria-label="通用节点"])').click();
@@ -90,6 +102,7 @@ try {
     await page.getByRole("dialog", { name: "确认保存配置", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
     await nodeDialog.waitFor({ state: "hidden" });
     assert.equal(nodeWrites.at(-1).isGeneralNode, false);
+    assert.equal(nodeWrites.at(-1).inputRateLimitMiB, 24);
     assert.deepEqual(nodeWrites.at(-1).resourceNetworks, ["10.41.203.35", "10.18.117.0/24"]);
     assert.deepEqual(errors, []);
     await context.close();

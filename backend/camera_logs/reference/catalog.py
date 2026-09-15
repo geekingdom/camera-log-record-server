@@ -36,7 +36,7 @@ GUIDES = [
 TITLES = {"get": "查询", "post": "创建", "patch": "编辑", "delete": "删除"}
 SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网络设备任务", "resume": "恢复网络设备任务",
            "authentication-records": "查询设备认证记录", "resource-metrics": "查询设备 CPU 与内存指标",
-           "restart": "重新启动等待隔离任务",
+           "restart": "重新启动等待隔离任务", "log-gap-catalog": "定位实时缺口已保存片段",
            "creators": "查询历史创建用户",
            "reveal": "查看服务账号口令", "rotate": "重新生成服务账号口令",
            "authenticate": "认证设备资源", "login": "账号登录", "logout": "退出登录", "password": "修改本人密码",

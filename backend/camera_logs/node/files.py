@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from camera_logs.logs.archive_access import read_limiter, snapshot
+from camera_logs.logs.export_readers import ExportReader
 from camera_logs.logs.file_reads import FileReads
 from camera_logs.logs.job_threads import job_thread
 
@@ -228,13 +229,24 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
         return FileResponse(snapshot_path, media_type="application/gzip", filename=f"{identifier}.tar.gz", background=BackgroundTask(snapshot_path.unlink, missing_ok=True))
 
     @app.get("/internal/downloads/{identifier}")
-    async def download(identifier: str, _: None = Depends(internal)):
+    async def download(identifier: str, request: Request, _: None = Depends(internal)):
+        """用持续读者租约传输已发布导出，维护回收与慢客户端下载互斥。"""
         job = await repo.db.jobs.find_one({"id": identifier, "status": "SUCCEEDED"})
         expires = job.get("expiresAt") if job else None
         if not job or not job.get("resultPath") or (expires and expires.astimezone(UTC) <= datetime.now(UTC)):
             raise HTTPException(404, "导出文件不存在")
         path = _path(runtime, repo, {"path": job["resultPath"]})
-        return FileResponse(path, filename=job.get("filename") or path.name)
+        reader = ExportReader(repo, job)
+        try:
+            await reader.acquire()
+            return await _limited_response(reads, downloads, path, request, filename=job.get("filename") or path.name,
+                                           on_close=reader.close, before_read=reader.assert_active)
+        except (FileNotFoundError, RuntimeError, ValueError):
+            await reader.close()
+            raise HTTPException(404, "导出文件不存在") from None
+        except BaseException:
+            await reader.close()
+            raise
 
     @app.post("/internal/coredumps/{identifier}/freeze")
     async def freeze_coredump(identifier: str, _: None = Depends(internal)):

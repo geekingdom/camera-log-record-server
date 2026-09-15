@@ -186,3 +186,31 @@ async def test_write_pressure_events_only_record_threshold_crossings(tmp_path):
     events = [event async for event in repo.db.events.find({"type": "WRITE_PRESSURE_CHANGED"})]
     assert [event["level"] for event in events] == ["NO_ADMISSION", "NORMAL"]
     assert [event["previousLevel"] for event in events] == ["NORMAL", "NO_ADMISSION"]
+
+
+async def test_input_rate_limit_blocks_new_runtime_but_keeps_existing(tmp_path):
+    """已分配任务也需本机复核输入速率；降低流量后准入恢复，不停止旧运行。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+    await repo.initialize()
+    active = {"id": "active", "runId": "run", "nodeId": repo.settings.node_id,
+              "status": "COLLECTING", "desiredState": "RUNNING"}
+    await repo.db.tasks.insert_many([active, {"id": "pending", "runId": "new-run",
+        "nodeId": repo.settings.node_id, "status": "PENDING", "desiredState": "RUNNING"}])
+    await repo.db.node_configs.insert_one({"id": repo.settings.node_id, "inputRateLimitMiB": 1})
+    runtime = SimpleNamespace(task=active, input_bytes=0, stopping=False, error=None,
+        background=asyncio.get_running_loop().create_future(), background_failure=lambda: None, stop=AsyncMock())
+    worker = Worker(repo)
+    worker.active["active"] = runtime
+    worker.last_maintenance = time.monotonic()
+    with patch("camera_logs.node.worker.shutil.disk_usage", return_value=SimpleNamespace(used=1, total=100, free=99)), \
+         patch.object(worker.input_rate, "sample", side_effect=[1024 * 1024, 0]), \
+         patch("camera_logs.node.worker.SessionRuntime") as factory:
+        await worker.tick()
+        factory.assert_not_called()
+        assert not (await repo.get("nodes", repo.settings.node_id))["accepting"]
+        runtime.stop.assert_not_awaited()
+        await worker.tick()
+        factory.assert_called_once()
+        assert (await repo.get("nodes", repo.settings.node_id))["accepting"]
+        runtime.stop.assert_not_awaited()

@@ -16,7 +16,7 @@ from test_api import client  # noqa: F401
 def test_completion_transaction_retries_without_rebuilding_output(client, monkeypatch, tmp_path):  # noqa: F811
     """首次数据库失败后只重试终态提交，不能重新生成下载或删除原产物。"""
     repo = client.app.state.repo
-    repo.settings = SimpleNamespace(log_root=tmp_path)
+    repo.settings = SimpleNamespace(log_root=tmp_path, node_id="node")
     job = {"id": "completion", "kind": "DOWNLOAD", "status": "RUNNING", "files": []}
     client.portal.call(repo.db.jobs.insert_one, job.copy())
     output = tmp_path / "exports" / job["id"] / "result.tar.gz"
@@ -42,6 +42,9 @@ def test_completion_transaction_retries_without_rebuilding_output(client, monkey
     assert len(commits) == 2
     assert len(builds) == 1 and output.exists()
     assert result["status"] == "SUCCEEDED"
+    persisted = client.portal.call(repo.db.jobs.find_one, {"id": job["id"]})
+    assert persisted["outputExecutionState"] == "CLOSED"
+    assert persisted["outputWriterClosedAt"] is not None
     assert client.portal.call(repo.db.audit.count_documents, {"action": "job_succeeded"}) == 1
 
 
@@ -49,7 +52,7 @@ def test_completion_transaction_retries_without_rebuilding_output(client, monkey
 def test_failure_or_cancellation_audit_matches_persisted_terminal(client, monkeypatch, tmp_path, cancel):  # noqa: F811
     """执行异常与取消都必须记录对应终态，不能把取消误报为失败。"""
     repo = client.app.state.repo
-    repo.settings = SimpleNamespace(log_root=tmp_path)
+    repo.settings = SimpleNamespace(log_root=tmp_path, node_id="node")
     job = {"id": "terminal", "kind": "DOWNLOAD", "status": "RUNNING", "files": []}
     client.portal.call(repo.db.jobs.insert_one, job.copy())
 

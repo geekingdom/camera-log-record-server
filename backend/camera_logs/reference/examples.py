@@ -130,6 +130,9 @@ def response_example(path, method, status):
     if path.endswith("/log-hours"):
         return page({"hourId": STAMP, "hour": STAMP, "status": "READY", "integrity": "VERIFIED",
                      "files": [{"id": "file-example", "bytes": 1024}], "bytes": 1024, "archiveBytes": 512})
+    if path.endswith("/log-gap-catalog"):
+        return {"items": [{"fileId": "file-example", "sessionId": "session-example", "start": 1024, "end": 65536}],
+                "nextCursor": None, "unrecoverable": []}
     if "/log-files/" in path:
         return {"id": "file-example", "taskId": "task-example", "status": "READY", "bytes": 10485760,
                 "nodeId": "collector-01", "runId": "run-example", "sessionId": "session-example",
@@ -179,7 +182,8 @@ def response_example(path, method, status):
     if "/ip-policy" in path:
         return {"version": 1, "enabled": False, "rules": [], "clientIp": "192.0.2.100"}
     if "/platform-settings" in path:
-        return {"retentionDays": 7, "version": 1, "updatedAt": STAMP}
+        return {"retentionDays": 7, "clusterCapacity": 500, "recordRetention": {"auditDays": 90, "eventDays": 90, "runDays": 90},
+                "version": 1, "updatedAt": STAMP}
     if "/nodes" in path:
         if path.endswith("/confirm-isolation"):
             return {"nodeId": "collector-01", "status": "ISOLATED"}

@@ -39,6 +39,17 @@ def public(document):
             "leaseUntil",
             "executionToken",
             "workerInstanceId",
+            "outputWriterToken",
+            "outputReaders",
+            "outputExecutionState",
+            "outputWriterNodeId",
+            "outputWriterStartedAt",
+            "outputWriterClosedAt",
+            "outputCleanupState",
+            "outputCleanupStartedAt",
+            "outputCleanupLeaseUntil",
+            "outputCleanupToken",
+            "outputCleanedAt",
             "resourceMonitorLeaseUntil",
             "resourceMonitorLeaseTaskId",
             "resourceMonitorLeaseRunId",
@@ -98,6 +109,7 @@ class Repository:
         # 每个任务只保留一个活动运行锁；不同任务可以使用同一设备端点。
         await self.db.endpoint_locks.create_index("taskId", unique=True)
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
+        await self.db.log_gap_snapshots.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.coredump_files.create_index([("resourceId", 1), ("receivedAt", -1), ("id", 1)])
         await self.db.coredump_files.create_index([("nodeId", 1), ("status", 1), ("updatedAt", -1)])
         await self.db.coredump_files.create_index([("sourceKey", 1), ("nodeId", 1), ("version", -1)])
@@ -114,6 +126,17 @@ class Repository:
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1)])
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1), ("status", 1)])
         await self.db.runs.create_index([("nodeId", 1), ("endedAt", 1)])
+        await self.db.runs.create_index([("endedAt", 1), ("id", 1)])
+        await self.db.run_archives.create_index("runId", unique=True)
+        await self.db.audit_archive_chunks.create_index("expiresAt", expireAfterSeconds=0)
+        await self.db.audit_archive_chunks.create_index([("day", 1), ("part", 1)], unique=True)
+        await self.db.run_archives.create_index([("taskId", 1), ("endedAt", -1)])
+        await self.db.commands.create_index([("taskId", 1), ("runId", 1), ("id", 1)])
+        await self.db.commands.create_index([("runId", 1), ("status", 1)])
+        await self.db.operations.create_index([("createdAt", 1), ("_id", 1)])
+        await self.db.operations.create_index([("taskId", 1), ("runId", 1), ("status", 1)])
+        await self.db.endpoint_locks.create_index("runId")
+        await self.db.idempotency.create_index([("resourceId", 1), ("expiresAt", 1)])
         await self.db.operations.create_index([("desiredState", 1), ("status", 1)])
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
@@ -123,6 +146,11 @@ class Repository:
         await self.db.jobs.create_index([("nodeId", 1), ("status", 1), ("leaseUntil", 1)])
         await self.db.jobs.create_index([("status", 1), ("leaseUntil", 1)])
         await self.db.jobs.create_index([("nodeId", 1), ("status", 1), ("createdAt", 1), ("id", 1)])
+        await self.db.jobs.create_index([("nodeId", 1), ("kind", 1), ("status", 1),
+                                         ("outputExecutionState", 1), ("expiresAt", 1), ("id", 1)],
+                                        name="jobs_export_cleanup_candidates")
+        await self.db.jobs.create_index([("nodeId", 1), ("kind", 1), ("outputCleanupState", 1),
+                                         ("outputCleanupLeaseUntil", 1), ("id", 1)])
         await self.db.authentication_records.create_index("id", unique=True)
         await self.db.authentication_records.create_index(
             [("resourceId", 1), ("result", 1), ("identityChanged", 1), ("createdAt", -1), ("id", -1)],
