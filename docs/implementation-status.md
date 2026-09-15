@@ -1,5 +1,7 @@
 # 当前状态总表
 
+500路本机短时证据（2026-09-15，基线`d051785`）：正式Collector/HourlyWriter接有界模拟源，500路各1200行/秒×10秒，共600万行；实际发送10.001秒，含排空压缩13.389秒，500路源摘要及前缀/包内仅日志校验全部通过。最大RSS约256MiB，临时正文及归档已删除；验证器/存储/前缀26项通过。详见[500路核心短时验证](history/2026-09-15-500-route-core-validation.md)。未测文件可读P99、真实协议、多节点及24小时混合负载，不能据此标为生产容量达标。`d051785`的[CI34955143375](https://github.com/geekingdom/camera-log-record-server/actions/runs/34955143375)已终止且无执行步骤，检查注释仍为GitHub账号付款/支出额度限制；管理员处理Billing后需重跑。
+
 生命周期增量（2026-09-15）：API启动前段失败现在关闭已创建Mongo客户端，Mongo关闭异常仍执行日志监听器排空；新增3项先失败后通过，相关33项及API修复后全量1480项通过。Worker退出已复现并修复“已有release等待阻止其他active开始关闭”，已有收尾与其他连接并行且不重复stop、不释放未知归属，统一取消管理；Worker专项101项、最终集成42项及Ruff通过。最终真实回环SSH/SIGTERM替换Worker自动恢复、两会话初始化顺序/各12行源摘要/连接及名额释放通过，随机库和临时日志已清理；未操作实体设备。详情见[API生命周期](history/2026-09-15-api-lifespan-cleanup.md)与[Worker并行收尾](history/2026-09-15-worker-parallel-shutdown.md)。物理断电、永久阻塞落盘和多节点非合作接管仍待目标验收；目标API/Worker需更新后验收，当前本机常驻进程未为本轮重启。
 
 本轮提交`5c371a8`已推送。其[CI34953810283](https://github.com/geekingdom/camera-log-record-server/actions/runs/34953810283)未启动任何测试步骤；GitHub检查注释明确为账号付款失败或支出上限不足。下一步由仓库管理员处理Billing后重跑该提交CI；不能把未启动标为代码测试失败或验证通过，本机验证证据见下文。
