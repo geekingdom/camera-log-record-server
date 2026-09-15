@@ -19,15 +19,26 @@ def number(value):
 
 def fresh(timestamp, current, seconds=15):
     """心跳和采样采用服务端UTC；未来过远或格式错误的时间同样视为未知。"""
+    return heartbeat_freshness_reason(timestamp, current, seconds) is None
+
+
+def heartbeat_freshness_reason(timestamp, current, seconds=15):
+    """返回心跳失效原因；未来时间必须显式暴露 API 与 Worker 的时钟偏差。"""
+    if timestamp is None:
+        return "未收到节点心跳"
     if isinstance(timestamp, str):
         try:
             timestamp = datetime.fromisoformat(timestamp)
         except ValueError:
-            return False
+            return "节点心跳时间无效"
     if not isinstance(timestamp, datetime):
-        return False
+        return "节点心跳时间无效"
     age = (current - timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else current - timestamp).total_seconds()
-    return -2 <= age <= seconds
+    if age < -2:
+        return "节点心跳时间晚于API时间超过2秒，API与Worker时钟不同步"
+    if age > seconds:
+        return f"超过{seconds}秒未收到节点心跳"
+    return None
 
 
 def measurements(node, current=None):
@@ -45,8 +56,9 @@ def resource_pressure(node, current=None):
 def node_health(node, current=None):
     """由真实指标给出健康状态及可排查原因，离线覆盖历史健康快照。"""
     current = current or now()
-    if not fresh(node.get("heartbeat"), current, 30):
-        return {"status": "OFFLINE", "reasons": ["超过30秒未收到节点心跳"]}
+    heartbeat_reason = heartbeat_freshness_reason(node.get("heartbeat"), current, 30)
+    if heartbeat_reason:
+        return {"status": "OFFLINE", "reasons": [heartbeat_reason]}
     critical, warnings, unknown = [], [], []
     if input_rate_blocked(node):
         critical.append(f"日志输入速率达到准入上限或测量缺失（{input_rate_limit(node)} MiB/s）")

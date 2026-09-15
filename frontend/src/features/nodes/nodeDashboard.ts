@@ -1,5 +1,6 @@
 // 节点看板的纯展示判断集中于此；资源遥测时效与服务端健康结论保持独立。
 import type { Node, NodeHealth, NodeTelemetry } from "../../shared/types";
+import { toRaw } from "vue";
 import { writeLatencyLimitMs } from "../../shared/nodeWriteLatency";
 
 export { writeLatencyLimitMs } from "../../shared/nodeWriteLatency";
@@ -7,20 +8,37 @@ export { writeLatencyLimitMs } from "../../shared/nodeWriteLatency";
 export const HEARTBEAT_STALE_MS = 30_000;
 export const TELEMETRY_STALE_MS = 15_000;
 const CLOCK_SKEW_TOLERANCE_MS = 2_000;
+const snapshots = new WeakMap<Node, { serverTime: number; receivedAt: number }>();
 
 function timestamp(value?: string | null) {
   const parsed = value ? new Date(value).getTime() : Number.NaN;
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+/** 收到新响应时锚定服务端时间；Vue 代理与原对象共享同一计时快照。 */
+export function anchorNodeSnapshot(node: Node): Node {
+  const serverTime = timestamp(node.assessedAt);
+  if (serverTime !== undefined) snapshots.set(toRaw(node), { serverTime, receivedAt: performance.now() });
+  else snapshots.delete(toRaw(node));
+  return node;
+}
+
+/** 页面未刷新时仍按单调时间老化，浏览器校时不会让节点突然上下线。 */
+function snapshotTime(node: Node, fallback: number) {
+  const snapshot = snapshots.get(toRaw(node));
+  return snapshot ? snapshot.serverTime + Math.max(0, performance.now() - snapshot.receivedAt) : fallback;
+}
+
 /** 节点心跳采用服务端三十秒阈值，并容忍两秒时钟偏差。 */
 export function nodeOnline(node: Node, current = Date.now()) {
+  current = snapshotTime(node, current);
   const reportedAt = timestamp(node.heartbeat);
   return reportedAt !== undefined && current - reportedAt >= -CLOCK_SKEW_TOLERANCE_MS && current - reportedAt <= HEARTBEAT_STALE_MS;
 }
 
 /** 遥测采用服务端十五秒阈值；过期数据只保留服务端健康原因，不作为资源仪表。 */
 export function currentTelemetry(node: Node, current = Date.now()): NodeTelemetry | undefined {
+  current = snapshotTime(node, current);
   const telemetry = node.telemetry;
   const sampledAt = timestamp(telemetry?.sampledAt);
   if (!telemetry || sampledAt === undefined || current - sampledAt < -CLOCK_SKEW_TOLERANCE_MS || current - sampledAt > TELEMETRY_STALE_MS) return undefined;

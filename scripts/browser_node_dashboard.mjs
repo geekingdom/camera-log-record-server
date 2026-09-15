@@ -9,6 +9,7 @@ const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const now = Date.now();
 const fresh = new Date(now - 2_000).toISOString();
 const stale = new Date(now - 70_000).toISOString();
+let assessedAt = new Date(now).toISOString();
 const nodes = [
   {
     id: "healthy-node", name: "采集节点 A", url: "https://worker-a.example.test", heartbeat: fresh,
@@ -50,7 +51,7 @@ try {
     const path = new URL(request.url()).pathname;
     const json = body => route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     if (path === "/api/v1/auth/me") return json({ user: { id: "admin", username: "admin", displayName: "验收管理员", isAdmin: true, enabled: true, mustChangePassword: false, scopes: ["*"] } });
-    if (path === "/api/v1/nodes") return json(pageOf(nodes));
+    if (path === "/api/v1/nodes") return json(pageOf(nodes.map(node => ({ ...node, assessedAt }))));
     if (["/api/v1/resources", "/api/v1/tasks", "/api/v1/command-templates", "/api/v1/users/creators"].includes(path)) return json(pageOf([]));
     throw new Error(`未模拟接口：${request.method()} ${path}`);
   });
@@ -74,11 +75,17 @@ try {
   // 模拟页面驻留后 Worker 的新心跳；渲染时钟不能固定在组件创建时刻。
   await page.clock.install();
   await page.clock.fastForward(10_000);
-  nodes[0].heartbeat = new Date(await page.evaluate(() => Date.now())).toISOString();
+  assessedAt = new Date(now + 10_000).toISOString();
+  nodes[0].heartbeat = assessedAt;
   nodes[0].telemetry.sampledAt = nodes[0].heartbeat;
   await refresh();
   const healthyCard = page.locator(".node-card").filter({ hasText: "采集节点 A" });
   await healthyCard.getByText("在线", { exact: true }).waitFor();
+  // 客户端墙上时钟偏移八小时，不应影响服务端快照的新鲜度。
+  await page.clock.setSystemTime(new Date(now + 8 * 3600_000));
+  await refresh();
+  await healthyCard.getByText("在线", { exact: true }).waitFor();
+  await healthyCard.getByText("36%", { exact: true }).waitFor();
   const originalOrder = await page.locator(".node-identity code").allTextContents();
   nodes.reverse();
   await refresh();

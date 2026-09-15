@@ -165,6 +165,7 @@ export interface Template {
   deletedAt?: string | null;
 }
 export interface Node {
+  assessedAt?: string;
   id: string;
   name?: string;
   status?: string;

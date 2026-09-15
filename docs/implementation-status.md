@@ -1,5 +1,9 @@
 # 当前状态总表
 
+| 当前问题 | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 跨机 Worker 在登记页在线、节点看板离线 | `administration/settings.py`、`node/health.py`统一30秒窗口并区分未来心跳；`commands/api.py`返回`assessedAt`；`nodeDashboard.ts`、`useWorkspaceCollections.ts`以服务器时间与浏览器单调计时更新快照 | 22项节点/设置回归、前端162项、生产构建、1440/390看板截图及浏览器快8小时验证通过；隔离真实API/Worker/WebSocket/小时下载通过并清理；见[心跳一致性证据](history/2026-09-15-node-heartbeat-consistency.md) | 公司目标机器的实际心跳和时钟尚未提供，不能认定其根因已证实；更新API/前端后核对`heartbeat`与`assessedAt`及A/B服务器UTC时间，真实时钟偏差须同步时间，不能放宽租约或伪造在线 |
+
 CI恢复证据：修复提交`ae9c671`已推送，其[CI34958663525](https://github.com/geekingdom/camera-log-record-server/actions/runs/34958663525)的`cross-worker-read`作业104346735930已成功完成，覆盖双Worker补读、SSH暂停跨Worker恢复及本次失败的SIGTERM恢复步骤。记录时其它部署作业仍在运行，整条流水线结论须另核；不再将本项列为待修复。
 
 CI修复（2026-09-15）：最新CI34956216992仅cross-worker-read失败（其余七项成功），原因是SIGTERM脚本强求瞬时STOPPED，而正常调度已转PENDING。正式调度回归先复现后修复；仅修改验证器接受两种无归属RUNNING状态，并增加旧运行结束/端点锁释放检查，39项及真实回环SIGTERM恢复通过，测试数据已清理。见[CI竞态证据](history/2026-09-15-ci-sigterm-observation.md)。当前查询已确认d051785、d78874c的CI成功，下面旧的计费阻塞仅为历史观察，不能作为当前失败原因。

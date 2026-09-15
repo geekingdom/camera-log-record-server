@@ -4,7 +4,6 @@
 避免心跳覆盖人工设置，也避免登记请求伪造在线节点。
 """
 
-from datetime import timedelta
 from ipaddress import ip_address
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -24,6 +23,7 @@ from camera_logs.common.config import (
 from camera_logs.common.database import now
 from camera_logs.common.retention_config import RecordRetentionConfig, retention_config
 from camera_logs.common.security import actor, authorize
+from camera_logs.node.health import fresh
 from camera_logs.node.input_admission import (
     DEFAULT_INPUT_RATE_LIMIT_MIB,
     MAX_INPUT_RATE_LIMIT_MIB,
@@ -44,7 +44,6 @@ from camera_logs.resource_metrics.models import (
 PLATFORM_SETTINGS_ID = "platform"
 DEFAULT_RETENTION_DAYS = 7
 MAX_RETENTION_DAYS = 3650
-ONLINE_HEARTBEAT_AGE = timedelta(seconds=30)
 
 
 class SettingsModel(BaseModel):
@@ -153,10 +152,7 @@ def _reported_at(node: dict | None) -> object | None:
 
 def _is_online(node: dict | None) -> bool:
     """在线状态只根据 worker 心跳计算，登记配置不能使节点显示为在线。"""
-    heartbeat = _reported_at(node)
-    if heartbeat is None:
-        return False
-    return now() - heartbeat.replace(tzinfo=now().tzinfo) < ONLINE_HEARTBEAT_AGE
+    return fresh(_reported_at(node), now(), 30)
 
 
 def _public_node_config(config: dict, node: dict | None) -> dict:

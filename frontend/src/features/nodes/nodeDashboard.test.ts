@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { reactive } from "vue";
 import type { Node } from "../../shared/types";
-import { currentHealth, currentTelemetry, formatRate, nodeAbnormal, nodeAdmissible, nodeOnline, writeLatencyLimitMs } from "./nodeDashboard";
+import { anchorNodeSnapshot, currentHealth, currentTelemetry, formatRate, nodeAbnormal, nodeAdmissible, nodeOnline, writeLatencyLimitMs } from "./nodeDashboard";
 
 const now = Date.parse("2026-09-10T00:00:00.000Z");
 const activeNode: Node = {
@@ -10,6 +11,19 @@ const activeNode: Node = {
 };
 
 describe("节点看板状态", () => {
+  it("服务器快照不受浏览器时钟偏移影响，停止刷新后仍会过期", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(1000);
+    try {
+      const node = reactive(anchorNodeSnapshot({ ...activeNode, assessedAt: new Date(now).toISOString() }));
+      expect(nodeOnline(node, now + 8 * 3600_000)).toBe(true);
+      expect(currentTelemetry(node, now - 8 * 3600_000)).toBeDefined();
+      clock.mockReturnValue(17_000);
+      expect(currentTelemetry(node, now)).toBeUndefined();
+      expect(nodeOnline(node, now)).toBe(true);
+      clock.mockReturnValue(32_000);
+      expect(nodeOnline(node, now)).toBe(false);
+    } finally { clock.mockRestore(); }
+  });
   it("只把新鲜心跳与未满容量的节点计入在线和可准入", () => {
     expect(nodeOnline(activeNode, now)).toBe(true);
     expect(nodeAdmissible(activeNode, now)).toBe(true);

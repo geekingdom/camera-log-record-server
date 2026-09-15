@@ -2,6 +2,7 @@
 import { computed, ref, watch, type Ref } from "vue";
 
 import type { Node, Page, Resource, Task, Template } from "../shared/types";
+import { anchorNodeSnapshot } from "../features/nodes/nodeDashboard";
 
 interface WorkspaceUser {
   id: string;
@@ -86,7 +87,7 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
     const currentSession = options.sessionGeneration.value;
     const data = await options.api.nodes();
     if (currentSession !== options.sessionGeneration.value) return;
-    nodes.value = data.items;
+    nodes.value = data.items.map(anchorNodeSnapshot);
     totals.value.nodes = data.total;
   }
   function clear() {
