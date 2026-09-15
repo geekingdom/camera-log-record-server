@@ -44,6 +44,8 @@ jobs:
       - name: 验证真实SSH暂停后跨Worker恢复和重新认证
         # 模拟海康设备固定监听回环80端口；仅此隔离脚本使用提权，数据库和日志根均随机。
         run: sudo --preserve-env=MONGO_URI "$(command -v python)" scripts/verify_cross_worker_ssh_resume.py
+      - name: 验证Worker受控退出后自动恢复真实SSH采集
+        run: sudo --preserve-env=MONGO_URI "$(command -v python)" scripts/verify_worker_sigterm_resume.py
       - name: 回收临时数据库容器
         if: always()
         run: docker rm -fv gap-mongo

@@ -79,6 +79,28 @@ async def test_403003_refreshes_token_once_then_replays_request():
 
 
 @pytest.mark.asyncio
+async def test_successful_token_is_cached_but_each_raw_challenge_is_forwarded_unchanged():
+    """同一 Worker 复用有效 OAuth token，但每个设备的完整原始 source 均独立提交。"""
+    calls, sources = [], []
+
+    async def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "auth.example":
+            return httpx.Response(200, json={"access_token": "cached-token"})
+        source = json.loads(request.content)["source"]
+        sources.append(source)
+        assert request.headers["x-hicode-authorization"] == "Bearer cached-token"
+        return httpx.Response(200, json={"data": {"data": "password"}})
+
+    provider = PshPasswordProvider(settings(), transport=httpx.MockTransport(handler))
+    first, second = "QmFzZTY0K2ZpcnN0PT0=", "QmFzZTY0K3NlY29uZD09"
+    assert await provider(task(), first) == "password"
+    assert await provider(task(), second) == "password"
+    assert calls == ["auth.example", "api.example", "api.example"]
+    assert sources == [first, second]
+
+
+@pytest.mark.asyncio
 async def test_second_403003_never_returns_misleading_password_data():
     async def handler(request):
         if request.url.host == "auth.example":

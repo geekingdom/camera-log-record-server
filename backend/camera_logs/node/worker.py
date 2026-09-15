@@ -19,6 +19,7 @@ from camera_logs.node.health import resource_pressure
 from camera_logs.node.input_admission import input_rate_blocked, input_rate_limit
 from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
+from camera_logs.node.shutdown import mark_unavailable_for_shutdown, shutdown_active_runtimes
 from camera_logs.node.telemetry_runtime import TelemetryRuntime
 from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
 
@@ -70,24 +71,27 @@ class Worker:
         task.add_done_callback(completed)
         return task
 
-    async def finish_runtime(self, runtime, action):
+    async def finish_runtime(self, runtime, action, *, already_stopped=False, stop_error=None):
         """绑定旧实例处理异步收尾异常；隔离关闭不代表可以释放数据库归属。"""
         ownership = owner_filter(runtime.task)
         try:
+            if stop_error is not None:
+                raise stop_error
             if action == "recover":
                 await self.recover_blocked_runtime(runtime)
                 return
             if action == "isolate":
-                await runtime.stop()
+                if not already_stopped:
+                    await runtime.stop()
                 if getattr(runtime, "collector", None) is not None:
                     await record_closed_receipt(
                         self.repo, runtime.task, self.instance_id, runtime.collector.session_id,
                     )
                 self.discard_closed(runtime)
             elif action == "pause":
-                await self.pause(runtime)
+                await self.pause(runtime, already_stopped=already_stopped)
             else:
-                await self.release(runtime)
+                await self.release(runtime, already_stopped=already_stopped)
         except Exception:
             if action != "isolate":
                 changed = await self.repo.db.tasks.update_one(ownership, {"$set": {
@@ -182,10 +186,11 @@ class Worker:
             {**owner_filter(task), "nodeId": None, "status": "STOPPED", "restartRequested": True},
             {"$set": {"desiredState": "RUNNING", "restartRequested": False}})
 
-    async def pause(self, runtime):
+    async def pause(self, runtime, *, already_stopped=False):
         """等待连接关闭和日志排空，保留运行预算与端点锁；并发停止优先完成释放。"""
         task = runtime.task
-        await runtime.stop()
+        if not already_stopped:
+            await runtime.stop()
         changed = await self.repo.db.tasks.update_one(
             {**owner_filter(task), "desiredState": "PAUSED"},
             {"$set": {"status": "PAUSED", "nodeId": None, "pausedAt": now()}})
@@ -215,10 +220,11 @@ class Worker:
              "type": "USER_PAUSED", "createdAt": now()}
         )
 
-    async def release(self, runtime):
+    async def release(self, runtime, *, already_stopped=False):
         """结束运行后移除端点锁，持久化操作结果；关闭异常必须向监督周期传播。"""
         task = runtime.task
-        await runtime.stop()
+        if not already_stopped:
+            await runtime.stop()
         if getattr(runtime, "collector", None) is not None:
             await record_closed_receipt(self.repo, task, self.instance_id, runtime.collector.session_id)
         failed = runtime.error or runtime.background_failure()
@@ -326,7 +332,7 @@ class Worker:
             "configurationMismatch": mismatch,
             "configuredUrl": config.get("url"), "telemetry": self.telemetry.value,
             "capabilities": {"coredumpNfs": bool(self.repo.settings.nfs_server_ip)},
-            "accepting": accepting}}, upsert=True)
+            "accepting": accepting}, "$unset": {"shuttingDownAt": ""}}, upsert=True)
         for task_id, future in list(self.releases.items()):
             if future.done():
                 try:
@@ -458,17 +464,16 @@ class Worker:
             await asyncio.sleep(1)
 
     async def close(self):
-        """进程退出时等待所有连接和文件关闭，再回收查询与维护协程。"""
+        """进程退出时回收本机连接，并保留已确认的任务控制意图。"""
+        try:
+            await mark_unavailable_for_shutdown(self)
+        except Exception:
+            logger.exception("节点关闭前未能暂停新任务准入")
+            allow_release = False
+        else:
+            allow_release = True
         await asyncio.gather(*self.releases.values(), return_exceptions=True)
-        for runtime in list(self.active.values()):
-            try:
-                if getattr(runtime, "retired", False):
-                    await self.finish_runtime(runtime, "isolate")
-                else:
-                    await self.repo.db.tasks.update_one(owner_filter(runtime.task), {"$set": {"desiredState": "STOPPED"}})
-                    await self.finish_runtime(runtime, "release")
-            except Exception:
-                logger.exception("节点停止失败")
+        await shutdown_active_runtimes(self, allow_release=allow_release)
         for job in self.jobs | set(self.manual_jobs.values()):
             job.cancel()
         tasks = [*self.jobs, *self.manual_jobs.values()]

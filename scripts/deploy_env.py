@@ -28,6 +28,16 @@ def create_environment(path: Path, component: str = "all") -> None:
         "NODE_CAPACITY": "100",
         "CLUSTER_CAPACITY": "500",
         "RETENTION_DAYS": "7",
+        # 默认禁用；公开端点可被公司代理覆盖，认证标识和密钥始终由受限环境填写。
+        "PSH_MODE": "disabled",
+        "PSH_TOKEN_URL": "https://hicode-auth-hz.hikvision.com/oauth/token",
+        "PSH_API_URL": "https://itapi.hikvision.com/api/",
+        "PSH_CLIENT_ID": "",
+        "PSH_CLIENT_SECRET": "",
+        "PSH_API_KEY": "",
+        "PSH_USER_NAME": "",
+        "PSH_REQUEST_TIMEOUT_SECONDS": "4",
+        "PSH_TOTAL_TIMEOUT_SECONDS": "9",
     }
     if component == "frontend":
         values = {"BACKEND_UPSTREAM": "", "FRONTEND_PORT": "5175"}
@@ -83,6 +93,15 @@ def create_environment(path: Path, component: str = "all") -> None:
         "NODE_PORT": "可修改：采集节点内部接口监听端口1-65535。",
         "RETENTION_DAYS": "可修改：默认保留天数；已保存后台配置时以后者为准。",
         "NODE_CAPACITY": "可修改：单节点任务容量，按磁盘和压测能力调整。",
+        "PSH_MODE": "disabled/mock/http；生产 http 模式必须填写 PSH_CLIENT_ID、PSH_CLIENT_SECRET、PSH_API_KEY 和 PSH_USER_NAME，真实凭据不得提交仓库。",
+        "PSH_TOKEN_URL": "公开 OAuth token 端点；公司代理可覆盖，URL 不得嵌入凭据。",
+        "PSH_API_URL": "公开 itapi 解密端点；公司代理可覆盖，URL 不得嵌入凭据。",
+        "PSH_CLIENT_ID": "生产 OAuth client ID；由受限环境或密钥管理系统填写。",
+        "PSH_CLIENT_SECRET": "生产 OAuth client secret；不得打印、提交或写入普通服务日志。",
+        "PSH_API_KEY": "生产 itapi API key；由受限环境或密钥管理系统填写。",
+        "PSH_USER_NAME": "生产 itapi userName；由受限环境填写。",
+        "PSH_REQUEST_TIMEOUT_SECONDS": "单次 OAuth 或 itapi 请求超时秒数，范围大于0且不超过30。",
+        "PSH_TOTAL_TIMEOUT_SECONDS": "一次口令流程总超时秒数，范围大于0且不超过120，且不得小于单请求超时。",
         "ADMIN_PASSWORD": "仅初始化空库；已修改的管理员密码不会被重复部署覆盖。",
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

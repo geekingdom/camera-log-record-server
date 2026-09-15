@@ -4,7 +4,7 @@ import re
 import socket
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_NODE_CAPACITY = 100
@@ -79,9 +79,19 @@ class Settings(BaseSettings):
     psh_mode: str = "disabled"
     psh_serial_character_interval: float = Field(default=.1, ge=0, le=1)
     psh_mock_password_file: Path | None = None
-    psh_token_url: str = ""
-    psh_api_url: str = ""
+    # 公开服务地址不是凭据；私有代理可通过环境变量覆盖，认证标识始终外置。
+    psh_token_url: str = "https://hicode-auth-hz.hikvision.com/oauth/token"
+    psh_api_url: str = "https://itapi.hikvision.com/api/"
     psh_client_id: str = ""
     psh_client_secret: str = ""
     psh_api_key: str = ""
     psh_user_name: str = ""
+    psh_request_timeout_seconds: float = Field(default=4, gt=0, le=30)
+    psh_total_timeout_seconds: float = Field(default=9, gt=0, le=120)
+
+    @model_validator(mode="after")
+    def validate_psh_timeouts(self):
+        """总超时必须覆盖至少一次远端请求，避免部署配置在运行时自相矛盾。"""
+        if self.psh_total_timeout_seconds < self.psh_request_timeout_seconds:
+            raise ValueError("PSH 总超时不能小于单请求超时")
+        return self

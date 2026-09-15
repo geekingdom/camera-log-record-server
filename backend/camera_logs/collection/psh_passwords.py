@@ -38,11 +38,16 @@ class PshPasswordProvider:
             if not isinstance(challenge, str) or not challenge:
                 raise PshPasswordError("PSH 挑战值无效")
             try:
-                async with asyncio.timeout(self._TOTAL_TIMEOUT):
+                async with asyncio.timeout(self._timeout("psh_total_timeout_seconds", self._TOTAL_TIMEOUT)):
                     return await self._http_password(challenge)
             except TimeoutError:
                 raise PshPasswordError("PSH 口令服务超时") from None
         raise PshPasswordError("PSH 口令提供器模式无效")
+
+    def _timeout(self, name: str, default: float) -> float:
+        """读取已由 Settings 限制范围的超时；测试夹具缺字段时保持原保守值。"""
+        value = getattr(self.settings, name, default)
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else default
 
     @staticmethod
     def _task_key(task: Mapping[str, Any]) -> str:
@@ -89,7 +94,7 @@ class PshPasswordProvider:
         client_secret = self._required("psh_client_secret")
         api_key = self._required("psh_api_key")
         user_name = self._required("psh_user_name")
-        timeout = httpx.Timeout(self._REQUEST_TIMEOUT)
+        timeout = httpx.Timeout(self._timeout("psh_request_timeout_seconds", self._REQUEST_TIMEOUT))
         async with httpx.AsyncClient(timeout=timeout, transport=self.transport) as client:
             token = self._token or await self._fetch_token(client, token_url, client_id, client_secret)
             response = await self._decrypt(client, api_url, client_id, api_key, user_name, token, challenge)

@@ -68,3 +68,31 @@ async def test_new_dialogue_does_not_inherit_previous_run_debug_failure():
     dialogue.mode = "PSH"
     await dialogue.ensure_ash(write, "\n", .1)
     assert writes == [b"debug\n", b"synthetic-password\n"]
+
+
+async def test_provider_failure_never_blindly_retries_a_device_password():
+    """远端解密失败只结束当前 debug；恢复探测不得把猜测口令写给设备。"""
+    calls, writes = [], []
+
+    def provider(*_args):
+        calls.append(True)
+        raise RuntimeError("remote response must not escape")
+
+    dialogue = PshDialogue({}, provider)
+    dialogue.mode = "PSH"
+
+    async def write(data):
+        writes.append(data)
+        if data == b"debug\n":
+            dialogue.feed((SOURCE + "\nPassword:").encode())
+        elif data == b"\x03":
+            dialogue.feed(b"# ")
+        elif data == b"ls\n":
+            dialogue.feed(b"'ls' Not Supported, Try 'help'\n# ")
+
+    from camera_logs.collection.psh_dialogue import PshSwitchError
+
+    with pytest.raises(PshSwitchError, match="未自动重试"):
+        await dialogue.ensure_ash(write, "\n", .2)
+    assert calls == [True]
+    assert writes == [b"debug\n", b"\x03", b"ls\n"]

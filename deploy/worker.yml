@@ -26,6 +26,7 @@ services:
       NFS_SERVER_IP: ${NFS_SERVER_IP:-}
     network_mode: host
     restart: unless-stopped
+    stop_grace_period: 120s
     depends_on: {storage-init: {condition: service_completed_successfully}}
     volumes:
       - ${HOST_LOG_ROOT:-worker-data}:/var/lib/camera-logs

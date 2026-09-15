@@ -137,13 +137,20 @@ async def read_file(client, identifier):
         offset = page["nextOffset"]
 
 
-async def verify_session_log(client, database, task_id, node_id, session, expected):
-    """等真实文件水位包含有限源样本，再按原始正文逐条验证连续且没有重复。"""
+async def verify_session_log(client, database, task_id, node_id, session, expected, *, session_id=None):
+    """等真实文件水位包含有限源样本，再按原始正文逐条验证连续且没有重复。
+
+    同节点的受控重启会生成新的会话。调用方提供持久化会话标识后，只读取该会话
+    产生的文件，避免第二轮验证把第一轮已归档正文拼进来而掩盖额外记录。
+    """
     expected = [line.rstrip(b"\n") for line in expected]
+    query = {"taskId": task_id, "nodeId": node_id}
+    if session_id is not None:
+        query["sessionId"] = session_id
     async with asyncio.timeout(8):
         while True:
             files = [item async for item in database.files.find(
-                {"taskId": task_id, "nodeId": node_id}
+                query
             ).sort([("sessionStartedAt", 1), ("firstSequence", 1), ("id", 1)])]
             content = b"".join(await asyncio.gather(*(read_file(client, item["id"]) for item in files)))
             actual = []

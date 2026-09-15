@@ -139,9 +139,9 @@ class SshSource:
         )
         self.port = self.server.get_port()
 
-    async def wait_commands(self, sessions: int, timeout: float = 30) -> None:
-        """确认每个 SSH 会话均按固定初始化顺序收到命令和一个定时 probe。"""
-        expected = INITIAL_COMMANDS + ["probe"]
+    async def wait_commands(self, sessions: int, timeout: float = 30, *, expect_probe: bool = True) -> None:
+        """确认每个 SSH 会话实际收到固定初始化命令，可选验证一个定时 probe。"""
+        expected = INITIAL_COMMANDS + (["probe"] if expect_probe else [])
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             received = self.command_lines()

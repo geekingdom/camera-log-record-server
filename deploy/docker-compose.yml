@@ -162,6 +162,7 @@ services:
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-af.hikvision.com.cn}
     env_file: ${DEPLOY_ENV_FILE:-../.env}
     restart: unless-stopped
+    stop_grace_period: 120s
     logging: *service-logging
     environment:
       MONGO_URI: ${COMPOSE_MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/camera_logs?replicaSet=rs0}

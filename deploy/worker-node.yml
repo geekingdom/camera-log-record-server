@@ -19,6 +19,7 @@ services:
       NFS_SERVER_IP: ${NFS_SERVER_IP:-}
     network_mode: host
     restart: unless-stopped
+    stop_grace_period: 120s
     volumes:
       - ${HOST_LOG_ROOT:-/srv/camera-logs}:/var/lib/camera-logs
       # 主机指标只读；采样失败时展示未知，不按空闲节点调度。

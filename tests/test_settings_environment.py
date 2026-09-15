@@ -14,6 +14,28 @@ INTEGER_SETTINGS = {
 }
 
 
+def test_psh_http_environment_uses_public_default_endpoints_and_configurable_timeouts(monkeypatch):
+    """生产 Worker 可只外置认证标识，并用环境调整公司网络等待预算。"""
+    monkeypatch.setenv("PSH_MODE", "http")
+    monkeypatch.setenv("PSH_CLIENT_ID", "test-client")
+    monkeypatch.setenv("PSH_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("PSH_API_KEY", "test-key")
+    monkeypatch.setenv("PSH_USER_NAME", "test-user")
+    monkeypatch.setenv("PSH_REQUEST_TIMEOUT_SECONDS", "20")
+    monkeypatch.setenv("PSH_TOTAL_TIMEOUT_SECONDS", "70")
+    settings = Settings(_env_file=None)
+    assert settings.psh_token_url == "https://hicode-auth-hz.hikvision.com/oauth/token"
+    assert settings.psh_api_url == "https://itapi.hikvision.com/api/"
+    assert settings.psh_request_timeout_seconds == 20
+    assert settings.psh_total_timeout_seconds == 70
+
+
+def test_psh_total_timeout_cannot_be_shorter_than_one_request():
+    """部署文件中的超时关系在进程启动前拒绝，而不是调试时才出现矛盾。"""
+    with pytest.raises(ValidationError, match="总超时"):
+        Settings(_env_file=None, psh_request_timeout_seconds=10, psh_total_timeout_seconds=9)
+
+
 def test_integer_settings_from_process_environment(monkeypatch):
     """Docker和systemd均以字符串传递环境变量，合法配置必须能够启动。"""
     for field, value in INTEGER_SETTINGS.items():

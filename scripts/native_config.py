@@ -34,6 +34,10 @@ def defaults():
         "ADMIN_USERNAME": "admin", "ADMIN_PASSWORD": "asdf!234",
         "SESSION_COOKIE_SECURE": "false", "RETENTION_DAYS": "7",
         "NODE_CAPACITY": "100", "CLUSTER_CAPACITY": "500", "PSH_MODE": "disabled",
+        "PSH_TOKEN_URL": "https://hicode-auth-hz.hikvision.com/oauth/token",
+        "PSH_API_URL": "https://itapi.hikvision.com/api/",
+        "PSH_CLIENT_ID": "", "PSH_CLIENT_SECRET": "", "PSH_API_KEY": "", "PSH_USER_NAME": "",
+        "PSH_REQUEST_TIMEOUT_SECONDS": "4", "PSH_TOTAL_TIMEOUT_SECONDS": "9",
     }
 
 
@@ -68,7 +72,15 @@ COMMENTS = {
     "BOOTSTRAP_TOKEN": "服务账号令牌，妥善保管；独立节点应复制平台配置。",
     "ADMIN_PASSWORD": "按要求仅空库首次使用默认口令，首登强制修改；重跑不会覆盖已改密码。",
     "RETENTION_DAYS": "可修改：默认保留天数；后台已经保存的设置优先。",
-    "PSH_MODE": "disabled/mock/remote；调试mock密码放独立受限文件，勿写入仓库。",
+    "PSH_MODE": "disabled/mock/http；调试mock密码放独立受限文件，生产http凭据由受限环境注入，勿写入仓库。",
+    "PSH_TOKEN_URL": "公开 OAuth token 端点；公司代理可覆盖，禁止在 URL 中嵌入凭据。",
+    "PSH_API_URL": "公开 itapi 解密端点；公司代理可覆盖，禁止在 URL 中嵌入凭据。",
+    "PSH_CLIENT_ID": "生产 OAuth client ID；仅在 PSH_MODE=http 时由受限环境填写。",
+    "PSH_CLIENT_SECRET": "生产 OAuth client secret；仅在 PSH_MODE=http 时由受限环境填写，禁止公开。",
+    "PSH_API_KEY": "生产 itapi API key；仅在 PSH_MODE=http 时由受限环境填写，禁止公开。",
+    "PSH_USER_NAME": "生产 itapi userName；仅在 PSH_MODE=http 时由受限环境填写。",
+    "PSH_REQUEST_TIMEOUT_SECONDS": "单个远端请求超时秒数，范围大于0且不超过30。",
+    "PSH_TOTAL_TIMEOUT_SECONDS": "一次口令流程总超时秒数，范围大于0且不超过120，且不得小于单请求超时。",
 }
 
 

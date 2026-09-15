@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -173,45 +174,118 @@ class HourlyWriter:
         return positions[-1].sequence if positions else self._sequence
 
     async def write_many(self, chunks: list[tuple[bytes, datetime | None]]) -> list[ChunkPosition]:
+        """整批独占写入；取消调用者也必须等真实I/O结束后才能释放文件锁。"""
         if any(not isinstance(data, bytes) for data, _ in chunks):
             raise TypeError("raw log chunks must be bytes")
+        pending = asyncio.create_task(self._write_many_owned(chunks))
+        cancelled = False
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = pending.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _write_many_owned(self, chunks: list[tuple[bytes, datetime | None]]) -> list[ChunkPosition]:
+        """同小时未满分卷的常见批次合并I/O；轮转和回拨保留逐片边界。"""
+        normalized = []
+        for source_index, (data, received_at) in enumerate(chunks):
+            if data:
+                stamp = received_at or self._now()
+                stamp = stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+                normalized.append((source_index, data, stamp))
         async with self._lock:
             if self._close_error:
                 raise self._close_error
-            positions: list[ChunkPosition] = []
-            for source_index, (data, received_at) in enumerate(chunks):
-                if not data:
-                    continue
-                instant = received_at or self._now()
-                instant = instant.replace(tzinfo=UTC) if instant.tzinfo is None else instant.astimezone(UTC)
-                rollback = self._last_received_at if self._last_received_at and instant < self._last_received_at else None
-                hour = self._hour_of(instant, self.zone)
-                if self._hour is None:
-                    await asyncio.to_thread(self._open_sync, hour)
-                elif hour != self._hour or rollback:
-                    await self._seal_locked()
-                    await self._publish_pending_locked(background=True)
-                    await asyncio.to_thread(self._open_sync, hour)
-                consumed = 0
-                while consumed < len(data):
-                    if self._size == MAX_LOG_BYTES:
-                        await self._seal_locked()
+            try:
+                if normalized:
+                    hour = self._hour_of(normalized[0][2], self.zone)
+                    if self._hour is None:
                         await asyncio.to_thread(self._open_sync, hour)
-                    count = min(MAX_LOG_BYTES - self._size, len(data) - consumed)
-                    piece = data[consumed:consumed + count]
-                    self._sequence += 1
-                    position = ChunkPosition(self._sequence, self._size, count, self._log, rollback if consumed == 0 else None,
-                                             source_index, consumed)
-                    assert self._handle is not None and self._index is not None and self._log is not None
-                    await asyncio.to_thread(self._append_sync, piece, position, instant)
-                    positions.append(position)
-                    self._size += count
-                    self._digest.update(piece)
-                    self._first_sequence = self._first_sequence or position.sequence
-                    self._last_sequence = position.sequence
-                    consumed += count
-                self._last_received_at = instant
-            return positions
+                    stamps = [entry[2] for entry in normalized]
+                    if (self._hour == hour and all(self._hour_of(stamp, self.zone) == hour for stamp in stamps)
+                            and all(a <= b for a, b in pairwise(stamps))
+                            and (self._last_received_at is None or stamps[0] >= self._last_received_at)
+                            and self._size + sum(len(entry[1]) for entry in normalized) <= MAX_LOG_BYTES):
+                        return await asyncio.to_thread(self._append_batch_sync, normalized)
+                return await self._write_rotating_locked(normalized)
+            except Exception as error:
+                # 部分写入不重试、不发布完整归档，保留原错误及原文件供受控恢复。
+                self._close_error = error
+                if self._handle is not None:
+                    try:
+                        await asyncio.to_thread(self._handle.close)
+                    except Exception as close_error:
+                        # 保持原始写入故障为主错误，同时保留句柄关闭失败供诊断。
+                        raise error from close_error
+                raise
+
+    async def _write_rotating_locked(self, chunks):
+        """调用方已持锁；只在跨小时、回拨或10MiB边界时逐片轮转。"""
+        positions: list[ChunkPosition] = []
+        for source_index, data, instant in chunks:
+            rollback = self._last_received_at if self._last_received_at and instant < self._last_received_at else None
+            hour = self._hour_of(instant, self.zone)
+            if self._hour is None:
+                await asyncio.to_thread(self._open_sync, hour)
+            elif hour != self._hour or rollback:
+                await self._seal_locked()
+                await self._publish_pending_locked(background=True)
+                await asyncio.to_thread(self._open_sync, hour)
+            consumed = 0
+            while consumed < len(data):
+                if self._size == MAX_LOG_BYTES:
+                    await self._seal_locked()
+                    await asyncio.to_thread(self._open_sync, hour)
+                count = min(MAX_LOG_BYTES - self._size, len(data) - consumed)
+                piece = data[consumed:consumed + count]
+                self._sequence += 1
+                position = ChunkPosition(self._sequence, self._size, count, self._log, rollback if consumed == 0 else None,
+                                         source_index, consumed)
+                assert self._handle is not None and self._index is not None and self._log is not None
+                await asyncio.to_thread(self._append_sync, piece, position, instant)
+                positions.append(position)
+                self._size += count
+                self._digest.update(piece)
+                self._first_sequence = self._first_sequence or position.sequence
+                self._last_sequence = position.sequence
+                if time.monotonic() - self._last_sync >= 1:
+                    await asyncio.to_thread(self._sync_files)
+                consumed += count
+            self._last_received_at = instant
+        return positions
+
+    def _append_batch_sync(self, chunks) -> list[ChunkPosition]:
+        """一次正文和一次索引追加保存多个源块，确认完成后再推进水位和摘要。"""
+        assert self._handle is not None and self._index is not None
+        positions, rows, offset = [], [], self._size
+        for source_index, data, stamp in chunks:
+            position = ChunkPosition(self._sequence + len(positions) + 1, offset, len(data), self._log,
+                                     source_index=source_index)
+            positions.append(position)
+            rows.append(json.dumps({"sequence": position.sequence, "offset": offset, "length": len(data),
+                                   "receivedAt": stamp.isoformat()}, separators=(",", ":")) + "\n")
+            offset += len(data)
+        payload = b"".join(data for _, data, _ in chunks)
+        view = memoryview(payload)
+        while view:
+            written = self._handle.write(view)
+            if not written:
+                raise OSError("log file did not accept a complete write")
+            view = view[written:]
+        with self._index.open("a", encoding="utf-8") as index:
+            index.write("".join(rows))
+        self._size = offset
+        self._sequence = self._last_sequence = positions[-1].sequence
+        self._first_sequence = self._first_sequence or positions[0].sequence
+        self._digest.update(payload)
+        self._last_received_at = chunks[-1][2]
+        if time.monotonic() - self._last_sync >= 1:
+            self._sync_files()
+        return positions
 
     def _append_sync(self, data: bytes, position: ChunkPosition, instant: datetime) -> None:
         assert self._handle is not None and self._index is not None
@@ -224,8 +298,6 @@ class HourlyWriter:
         with self._index.open("a", encoding="utf-8") as index:
             index.write(json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
                 "receivedAt": instant.astimezone(UTC).isoformat()}, separators=(",", ":")) + "\n")
-        if time.monotonic() - self._last_sync >= 1:
-            self._sync_files()
 
     def _sync_files(self) -> None:
         if self._handle is None or self._index is None:

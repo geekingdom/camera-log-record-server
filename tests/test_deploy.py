@@ -35,6 +35,26 @@ def test_deploy_environment_is_private_and_uses_distinct_random_credentials(tmp_
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("component, filename", [("all", ".env"), ("worker", ".env.worker")])
+def test_generated_environment_defaults_psh_to_disabled_without_credentials(tmp_path, component, filename):
+    """完整部署和独立节点均保留公开端点，但绝不生成真实 PSH 凭据。"""
+    path = tmp_path / filename
+    environment["create_environment"](path, component)
+    values = dotenv_values(path)
+
+    assert values["PSH_MODE"] == "disabled"
+    assert values["PSH_TOKEN_URL"] == "https://hicode-auth-hz.hikvision.com/oauth/token"
+    assert values["PSH_API_URL"] == "https://itapi.hikvision.com/api/"
+    assert values["PSH_REQUEST_TIMEOUT_SECONDS"] == "4"
+    assert values["PSH_TOTAL_TIMEOUT_SECONDS"] == "9"
+    assert {key: values[key] for key in ("PSH_CLIENT_ID", "PSH_CLIENT_SECRET", "PSH_API_KEY", "PSH_USER_NAME")} == {
+        "PSH_CLIENT_ID": "",
+        "PSH_CLIENT_SECRET": "",
+        "PSH_API_KEY": "",
+        "PSH_USER_NAME": "",
+    }
+
+
 def test_deploy_environment_refuses_to_replace_existing_keys(tmp_path):
     """已有环境文件时不得用新密钥覆盖，避免现有加密数据不可恢复。"""
     path = tmp_path / ".env"
