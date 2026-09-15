@@ -56,6 +56,13 @@ async def current_slots(database):
     return await database.ssh_connection_slots.count_documents({"claims": {"$ne": []}})
 
 
+def awaiting_replacement(task):
+    """判断任务已无节点且保留运行意图，供SIGTERM后的状态观察使用。"""
+    # 正常调度可在观察前将STOPPED转为PENDING；两者都必须没有节点归属。
+    return (task.get("status") in {"STOPPED", "PENDING"}
+            and task.get("desiredState") == "RUNNING" and task.get("nodeId") is None)
+
+
 async def main(isapi_test_port=80):
     """启动采集、向 Worker 发送 SIGTERM、替换进程并验证新运行。"""
     configured = Settings()
@@ -184,15 +191,16 @@ async def main(isapi_test_port=80):
                 released = await wait_task(
                     client,
                     task_id,
-                    lambda item: (
-                        item.get("status") == "STOPPED"
-                        and item.get("desiredState") == "RUNNING"
-                        and item.get("nodeId") is None
-                    ),
+                    awaiting_replacement,
                     "SIGTERM 后任务未完成可恢复收尾",
                 )
                 if source.active or await current_slots(database):
                     raise RuntimeError("SIGTERM 后 SSH 连接或名额未释放")
+                old_run = await database.runs.find_one({"id": first["runId"]})
+                if released.get("runId") != first["runId"] or not old_run or not old_run.get("endedAt"):
+                    raise RuntimeError("SIGTERM 后旧运行未确认结束")
+                if await database.endpoint_locks.count_documents({"taskId": task_id, "runId": first["runId"]}):
+                    raise RuntimeError("SIGTERM 后旧运行端点锁未释放")
                 replacement_log = (root / "worker-replacement.log").open("w")
                 logs.append(replacement_log)
                 replacement = await start_worker(
@@ -251,7 +259,8 @@ async def main(isapi_test_port=80):
                             "sessions": source.connection_count,
                             "initialCommands": source.command_lines(),
                             "actualLogs": [first_log, second_log],
-                            "releaseBeforeReplacement": released["status"] == "STOPPED",
+                            "releaseBeforeReplacement": awaiting_replacement(released),
+                            "releaseObservedStatus": released["status"],
                             "finalStatus": final["status"],
                             "isapiTestPort": isapi_test_port,
                         },
