@@ -25,6 +25,7 @@ from starlette.requests import Request
 
 from camera_logs.common.database import now
 from camera_logs.common.request_context import request_context
+from camera_logs.common.request_targets import request_target
 from camera_logs.common.websocket_logging import track_websocket
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
@@ -191,6 +192,7 @@ def log_request(
         "clientIp": getattr(getattr(request, "client", None), "host", None),
         "method": request.method,
         "route": path,
+        **request_target(path, dict(getattr(request, "path_params", {}))),
         "targets": dict(request.path_params) if hasattr(request, "path_params") else {},
         "status": status,
         "responseComplete": response_complete,
@@ -281,7 +283,8 @@ class RequestLoggingMiddleware:
                         "outcome": outcome, "level": level, "responseComplete": complete,
                         "responseBytes": sent_bytes,
                         "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
-                        "taskId": request.path_params.get("task_id") if hasattr(request, "path_params") else None,
+                        **request_target(getattr(scope.get("route"), "path", None) or path,
+                                         dict(request.path_params)),
                         "reason": reason,
                         "errorType": type(failure).__name__ if failure is not None else None,
                         "errorFrames": _error_frames(failure) if failure is not None else None,

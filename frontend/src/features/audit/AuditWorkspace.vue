@@ -6,6 +6,7 @@ import { auditApi, type AuditEvent, type EventBase, type EventLevel, type EventO
 import { EventCursorPager } from "./eventPager";
 import AuditEventDrawer from "./AuditEventDrawer.vue";
 import { eventSource } from "./eventSource";
+import { requestTargetDetail, requestTargetName } from "./eventTarget";
 
 type Tab = "audit" | "runtime" | "request";
 type Row = AuditEvent | RuntimeEvent | RequestEvent;
@@ -93,7 +94,7 @@ function summary(row: Row) {
 }
 
 function target(row: Row) {
-  if (activeTab.value === "request") return (row as RequestEvent).route || "-";
+  if (activeTab.value === "request") return requestTargetName(row);
   return row.targetName || row.taskName || row.targetId || row.taskId || "-";
 }
 
@@ -225,7 +226,7 @@ void load();
       <el-table v-loading="loading" :data="rows" class="data-table audit-table" scrollbar-always-on highlight-current-row empty-text="当前条件下没有事件" @row-click="select">
         <el-table-column label="事件摘要" min-width="245" show-overflow-tooltip><template #default="{ row }"><div class="summary-cell"><strong>{{ summary(row) }}</strong><small v-if="row.reason">{{ row.reason }}</small></div></template></el-table-column>
         <el-table-column label="级别 / 结果" min-width="132"><template #default="{ row }"><div class="tag-stack"><el-tooltip :content="row.level || '未记录'"><el-tag :type="levelType(row.level)" effect="plain">{{ row.level ? levelLabel(row.level) : "未记录" }}</el-tag></el-tooltip><el-tooltip v-if="row.outcome" :content="row.outcome"><el-tag :type="outcomeType(row.outcome)" effect="plain">{{ outcomeLabel(row.outcome) }}</el-tag></el-tooltip><el-tag v-else-if="activeTab === 'request'" :type="Number(row.httpStatus) >= 500 ? 'danger' : Number(row.httpStatus) >= 400 ? 'warning' : 'success'" effect="plain">{{ row.httpStatus || "未记录" }}</el-tag></div></template></el-table-column>
-        <el-table-column label="对象" min-width="180" show-overflow-tooltip><template #default="{ row }"><div class="object-cell"><strong>{{ target(row) }}</strong><small>{{ row.deviceIp || row.taskId || row.nodeId || "未记录" }}</small></div></template></el-table-column>
+        <el-table-column label="对象" min-width="180" show-overflow-tooltip><template #default="{ row }"><div class="object-cell"><strong>{{ target(row) }}</strong><small>{{ activeTab === 'request' ? requestTargetDetail(row) : row.deviceIp || row.taskId || row.nodeId || "未记录" }}</small></div></template></el-table-column>
         <el-table-column label="操作者 / 来源" min-width="200" show-overflow-tooltip><template #default="{ row }"><div class="object-cell"><strong>{{ eventSource(row).name }}</strong><small>{{ eventSource(row).detail }}</small></div></template></el-table-column>
         <el-table-column label="时间" min-width="178"><template #default="{ row }"><span class="event-time">{{ rowTime(row) }}</span><small v-if="row.requestId" class="request-short">{{ row.requestId }}</small></template></el-table-column>
       </el-table>

@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from camera_logs.administration.event_sources import event_source, event_source_documents
 from camera_logs.common.database import public
 from camera_logs.common.observability import redact, redact_text
+from camera_logs.common.request_targets import request_target
 
 ACTION_SUMMARIES = {
     "control:RUNNING": "请求启动任务", "control:STOPPED": "请求停止任务",
@@ -192,7 +193,9 @@ async def _documents_by_id(db, collection: str, identifiers: set[str]) -> dict[s
 
 async def present_events(db, items: Iterable[dict]) -> list[dict]:
     """批量解析主体、任务和目标名称，避免分页条目逐行查询造成 N+1。"""
-    raw_items = list(items)
+    # 历史集合请求可从路由补齐类型；未保存的实体 ID 不猜测、不回填数据库。
+    raw_items = [({**request_target(item["route"], {"task_id": item.get("taskId")}), **item}
+                  if item.get("route") and item.get("method") else item) for item in items]
     actor_ids = {str(item["actor"]) for item in raw_items if item.get("actor")}
     target_ids = {str(item["targetId"]) for item in raw_items if item.get("targetId")}
     task_ids = {str(item["taskId"]) for item in raw_items if item.get("taskId")} | target_ids

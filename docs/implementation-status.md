@@ -1,5 +1,10 @@
 # 当前状态总表
 
+| 当前请求记录问题 | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 请求对象统一显示未记录 | `common/request_targets.py`、`observability.py`、`administration/event_presenter.py`、前端审计表格和详情 | 保存路由声明的对象ID并批量补名称；集合/平台操作明确范围。对象及请求专项21项、前端164项、构建、真实Cookie三类审计页面及1440/390截图通过；后端全量1500项通过 | 旧记录未保存的实体ID无法恢复，集合类型可在读取时补齐；30天TTL和请求频率不变，见[当前证据](history/2026-09-15-request-target-and-client-ip.md) |
+| 公司来源IP显示Docker容器地址 | 已确认用户实际运行独立frontend/backend/worker/database四个Compose项目；`deploy/config/backend.env.example`及部署说明补齐代理配置，`tests/test_proxy_headers.py`覆盖策略和请求审计 | 用户实测API的`FORWARDED_ALLOW_IPS=127.0.0.1`，不信任实际对端172.21.0.2；可信代理恢复浏览器10.41.203.12、非可信XFF仍拒绝的联合回归通过 | 公司需在实际`.env.backend`加入代理172.21.0.2后仅重建API，并通过新请求验证；未远程执行，不能宣称目标已恢复。IP白名单仍限定浏览器而非设备地址，历史误记IP不可可靠回填 |
+
 | 当前问题 | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 跨机 Worker 在登记页在线、节点看板离线 | `administration/settings.py`、`node/health.py`统一30秒窗口并区分未来心跳；`commands/api.py`返回`assessedAt`；`nodeDashboard.ts`、`useWorkspaceCollections.ts`以服务器时间与浏览器单调计时更新快照 | 22项节点/设置回归、前端162项、生产构建、1440/390看板截图及浏览器快8小时验证通过；隔离真实API/Worker/WebSocket/小时下载通过并清理；见[心跳一致性证据](history/2026-09-15-node-heartbeat-consistency.md) | 公司目标机器的实际心跳和时钟尚未提供，不能认定其根因已证实；更新API/前端后核对`heartbeat`与`assessedAt`及A/B服务器UTC时间，真实时钟偏差须同步时间，不能放宽租约或伪造在线 |

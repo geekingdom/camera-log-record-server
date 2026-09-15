@@ -45,6 +45,26 @@ Docker 镜像构建默认使用公司 pip 制品库，可通过 `PIP_INDEX_URL` 
 
 独立后端默认只监听 `127.0.0.1:18080`；分机部署将 `API_BIND_IP` 改为内网 IP 或 `0.0.0.0`。`FORWARDED_ALLOW_IPS` 填前端代理实际来源 IP/CIDR，支持逗号分隔。前端容器中的 `127.0.0.1` 指向自身，`BACKEND_UPSTREAM` 应使用后端可达地址。平台白名单限制浏览器/API 客户端来源，不限制设备或串口目标。
 
+### 独立 Docker 前端的客户端 IP
+
+独立 `deploy-frontend.sh` 容器代理 `deploy-backend.sh` API 时，API 实际看到的是代理连接来源，而不是浏览器地址。同机可能是前端容器 bridge 地址，跨机经过SNAT时可能是前端宿主机地址，须以API实际对端为准。后端 `.env.backend` 的 `FORWARDED_ALLOW_IPS` 保留默认本机 `127.0.0.1`，并加入真实代理来源。公司服务器 `10.41.203.43`、浏览器 `10.41.203.12`、API记录代理地址 `172.21.0.2` 的部署应设置：
+
+```ini
+FORWARDED_ALLOW_IPS=127.0.0.1,172.21.0.2
+```
+
+然后只在后端服务器执行 `bash ./deploy-backend.sh --env-file /实际路径/.env.backend`，不需要重启 Worker 或数据库。前端 Nginx 已用 `$remote_addr` 覆写浏览器提交的 `X-Forwarded-For`，故 API 的来源策略和请求审计都会读取 `10.41.203.12`。不要把浏览器 IP 写入可信代理列表，也不要以 `172.21.0.0/16` 或 `*` 扩大信任范围。
+
+bridge 地址可能随前端容器重建变化。部署或升级前先在后端主机只读确认当前地址，再写入后端配置并重启 API：
+
+```sh
+docker inspect camera-log-record-server-frontend-frontend-1 --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+docker exec camera-log-record-server-backend-api-1 printenv FORWARDED_ALLOW_IPS
+docker exec camera-log-record-server-frontend-frontend-1 nginx -T 2>&1 | grep -F 'X-Forwarded-For'
+```
+
+若自定义了 `COMPOSE_PROJECT_NAME`，先用 `docker ps --filter label=com.docker.compose.service=frontend --format '{{.Names}}'` 和同一方式查询 `api`，再将实际容器名代入上述命令。不要输出完整 `docker compose config`，其中可能包含数据库连接串或其它敏感配置。
+
 ## 服务器 A 平台与服务器 B Worker
 
 跨机 Docker 仍只使用既有入口：服务器 A 使用 `deploy-all.sh` 部署数据库、API、本机 Worker 和前端；服务器 B 使用 `deploy-worker.sh` 部署独立 Worker。A 的三成员仍位于同一台主机，用于副本集事务与一致性，不能当作跨主机数据库容灾。

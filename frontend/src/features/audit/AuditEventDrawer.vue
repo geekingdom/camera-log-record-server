@@ -70,7 +70,7 @@ async function copyRequestId() {
           <dt>运行</dt><dd>{{ value(row.runId) }}</dd>
           <dt>会话</dt><dd>{{ value(row.sessionId) }}</dd>
           <dt>节点</dt><dd>{{ value(row.nodeId) }}</dd>
-          <dt>对象</dt><dd>{{ value(row.targetName || row.targetId) }}</dd>
+          <dt>对象</dt><dd>{{ value(row.targetName || row.targetLabel || row.targetId) }}</dd>
         </dl>
       </section>
 

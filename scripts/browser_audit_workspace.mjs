@@ -158,10 +158,16 @@ async function verifyWorkspace() {
     await page.getByRole("tab", { name: "请求记录", exact: true }).click();
   });
   await page.getByRole("heading", { name: "请求记录", exact: true }).waitFor();
+  await page.evaluate(() => fetch("/api/v1/nodes", { credentials: "same-origin" }));
+  // 本轮请求晚于页面初始时间范围，显式刷新查询截止时间。
+  await page.getByRole("button", { name: "近 24 小时", exact: true }).click();
   await page.getByLabel("按请求方法筛选", { exact: true }).fill("GET");
+  await page.getByLabel("按路由筛选", { exact: true }).fill("/api/v1/nodes");
   await waitForApi("/api/v1/request-events", async () => {
     await page.getByRole("button", { name: "查询", exact: true }).click();
   });
+  await page.locator(".object-cell").getByText("服务节点", { exact: true }).first().waitFor();
+  await page.getByText("集合查询（无单个对象）", { exact: true }).first().waitFor();
   await selectFirstRecord("请求记录详情");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "请求记录详情", exact: true }).waitFor({ state: "hidden" });
