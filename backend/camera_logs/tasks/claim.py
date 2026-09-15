@@ -92,7 +92,6 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             or node.get("isolated") or node.get("configurationMismatch")
             or resource_pressure(node, current_time)
             or node.get("writeLatencyMs", 0) > 200
-            or occupied >= node.get("capacity", DEFAULT_NODE_CAPACITY)
         ):
             return None
 
@@ -130,6 +129,11 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             {"id": node_id}, {"$inc": {"assignmentRevision": 1}},
             return_document=ReturnDocument.AFTER, session=session,
         )
+        # 心跳中的容量和准入可能早于管理员保存；同一配置写栅栏保证竞争后重新复核。
+        configured = node_config or {}
+        capacity = configured.get("capacity", node.get("capacity", DEFAULT_NODE_CAPACITY))
+        if not configured.get("accepting", True) or occupied >= capacity:
+            return None
         if input_rate_blocked(node, node_config if node_config is not None else node):
             return None
         if node_config and (node_config.get("deletedAt") or not accepts_resource(node_config, resource_ip)):

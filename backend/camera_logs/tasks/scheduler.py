@@ -78,9 +78,12 @@ async def schedule_once(repo, lease=None):
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
+        # 候选排序直接采用已保存容量，关闭准入也不等待下一次Worker心跳才排除。
         nodes = [node | routing_config(node_configs.get(node["id"], {}))
-                 | {"inputRateLimitMiB": input_rate_limit(node_configs.get(node["id"], node))} for node in nodes
-                 if not node_configs.get(node["id"], {}).get("deletedAt")]
+                 | {"capacity": node_configs.get(node["id"], {}).get("capacity", node.get("capacity", repo.settings.node_capacity)),
+                    "inputRateLimitMiB": input_rate_limit(node_configs.get(node["id"], node))} for node in nodes
+                 if not node_configs.get(node["id"], {}).get("deletedAt")
+                 and node_configs.get(node["id"], {}).get("accepting", True)]
         resource = await db.resources.find_one({"id": task.get("resourceId")}) if task.get("resourceId") else None
         routing_task = task | {"resourceIp": resource["ip"] if resource else task.get("ip"),
                                "requiresNfs": requires_coredump_nfs(task, resource)}
