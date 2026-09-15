@@ -27,4 +27,6 @@ JSONL时间不再调用依赖容器本地时区的默认formatTime，而是显�
 
 ## 验收边界
 
+功能提交`5c371a8`已推送；CI34953810283各作业无执行步骤。GitHub check-run注释为“The job was not started because recent account payments have failed or your spending limit needs to be increased”。云端验收待账号Billing恢复后重跑，不将其误判为代码回归。
+
 公司OAuth/解密接口当前本机不可访问，本轮仅用MockTransport验证响应和异常分支，不能断言公司现场失败根因已解决。需升级Worker后复现并按同一会话日志定位，详见`docs/psh-production.md`。更改不会补回旧接口响应，也不改变设备原始输出的保存语义。物理多节点与500路全天验收仍保留在当前状态总表。
