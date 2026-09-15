@@ -1,6 +1,7 @@
 """PSH 口令提供器测试：所有 HTTP 调用均由 MockTransport 拦截。"""
 
 import json
+import logging
 from types import SimpleNamespace
 
 import httpx
@@ -137,3 +138,105 @@ async def test_http_errors_and_response_body_never_leak_sensitive_values():
         await provider(task(), "challenge")
     assert secret not in str(raised.value)
     assert "challenge" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_decrypt_http_failure_keeps_safe_response_details_and_redacts_json_log(caplog):
+    """服务端错误保留阶段、状态和白名单说明，绝不记录挑战值、口令或令牌。"""
+    challenge = "private-device-challenge"
+    secret = "decrypted-password-and-token"
+
+    async def handler(request):
+        if request.url.host == "auth.example":
+            return httpx.Response(200, json={"access_token": "oauth-token"})
+        return httpx.Response(503, json={
+            "code": "SERVICE_BUSY", "message": "upstream is busy", "error_description": "retry later",
+            "data": {"data": secret}, "source": challenge, "token": "response-token",
+        })
+
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.psh_passwords")
+    provider = PshPasswordProvider(settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(PshPasswordError) as raised:
+        await provider(task() | {"id": "task-1", "runId": "run-1", "sessionId": "session-1"}, challenge)
+
+    error = raised.value
+    assert error.diagnostic["stage"] == "DECRYPT_RESPONSE"
+    assert error.diagnostic["httpStatus"] == 503
+    assert error.diagnostic["serviceCode"] == "SERVICE_BUSY"
+    assert error.diagnostic["message"] == "upstream is busy"
+    contexts = [getattr(record, "context", {}) for record in caplog.records]
+    assert any(context.get("taskId") == "task-1" and context.get("sessionId") == "session-1" for context in contexts)
+    serialized = repr(contexts) + str(error) + repr(error.diagnostic)
+    for value in (challenge, secret, "oauth-token", "response-token"):
+        assert value not in serialized
+
+
+@pytest.mark.asyncio
+async def test_token_invalid_json_and_decrypt_timeout_have_distinct_safe_diagnostics(caplog):
+    """令牌格式失败和解密超时不能塌缩成同一通用错误，且异常正文不外泄。"""
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.psh_passwords")
+
+    async def invalid_json(request):
+        return httpx.Response(200, text="<html>gateway response with password=do-not-log</html>")
+
+    provider = PshPasswordProvider(settings(), transport=httpx.MockTransport(invalid_json))
+    with pytest.raises(PshPasswordError) as invalid:
+        await provider(task(), "challenge-not-for-log")
+    assert invalid.value.diagnostic["stage"] == "TOKEN_RESPONSE"
+    assert invalid.value.diagnostic["reason"] == "INVALID_JSON"
+
+    async def timeout(request):
+        if request.url.host == "auth.example":
+            return httpx.Response(200, json={"access_token": "never-log-token"})
+        raise httpx.ReadTimeout("socket password=do-not-log", request=request)
+
+    provider = PshPasswordProvider(settings(), transport=httpx.MockTransport(timeout))
+    with pytest.raises(PshPasswordError) as timed_out:
+        await provider(task(), "challenge-not-for-log")
+    assert timed_out.value.diagnostic["stage"] == "DECRYPT_REQUEST"
+    assert timed_out.value.diagnostic["reason"] == "TIMEOUT"
+    assert timed_out.value.diagnostic["exceptionType"] == "ReadTimeout"
+    serialized = repr([getattr(record, "context", {}) for record in caplog.records])
+    for value in ("do-not-log", "never-log-token", "challenge-not-for-log"):
+        assert value not in serialized
+
+
+@pytest.mark.asyncio
+async def test_token_html_failure_is_http_status_with_safe_preview_and_no_secret_leak(caplog):
+    """非2xx令牌响应优先按HTTP失败归类，预览用于识别网关但不得回显秘密。"""
+    challenge, secret = "challenge-should-not-log", "client-secret gateway-token"
+
+    async def handler(_request):
+        return httpx.Response(502, content=f"<html>proxy failure {challenge} {secret}</html>",
+                              headers={"content-type": "text/html"})
+
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.psh_passwords")
+    provider = PshPasswordProvider(settings(), transport=httpx.MockTransport(handler))
+    with pytest.raises(PshPasswordError) as raised:
+        await provider(task(), challenge)
+    details = raised.value.diagnostic
+    assert details["stage"] == "TOKEN_RESPONSE"
+    assert details["reason"] == "HTTP_STATUS"
+    assert details["httpStatus"] == 502
+    assert details["responseContentType"] == "text/html"
+    assert "proxy failure" in details["responsePreview"]
+    serialized = repr(details) + repr([getattr(record, "context", {}) for record in caplog.records])
+    assert challenge not in serialized and secret not in serialized
+
+
+@pytest.mark.asyncio
+async def test_config_and_mock_failures_keep_legacy_message_and_emit_diagnostics(caplog):
+    """配置与mock错误不能绕过JSON日志诊断，旧有面向用户的中文错误保持可识别。"""
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.psh_passwords")
+    invalid_url = PshPasswordProvider(settings(psh_token_url="http://auth.example/token"))
+    with pytest.raises(PshPasswordError, match="URL 无效") as config_error:
+        await invalid_url(task(), "challenge")
+    assert config_error.value.diagnostic["stage"] == "CONFIG"
+    assert config_error.value.diagnostic["reason"] == "INVALID_URL"
+
+    mock = PshPasswordProvider(settings(psh_mode="mock", psh_mock_password_file=None))
+    with pytest.raises(PshPasswordError, match="PSH 口令服务失败") as mock_error:
+        await mock(task(), "challenge")
+    assert mock_error.value.diagnostic["stage"] == "MOCK"
+    assert mock_error.value.diagnostic["reason"] == "FILE_UNCONFIGURED"
+    assert any(getattr(record, "context", {}).get("stage") in {"CONFIG", "MOCK"} for record in caplog.records)

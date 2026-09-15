@@ -8,10 +8,12 @@ import { confirmAction } from "../../shared/confirm";
 import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
 import LogFileViewer from "./LogFileViewer.vue";
-import { shanghaiDayBounds, shanghaiToday } from "./archiveDate";
+import { shanghaiDateTimeRange, shanghaiDateTimeToUtc, shanghaiToday } from "./archiveDate";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
 const props = defineProps<{ taskId: string; canDownload?: boolean }>();
 const date = ref(shanghaiToday()), hourPage = ref(1), hourTotal = ref(0), progress = ref(0);
+const initialSearchRange = shanghaiDateTimeRange();
+const searchStart = ref(initialSearchRange.start), searchEnd = ref(initialSearchRange.end);
 const file = ref<LogFile>(), viewerOpen = ref(false), viewerOffset = ref(0), viewerKeyword = ref(""), resultPage = ref(1), resultTotal = ref(0), resultJob = ref(""), searchKeyword = ref("");
 const integrityLabels: Record<string, string> = { VERIFIED: "归档已校验", OPEN: "正在写入", UNAVAILABLE: "含不可用片段", UNVERIFIED: "待确认摘要" };
 const jobStatusLabels: Record<string, string> = { QUEUED: "等待执行", RUNNING: "正在执行", SUCCEEDED: "已完成", FAILED: "执行失败", CANCELLED: "已取消", EXPIRED: "已过期" };
@@ -132,7 +134,14 @@ async function download() {
 async function search() {
   if (busy.value) return;
   if (!keyword.value.trim()) return ElMessage.warning("请输入关键词");
-  const range = shanghaiDayBounds(date.value);
+  let startUtc: string, endUtc: string;
+  try {
+    startUtc = shanghaiDateTimeToUtc(searchStart.value);
+    endUtc = shanghaiDateTimeToUtc(searchEnd.value);
+  } catch { return ElMessage.warning("请选择完整的开始和结束时间"); }
+  const start = new Date(startUtc), end = new Date(endUtc);
+  if (end <= start) return ElMessage.warning("结束时间必须晚于开始时间");
+  if (end.getTime() - start.getTime() > 24 * 60 * 60 * 1000) return ElMessage.warning("检索时间范围不能超过 24 小时");
   const current = ++jobGeneration;
   // 新检索必须作废旧结果页请求，避免旧作业的分页响应覆盖新作业首屏。
   resultsGeneration++;
@@ -150,8 +159,8 @@ async function search() {
     const job = await api.search(
       props.taskId,
       searchKeyword.value,
-      range.start,
-      range.end,
+      startUtc,
+      endUtc,
     );
     if (current !== jobGeneration) return;
     runningJob = { id: job.id, kind: "log-searches" };
@@ -190,19 +199,11 @@ async function loadResultPage() {
   } catch (error) { if (workspace === generation && current === resultsGeneration) fail(error); }
 }
 watch(date, () => {
-  // 更换上海自然日后，旧检索作业及其分页响应不得回写到新日期。
-  jobGeneration++;
-  runningJob = undefined;
-  busy.value = false;
-  status.value = "";
-  progress.value = 0;
-  resultsGeneration++;
+  // 归档日期只决定小时目录；检索范围和作业不受影响，但迟到的旧文件元数据不能重开查看器。
   fileLookupGeneration++;
+  viewerOpen.value = false;
   if (hourPage.value !== 1) hourPage.value = 1;
   else void load();
-  results.value = [];
-  resultTotal.value = 0;
-  resultJob.value = "";
 });
 watch(hourPage, () => void load());
 watch(
@@ -221,6 +222,9 @@ watch(
     viewerOpen.value = false;
     fileLookupGeneration++;
     results.value = [];
+    const range = shanghaiDateTimeRange();
+    searchStart.value = range.start;
+    searchEnd.value = range.end;
     busy.value = false;
   },
   { immediate: true },
@@ -288,7 +292,12 @@ onBeforeUnmount(() => {
     </div>
     <el-progress v-if="busy || status === 'SUCCEEDED'" :percentage="Math.min(100, Math.max(0, progress))" :status="status === 'SUCCEEDED' ? 'success' : undefined" />
     <h3>历史检索</h3>
-    <div class="search-scope">检索范围：{{ date }} 00:00:00 至次日 00:00:00（上海时间）</div>
+    <div class="search-scope">独立检索范围（上海时间，默认最近 1 小时；最长 24 小时）</div>
+    <div class="search-time-range" aria-label="历史检索时间范围">
+      <label>开始时间<input v-model="searchStart" type="datetime-local" step="60" aria-label="检索开始时间（上海时区）" /></label>
+      <span>至</span>
+      <label>结束时间<input v-model="searchEnd" type="datetime-local" step="60" aria-label="检索结束时间（上海时区）" /></label>
+    </div>
     <div class="search-row">
       <el-input
         v-model="keyword"
@@ -331,6 +340,9 @@ onBeforeUnmount(() => {
   margin: 12px 0;
 }
 .search-scope { margin: 6px 0 10px; color: #697a79; font-size: 12px; }
+.search-time-range { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #5b6a6e; font-size: 12px; }
+.search-time-range label { display: grid; gap: 4px; min-width: min(100%, 210px); }
+.search-time-range input { box-sizing: border-box; width: 210px; max-width: 100%; min-height: 32px; padding: 4px 8px; border: 1px solid #d6dfe0; border-radius: 4px; color: #34474b; font: inherit; }
 .search-line { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 :deep(.el-date-editor) {
   max-width: 100%;
@@ -352,5 +364,8 @@ onBeforeUnmount(() => {
   .search-row {
     align-items: stretch;
   }
+  .search-time-range { align-items: stretch; }
+  .search-time-range label { flex: 1 1 100%; }
+  .search-time-range input { width: 100%; }
 }
 </style>

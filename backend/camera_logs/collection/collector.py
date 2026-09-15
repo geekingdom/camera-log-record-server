@@ -75,7 +75,7 @@ class Collector:
         self._prefixer = LinePrefixer()
         self._terminal_error: Exception | None = None
         self._commands = CommandDispatcher(
-            self.task,
+            self.task | {"id": self.task_id, "runId": self.run_id, "sessionId": self.session_id},
             resolve_debug_password=resolve_debug_password,
             on_debug=on_debug,
             connection=lambda: self._connection,

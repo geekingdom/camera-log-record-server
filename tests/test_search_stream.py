@@ -17,6 +17,22 @@ def scan(scanner, data, number, **fields):
     return list(scanner.scan(io.BytesIO(data), index, IDENTITY | {"id": str(number)} | fields, lambda: False))
 
 
+def test_minute_range_filters_inside_same_hour_with_shanghai_offset():
+    """同一小时文件中按上海分钟区间筛选，前后行排除且结束边界不包含。"""
+    start = datetime.fromisoformat("2026-09-09T08:15:00+08:00")
+    end = datetime.fromisoformat("2026-09-09T08:17:00+08:00")
+    times = [NOW + timedelta(minutes=14, seconds=59), NOW + timedelta(minutes=15),
+             NOW + timedelta(minutes=16, seconds=59), NOW + timedelta(minutes=17)]
+    blocks = [f"needle row-{number}\n".encode() for number in range(4)]
+    offset, index = 0, []
+    for number, (stamp, block) in enumerate(zip(times, blocks, strict=True)):
+        index.append({"offset": offset, "length": len(block), "sequence": number, "receivedAt": stamp.isoformat()})
+        offset += len(block)
+    scanner = StreamSearch(b"needle", start, end)
+    result = list(scanner.scan(io.BytesIO(b"".join(blocks)), index, IDENTITY | {"id": "minute-file"}, lambda: False))
+    assert [item["text"] for item in result] == ["needle row-1", "needle row-2"]
+
+
 @pytest.mark.parametrize("split", range(1, 6))
 def test_every_keyword_split_has_one_match_with_original_offset(split):
     scanner = StreamSearch(b"needle", NOW, RANGE_END)

@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .psh_passwords import PshPasswordError
 from .psh_response import PshResponse
 
 _ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -215,6 +216,7 @@ class PshDialogue:
         self._active, self._buffer = True, b""
         self._response, self._source = PshResponse(), None
         awaiting_challenge = False
+        stage = "PROBE"
         try:
             async with asyncio.timeout(timeout):
                 await _notify(self.on_event, "STARTED", {"mode": self.mode})
@@ -225,6 +227,7 @@ class PshDialogue:
                         return
                     self._buffer, self._response, self._source = b"", PshResponse(), None
                 awaiting_challenge = True
+                stage = "WAIT_CHALLENGE"
                 await write(("debug" + newline).encode())
                 response, source = await self._wait_response()
                 if response == "FALLBACK":
@@ -239,13 +242,16 @@ class PshDialogue:
                 if response != "CHALLENGE" or not self.provider:
                     raise PshSwitchError("未配置可用的 PSH 解密服务")
                 await _notify(self.on_event, "CHALLENGE_RECEIVED", {"mode": "PSH"})
+                stage = "RESOLVE_PASSWORD"
                 result = self.provider(self.task, source)
                 password = await result if inspect.isawaitable(result) else result
                 if not isinstance(password, str) or not password or len(password) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in password):
                     raise PshSwitchError("PSH 解密服务返回无效口令")
                 self._buffer = b""
                 self._response, self._source = PshResponse(), None
+                stage = "SUBMIT_PASSWORD"
                 await write((password + newline).encode())
+                stage = "CONFIRM_ASH"
                 response, _ = await self._wait_response(confirming=True)
                 if response == "PROMPT":
                     await self._probe_ls(write, newline)
@@ -253,12 +259,26 @@ class PshDialogue:
                         raise PshSwitchError("口令提交后 ls 仍处于 PSH 模式")
                 await _notify(self.on_event, "ASH_READY", {"mode": "ASH"})
         except asyncio.CancelledError:
+            await _notify(self.on_event, "CANCELLED", {
+                "mode": self.mode, "commandBlocked": True,
+                "debugError": f"PSH 调试已取消（阶段={stage}；原因=CANCELLED）",
+                "debugDiagnostic": {"stage": stage, "reason": "CANCELLED"},
+            })
             raise
-        except Exception:  # noqa: BLE001 - 第三方错误统一转换为不含密文口令的领域异常。
+        except PshPasswordError as error:
+            failure = str(error)
+            await _notify(self.on_event, "FAILED", {
+                "mode": self.mode, "commandBlocked": True, "debugError": failure,
+                "debugDiagnostic": error.diagnostic,
+            })
+            await self.recover_command_channel(write, newline, timeout)
+            raise PshSwitchError("PSH 到 ASH 切换失败或超时；本次命令未自动重试") from None
+        except Exception as error:  # noqa: BLE001 - 异常正文不安全，仅保留阶段和类型。
             # 隔离第三方异常文本，防止请求参数、响应正文或解密口令进入日志。
             failure = "PSH 调试失败，本次命令未自动重试"
             await _notify(self.on_event, "FAILED", {
-                "mode": self.mode, "commandBlocked": True, "debugError": failure,
+                "mode": self.mode, "commandBlocked": True, "debugError": f"{failure}（阶段={stage}；异常={type(error).__name__}）",
+                "debugDiagnostic": {"stage": stage, "reason": "DEVICE_DIALOGUE_FAILED", "exceptionType": type(error).__name__},
             })
             await self.recover_command_channel(write, newline, timeout)
             if awaiting_challenge:

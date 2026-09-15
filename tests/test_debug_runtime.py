@@ -217,12 +217,40 @@ async def test_debug_already_ash_retries_after_event_insert_failure(tmp_path):
     )
     runtime.task = task
     confirmation = {"mode": "ASH", "commandBlocked": False, "debugError": None}
-    with pytest.raises(OSError, match="模拟事件存储失败"):
-        await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("ALREADY_ASH", confirmation)
     await runtime.on_debug("ALREADY_ASH", confirmation)
 
     assert calls == 2
     assert await repo.db.events.count_documents({"taskId": task["id"], "phase": "ALREADY_ASH"}) == 1
+
+
+async def test_debug_diagnostic_is_logged_before_database_stall(tmp_path, monkeypatch, caplog):
+    """事件与状态库都无响应时诊断仍先进入JSONL上下文，且回调有界结束。"""
+    import logging
+
+    from camera_logs.collection import runtime_events
+
+    repo, task = await repository(tmp_path)
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.runtime_events")
+    monkeypatch.setattr(runtime_events, "_EVENT_WRITE_TIMEOUT_SECONDS", .01)
+
+    async def stalled(*args, **kwargs):
+        assert any(record.message == "设备调试模式交互" for record in caplog.records)
+        await asyncio.Event().wait()
+
+    runtime = SimpleNamespace(task=task, collector=SimpleNamespace(session_id="session-proof"),
+        repo=SimpleNamespace(settings=repo.settings, db=SimpleNamespace(
+            events=SimpleNamespace(insert_one=stalled), tasks=SimpleNamespace(update_one=stalled))))
+    diagnostic = {"stage": "TOKEN_RESPONSE", "httpStatus": 401, "reason": "HTTP_STATUS"}
+    await asyncio.wait_for(runtime_events.record_debug_event(runtime, "FAILED", {
+        "mode": "PSH", "debugError": "认证失败", "debugDiagnostic": diagnostic,
+    }), .5)
+    record = next(record for record in caplog.records if record.message == "设备调试模式交互")
+    assert record.context["sessionId"] == "session-proof"
+    assert record.context["taskId"] == task["id"]
+    assert record.context["runId"] == task["runId"]
+    assert record.context["nodeId"] == repo.settings.node_id
+    assert record.context["debugDiagnostic"] == diagnostic
 
 
 @pytest.mark.usefixtures("mock_reservation_transaction")

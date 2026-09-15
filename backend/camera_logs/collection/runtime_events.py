@@ -1,8 +1,8 @@
 """采集会话状态映射与可追踪运行事件。
 
-该模块集中处理 Collector 回调的归属核验、状态转换和事件持久化。设备错误正文
-与异常文本不能写入事件集合；仅保存平台可信的任务、运行、会话和节点身份以及
-固定中文说明。事件库暂时故障不妨碍会话关闭和重连。
+该模块集中处理 Collector 回调的归属核验、状态转换和事件持久化。设备原始正文
+与未脱敏异常不能写入事件集合；PSH接口说明须先由诊断模块限制字段并脱敏，再附加
+任务、运行、会话和节点身份。事件库暂时故障不妨碍会话关闭和重连。
 """
 
 from __future__ import annotations
@@ -27,24 +27,44 @@ async def record_debug_event(runtime: Any, event: str, details: dict[str, Any]) 
     """保存调试状态，只有成功落库的同会话 ASH 确认才可去重。"""
     command_blocked = bool(details.get("commandBlocked", False))
     debug_error = details.get("debugError")
+    diagnostic = details.get("debugDiagnostic")
+    diagnostic = diagnostic if isinstance(diagnostic, dict) else None
     session_id = runtime.collector.session_id
     confirmation = (session_id, details["mode"], debug_error, command_blocked)
     repeated = event == "ALREADY_ASH" and confirmation == getattr(runtime, "last_already_ash", None)
+    # 数据库等待前保留关联诊断，外层取消或数据库不可用也不会丢失已发生的失败阶段。
+    logger.info("设备调试模式交互", extra={"context": {
+        "taskId": runtime.task["id"], "runId": runtime.task["runId"], "sessionId": session_id,
+        "nodeId": runtime.repo.settings.node_id, "phase": event, "mode": details["mode"],
+        "commandBlocked": command_blocked, "debugError": debug_error, "debugDiagnostic": diagnostic,
+    }})
+    event_written = repeated
     if not repeated:
-        await runtime.repo.db.events.insert_one({
-            "taskId": runtime.task["id"], "runId": runtime.task["runId"],
-            "nodeId": runtime.repo.settings.node_id, "sessionId": session_id,
-            "type": "DEBUG_MODE", "phase": event, "mode": details["mode"],
-            "commandBlocked": command_blocked, "debugError": debug_error, "createdAt": now(),
-        })
+        try:
+            await asyncio.wait_for(runtime.repo.db.events.insert_one({
+                "taskId": runtime.task["id"], "runId": runtime.task["runId"],
+                "nodeId": runtime.repo.settings.node_id, "sessionId": session_id,
+                "type": "DEBUG_MODE", "phase": event, "mode": details["mode"],
+                "commandBlocked": command_blocked, "debugError": debug_error,
+                "debugDiagnostic": diagnostic, "createdAt": now(),
+            }), timeout=_EVENT_WRITE_TIMEOUT_SECONDS)
+        except Exception as error:  # noqa: BLE001 - 事件库故障不得中断设备调试。
+            logger.error("设备调试事件记录失败 task=%s phase=%s errorType=%s", runtime.task["id"], event,
+                type(error).__name__)
+        else:
+            event_written = True
         # 写入失败必须保留旧确认值，下次仍可尝试记录；其他阶段开启新的确认周期。
-        runtime.last_already_ash = confirmation if event == "ALREADY_ASH" else None
+        if event_written:
+            runtime.last_already_ash = confirmation if event == "ALREADY_ASH" else None
     if not getattr(runtime, "retired", False):
-        await runtime.repo.db.tasks.update_one(owner_filter(runtime.task), {
-            "$set": {"shellMode": details["mode"], "debugPhase": event,
-                     "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()},
-        })
-    logger.info("设备调试模式交互 task=%s phase=%s mode=%s", runtime.task["id"], event, details["mode"])
+        try:
+            await asyncio.wait_for(runtime.repo.db.tasks.update_one(owner_filter(runtime.task), {
+                "$set": {"shellMode": details["mode"], "debugPhase": event,
+                         "commandBlocked": command_blocked, "debugError": debug_error, "updatedAt": now()},
+            }), timeout=_EVENT_WRITE_TIMEOUT_SECONDS)
+        except Exception as error:  # noqa: BLE001 - 状态库故障不得中断设备调试。
+            logger.error("设备调试状态更新失败 task=%s phase=%s errorType=%s", runtime.task["id"], event,
+                         type(error).__name__)
 
 
 async def _current_owner(runtime: Any) -> bool:

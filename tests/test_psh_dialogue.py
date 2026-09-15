@@ -1,11 +1,33 @@
 """PSH 密文提取与流式模式观察使用合成数据，真实密文和口令不得入库。"""
 
+import asyncio
 import base64
 
 import pytest
 from camera_logs.collection.psh_dialogue import PshDialogue, extract_challenge
 
 SOURCE = base64.b64encode(bytes(range(256)) + b"test").decode()
+
+
+async def test_cancel_during_challenge_wait_keeps_stage_and_propagates_cancel():
+    """连接收尾取消等待时仍记录所在阶段，不吞取消也不发送口令。"""
+    events, writes = [], []
+    sent = asyncio.Event()
+    dialogue = PshDialogue({}, None, lambda phase, details: events.append((phase, details)))
+    dialogue.mode = "PSH"
+
+    async def write(data):
+        writes.append(data)
+        sent.set()
+
+    running = asyncio.create_task(dialogue.ensure_ash(write, "\n", 30))
+    await sent.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert events[-1][0] == "CANCELLED"
+    assert events[-1][1]["debugDiagnostic"] == {"stage": "WAIT_CHALLENGE", "reason": "CANCELLED"}
+    assert writes == [b"debug\n"]
 
 
 @pytest.mark.parametrize("marker", ["", "enc_string: "])

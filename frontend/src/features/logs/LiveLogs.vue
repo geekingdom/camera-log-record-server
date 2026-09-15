@@ -2,7 +2,8 @@
 // 实时日志只暂停本地视图；连接、去重和有界接收始终继续运行。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { AArrowDown, AArrowUp, LocateFixed, Pause, Play, Send, Trash2, FileSearch, Search } from "lucide-vue-next";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElNotification } from "element-plus";
+import "element-plus/es/components/notification/style/css";
 import { api, getToken } from "../../shared/api";
 import type { Task } from "../../shared/types";
 import {
@@ -24,13 +25,34 @@ const buffer = new LiveLogBuffer();
 const lines = ref<string[]>([]);
 const connected = ref(false);
 const taskState = ref<Task>();
+let debugNotice: ReturnType<typeof ElNotification> | undefined;
+let lastDebugNotice = "";
+// 状态轮询只在错误状态变化时通知，关闭通知不改变设备命令通道的实际限制。
+function showDebugNotice(state: Task) {
+  const key = state.debugError || state.commandBlocked
+    ? JSON.stringify([state.debugError, state.commandBlocked]) : "";
+  if (key === lastDebugNotice) return;
+  lastDebugNotice = key;
+  debugNotice?.close();
+  debugNotice = undefined;
+  if (!key) return;
+  debugNotice = ElNotification({
+    title: state.commandBlocked ? "命令通道尚未恢复，日志采集继续" : "调试切换失败，普通命令与日志采集继续",
+    message: state.debugError || "设备命令通道尚未恢复，请稍后重试。",
+    type: "warning", position: "top-right", duration: 10000, showClose: true,
+    customClass: "live-debug-notification",
+  });
+}
 let stateTimer: ReturnType<typeof setTimeout> | undefined;
 let stateGeneration = 0;
 // 控制通道与实时接收独立显示，命令阻断不能使日志订阅断开。
 async function readTaskState(current: number) {
   try {
     const state = await api.task(props.taskId);
-    if (current === stateGeneration) taskState.value = state;
+    if (current === stateGeneration) {
+      taskState.value = state;
+      showDebugNotice(state);
+    }
   } catch { /* 短时状态请求失败不影响已建立的日志订阅。 */ }
   finally {
     if (current === stateGeneration) stateTimer = setTimeout(() => void readTaskState(current), 3000);
@@ -241,6 +263,9 @@ function onCommandKeydown(event: KeyboardEvent) {
 }
 watch(() => props.taskId, connect, { immediate: true });
 watch(() => props.taskId, () => {
+  debugNotice?.close();
+  debugNotice = undefined;
+  lastDebugNotice = "";
   clearTimeout(stateTimer);
   taskState.value = undefined;
   void readTaskState(++stateGeneration);
@@ -268,7 +293,7 @@ watch(consoleRef, (current, previous) => {
   if (previous) resize.unobserve(previous);
   if (current) resize.observe(current);
 });
-onBeforeUnmount(() => { stateGeneration++; commandGeneration++; clearTimeout(stateTimer); resize.disconnect(); close(); });
+onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGeneration++; clearTimeout(stateTimer); resize.disconnect(); close(); });
 </script>
 <template>
   <section class="form-section runtime runtime-terminal">
@@ -333,7 +358,6 @@ onBeforeUnmount(() => { stateGeneration++; commandGeneration++; clearTimeout(sta
       </div>
       <el-button v-if="props.canSend" type="primary" :icon="Send" :loading="sending" :disabled="sending || !command.trim() || (taskState?.commandBlocked && command.trim() !== 'debug')" @click="send">发送</el-button>
     </div>
-    <el-alert v-if="taskState?.debugError || taskState?.commandBlocked" :title="taskState.commandBlocked ? '命令通道尚未恢复，日志采集继续' : '调试切换失败，普通命令与日志采集继续'" :description="taskState.debugError || undefined" type="warning" :closable="false" />
     <LiveLogRanges v-model="rangesOpen" :task-id="props.taskId" :ranges="missingRanges" :dropped-count="droppedRangeCount" @history="emit('history')" />
   </section>
 </template>
@@ -345,7 +369,7 @@ onBeforeUnmount(() => { stateGeneration++; commandGeneration++; clearTimeout(sta
 .log-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .log-gap .el-button + .el-button { margin-left: 0; }
 .terminal-console { flex: 1 1 auto; min-height: 0; height: auto; margin: 8px 0; padding: 4px 0; border-radius: 3px; background: #151719; border-color: #30353b; color: #dce1e6; }
-.manual-command { align-items: flex-start; }
+.manual-command { flex: 0 0 auto; align-items: flex-start; min-width: 0; }
 .command-entry { position: relative; flex: 1; min-width: 0; }
 .command-suggestions { position: relative; margin-top: 2px; max-height: 120px; overflow: auto; border: 1px solid #3c5148; background: #17221e; }
 .command-suggestions button { display: block; width: 100%; padding: 5px 8px; border: 0; background: transparent; color: #d6e6de; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: left; }
@@ -357,4 +381,12 @@ onBeforeUnmount(() => { stateGeneration++; commandGeneration++; clearTimeout(sta
   .log-tools { width: 100%; }
   .log-tools .el-button { padding: 7px; }
 }
+</style>
+
+<style>
+/* 通知挂载在body上，独立约束窄屏宽度和长诊断正文，不能挤压实时日志布局。 */
+.live-debug-notification { width: min(440px, calc(100vw - 32px)); box-sizing: border-box; }
+.live-debug-notification .el-notification__group { min-width: 0; }
+.live-debug-notification .el-notification__title { padding-right: 16px; overflow-wrap: anywhere; }
+.live-debug-notification .el-notification__content { max-height: min(240px, 40dvh); overflow: auto; text-align: left; overflow-wrap: anywhere; }
 </style>

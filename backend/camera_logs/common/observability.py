@@ -14,8 +14,10 @@ import traceback
 import uuid
 from collections.abc import Mapping
 from copy import copy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.errors import ServerErrorMiddleware
@@ -27,6 +29,7 @@ from camera_logs.common.websocket_logging import track_websocket
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
 LOG_BACKUP_COUNT = 14
+LOG_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _SECRET_KEYS = {
     "password", "token", "authorization", "passwordencrypted", "currentpassword", "newpassword",
     "adminpassword", "passwordhash", "tokenhash", "tokenencrypted", "bootstraptoken", "internaltoken",
@@ -78,11 +81,11 @@ def redact_text(value: str) -> str:
 
 
 class JsonLineFormatter(logging.Formatter):
-    """将日志记录格式化为单行且已脱敏的 JSON 对象。"""
+    """按事件发生时刻输出带上海时区偏移的单行脱敏JSON，不依赖容器TZ。"""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "timestamp": datetime.fromtimestamp(record.created, LOG_TIMEZONE).isoformat(timespec="seconds"),
             "level": record.levelname,
             "logger": record.name,
             "message": redact_text(record.getMessage()),
