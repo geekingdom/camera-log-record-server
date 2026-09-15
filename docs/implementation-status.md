@@ -1,5 +1,7 @@
 # 当前状态总表
 
+CI恢复证据：修复提交`ae9c671`已推送，其[CI34958663525](https://github.com/geekingdom/camera-log-record-server/actions/runs/34958663525)的`cross-worker-read`作业104346735930已成功完成，覆盖双Worker补读、SSH暂停跨Worker恢复及本次失败的SIGTERM恢复步骤。记录时其它部署作业仍在运行，整条流水线结论须另核；不再将本项列为待修复。
+
 CI修复（2026-09-15）：最新CI34956216992仅cross-worker-read失败（其余七项成功），原因是SIGTERM脚本强求瞬时STOPPED，而正常调度已转PENDING。正式调度回归先复现后修复；仅修改验证器接受两种无归属RUNNING状态，并增加旧运行结束/端点锁释放检查，39项及真实回环SIGTERM恢复通过，测试数据已清理。见[CI竞态证据](history/2026-09-15-ci-sigterm-observation.md)。当前查询已确认d051785、d78874c的CI成功，下面旧的计费阻塞仅为历史观察，不能作为当前失败原因。
 
 部署复核（2026-09-15）：Docker Desktop29.4.0已启动，构建上下文5必要项/19排除场景通过。正式Worker镜像构建在Docker Hub基础镜像元数据阶段超时，宿主机直连仓库443亦超时，尚未进入pip或工程安装；未产出临时镜像或采集日志。原生Linux组件验证器不在macOS绕过平台检查。详见[容器构建阻塞证据](history/2026-09-15-local-container-build-check.md)。下一步恢复可信基础镜像访问后重跑；目标Linux、公司解密接口及CI计费条件仍需外部环境。
