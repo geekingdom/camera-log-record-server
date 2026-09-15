@@ -14,6 +14,7 @@ from camera_logs.common.models import new_id
 from camera_logs.node.health import rank_nodes
 from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.resource_routing import routing_config
+from camera_logs.node.write_pressure import write_latency_limit
 from camera_logs.resources.health import reconcile_authorized_recoveries
 from camera_logs.resources.lifecycle import reconcile_deleted_resources
 from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task, requires_coredump_nfs
@@ -81,7 +82,8 @@ async def schedule_once(repo, lease=None):
         # 候选排序直接采用已保存容量，关闭准入也不等待下一次Worker心跳才排除。
         nodes = [node | routing_config(node_configs.get(node["id"], {}))
                  | {"capacity": node_configs.get(node["id"], {}).get("capacity", node.get("capacity", repo.settings.node_capacity)),
-                    "inputRateLimitMiB": input_rate_limit(node_configs.get(node["id"], node))} for node in nodes
+                    "inputRateLimitMiB": input_rate_limit(node_configs.get(node["id"], node)),
+                    "writeLatencyLimitMs": write_latency_limit(node_configs.get(node["id"], node))} for node in nodes
                  if not node_configs.get(node["id"], {}).get("deletedAt")
                  and node_configs.get(node["id"], {}).get("accepting", True)]
         resource = await db.resources.find_one({"id": task.get("resourceId")}) if task.get("resourceId") else None

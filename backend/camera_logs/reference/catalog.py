@@ -4,6 +4,7 @@ from camera_logs.reference.descriptions import describe_operation, describe_para
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
+    {"title": "节点写入延迟限制", "text": "管理员通过POST /api/v1/admin/nodes登记、PATCH /api/v1/admin/nodes/{node_id}带version编辑writeLatencyLimitMs。单位毫秒，整数1至60000，默认200；每节点独立保存，达到75%预警，超过阈值限制新采集会话。保存后调度使用新配置，Worker下一周期更新心跳和准入，无需重启；旧心跳仍拒绝准入时需要等待新心跳。已有采集不因超限被主动停止。提高阈值只调整准入和健康判断，不提高磁盘吞吐、不改变日志顺序、批量写入或同步策略。"},
     {"title": "管理事件游标分页", "text": "audit-events、runtime-events和request-events仅管理员可访问。传cursor=开启游标首屏，使用返回nextCursor续页并保持原筛选和时间范围；返回items、pageSize、hasMore、nextCursor及total。默认不统计总数，total为null，显式includeTotal=true才执行精确统计。未传cursor仍保持page/pageSize旧接口。游标不能跨事件类别或筛选条件使用，页码大于1与游标同时提供返回422。游标是翻页位置而非历史快照，新记录在刷新首屏后可见，保留期内删除的记录不会补回。"},
     {"title": "Coredump时间含义", "text": "receivedAt和firstSeenAt是服务器首次扫描观测时间，不代表文件传输完成。sourceModifiedAt来自设备文件系统mtime，会受设备时间影响，因此可能早于或晚于接收观测时间；不能只比较这两个时间判断丢失或延迟。"},
     {"title": "节点资源准入", "text": "管理员在POST/PATCH /api/v1/admin/nodes配置isGeneralNode，默认true。非通用节点必须填写resourceNetworks多个IP或CIDR，仅允许匹配资源进入，健康且有容量时优先于通用节点；不可用时回退可用通用节点。匹配设备资源IP，不按海康资源下Telnet串口任务的服务器IP匹配。修改后影响新分配，不迁移已有采集任务；Worker无需改造，采样和挂载继续复用采集任务所在节点。"},

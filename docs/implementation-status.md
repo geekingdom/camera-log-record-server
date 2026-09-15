@@ -1,5 +1,7 @@
 # 当前状态总表
 
+最新增量（2026-09-15）：管理员可在节点登记和编辑界面保存逐节点 `writeLatencyLimitMs`，范围为1至60000毫秒，历史节点缺省兼容200毫秒。调度、领取事务、Worker准入、健康告警和排序均采用保存值；达到75%预警，仅超过上限才拒绝新会话，不因延迟停止已有采集。真实Mongo验证500→200ms收紧竞争、恢复500ms后领取、独立节点阈值与无孤立run/lock；本机正式PATCH及实际心跳验证200→500→200热更新。后端全量1464项、前端158项、构建、20项生产浏览器、隔离真实Worker/WebSocket/小时下载冒烟、Ruff通过，临时库和日志已清理。详见[阈值验证](history/2026-09-15-node-write-latency-limit.md)。该配置不提高实际吞吐，不改变文件可读P99≤200ms的原始验收目标；目标生产容量仍待验证。
+
 实机增量（2026-09-15）：35主机SSH在随机本机数据库、独立API/Worker及临时日志根完成两轮正常暂停/恢复。每轮暂停前后名额/FD归零，等待12秒不恢复连接；继续保持run并新建session，最终stop释放连接。3会话归档含3个日志成员，共2,022,642字节；随机库与临时日志全部回收，独立检查无35:22残留连接。见[35生命周期证据](history/2026-09-15-device35-lifecycle.md)。不将正常恢复等同重启/跨节点，也不以归档非空代替源端逐字节完整性验收。
 
 当前版本验收：`282f982`的[CI34936992249](https://github.com/geekingdom/camera-log-record-server/actions/runs/34936992249)八项全部通过。本机生产构建20项浏览器脚本通过，检查1440/390/320像素工作台及1920/1024像素资源筛选，桌面/移动端终端和趋势图截图已查看；覆盖导航、操作权限、ANSI/级别着色、查找定位、命令历史、小时归档及缺口补读。`verify_isolated_browser_smoke.py`调用正式浏览器冒烟脚本，真实API/Worker/WebSocket/小时下载全链路通过，随机数据库与临时日志目录已删除，未访问实体设备。页面模拟验证与真实协议链路验证分别记录，不将其等同于目标服务器全天容量验收。
@@ -18,7 +20,7 @@
 
 | 本轮优先项 | 当前实现位置 | 已核验证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 输入速率硬准入 | `node/input_admission.py`、调度/领取/Worker、后台节点配置 | 真实Mongo配置竞争、Worker准入、前端保存及定向验证通过；收紧时领取回滚且无孤立run/lock，放宽后恢复；本机重载后`local-dev`新心跳为`inputBytesPerSecond=0` | 目标多节点部署和真实持续吞吐验收 |
+| 输入速率和写入延迟硬准入 | `node/input_admission.py`、`node/write_pressure.py`、调度/领取/Worker、后台节点配置 | 输入速率真实Mongo配置竞争、Worker准入、前端保存及定向验证通过；写入延迟逐节点1至60000ms，75%预警、超限仅拒绝新会话，真实Mongo验证放宽/收紧竞争、独立节点阈值及无孤立run/lock；本机重载后`local-dev`新心跳为`inputBytesPerSecond=0` | 目标多节点部署、真实持续吞吐及按目标硬件标定阈值 |
 | 增长记录治理 | `common/record_archive.py`、`record_purge.py`、`record_maintenance.py`、`retention_config.py`、设置API及组件 | 真实Mongo验证摘要故障回滚、1001条分段、租约互斥/恢复；五类Explain均10结果/10键/10文档且无SORT；本机重载后维护租约行已出现 | 生产数据规模索引/复制成本及长期维护验收 |
 | 实时缺口跨文件/节点补读 | `logs/gap_catalog.py`、`gap_snapshots.py`、`LiveLogRanges.vue` | 目录锚点、短游标、24小时/500文件/200片段边界，权限/分页/字节边界/迟到响应和20项生产浏览器验证通过；本机归档/清理/缺口/设置定向24项通过 | 物理跨节点与真实持续采集验收 |
 | 异常下载产物回收 | `logs/export_locks.py`、`export_readers.py`、`export_writer.py`、`jobs.py`、`maintenance.py`、节点下载端点 | 写入关闭证据、读者租约、CAS、`flock`、取消/失联恢复和定向验证通过；受控重载前无活动作业、任务归属或端点锁 | 真实大文件断电/多人持续下载和目标部署验收；未知归属旧目录保守保留 |
@@ -60,6 +62,7 @@ R46既有实机验收已通过，证据保留在[实机暂停重启记录](histo
 
 | ID / 最终需求 | 实现位置与状态 | 验证证据 | 未完成部分 | 下一步 |
 | --- | --- | --- | --- | --- |
+| R87 前端逐节点配置写入延迟上限并热生效 | `administration/settings.py`、`node/write_pressure.py`、health/worker、scheduler/claim；SettingsManager登记/编辑及NodeList展示；站内API说明已同步 | 全量后端1464、前端158、真实Mongo事务竞争、独立节点、正式PATCH及心跳200→500→200；20项生产页面、1440/390配置截图及隔离真实冒烟通过 | 无本项已知开发缺口；Worker下次心跳生效，目标环境需升级同版 | 部署前端/API/Worker；管理员按目标硬件标定各节点，保留全天容量验收 |
 | R84 设备型号和序列号模糊查询、资源工具栏不重叠 | `ResourceWorkspace.vue`身份输入与自适应网格/换行操作区；`shared/api.ts`显式类型；复用`resources/api.py`字面子串筛选 | 资源发现10项、前端API参数测试；`browser_resource_identity_filters.mjs`组合条件、清除、分页/选择复位、五视口和桌面双侧栏状态；20项生产浏览器通过，截图已检查 | 目标部署需更新前端 | 更新静态产物并刷新页面 |
 | R85 趋势弹窗构建大块警告 | `frontend/vite.config.ts`按echarts/zrender库边界分块，保留弹窗按需加载 | 生产构建：弹窗13.78KB、echarts374.08KB、zrender176.99KB；没有提高500KB阈值；趋势浏览器canvas/切换通过 | 分块不表示总下载量降低；未进行生产网络加载耗时验收 | 保持按需加载回归，目标部署更新静态产物 |
 | R86 独立部署失败输出可诊断 | `scripts/component_diagnostics.py`仅展示固定分类/提示，不回显第三方原文；`verify_component_deployment.py`接入非零退出路径 | 相关37项通过，覆盖外部Basic、含空格密码、编码值、自由文本凭据；39d3595的CI34843428794独立组件及其它六项成功 | 首次历史故障根因未知；未扩展超时路径 | 保持固定分类输出，具体根因在部署主机核对 |
@@ -117,7 +120,7 @@ R46既有实机验收已通过，证据保留在[实机暂停重启记录](histo
 | R10 手动优先、不跨会话、断线拒绝与审计 | `commands/manual_submission.py` 将入队、幂等映射和审计同事务提交；已加载本机API | 历史真实副本集证明审计失败/取消整体回滚、同键并发返回同一命令、提交确认丢失后只读恢复、停止后同键重放；临时数据已清理 | 最终 DB 检查至 socket 写入仍需物理隔离；历史 PENDING 仅重放，不补造审计 | 继续 R11 接管隔离 |
 | R11 幂等启停、受控重启、租约/代次隔离 | `tasks/editing.py` 编辑、资源声明、停止操作、审计同事务，安全排队编辑保留RUNNING；Worker已知失败保持STOPPED | `175b938` Linux CI 34328314712通过；真实副本集回滚/竞争/确认丢失与排队调度验证；本机API/Worker已更新，34实机暂停恢复停止通过 | 跨节点物理隔离未证明 | 继续旧实例接管隔离，目标Worker部署需受控维护 |
 | R12 PSH 密文、ls 探测、模拟口令、失败仅影响当次 | `collection/psh_*.py`、`common/config.py`、Docker/原生环境生成器及`docs/psh-production.md`；真实OAuth/itapi协议已实现，生产模式需.env启用并填凭据 | 本轮101项协议/部署/环境测试通过，原始source转发、token缓存、403003有限刷新、失败不盲发设备密码；参考ssh_debug.py核对，不调用真实服务 | 设备仍处于Password时先恢复命令通道；公司网络真实OAuth/itapi和10003切换未验证；监控ASH仍有10秒上层预算 | 公司部署填PSH_MODE=http及四项凭据后验证；默认disabled，本机mock不替代真实解密验收 |
-| R13 10 MiB 编号分卷、上海小时、仅日志 tar.gz、归档后删原卷 | `logs/storage.py`、`logs/compression.py`；同小时批量正文/索引I/O，取消等待线程完成，部分写失败保留原卷并拒绝继续 | 新增4项批写/取消/短写/慢写故障测试；相邻35项；32路115200行合成归档摘要一致；本机120小包批写8.121→0.545ms，见[写入验证](history/2026-09-15-write-batching.md) | 集群验收未完成；10M按10MiB；200ms准入限制仍保留，高延迟不主动丢弃已有批次，断电/永久磁盘故障不保证零缺失 | 更新目标Worker后实测写延迟与混合负载，保留200ms原始验收口径 |
+| R13 10 MiB 编号分卷、上海小时、仅日志 tar.gz、归档后删原卷 | `logs/storage.py`、`logs/compression.py`；同小时批量正文/索引I/O，取消等待线程完成，部分写失败保留原卷并拒绝继续 | 新增4项批写/取消/短写/慢写故障测试；相邻35项；32路115200行合成归档摘要一致；本机120小包批写8.121→0.545ms，见[写入验证](history/2026-09-15-write-batching.md) | 集群验收未完成；10M按10MiB；准入默认200ms且可按R87逐节点配置，高延迟不主动丢弃已有批次，断电/永久磁盘故障不保证零缺失 | 更新目标Worker后实测写延迟与混合负载，保留文件可读P99≤200ms原始验收目标 |
 | R14 小时查询、统一小时包、多选 ZIP、Range | `logs/hour_download.py`、`logs/export_output.py`、日志前端，已实现 | 下载/归档测试、历史浏览器下载 | 分布式缺片与规模限制待验收 | 多小时端到端校验 |
 | R15 流式搜索、并发/读预算、配额与到期清理 | `logs/jobs.py`、限制器、`logs/maintenance.py:cleanup_exports`、`export_writer.py`、`export_readers.py`、`export_locks.py`；终态导出以关闭证据、读者租约和文件锁受限回收 | `test_maintenance.py`终态/拒绝条件、真实Mongo作业崩溃收尾及本轮取消/失联/读者清理竞争验证见R26 | 混合持续负载、真实大文件中断和目标环境未证明；无关闭或归属证据的取消/旧产物保留 | 在目标环境完成大文件和多人下载维护验收；不重复实现已有回收互斥 |
 | R16 美观 UI、侧栏折叠/滚动、状态按钮、修改二次确认 | 前端app/features、useWorkspaceCollections/useWorkspaceNavigation/AppNavigation；App当前500行，5a0ff89已统一刷新入口 | 本轮核对导航12项、前端154项/构建通过；8b99fd4的Linux前端CI成功；既有桌面/移动端截图保留，不作为本轮新截图 | 全页面和全部分辨率不能由单一浏览器脚本证明；目标浏览器仍需部署验收 | 保持统一刷新调度；目标浏览器验证，不重复实现已经完成的导航合并 |

@@ -179,6 +179,7 @@ export interface Node {
   diskPercent?: number;
   diskFreeBytes?: number;
   inputBytesPerSecond?: number;
+  writeLatencyLimitMs?: number;
   writeLatencyMs?: number;
   writeLatencySamples?: number;
   writeLatencyPendingMs?: number;

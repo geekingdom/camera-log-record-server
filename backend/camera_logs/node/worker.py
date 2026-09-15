@@ -21,7 +21,7 @@ from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
 from camera_logs.node.shutdown import mark_unavailable_for_shutdown, shutdown_active_runtimes
 from camera_logs.node.telemetry_runtime import TelemetryRuntime
-from camera_logs.node.write_pressure import WRITE_LATENCY_LIMIT_MS, WritePressure
+from camera_logs.node.write_pressure import WritePressure, write_latency_blocked, write_latency_limit
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ class Worker:
         mismatch = bool(config.get("url") and config["url"].rstrip("/") != self.repo.settings.node_url.rstrip("/"))
         reported = await self.repo.db.nodes.find_one({"id": self.repo.settings.node_id}) or {}
         write_latency = self.write_latency()
-        await self.write_pressure.report(self.repo.db, self.repo.settings.node_id, write_latency)
+        await self.write_pressure.report(self.repo.db, self.repo.settings.node_id, write_latency, config)
         accepting = (
             disk_percent < 90
             and config.get("accepting", True)
@@ -317,7 +317,7 @@ class Worker:
             and not reported.get("deletedAt")
             and not mismatch
             and not reported.get("isolated", False)
-            and write_latency["writeLatencyMs"] <= WRITE_LATENCY_LIMIT_MS
+            and not write_latency_blocked(write_latency, config)
             and not resource_pressure({"telemetry": self.telemetry.value})
         )
         rate = self.input_rate.sample(self.active.values())
@@ -327,6 +327,7 @@ class Worker:
             "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "heartbeat": now(),
             "capacity": capacity, "activeTasks": len(self.active),
             "inputRateLimitMiB": input_rate_limit(config),
+            "writeLatencyLimitMs": write_latency_limit(config),
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
             **write_latency,
             "configurationMismatch": mismatch,

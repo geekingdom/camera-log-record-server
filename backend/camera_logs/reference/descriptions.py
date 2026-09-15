@@ -15,6 +15,7 @@ FIELD_DESCRIPTIONS = {
     "authType": "访问海康 ISAPI 设备信息接口时使用的 HTTP 认证方式。",
     "autoStart": "创建采集任务后是否立即提交启动操作。",
     "capacity": "该 Worker 节点允许同时承载的采集任务数量。",
+    "writeLatencyLimitMs": "该节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动中断已有采集。",
     "clearPassword": "编辑任务时是否明确清除已保存的设备登录密码。",
     "clusterCapacity": "平台允许同时运行的全部采集任务总上限。",
     "command": "发送给设备的一条单行命令正文。",

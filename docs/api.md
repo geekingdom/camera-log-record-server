@@ -206,7 +206,17 @@ POST /api/v1/admin/nodes
 PATCH /api/v1/admin/nodes/{nodeId}
 ```
 
-登记请求包含 `id`、`url`、`capacity` 和可选的 `accepting`。`url` 支持 HTTP 和 HTTPS，包括 Docker 服务名、内网 IPv4/IPv6；不得包含用户信息、查询参数、片段、附加路径或通配监听地址。公布地址须从 API 所在容器或主机可达，且与同 ID worker 的上报地址一致。更新节点仅接受 `version`、`capacity` 和 `accepting`，当前版本不提供已登记节点地址修改接口。登记响应和节点列表会同时给出人工配置与 worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回，沿用原部署配置；登记后才由平台容量和准入设置约束。实际容量取平台配置与本机 `NODE_CAPACITY` 的较小值。登记不会启动 worker，也不能把不同 ID 的心跳合并。
+登记请求包含 `id`、`url`、`capacity`，以及可选的 `accepting`、`inputRateLimitMiB`、`writeLatencyLimitMs`、`isGeneralNode`、`resourceNetworks`。`url` 支持 HTTP 和 HTTPS，包括 Docker 服务名、内网 IPv4/IPv6；不得包含用户信息、查询参数、片段、附加路径或通配监听地址。公布地址须从 API 所在容器或主机可达，且与同 ID Worker 的上报地址一致。更新节点携带 `version`，可以调整容量、准入、输入速率限制、写入延迟限制和设备地址规则；当前版本不提供已登记节点地址修改接口。登记响应和节点列表会同时给出人工配置与 Worker 的实际心跳，例如 `registered`、`online`、`reportedAt`、`reportedUrl` 与 `urlMismatch`；以心跳为准判断在线状态。未登记但有心跳的节点以 `registered=false`、`version=0` 返回。管理员保存的容量是权威值，仅未登记节点使用 `NODE_CAPACITY` 默认值。登记不会启动 Worker，也不能把不同 ID 的心跳合并。
+
+`writeLatencyLimitMs` 为每个节点独立的写入延迟准入上限，整数1～60000毫秒，缺省200。达到阈值75%开始预警，超过阈值限制新会话接入，等于阈值仍可接入。修改需要管理员权限和版本确认，保存后无需重启；调度采用保存值，Worker下一周期更新上报和准入，若旧心跳已关闭准入则等待新心跳恢复。调低阈值不会主动关闭已有采集；调高阈值只放宽准入判断，不改变批量写入、同步、日志顺序及故障处理策略。
+
+```http
+PATCH /api/v1/admin/nodes/collector-01
+Content-Type: application/json
+Authorization: Bearer <管理员服务账号口令>
+
+{"version": 3, "writeLatencyLimitMs": 500}
+```
 
 ## 服务账号与审计
 

@@ -7,6 +7,7 @@ from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 from camera_logs.node.input_admission import input_rate_blocked, input_rate_limit
 from camera_logs.node.resource_routing import accepts_resource
+from camera_logs.node.write_pressure import write_latency_blocked, write_latency_limit
 
 
 def number(value):
@@ -58,12 +59,12 @@ def node_health(node, current=None):
         ("cpuPercent", "CPU使用率", 80, 95, sample),
         ("memoryPercent", "内存使用率", 85, 95, sample),
         ("diskPercent", "磁盘使用率", 80, 90, node),
-        ("writeLatencyMs", "写入延迟", 150, 200, node),
+        ("writeLatencyMs", "写入延迟", write_latency_limit(node) * .75, write_latency_limit(node), node),
     ):
         value = number(source.get(key))
         if value is None:
             unknown.append(f"{label}暂无有效数据")
-        elif (value > 200 if key == "writeLatencyMs" else value >= limit):
+        elif (value > limit if key == "writeLatencyMs" else value >= limit):
             critical.append(f"{label}过高（{value:.1f}{'ms' if key == 'writeLatencyMs' else '%'}）")
         elif value >= warning:
             warnings.append(f"{label}接近限值（{value:.1f}{'ms' if key == 'writeLatencyMs' else '%'}）")
@@ -98,7 +99,7 @@ def rank_nodes(nodes, occupancy, task=None):
         count = occupancy.get(node["id"], 0)
         if not fresh(node.get("heartbeat"), current) or not node.get("accepting") or node.get("isolated") \
                 or node.get("deletedAt") or node.get("configurationMismatch") or count >= capacity \
-                or (number(node.get("diskPercent")) or 0) >= 90 or (number(node.get("writeLatencyMs")) or 0) > 200 \
+                or (number(node.get("diskPercent")) or 0) >= 90 or write_latency_blocked(node) \
                 or resource_pressure(node, current) or input_rate_blocked(node):
             continue
         sample = measurements(node, current)
@@ -112,7 +113,7 @@ def rank_nodes(nodes, occupancy, task=None):
         score = (.30 * utilisation + .20 * (cpu / 100 if cpu is not None else .75)
                  + .20 * (memory / 100 if memory is not None else .75)
                  + .10 * ((number(node.get("diskPercent")) or 0) / 100)
-                 + .10 * min(1, (number(node.get("writeLatencyMs")) or 0) / 200)
+                 + .10 * min(1, (number(node.get("writeLatencyMs")) or 0) / write_latency_limit(node))
                  + .10 * (network / peak_network if network is not None else .75))
         # 健康专用节点优先；同一类别仍使用原加权成本，硬准入失败已在上面剔除。
         priority = 2 if task is not None and node.get("isGeneralNode", True) else 0

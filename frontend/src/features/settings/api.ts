@@ -51,6 +51,7 @@ export interface NodeConfig {
   capacity: number;
   accepting: boolean;
   inputRateLimitMiB?: number;
+  writeLatencyLimitMs?: number;
   version: number;
   registered: boolean;
   online: boolean;
@@ -69,6 +70,7 @@ export interface NodeRegistration {
   capacity: number;
   accepting: boolean;
   inputRateLimitMiB?: number;
+  writeLatencyLimitMs?: number;
   isGeneralNode?: boolean;
   resourceNetworks?: string[];
 }
@@ -90,7 +92,7 @@ export const settingsApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(body),
     }),
-  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks" | "inputRateLimitMiB">) =>
+  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks" | "inputRateLimitMiB" | "writeLatencyLimitMs">) =>
     request<NodeConfig>(`/admin/nodes/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

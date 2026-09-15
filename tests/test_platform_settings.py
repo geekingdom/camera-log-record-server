@@ -78,6 +78,7 @@ def test_node_registration_does_not_create_heartbeat_and_merges_live_status(clie
         "accepting": True, "version": 1, "registered": True, "online": False, "reportedAt": None,
         "isGeneralNode": True, "resourceNetworks": [],
         "inputRateLimitMiB": 50,
+        "writeLatencyLimitMs": 200,
     }]
 
     client.portal.call(client.app.state.repo.db.nodes.insert_one, {

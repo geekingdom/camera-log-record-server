@@ -17,7 +17,7 @@ TEMPLATE = {"id": "template-example", "name": "日志模板", "description": "�
 JOB = {"id": "job-example", "taskId": "task-example", "kind": "DOWNLOAD", "status": "QUEUED", "progress": 0}
 COMMAND = {"id": "command-example", "taskId": "task-example", "kind": "MANUAL", "command": "ls", "status": "QUEUED"}
 NODE = {"id": "collector-01", "url": "http://192.0.2.20:18081", "capacity": 100, "accepting": True,
-        "isGeneralNode": True, "resourceNetworks": [],
+        "isGeneralNode": True, "resourceNetworks": [], "writeLatencyLimitMs": 200,
         "version": 1, "registered": True, "online": True}
 VALUES = {"name": "示例名称", "username": "integration-user", "password": "Example-password-123!",
           "currentPassword": "Example-current-123!", "newPassword": "Example-new-password-123!",
@@ -71,6 +71,8 @@ def request_example(schema, schemas):
         return {"fileIds": ["coredump-example"]}
     if name == "TaskPatch":
         return {"version": 1, "name": "更新后的任务名称", "sshTarget": "SLAVE_1"}
+    if name == "NodeConfigPatch":
+        return {"version": 1, "writeLatencyLimitMs": 500}
     return schema_example(schema, schemas)
 
 

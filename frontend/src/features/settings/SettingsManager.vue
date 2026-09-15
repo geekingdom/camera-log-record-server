@@ -6,7 +6,8 @@ import { ElMessage } from "element-plus";
 import { ApiError } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { settingsApi, type NodeConfig, type NodeRegistration, type PlatformSettings } from "./api";
-import { MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, normalizeCapacity } from "./settingsForm";
+import { DEFAULT_WRITE_LATENCY_LIMIT_MS, MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, MAX_WRITE_LATENCY_LIMIT_MS, MIN_WRITE_LATENCY_LIMIT_MS, normalizeCapacity } from "./settingsForm";
+import { formatWriteLatencyLimit } from "../../shared/nodeWriteLatency";
 import ResourceMonitorSettings from "./ResourceMonitorSettings.vue";
 import RecordRetentionSettings from "./RecordRetentionSettings.vue";
 
@@ -63,15 +64,15 @@ async function savePlatformSettings() {
 function openRegister(node?: NodeConfig) {
   editingNode.value = undefined;
   nodeForm.value = node
-    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting, inputRateLimitMiB: node.inputRateLimitMiB ?? 0, isGeneralNode: node.isGeneralNode ?? true }
-    : { id: "", url: "", capacity: 10, accepting: true, inputRateLimitMiB: 50, isGeneralNode: true };
+    ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting, inputRateLimitMiB: node.inputRateLimitMiB ?? 0, writeLatencyLimitMs: node.writeLatencyLimitMs ?? DEFAULT_WRITE_LATENCY_LIMIT_MS, isGeneralNode: node.isGeneralNode ?? true }
+    : { id: "", url: "", capacity: 10, accepting: true, inputRateLimitMiB: 50, writeLatencyLimitMs: DEFAULT_WRITE_LATENCY_LIMIT_MS, isGeneralNode: true };
   nodeNetworksText.value = (node?.resourceNetworks ?? []).join("\n");
   nodeDialog.value = true;
 }
 
 function openEdit(node: NodeConfig) {
   editingNode.value = node;
-  nodeForm.value = { id: node.id, url: node.url, capacity: node.capacity, accepting: node.accepting, isGeneralNode: node.isGeneralNode ?? true };
+  nodeForm.value = { id: node.id, url: node.url, capacity: node.capacity, accepting: node.accepting, writeLatencyLimitMs: node.writeLatencyLimitMs ?? DEFAULT_WRITE_LATENCY_LIMIT_MS, isGeneralNode: node.isGeneralNode ?? true };
   nodeNetworksText.value = (node.resourceNetworks ?? []).join("\n");
   nodeForm.value.inputRateLimitMiB = node.inputRateLimitMiB ?? 0;
   nodeDialog.value = true;
@@ -91,6 +92,7 @@ async function saveNode() {
         capacity: nodeForm.value.capacity,
         accepting: nodeForm.value.accepting,
         inputRateLimitMiB: nodeForm.value.inputRateLimitMiB ?? 0,
+        writeLatencyLimitMs: nodeForm.value.writeLatencyLimitMs ?? DEFAULT_WRITE_LATENCY_LIMIT_MS,
         isGeneralNode: nodeForm.value.isGeneralNode ?? true,
         resourceNetworks,
       });
@@ -153,6 +155,7 @@ onMounted(() => void load());
         <el-table-column label="准入" width="110"><template #default="{ row }"><el-tag v-if="row.registered" :type="row.accepting ? 'success' : 'warning'">{{ row.accepting ? "允许" : "暂停" }}</el-tag><span v-else class="settings-muted">未配置</span></template></el-table-column>
         <el-table-column label="容量" width="100"><template #default="{ row }">{{ row.capacity }}</template></el-table-column>
         <el-table-column label="输入速率上限" width="140"><template #default="{ row }">{{ row.inputRateLimitMiB ? `${row.inputRateLimitMiB} MiB/s` : "未启用" }}</template></el-table-column>
+        <el-table-column label="写入延迟上限" width="140"><template #default="{ row }">{{ formatWriteLatencyLimit(row.writeLatencyLimitMs) }}</template></el-table-column>
         <el-table-column label="资源准入" min-width="210"><template #default="{ row }"><el-tag :type="row.isGeneralNode === false ? 'warning' : 'info'">{{ row.isGeneralNode === false ? "专用节点" : "通用节点" }}</el-tag><span v-if="row.isGeneralNode === false" class="node-url">{{ (row.resourceNetworks || []).join('、') }}</span></template></el-table-column>
         <el-table-column label="心跳信息" min-width="180"><template #default="{ row }"><span v-if="row.reportedAt">{{ new Date(row.reportedAt).toLocaleString("zh-CN", { hour12: false }) }}</span><span v-else class="settings-muted">尚未收到心跳</span><span v-if="row.urlMismatch" class="settings-warning">地址与 Worker NODE_URL 不一致</span></template></el-table-column>
         <el-table-column label="操作" width="148" fixed="right"><template #default="{ row }"><el-tooltip :content="row.registered ? '编辑节点准入与容量' : '使用此 Worker 心跳信息登记节点'"><el-button text :icon="row.registered ? Edit3 : Plus" :aria-label="row.registered ? '编辑节点配置' : '登记此节点'" @click="row.registered ? openEdit(row) : openRegister(row)">{{ row.registered ? "编辑" : "登记" }}</el-button></el-tooltip><el-tooltip :content="row.activeTasks ? '节点仍有活动采集任务' : '删除节点，保留历史日志'"><el-button text type="danger" :icon="Trash2" :loading="deletingNode === row.id" :disabled="Boolean(deletingNode) || Boolean(row.activeTasks)" :aria-label="`删除节点 ${row.id}`" @click="removeNode(row)" /></el-tooltip></template></el-table-column>
@@ -163,7 +166,7 @@ onMounted(() => void load());
     <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" class="node-config-dialog" destroy-on-close>
       <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">登记配置是运行时权威；仅未登记节点使用 Worker 的 NODE_CAPACITY 作为默认容量。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
       <el-form label-position="top"><el-form-item label="通用节点"><el-switch v-model="nodeForm.isGeneralNode" aria-label="通用节点" /></el-form-item><el-form-item v-if="nodeForm.isGeneralNode === false" label="允许接入的设备资源 IP / CIDR（每行一项）" required><el-input v-model="nodeNetworksText" type="textarea" :rows="4" aria-label="允许接入的设备资源地址" placeholder="10.41.203.35&#10;10.18.117.0/24" /></el-form-item></el-form>
-      <el-form label-position="top"><el-form-item label="日志输入速率上限（MiB/s，0 为不限制）"><el-input-number v-model="nodeForm.inputRateLimitMiB" :min="0" :max="100000" :precision="0" aria-label="日志输入速率上限" controls-position="right" /></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="日志输入速率上限（MiB/s，0 为不限制）"><el-input-number v-model="nodeForm.inputRateLimitMiB" :min="0" :max="100000" :precision="0" aria-label="日志输入速率上限" controls-position="right" /></el-form-item><el-form-item label="写入延迟上限（ms）"><el-input-number v-model="nodeForm.writeLatencyLimitMs" :min="MIN_WRITE_LATENCY_LIMIT_MS" :max="MAX_WRITE_LATENCY_LIMIT_MS" :precision="0" aria-label="写入延迟上限" controls-position="right" /><p class="node-help">超过上限时只暂停新任务准入，不会终止正在采集的会话。</p></el-form-item></el-form>
       <template #footer><el-button @click="nodeDialog = false">取消</el-button><el-button type="primary" :loading="savingNode" :disabled="savingNode" :icon="ServerCog" @click="saveNode">保存配置</el-button></template>
     </el-dialog>
   </section>

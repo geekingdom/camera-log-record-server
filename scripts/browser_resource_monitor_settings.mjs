@@ -45,6 +45,12 @@ try {
         }
         return json({ items: registeredNodes });
       }
+      if (path.startsWith("/api/v1/admin/nodes/") && request.method() === "PATCH") {
+        const body = request.postDataJSON();
+        nodeWrites.push(body);
+        registeredNodes = registeredNodes.map(node => node.id === decodeURIComponent(path.split("/").at(-1)) ? { ...node, ...body, version: node.version + 1 } : node);
+        return json(registeredNodes.find(node => node.id === decodeURIComponent(path.split("/").at(-1))));
+      }
       if (["/api/v1/admin/nodes", "/api/v1/nodes", "/api/v1/tasks", "/api/v1/resources", "/api/v1/command-templates", "/api/v1/users/creators"].includes(path)) return json({ items: [], total: 0, page: 1, pageSize: 100 });
       throw new Error(`未模拟请求 ${request.method()} ${path}`);
     });
@@ -94,6 +100,9 @@ try {
     const rate = nodeDialog.getByRole("spinbutton", { name: "日志输入速率上限", exact: true });
     assert.equal(await rate.inputValue(), "50");
     await rate.fill("24");
+    const latency = nodeDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true });
+    assert.equal(await latency.inputValue(), "200");
+    await latency.fill("750");
     const general = nodeDialog.getByRole("switch", { name: "通用节点", exact: true });
     assert.equal(await general.getAttribute("aria-checked"), "true");
     await nodeDialog.locator('.el-switch:has(input[aria-label="通用节点"])').click();
@@ -103,7 +112,26 @@ try {
     await nodeDialog.waitFor({ state: "hidden" });
     assert.equal(nodeWrites.at(-1).isGeneralNode, false);
     assert.equal(nodeWrites.at(-1).inputRateLimitMiB, 24);
+    assert.equal(nodeWrites.at(-1).writeLatencyLimitMs, 750);
     assert.deepEqual(nodeWrites.at(-1).resourceNetworks, ["10.41.203.35", "10.18.117.0/24"]);
+    await page.getByRole("button", { name: "编辑节点配置", exact: true }).click();
+    const editDialog = page.getByRole("dialog", { name: "编辑节点配置", exact: true });
+    assert.equal(await editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true }).inputValue(), "750");
+    await editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true }).fill("1200");
+    // 新字段位于可滚动正文末尾，窄屏也必须能同时看见输入项和固定保存区。
+    const latencyField = editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true });
+    await latencyField.scrollIntoViewIfNeeded();
+    await editDialog.locator('.el-dialog__body').evaluate(body => { body.scrollTop = body.scrollHeight; });
+    const fieldBox = await latencyField.boundingBox();
+    const saveBox = await editDialog.getByRole("button", { name: "保存配置", exact: true }).boundingBox();
+    assert.ok(fieldBox && saveBox && fieldBox.y >= 0 && fieldBox.y + fieldBox.height <= saveBox.y,
+      "写入延迟输入不得被保存区遮挡");
+    assert.ok(saveBox.y + saveBox.height <= 900, "保存区应在视口内可见");
+    await page.screenshot({ path: `output/playwright/node-write-latency-settings-${width}.png`, animations: "disabled" });
+    await editDialog.getByRole("button", { name: "保存配置", exact: true }).click();
+    await page.getByRole("dialog", { name: "确认保存配置", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
+    assert.equal(nodeWrites.at(-1).writeLatencyLimitMs, 1200);
+    await page.getByText("1.2 s", { exact: true }).waitFor();
     assert.deepEqual(errors, []);
     await context.close();
   }

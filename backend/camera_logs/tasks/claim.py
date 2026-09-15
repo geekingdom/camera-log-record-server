@@ -12,6 +12,7 @@ from camera_logs.common.models import new_id
 from camera_logs.node.health import resource_pressure
 from camera_logs.node.input_admission import input_rate_blocked
 from camera_logs.node.resource_routing import accepts_resource
+from camera_logs.node.write_pressure import write_latency_blocked
 
 
 class SchedulerLeaseLost(RuntimeError):
@@ -91,7 +92,6 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             node is None
             or node.get("isolated") or node.get("configurationMismatch")
             or resource_pressure(node, current_time)
-            or node.get("writeLatencyMs", 0) > 200
         ):
             return None
 
@@ -135,6 +135,8 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
         if not configured.get("accepting", True) or occupied >= capacity:
             return None
         if input_rate_blocked(node, node_config if node_config is not None else node):
+            return None
+        if write_latency_blocked(node, node_config if node_config is not None else node):
             return None
         if node_config and (node_config.get("deletedAt") or not accepts_resource(node_config, resource_ip)):
             return None

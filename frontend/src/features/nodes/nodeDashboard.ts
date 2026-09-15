@@ -1,5 +1,8 @@
 // 节点看板的纯展示判断集中于此；资源遥测时效与服务端健康结论保持独立。
 import type { Node, NodeHealth, NodeTelemetry } from "../../shared/types";
+import { writeLatencyLimitMs } from "../../shared/nodeWriteLatency";
+
+export { writeLatencyLimitMs } from "../../shared/nodeWriteLatency";
 
 export const HEARTBEAT_STALE_MS = 30_000;
 export const TELEMETRY_STALE_MS = 15_000;
@@ -34,7 +37,7 @@ export function nodeAdmissible(node: Node, current = Date.now()) {
   const capacity = Number(node.capacity ?? 0);
   const activeTasks = Number(node.activeTasks ?? 0);
   const telemetry = currentTelemetry(node, current);
-  const pressured = Number(node.diskPercent ?? 0) >= 90 || Number(node.writeLatencyMs ?? 0) > 200 ||
+  const pressured = Number(node.diskPercent ?? 0) >= 90 || Number(node.writeLatencyMs ?? 0) > writeLatencyLimitMs(node) ||
     Number(telemetry?.cpuPercent ?? 0) >= 95 || Number(telemetry?.memoryPercent ?? 0) >= 95;
   return nodeOnline(node, current) && node.accepting === true && !node.isolated && !node.configurationMismatch &&
     currentHealth(node)?.status !== "CRITICAL" && !pressured && capacity > activeTasks;

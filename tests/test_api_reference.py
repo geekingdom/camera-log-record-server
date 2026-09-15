@@ -5,6 +5,19 @@ from pydantic import TypeAdapter
 from test_api import client  # noqa: F401
 
 
+def test_node_write_latency_limit_is_documented_with_valid_examples(client):
+    """节点配置目录需解释毫秒阈值和准入边界，并提供可直接提交的示例。"""
+    reference = client.get("/api/v1/api-reference").json()
+    for name in ("NodeRegistration", "NodeConfigPatch"):
+        field = reference["schemas"][name]["properties"]["writeLatencyLimitMs"]
+        assert "毫秒" in field["description"]
+        assert "200" in field["description"]
+    operations = {item["id"]: item for item in reference["operations"]}
+    assert operations["POST /api/v1/admin/nodes"]["requestExample"]["writeLatencyLimitMs"] == 200
+    assert operations["PATCH /api/v1/admin/nodes/{node_id}"]["requestExample"]["writeLatencyLimitMs"] == 500
+    assert operations["POST /api/v1/admin/nodes"]["responseExample"]["writeLatencyLimitMs"] == 200
+
+
 def test_management_event_cursor_contract_is_documented(client):
     """站内目录必须解释空游标首屏、按需统计和保持旧调用的兼容边界。"""
     reference = client.get("/api/v1/api-reference").json()

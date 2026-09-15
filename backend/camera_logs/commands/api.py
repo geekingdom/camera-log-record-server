@@ -11,6 +11,7 @@ from camera_logs.common.models import InitialCommand, TokenCreate, TokenPatch, T
 from camera_logs.common.security import actor, authorize, authorize_owner
 from camera_logs.node.health import node_health
 from camera_logs.node.input_admission import input_rate_limit
+from camera_logs.node.write_pressure import write_latency_limit
 from camera_logs.users.service_tokens import (
     create_service_token,
     public_token,
@@ -55,9 +56,12 @@ def install_command_routes(app, repo, listing):
         authorize(user, "admin")
         result = await listing("nodes", {"deletedAt": None}, 1, 100, "id")
         configs = {item["id"]: item async for item in repo().db.node_configs.find(
-            {"id": {"$in": [node["id"] for node in result["items"]]}}, {"id": 1, "inputRateLimitMiB": 1})}
+            {"id": {"$in": [node["id"] for node in result["items"]]}},
+            {"id": 1, "inputRateLimitMiB": 1, "writeLatencyLimitMs": 1})}
         for node in result["items"]:
-            node["inputRateLimitMiB"] = input_rate_limit(configs.get(node["id"], node))
+            config = configs.get(node["id"], node)
+            node["inputRateLimitMiB"] = input_rate_limit(config)
+            node["writeLatencyLimitMs"] = write_latency_limit(config)
             node["health"] = node_health(node)
         return result
 

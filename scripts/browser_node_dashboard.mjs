@@ -12,7 +12,7 @@ const stale = new Date(now - 70_000).toISOString();
 const nodes = [
   {
     id: "healthy-node", name: "采集节点 A", url: "https://worker-a.example.test", heartbeat: fresh,
-    accepting: true, capacity: 12, activeTasks: 3, diskPercent: 42, inputBytesPerSecond: 3_145_728, writeLatencyMs: 28, writeLatencySamples: 84,
+    accepting: true, capacity: 12, activeTasks: 3, diskPercent: 42, inputBytesPerSecond: 3_145_728, writeLatencyLimitMs: 500, writeLatencyMs: 28, writeLatencySamples: 84,
     telemetry: { sampledAt: fresh, scope: "HOST", cpuPercent: 36, memoryPercent: 58, memoryUsedBytes: 4_000_000_000, memoryTotalBytes: 8_000_000_000, networkUploadBytesPerSecond: 1_024_000, networkDownloadBytesPerSecond: 2_048_000 },
     health: { status: "HEALTHY", reasons: [] },
   },
@@ -63,6 +63,8 @@ try {
   await page.getByText("4", { exact: true }).first().waitFor();
   await page.getByText("可接收新任务", { exact: true }).waitFor();
   await page.getByText("采集输入", { exact: true }).first().waitFor();
+  await page.getByText("28 ms / 500 ms", { exact: true }).waitFor();
+  await page.getByText("460 ms / 200 ms", { exact: true }).waitFor();
   await page.getByText("磁盘使用率较高；写入延迟超过阈值", { exact: true }).waitFor();
   await page.getByText("节点已隔离；磁盘使用率过高（96.0%）", { exact: true }).waitFor();
   await page.getByText("严重", { exact: true }).waitFor();

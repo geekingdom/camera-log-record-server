@@ -18,6 +18,7 @@ import {
   WifiOff,
 } from "lucide-vue-next";
 import type { Node } from "../../shared/types";
+import { formatWriteLatencyLimit, writeLatencyLimitMs } from "../../shared/nodeWriteLatency";
 import {
   currentHealth,
   currentTelemetry,
@@ -59,7 +60,7 @@ function admissionLabel(node: Node) {
   if (!node.accepting) return "暂停接入";
   if (currentHealth(node)?.status === "CRITICAL") return "健康严重";
   if (Number(node.diskPercent ?? 0) >= 90) return "磁盘压力过高";
-  if (Number(node.writeLatencyMs ?? 0) > 200) return "写入延迟过高";
+  if (Number(node.writeLatencyMs ?? 0) > writeLatencyLimitMs(node)) return `写入延迟超过 ${formatWriteLatencyLimit(writeLatencyLimitMs(node))}`;
   if (Number(currentTelemetry(node, now.value)?.cpuPercent ?? 0) >= 95) return "CPU 压力过高";
   if (Number(currentTelemetry(node, now.value)?.memoryPercent ?? 0) >= 95) return "内存压力过高";
   if (Number(node.activeTasks ?? 0) >= Number(node.capacity ?? 0)) return "容量已满";
@@ -110,7 +111,7 @@ function memoryText(node: Node) {
         <div class="node-facts">
           <div><span>任务容量</span><strong>{{ node.activeTasks ?? "暂无数据" }}<template v-if="node.capacity !== undefined"> / {{ node.capacity }}</template></strong></div>
           <div><span>新任务准入</span><strong :class="{ admitted: nodeAdmissible(node, now), blocked: !nodeAdmissible(node, now) }">{{ admissionLabel(node) }}</strong></div>
-          <div><span>写入延迟</span><strong>{{ formatLatency(node) }}</strong></div>
+          <div><span>写入延迟 / 上限</span><strong>{{ formatLatency(node) }} / {{ formatWriteLatencyLimit(node.writeLatencyLimitMs) }}</strong></div>
           <div><span>遥测范围</span><strong>{{ telemetryScope(node) }}</strong></div>
         </div>
 

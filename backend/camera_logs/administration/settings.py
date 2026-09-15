@@ -30,6 +30,11 @@ from camera_logs.node.input_admission import (
     input_rate_limit,
 )
 from camera_logs.node.resource_routing import normalize_resource_networks, routing_config
+from camera_logs.node.write_pressure import (
+    DEFAULT_WRITE_LATENCY_LIMIT_MS,
+    MAX_WRITE_LATENCY_LIMIT_MS,
+    write_latency_limit,
+)
 from camera_logs.resource_metrics.models import (
     ResourceMonitorConfig,
     default_monitor_config,
@@ -67,6 +72,8 @@ class NodeRegistration(SettingsModel):
     accepting: bool = True
     inputRateLimitMiB: int = Field(default=DEFAULT_INPUT_RATE_LIMIT_MIB, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
                                     description="日志输入速率准入上限，单位MiB/s；0禁用，达到上限暂停分配新任务，不停止已有采集")
+    writeLatencyLimitMs: int = Field(default=DEFAULT_WRITE_LATENCY_LIMIT_MS, ge=1, le=MAX_WRITE_LATENCY_LIMIT_MS, strict=True,
+                                     description="写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
     isGeneralNode: bool = True
     resourceNetworks: list[str] = Field(default_factory=list, max_length=128)
 
@@ -127,6 +134,8 @@ class NodeConfigPatch(SettingsModel):
     accepting: bool | None = None
     inputRateLimitMiB: int | None = Field(default=None, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
                                            description="节点日志输入准入上限MiB/s，0禁用；保存后调度立即读取新配置")
+    writeLatencyLimitMs: int | None = Field(default=None, ge=1, le=MAX_WRITE_LATENCY_LIMIT_MS, strict=True,
+                                             description="节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
     isGeneralNode: bool | None = None
     resourceNetworks: list[str] | None = Field(default=None, max_length=128)
 
@@ -160,6 +169,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
         "version": config["version"],
         "registered": True,
         "inputRateLimitMiB": input_rate_limit(config),
+        "writeLatencyLimitMs": write_latency_limit(config),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
         **routing_config(config),
@@ -183,6 +193,7 @@ def _public_discovered_node(node: dict) -> dict:
         "version": 0,
         "registered": False,
         "inputRateLimitMiB": input_rate_limit(node),
+        "writeLatencyLimitMs": write_latency_limit(node),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
         "activeTasks": node.get("activeTasks", 0),

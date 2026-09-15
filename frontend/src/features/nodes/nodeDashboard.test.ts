@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Node } from "../../shared/types";
-import { currentHealth, currentTelemetry, formatRate, nodeAbnormal, nodeAdmissible, nodeOnline } from "./nodeDashboard";
+import { currentHealth, currentTelemetry, formatRate, nodeAbnormal, nodeAdmissible, nodeOnline, writeLatencyLimitMs } from "./nodeDashboard";
 
 const now = Date.parse("2026-09-10T00:00:00.000Z");
 const activeNode: Node = {
@@ -35,5 +35,13 @@ describe("节点看板状态", () => {
     expect(nodeAdmissible({ ...activeNode, health: { status: "CRITICAL", reasons: ["节点已隔离"] } }, now)).toBe(false);
     expect(nodeAdmissible({ ...activeNode, telemetry: { ...activeNode.telemetry, cpuPercent: 95 } }, now)).toBe(false);
     expect(nodeAdmissible({ ...activeNode, diskPercent: 90 }, now)).toBe(false);
+  });
+  it("写入延迟使用节点自身限制，历史缺省值保持 200 ms", () => {
+    expect(writeLatencyLimitMs(activeNode)).toBe(200);
+    expect(nodeAdmissible({ ...activeNode, writeLatencyMs: 200 }, now)).toBe(true);
+    expect(nodeAdmissible({ ...activeNode, writeLatencyMs: 201 }, now)).toBe(false);
+    expect(writeLatencyLimitMs({ ...activeNode, writeLatencyLimitMs: 600 })).toBe(600);
+    expect(nodeAdmissible({ ...activeNode, writeLatencyLimitMs: 600, writeLatencyMs: 599 }, now)).toBe(true);
+    expect(nodeAdmissible({ ...activeNode, writeLatencyLimitMs: 600, writeLatencyMs: 601 }, now)).toBe(false);
   });
 });
