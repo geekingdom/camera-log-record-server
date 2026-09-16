@@ -3,7 +3,7 @@
 | 当前请求记录问题 | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 请求对象统一显示未记录 | `common/request_targets.py`、`observability.py`、`administration/event_presenter.py`、前端审计表格和详情 | 保存路由声明的对象ID并批量补名称；集合/平台操作明确范围。对象及请求专项21项、前端164项、构建、真实Cookie三类审计页面及1440/390截图通过；后端全量1500项通过 | 旧记录未保存的实体ID无法恢复，集合类型可在读取时补齐；30天TTL和请求频率不变，见[当前证据](history/2026-09-15-request-target-and-client-ip.md) |
-| 公司来源IP显示Docker容器地址 | 已确认用户实际运行独立frontend/backend/worker/database四个Compose项目；`deploy/config/backend.env.example`及部署说明补齐代理配置，`tests/test_proxy_headers.py`覆盖策略和请求审计 | 用户实测API的`FORWARDED_ALLOW_IPS=127.0.0.1`，不信任实际对端172.21.0.2；可信代理恢复浏览器10.41.203.12、非可信XFF仍拒绝的联合回归通过 | 公司需在实际`.env.backend`加入代理172.21.0.2后仅重建API，并通过新请求验证；未远程执行，不能宣称目标已恢复。IP白名单仍限定浏览器而非设备地址，历史误记IP不可可靠回填 |
+| 公司来源IP显示Docker容器地址 | 用户使用`deploy-all.sh`跨机完整部署，脚本内部拆分四个组件项目但共用入口`.env`，不是用户独立部署；部署说明已更正，`tests/test_proxy_headers.py`覆盖策略和请求审计 | 用户实测API的`FORWARDED_ALLOW_IPS=127.0.0.1`，不信任实际对端172.21.0.2；可信代理恢复浏览器10.41.203.12、非可信XFF仍拒绝的联合回归通过；2026-09-16核实`deploy.sh`跨机分支逐项传递同一env_file | 在原统一`.env`加入代理172.21.0.2后仅重建API，Compose的DEPLOY_ENV_FILE与--env-file均须指向该文件；不得另建.env.backend。未远程执行，目标新请求待验证，历史误记IP不可可靠回填 |
 
 | 当前问题 | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |

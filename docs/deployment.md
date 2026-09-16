@@ -45,7 +45,9 @@ Docker 镜像构建默认使用公司 pip 制品库，可通过 `PIP_INDEX_URL` 
 
 独立后端默认只监听 `127.0.0.1:18080`；分机部署将 `API_BIND_IP` 改为内网 IP 或 `0.0.0.0`。`FORWARDED_ALLOW_IPS` 填前端代理实际来源 IP/CIDR，支持逗号分隔。前端容器中的 `127.0.0.1` 指向自身，`BACKEND_UPSTREAM` 应使用后端可达地址。平台白名单限制浏览器/API 客户端来源，不限制设备或串口目标。
 
-### 独立 Docker 前端的客户端 IP
+### 跨机完整部署与独立前端的客户端 IP
+
+`deploy-all.sh` 在 `DEPLOY_TOPOLOGY=multi-host` 时，会自动以四个组件项目部署，但所有组件均传入同一个入口 `--env-file`（默认项目根目录 `.env`）。项目名带 `-backend`、`-frontend` 不表示用户手动独立部署，也不表示读取 `.env.backend`。此模式应修改统一 `.env` 的 `FORWARDED_ALLOW_IPS`；只有单独运行组件入口且没有指定配置文件时，才使用 `.env.backend` 等默认组件文件。
 
 独立 `deploy-frontend.sh` 容器代理 `deploy-backend.sh` API 时，API 实际看到的是代理连接来源，而不是浏览器地址。同机可能是前端容器 bridge 地址，跨机经过SNAT时可能是前端宿主机地址，须以API实际对端为准。后端 `.env.backend` 的 `FORWARDED_ALLOW_IPS` 保留默认本机 `127.0.0.1`，并加入真实代理来源。公司服务器 `10.41.203.43`、浏览器 `10.41.203.12`、API记录代理地址 `172.21.0.2` 的部署应设置：
 
@@ -53,7 +55,15 @@ Docker 镜像构建默认使用公司 pip 制品库，可通过 `PIP_INDEX_URL` 
 FORWARDED_ALLOW_IPS=127.0.0.1,172.21.0.2
 ```
 
-然后只在后端服务器执行 `bash ./deploy-backend.sh --env-file /实际路径/.env.backend`，不需要重启 Worker 或数据库。前端 Nginx 已用 `$remote_addr` 覆写浏览器提交的 `X-Forwarded-For`，故 API 的来源策略和请求审计都会读取 `10.41.203.12`。不要把浏览器 IP 写入可信代理列表，也不要以 `172.21.0.0/16` 或 `*` 扩大信任范围。
+跨机完整部署修改统一 `.env` 后，在项目根目录仅重建 API 加载环境变量（如有自定义配置路径，两个配置参数须指向原文件）：
+
+```sh
+DEPLOY_ENV_FILE="$PWD/.env" docker compose --project-name camera-log-record-server-backend --env-file .env -f deploy/backend.yml up -d --no-deps --force-recreate api
+```
+
+`DEPLOY_ENV_FILE` 指定容器环境文件，`--env-file` 指定Compose变量展开来源，两者必须一致；只运行`docker restart`不会加载新环境变量。整套平台正常部署入口仍是 `deploy-all.sh`，无需创建`.env.backend`。若需同时重建后端镜像，可使用 `bash ./deploy-backend.sh --env-file "$PWD/.env"` 做单组件维护。真正独立部署则传入原`.env.backend`。以上无需重启Worker或数据库，API会短暂不可用。
+
+前端 Nginx 已用 `$remote_addr` 覆写浏览器提交的 `X-Forwarded-For`，故 API 的来源策略和请求审计都会读取 `10.41.203.12`。不要把浏览器 IP 写入可信代理列表，也不要以 `172.21.0.0/16` 或 `*` 扩大信任范围。
 
 bridge 地址可能随前端容器重建变化。部署或升级前先在后端主机只读确认当前地址，再写入后端配置并重启 API：
 

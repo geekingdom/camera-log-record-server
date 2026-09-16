@@ -10,6 +10,8 @@
 
 ## 来源IP证据与待办
 
+2026-09-16更正：此前从组件项目名推断用户独立部署是错误的。用户实际使用`deploy-all.sh`跨机模式，`deploy.sh`会拆分组件项目并逐一传递同一入口env_file。以下当时写到`.env.backend`的处理指引不适用于该现场，应修改原统一`.env`，仅重建API时同时指定DEPLOY_ENV_FILE与--env-file。用户无需改变完整部署入口。代理信任缺少172.21.0.2的实测事实仍有效。
+
 用户报告浏览器10.41.203.12访问服务器10.41.203.43，事件记录172.21.0.2。用户先称完整部署，但随后提供docker ps，实际运行项目分别为：
 
 - `camera-log-record-server-frontend`：`camera-log-record-server-frontend-frontend-1`
