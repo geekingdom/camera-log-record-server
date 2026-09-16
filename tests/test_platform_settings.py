@@ -1,6 +1,7 @@
 """验证平台配置的乐观锁、动态保留期和节点登记边界。"""
 
 from camera_logs.common.database import now
+from camera_logs.common.security import actor
 from camera_logs.logs.maintenance import get_retention_days
 from test_api import client  # noqa: F401
 
@@ -11,6 +12,7 @@ def test_platform_settings_have_default_version_and_detect_conflict(client):  # 
     assert initial.status_code == 200, initial.text
     assert initial.json()["retentionDays"] == 7
     assert initial.json()["clusterCapacity"] == 500
+    assert initial.json()["liveLogBufferMiB"] == 10
     assert initial.json()["version"] == 1
 
     updated = client.patch("/api/v1/platform-settings", json={"retentionDays": 14, "version": 1})
@@ -21,6 +23,32 @@ def test_platform_settings_have_default_version_and_detect_conflict(client):  # 
     assert client.patch("/api/v1/platform-settings", json={"retentionDays": 30, "version": 1}).status_code == 409
     assert client.portal.call(client.app.state.repo.db.audit.count_documents,
                               {"action": "update_platform_settings", "targetId": "platform"}) == 1
+
+
+def test_live_log_buffer_setting_is_versioned_and_display_api_is_minimal(client):  # noqa: F811
+    """管理员保存浏览器日志内存上限，普通已登录用户只读取这一项显示配置。"""
+    initial = client.get("/api/v1/platform-settings").json()
+    changed = client.patch("/api/v1/platform-settings", json={
+        "retentionDays": initial["retentionDays"], "version": initial["version"], "liveLogBufferMiB": 24,
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["liveLogBufferMiB"] == 24
+    assert client.get("/api/v1/display-settings").json() == {"liveLogBufferMiB": 24}
+    for invalid in (0, 101, True, 1.5):
+        rejected = client.patch("/api/v1/platform-settings", json={
+            "retentionDays": initial["retentionDays"], "version": changed.json()["version"],
+            "liveLogBufferMiB": invalid,
+        })
+        assert rejected.status_code == 422
+
+    client.app.dependency_overrides[actor] = lambda: {
+        "id": "ordinary-user", "scopes": ["tasks:read"], "isAdmin": False,
+    }
+    try:
+        assert client.get("/api/v1/display-settings").json() == {"liveLogBufferMiB": 24}
+        assert client.get("/api/v1/platform-settings").status_code == 403
+    finally:
+        client.app.dependency_overrides.pop(actor, None)
 
 
 def test_platform_and_node_capacity_accept_values_above_100(client):  # noqa: F811

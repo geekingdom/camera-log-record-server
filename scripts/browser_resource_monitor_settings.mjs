@@ -17,7 +17,7 @@ const nodeWrites = [];
 try {
   await mkdir("output/playwright", { recursive: true });
   for (const width of [1440, 390]) {
-    let platform = { retentionDays: 7, clusterCapacity: 500, version: 1, resourceMonitor: structuredClone(config) };
+    let platform = { retentionDays: 7, clusterCapacity: 500, liveLogBufferMiB: 10, version: 1, resourceMonitor: structuredClone(config) };
     let registeredNodes = [];
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.addInitScript(() => sessionStorage.setItem("camera-log-record-token", "monitor-settings-fixture"));
@@ -59,9 +59,23 @@ try {
     page.on("pageerror", error => errors.push(error.message));
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.getByRole("tab", { name: "后台配置", exact: true }).click();
+    const modules = page.locator(".settings-module-tabs");
+    const platformModule = modules.getByText("平台与容量", { exact: true });
+    await platformModule.waitFor();
+    await page.getByRole("spinbutton", { name: "实时日志内存上限", exact: true }).fill("24");
+    await page.getByRole("button", { name: "保存平台与容量配置", exact: true }).click();
+    const platformConfirmation = page.getByRole("dialog", { name: "确认保存配置", exact: true });
+    await platformConfirmation.getByRole("button", { name: "确认", exact: true }).click();
+    await platformConfirmation.waitFor({ state: "hidden" });
+    await page.getByText("平台配置已保存", { exact: true }).waitFor();
+    assert.equal(writes.at(-1).liveLogBufferMiB, 24);
+    assert.equal(await page.getByRole("spinbutton", { name: "实时日志内存上限", exact: true }).inputValue(), "24");
+    await page.screenshot({ path: `output/playwright/platform-settings-${width}.png`, fullPage: false });
+
+    await modules.getByText("记录保留", { exact: true }).click();
     const settings = page.getByRole("region", { name: "CPU 与内存监控配置", exact: true });
-    await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).waitFor();
-    const retention = page.getByRole("region", { name: "增长记录保留策略", exact: true });
+    const retention = page.locator(".record-retention");
+    await retention.getByRole("spinbutton", { name: "审计记录保留天数", exact: true }).waitFor();
     await retention.getByRole("spinbutton", { name: "审计记录保留天数", exact: true }).fill("30");
     await retention.getByRole("button", { name: "保存策略", exact: true }).click();
     await page.getByRole("dialog", { name: "确认保存保留策略", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
@@ -70,12 +84,18 @@ try {
     assert.deepEqual(writes.at(-1).recordRetention, { auditDays: 30, eventDays: 90, runDays: 90 });
     await retention.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `output/playwright/record-retention-${width}.png`, fullPage: false });
+    await modules.getByText("资源监控", { exact: true }).click();
+    await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).waitFor();
     assert.equal(await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).inputValue(), config.items[0].command);
     assert.equal(await settings.getByRole("textbox", { name: "数值正则 1", exact: true }).inputValue(), config.items[0].pattern);
     await settings.getByRole("button", { name: "新增指标", exact: true }).click();
     await settings.getByRole("textbox", { name: "指标名称 2", exact: true }).fill("Slab");
     await settings.getByRole("textbox", { name: "采集命令 2", exact: true }).fill("cat /proc/meminfo");
     await settings.getByRole("textbox", { name: "数值正则 2", exact: true }).fill("Slab:\\s*(\\d+) kB");
+    await modules.getByText("记录保留", { exact: true }).click();
+    await modules.getByText("资源监控", { exact: true }).click();
+    assert.equal(await settings.getByRole("textbox", { name: "指标名称 2", exact: true }).inputValue(), "Slab",
+      "切换配置模块不得销毁未保存的监控草稿");
     const count = writes.length;
     await settings.getByRole("button", { name: "保存监控配置", exact: true }).click();
     const confirmation = page.getByRole("dialog", { name: "确认保存监控配置", exact: true });
@@ -93,6 +113,7 @@ try {
     assert.ok(geometry.scrollWidth <= geometry.width + 1, JSON.stringify(geometry));
     await settings.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `output/playwright/resource-monitor-settings-${width}.png`, fullPage: true });
+    await modules.getByText("节点准入", { exact: true }).click();
     await page.getByRole("button", { name: "登记节点", exact: true }).click();
     const nodeDialog = page.getByRole("dialog", { name: "登记节点", exact: true });
     await nodeDialog.getByRole("textbox").nth(0).fill(`dedicated-${width}`);

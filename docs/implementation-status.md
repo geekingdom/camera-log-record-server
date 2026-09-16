@@ -1,5 +1,11 @@
 # 当前状态总表
 
+| 当前需求（2026-09-16，已完成本机验证） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 异常节点上的运行任务自动在其他合格节点重新采集，旧日志不迁移 | `node/failover.py`、`tasks/scheduler.py`、`tasks/claim.py`、Worker内部关闭接口；精确旧运行关闭证明后创建新运行，保留用户暂停/停止意图，排除故障原节点；数据库恢复按专属状态重试未完成关闭 | 真实Mongo、回环SSH、双Worker确定性生产函数编排通过：新run、旧锁释放、全程峰值1连接、两侧独立READY归档；全量1512及末次相关86项通过，临时库和日志已清理；已接入CI | 完全失联且无可信关闭/隔离证明仍等待隔离；当前针对心跳/数据库失联，非任意健康预警迁移。自然后台时序、物理网络分区和目标Linux多机仍待验收，见[当前证据](history/2026-09-16-node-failover-live-budget.md) |
+| 实时窗口取消主动高频省略，按可配置预算保留最新日志 | `liveLogBuffer.ts`、`LiveLogs.vue`、`collection/runtime.py`；默认10MiB、1至100MiB内容与索引估算预算，超限淘汰最旧内容；暂停/查找时预算缩小也裁剪快照 | 1200行/秒合成缓冲测试；桌面/移动端终端及最旧范围补读浏览器通过；真实隔离API/Worker/WebSocket/小时下载通过并清理临时库和日志；前端166项、构建及Ruff通过 | 内容预算不等同浏览器RSS；网络缺口仍需显式补读，首次打开从服务端最近帧开始；目标持续高频网络吞吐及全天容量未验收 |
+| 后台可保存显示预算，配置改为横向模块导航 | `administration/settings.py`、`SettingsManager.vue`、`settings/api.ts`；平台与容量、节点准入、资源监控、记录保留四模块；普通用户只读最小显示配置，现有页面每30秒更新 | 1440/390浏览器验证保存、模块切换及保留草稿，截图检查通过；配置/API文档/请求对象26项通过；本机API/Worker已更新且健康，新接口真实返回200与默认10MiB | 目标服务器需部署同版API、Worker和前端；设计见[node-failover-and-live-window.md](node-failover-and-live-window.md)，本机证据与外部验收边界已分开 |
+
 | 当前请求记录问题 | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 请求对象统一显示未记录 | `common/request_targets.py`、`observability.py`、`administration/event_presenter.py`、前端审计表格和详情 | 保存路由声明的对象ID并批量补名称；集合/平台操作明确范围。对象及请求专项21项、前端164项、构建、真实Cookie三类审计页面及1440/390截图通过；后端全量1500项通过 | 旧记录未保存的实体ID无法恢复，集合类型可在读取时补齐；30天TTL和请求频率不变，见[当前证据](history/2026-09-15-request-target-and-client-ip.md) |
@@ -153,7 +159,7 @@ R46既有实机验收已通过，证据保留在[实机暂停重启记录](histo
 | R14 小时查询、统一小时包、多选 ZIP、Range | `logs/hour_download.py`、`logs/export_output.py`、日志前端，已实现 | 下载/归档测试、历史浏览器下载 | 分布式缺片与规模限制待验收 | 多小时端到端校验 |
 | R15 流式搜索、并发/读预算、配额与到期清理 | `logs/jobs.py`、限制器、`logs/maintenance.py:cleanup_exports`、`export_writer.py`、`export_readers.py`、`export_locks.py`；终态导出以关闭证据、读者租约和文件锁受限回收 | `test_maintenance.py`终态/拒绝条件、真实Mongo作业崩溃收尾及本轮取消/失联/读者清理竞争验证见R26 | 混合持续负载、真实大文件中断和目标环境未证明；无关闭或归属证据的取消/旧产物保留 | 在目标环境完成大文件和多人下载维护验收；不重复实现已有回收互斥 |
 | R16 美观 UI、侧栏折叠/滚动、状态按钮、修改二次确认 | 前端app/features、useWorkspaceCollections/useWorkspaceNavigation/AppNavigation；App当前500行，5a0ff89已统一刷新入口 | 本轮核对导航12项、前端154项/构建通过；8b99fd4的Linux前端CI成功；既有桌面/移动端截图保留，不作为本轮新截图 | 全页面和全部分辨率不能由单一浏览器脚本证明；目标浏览器仍需部署验收 | 保持统一刷新调度；目标浏览器验证，不重复实现已经完成的导航合并 |
-| R17 实时虚拟列表/限速、ANSI、暂停跟随与续传 | `LiveLogs.vue`、`LiveLogRanges.vue`、`logs/gap_catalog.py`、`gap_snapshots.py`、`shared/composables/liveLogBuffer.ts`；已支持跨文件/跨会话目录定位和短游标补读 | 浏览器精确五页补读、暂停/任务切换/迟到响应及1440/390/320视口；20项生产页面验证；`DELETED`缺口持久分页定向3项通过 | 无file/offset或目录不完整的源缺口只能转小时归档；物理跨节点与真实持续采集规模未验收 | 目标多节点部署后验证目录一致性和真实流；不重复实现既有补读窗口 |
+| R17 实时虚拟列表/容量保留、ANSI、暂停跟随与续传 | `LiveLogs.vue`、`LiveLogRanges.vue`、`logs/gap_catalog.py`、`gap_snapshots.py`、`shared/composables/liveLogBuffer.ts`；取消200行/秒及5000行主动省略，改为管理员配置1至100MiB、默认10MiB的最新内容预算；跨文件/会话补读保留 | 高频1200行/秒合成输入；1440/390/320补读浏览器验证最旧50行淘汰、最新200行保留和暂停时预算收缩；已有精确五页补读与`DELETED`缺口分页证据保留 | 配置值估算日志内容和索引，不等同浏览器RSS；无file/offset或目录不完整的源缺口只能转小时归档；物理跨节点与真实持续采集规模未验收 | 目标多节点部署后验证目录一致性和真实流；不再恢复已取消的按速率主动省略 |
 | R18 保留天数、节点登记/准入、审计/事件 | `administration/settings.py`的保留期/节点配置与审计同事务，`node/input_admission.py`，`record_maintenance.py`，事件展示/筛选；已实现 | 节点输入速率真实Mongo竞争/恢复、设置保存、增长记录维护和20项生产页面验证通过；事件既有真实Mongo派生查询与浏览器证据保留 | 登记不等于部署；目标节点持续输入和生产事件/索引成本未验收 | 部署同版API/Worker/前端后，按目标吞吐标定阈值并观测维护与事件查询成本 |
 | R19 Token/撤销/权限、加密审计、TLS | Token/公共鉴权、`users/sessions.py`；有效用户共享读取，写入按所有者，令牌继承绑定用户，旧独立资源/任务范围模型已替换 | 权限/脱敏/会话及服务令牌测试，本轮全量通过 | 分布式 TLS 未验收 | 真实代理与会话撤销验证，参见R34/R35 |
 | R20 500×1200 行/秒×24小时，文件可读 P99≤200ms | 压测工具与写入指标，待验收 | 短时报告仅证明对应样本 | 无等规模证据，API 观察不能替代文件可读 | 独立文件探针与 Linux 集群全天验收 |

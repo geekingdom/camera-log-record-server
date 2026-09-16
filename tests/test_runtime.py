@@ -400,6 +400,22 @@ def test_live_chunks_use_their_immutable_path_and_offset(tmp_path):
     assert stored_hour.endswith("+00:00")
 
 
+def test_live_tail_returns_all_continuous_high_frequency_frames(tmp_path):
+    """轮询间隔固定时，连续帧不能再因单轮 32 条上限滞留到运行缓冲过期。"""
+    runtime = runtime_for_callbacks(tmp_path)
+    runtime.frames = deque(
+        {"cursor": f"run-a:{index}", "size": 1, "data": ""}
+        for index in range(1, 1_201)
+    )
+
+    tail = runtime.tail("run-a:0")
+
+    assert len(tail["frames"]) == 1_200
+    assert tail["frames"][0]["cursor"] == "run-a:1"
+    assert tail["frames"][-1]["cursor"] == "run-a:1200"
+    assert tail["gap"] is False
+
+
 def test_hour_from_path_supports_new_and_legacy_layouts(tmp_path):
     """目录改版只能影响新写入，既有归档的 catalog 小时仍须保持可读。"""
     new_path = tmp_path / "device-a" / "采集任务-full-task-id" / "2026-09-08" / "09" / "part-000001.log"

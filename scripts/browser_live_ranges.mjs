@@ -24,13 +24,14 @@ const administrator = {
 const encoder = new TextEncoder();
 const byteLength = (text) => encoder.encode(text).byteLength;
 const encoded = (text) => Buffer.from(text).toString("base64");
-const line = (index) => `省略范围-${String(index).padStart(3, "0")}-${"数据".repeat(900)}\n`;
+// 1 MiB 内容预算下每行约 5.2 KiB，250 行会保留最新 200 行；此处验证预算淘汰而非旧的行数速率限流。
+const line = (index) => `省略范围-${String(index).padStart(3, "0")}-${"数据".repeat(1275)}\n`;
 const completeText = Array.from({ length: 250 }, (_, index) => line(index)).join("");
-const retainedText = Array.from({ length: 200 }, (_, index) => line(index)).join("");
-const omittedText = Array.from({ length: 50 }, (_, index) => line(index + 200)).join("");
+const omittedText = Array.from({ length: 50 }, (_, index) => line(index)).join("");
 const omittedBytes = encoder.encode(omittedText);
-const omittedStart = byteLength(retainedText);
-const omittedEnd = byteLength(completeText);
+const omittedStart = 0;
+const omittedEnd = byteLength(omittedText);
+const transportStart = byteLength(completeText);
 const requestedContent = [];
 const transportFaultRequests = [];
 const catalogRequests = [];
@@ -40,6 +41,9 @@ let transportReadAttempt = 0;
 let staleReply;
 let staleRequestStarted;
 const staleRequestStartedPromise = new Promise(resolve => { staleRequestStarted = resolve; });
+let releaseDisplaySettings;
+let markDisplaySettingsStarted;
+const displaySettingsStarted = new Promise(resolve => { markDisplaySettingsStarted = resolve; });
 
 async function json(route, body, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -66,6 +70,11 @@ await context.route("**/api/v1/**", async route => {
   if (pathname === "/api/v1/command-templates") return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (pathname === "/api/v1/nodes" || pathname === "/api/v1/admin/nodes") return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (pathname === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1, updatedAt: timestamp });
+  if (pathname === "/api/v1/display-settings") {
+    markDisplaySettingsStarted();
+    await new Promise(resolve => { releaseDisplaySettings = resolve; });
+    return json(route, { liveLogBufferMiB: 1 });
+  }
   if (["/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(pathname))
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (pathname === `/api/v1/tasks/${primaryTask.id}`) return json(route, primaryTask);
@@ -87,7 +96,7 @@ await context.route("**/api/v1/**", async route => {
   if (pathname === "/api/v1/log-files/range-file/content") {
     const offset = Number(url.searchParams.get("offset"));
     const limit = Number(url.searchParams.get("limit"));
-    if (offset === omittedEnd) {
+    if (offset === transportStart) {
       transportReadAttempt += 1;
       transportFaultRequests.push({ offset, limit, attempt: transportReadAttempt });
       assert.equal(limit, 16, "传输缺口补读必须限制在精确的 16 字节区间内");
@@ -181,13 +190,21 @@ async function assertDialogFooterReachable(dialog) {
 
 try {
   await mkdir(output, { recursive: true });
-  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "domcontentloaded" });
   await openPrimaryLiveLogs();
   const consoleOutput = page.locator(".log-console");
-  await consoleOutput.getByText(line(199).trim(), { exact: true }).waitFor();
+  await displaySettingsStarted;
+  await consoleOutput.getByText(line(249).trim(), { exact: true }).waitFor();
+  await page.getByRole("button", { name: "暂停视图", exact: true }).click();
+  releaseDisplaySettings();
+  await page.getByText("本地内容预算已移出 50 行较早日志。", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "继续视图", exact: true }).waitFor();
+  await consoleOutput.getByText(line(249).trim(), { exact: true }).waitFor();
+  await page.getByRole("button", { name: "继续视图", exact: true }).click();
+  await consoleOutput.getByText(line(249).trim(), { exact: true }).waitFor();
   const renderedLineCount = await consoleOutput.evaluate(element => Math.round(element.scrollHeight / 24));
-  assert.equal(renderedLineCount, 200, "单帧 250 行仅应保留 200 行可见日志；虚拟列表只挂载当前视口行");
-  await page.getByText("本地已省略 50 行高频日志。", { exact: true }).waitFor();
+  assert.equal(renderedLineCount, 200, "1 MiB 内容预算下只保留最新 200 行；虚拟列表只挂载当前视口行");
+  await page.getByText("本地内容预算已移出 50 行较早日志。", { exact: true }).waitFor();
 
   // 暂停后接收器继续推进 cursor，并把偏移跳跃和服务端未知缺口写入范围列表。
   await page.getByRole("button", { name: "暂停视图", exact: true }).click();
@@ -195,7 +212,7 @@ try {
   assert.ok(socket, "主任务必须建立模拟 WebSocket");
   socket.send(JSON.stringify({
     type: "data", data: encoded("暂停期间收到的新行\n"), fileId: "range-file", sessionId: "range-session",
-    offset: omittedEnd + 16, cursor: "paused-cursor-forward-gap",
+    offset: transportStart + 16, cursor: "paused-cursor-forward-gap",
   }));
   socket.send(JSON.stringify({ type: "gap", message: "服务端未提供精确字节区间", cursor: "paused-cursor-server-gap" }));
   socket.send(JSON.stringify({ type: "data", data: encoded("NODE_A_GAP\n"), fileId: "gap-node-a-file", sessionId: "range-session", offset: 0, cursor: "gap-before" }));
@@ -234,7 +251,7 @@ try {
   await dialog.getByRole("button", { name: "返回缺口列表", exact: true }).click();
   const transportRow = dialog.locator(".range-item").filter({ hasText: "传输中断" }).first();
   await transportRow.getByRole("button", { name: /读取.*范围/ }).click();
-  const transportCursor = `已读取至 ${omittedEnd.toLocaleString("zh-CN")} / ${(omittedEnd + 16).toLocaleString("zh-CN")}`;
+  const transportCursor = `已读取至 ${transportStart.toLocaleString("zh-CN")} / ${(transportStart + 16).toLocaleString("zh-CN")}`;
   for (const message of ["返回文件与缺口记录不一致", "返回会话与缺口记录不一致", "返回字节边界无效", "返回字节边界无效"]) {
     await dialog.getByText(message, { exact: true }).waitFor();
     await dialog.getByText(transportCursor, { exact: true }).waitFor();
@@ -246,7 +263,7 @@ try {
   await dialog.getByText("TRANSPORT_OK_16!", { exact: true }).waitFor();
   assert.deepEqual(
     transportFaultRequests.slice(0, 6).map(({ offset, limit }) => ({ offset, limit })),
-    Array.from({ length: 6 }, () => ({ offset: omittedEnd, limit: 16 })),
+    Array.from({ length: 6 }, () => ({ offset: transportStart, limit: 16 })),
     "错误和空页重试不得推进传输缺口的读取 cursor",
   );
 
@@ -276,12 +293,12 @@ try {
   await dialog.getByRole("button", { name: "查看小时归档", exact: true }).click();
   await page.getByRole("tab", { name: "小时归档与检索", exact: true }).waitFor();
   await page.getByRole("tab", { name: "实时打印", exact: true }).click();
-  await consoleOutput.getByText(line(199).trim(), { exact: true }).waitFor();
+  await consoleOutput.getByText(line(249).trim(), { exact: true }).waitFor();
   const reopenedSocket = sockets.get(primaryTask.id);
   assert.ok(reopenedSocket, "返回实时打印后必须重建当前任务的模拟 WebSocket");
   reopenedSocket.send(JSON.stringify({
     type: "data", data: encoded("关闭后迟到读取\n"), fileId: "range-file", sessionId: "range-session",
-    offset: omittedEnd + 16, cursor: "stale-cursor-forward-gap",
+    offset: transportStart + 16, cursor: "stale-cursor-forward-gap",
   }));
   await page.waitForTimeout(180);
   await page.getByRole("button", { name: "查看省略范围", exact: true }).click();

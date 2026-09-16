@@ -53,6 +53,8 @@ await context.route("**/api/v1/**", async (route) => {
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (request.method() === "GET" && path === "/api/v1/platform-settings")
     return json(route, { retentionDays: 7, version: 1, updatedAt: timestamp });
+  if (request.method() === "GET" && path === "/api/v1/display-settings")
+    return json(route, { liveLogBufferMiB: 10 });
   if (request.method() === "GET" && path === "/api/v1/admin/nodes") return json(route, { items: [node] });
   if (request.method() === "GET" && path === "/api/v1/service-tokens") return json(route, {
     items: [{ id: "service-token", name: long, scopes: ["tasks:read", "logs:read"], taskIds: [task.id], expiresAt: "2030-01-01T00:00:00Z", createdAt: timestamp, revoked: false }],

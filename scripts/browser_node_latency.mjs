@@ -59,6 +59,7 @@ await context.route("**/api/v1/**", async (route) => {
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (path === "/api/v1/nodes") return json(route, { items: nodes, total: nodes.length, page: 1, pageSize: 100 });
   if (path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1, updatedAt: timestamp });
+  if (path === "/api/v1/display-settings") return json(route, { liveLogBufferMiB: 10 });
   if (path === "/api/v1/admin/nodes") return json(route, { items: [] });
   throw new Error(`未模拟的请求：${request.method()} ${path}`);
 });

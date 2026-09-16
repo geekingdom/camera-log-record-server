@@ -494,5 +494,7 @@ class SessionRuntime:
                 number = 0
         frames = [frame for frame in self.frames if int(frame["cursor"].rsplit(":", 1)[1]) > number]
         if not cursor:
+            # 首次订阅只展示最新四帧，避免打开页面回放整个运行缓冲；重连携带 cursor 时返回全部连续帧。
             frames = frames[-4:]
-        return {"frames": frames[:32], "gap": bool(frames and cursor and int(frames[0]["cursor"].rsplit(":", 1)[1]) > number+1)}
+        # 缓冲本身已按 8 MiB 限制；一次返回所有连续帧，避免 100ms 轮询的固定帧数成为高频日志瓶颈。
+        return {"frames": frames, "gap": bool(frames and cursor and int(frames[0]["cursor"].rsplit(":", 1)[1]) > number+1)}

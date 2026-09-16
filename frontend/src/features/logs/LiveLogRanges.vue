@@ -56,7 +56,6 @@ const selectedCanCatalog = computed(() => {
   return Boolean(range?.reason === "server" && range.beforeFileId && Number.isSafeInteger(range.beforeOffset) && range.beforeSessionId && range.afterFileId && Number.isSafeInteger(range.afterOffset) && range.afterSessionId);
 });
 const reasonLabel: Record<LiveLogRange["reason"], string> = {
-  rate: "本地限速省略",
   transport: "传输中断",
   retention: "本地缓冲过期",
   server: "服务端缓冲缺口",

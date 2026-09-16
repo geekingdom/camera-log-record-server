@@ -60,3 +60,11 @@ class NodeHttpPool:
         client = self._clients[self._next]
         self._next = (self._next + 1) % POOL_COUNT
         return await client.get(url, **kwargs)
+
+    async def post(self, url, **kwargs):
+        """复用同一受生命周期管理的连接池发送内部节点控制请求。"""
+        if not self._started or self._closed or len(self._clients) != POOL_COUNT:
+            raise RuntimeError("节点 HTTP 连接池未运行")
+        client = self._clients[self._next]
+        self._next = (self._next + 1) % POOL_COUNT
+        return await client.post(url, **kwargs)

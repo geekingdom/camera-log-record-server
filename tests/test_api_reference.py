@@ -101,6 +101,20 @@ def test_reference_requires_authentication_and_is_available_to_read_only_token(c
     assert client.get("/api/v1/api-reference", headers={"Authorization": "Bearer invalid"}).status_code == 401
 
 
+def test_reference_documents_minimal_live_log_display_settings(client):
+    """实时页面配置应公开给有效身份，但目录不能误写为管理员完整后台设置。"""
+    operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
+    display = operations["GET /api/v1/display-settings"]
+    assert display["title"] == "查询实时日志显示配置"
+    assert display["group"] == "平台配置"
+    assert display["permission"] == "有效Token或登录会话（仅返回实时日志内存上限）"
+    assert display["responseExample"] == {"liveLogBufferMiB": 10}
+    guide = next(item["text"] for item in client.get("/api/v1/api-reference").json()["guides"]
+                 if item["title"] == "实时日志显示配置")
+    for text in ("liveLogBufferMiB", "1至100", "不返回", "Worker原始日志"):
+        assert text in guide
+
+
 def test_reference_documents_reusable_credentials_and_admin_only_rotation(client):
     """口令查看与管理员轮换不能在目录中混用权限或响应结构。"""
     operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}

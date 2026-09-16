@@ -28,6 +28,7 @@ GUIDES = [
     {"title": "查询结果与完整日志", "text": "检索返回作业id；查询作业状态后，通过/log-searches/{id}/results分页获取结果。非空关键词按完整匹配行返回text，同一行多个命中只返回一项，不包含相邻行和行尾换行符；fileId/offset为首个范围内命中的原始字节位置，lineStartFileId/lineStartOffset为逻辑行起点，可跨连续分卷。单行最多256KiB，命中超长行明确失败；结果最多1000项且正文总计最多8MiB，truncated=true表示需缩短区间或读取原文件。GET /api/v1/log-files/{id}读取安全元数据，再按文件/content?offset=0&limit=65536续读，limit最大262144。空关键词仍返回按接收时间筛选的Base64字节片段。搜索上限和页面着色不影响原始日志保存。"},
     {"title": "小时下载与断点续传", "text": "先用/tasks/{task_id}/log-hours取得hourId，可传date按北京时间筛选日期，再POST /downloads提交taskId和hourIds。单次最多168小时、预计20GB。轮询成功后GET /downloads/{id}/content，携带Bearer及可选Range。单小时下载仅含日志的tar.gz，多小时ZIP STORE。缺片默认失败；allowPartial=true才允许部分导出。"},
     {"title": "实时日志", "text": "HTTP部署使用ws://<host>/api/v1/tasks/{task_id}/logs；HTTPS部署使用wss://<host>/api/v1/tasks/{task_id}/logs。连接后10秒内发送JSON首帧token及可选cursor，不能把Token放URL。服务端每次推送重验权限；data为Base64原始字节，fileId/offset用于消除重叠后再解码。gap表示实时缓冲缺口，按文件或小时归档补读。重连提交最后cursor，不保证断线期间设备输出可追回。"},
+    {"title": "实时日志显示配置", "text": "GET /api/v1/display-settings 供已登录平台用户和有效第三方服务账号读取实时日志浏览器内存上限 liveLogBufferMiB。该接口只返回整数1至100的MiB上限，默认10；不返回日志保留期、节点容量、资源监控规则或其他管理员后台配置。前端应定期刷新该值并只限制本地展示缓存，不能据此删除Worker原始日志、改变采集顺序或中断下载。"},
     {"title": "手动命令", "text": "POST /tasks/{task_id}/commands提交command及可选newline/delaySeconds/prompt/timeoutSeconds，使用同一采集连接。初始化未完成或断线拒绝；通过/commands/{id}或/task的command-executions查询。最多发送次数不代表设备业务成功，UNKNOWN不自动重发。"},
     {"title": "用户权限与所有权", "text": "有效普通用户自动拥有tasks:read、logs:read、logs:download、templates:read、templates:write和service-tokens:read；用户配置的scopes仅增加写入、控制、命令或管理能力。平台来源IP策略仍会收窄本次请求的有效权限。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态。所有人可读取资源、任务、下载和只读日志；资源和任务的编辑、删除或控制，以及向任务发送手动命令，均须具备对应scope且仅创建者或管理员可执行。创建任务可使用他人创建的资源，任务自身独立归属。"},
     {"title": "模板共享", "text": "服务端写入模板创建者，客户端不能提交createdBy。创建者、sharedWith中的有效用户及sharedWithAll=true时的全部有效用户可读取模板；管理员可读取全部模板。仅创建者或管理员可编辑、删除模板；sharedWith中的用户必须存在、启用且未删除，sharedWithAll仅管理员可设置。模板名称按创建者唯一。任务只在创建或实际切换模板来源时校验模板可读，已保存的任务快照不会因撤销共享或删除模板失效。GET /api/v1/users/share-targets要求templates:read，返回可共享对象的最小用户列表。"},
@@ -43,7 +44,7 @@ SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网�
            "authenticate": "认证设备资源", "login": "账号登录", "logout": "退出登录", "password": "修改本人密码",
            "me": "查询当前登录用户", "reset-password": "重置子账户密码", "confirm-isolation": "确认旧节点已隔离",
            "browser-session": "签发浏览器下载授权", "results": "分页查询检索结果", "log-hours": "查询任务小时日志",
-           "command-executions": "查询任务命令记录", "permissions": "查询可配置权限", "share-targets": "查询模板共享对象", "content": "读取日志内容"}
+           "command-executions": "查询任务命令记录", "permissions": "查询可配置权限", "share-targets": "查询模板共享对象", "display-settings": "查询实时日志显示配置", "content": "读取日志内容"}
 
 
 def group(path):
@@ -53,7 +54,8 @@ def group(path):
                              ("log-", "日志查询"), ("downloads", "日志下载"), ("tasks", "采集任务"),
                              ("operations", "异步操作"), ("service-tokens", "服务令牌"),
                              ("users", "用户管理"), ("auth/", "登录会话"), ("events", "审计事件"),
-                             ("nodes", "节点管理"), ("ip-policy", "来源IP策略"), ("platform-settings", "平台配置")):
+                             ("nodes", "节点管理"), ("ip-policy", "来源IP策略"),
+                             ("platform-settings", "平台配置"), ("display-settings", "平台配置")):
         if fragment in path:
             return title
     return "平台接口"
@@ -73,6 +75,8 @@ def permission(path, method):
         return "templates:read"
     if path == "/api/v1/users/creators":
         return "tasks:read 或 templates:read（最小历史创建人目录）"
+    if path == "/api/v1/display-settings":
+        return "有效Token或登录会话（仅返回实时日志内存上限）"
     if "/service-tokens" in path and (method == "GET" or path.endswith("/reveal")):
         return "service-tokens:read + 仅绑定用户本人或admin"
     if any(part in path for part in ("/users", "/service-tokens", "/admin/", "/nodes", "-events", "/platform-settings")) or path == "/metrics":

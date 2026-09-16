@@ -10,6 +10,9 @@ def test_collection_and_platform_requests_have_meaningful_targets():
         "targetKind": "nodes", "targetLabel": "服务节点", "targetScope": "COLLECTION",
     }
     assert request_target("/api/v1/platform-settings", {})["targetScope"] == "PLATFORM"
+    assert request_target("/api/v1/display-settings", {}) == {
+        "targetKind": "display-settings", "targetLabel": "实时日志显示配置", "targetScope": "PLATFORM",
+    }
 
 
 def test_named_and_generic_path_ids_are_bound_to_the_route_object():

@@ -39,10 +39,16 @@ export interface RecordRetentionConfig {
 export interface PlatformSettings {
   retentionDays: number;
   clusterCapacity?: number;
+  liveLogBufferMiB: number;
   version: number;
   updatedAt: string;
   resourceMonitor?: ResourceMonitorConfig;
   recordRetention?: RecordRetentionConfig;
+}
+
+/** 已登录用户可读取的实时页面显示约束，不包含管理员平台配置。 */
+export interface DisplaySettings {
+  liveLogBufferMiB: number;
 }
 
 export interface NodeConfig {
@@ -77,7 +83,8 @@ export interface NodeRegistration {
 
 export const settingsApi = {
   platform: () => request<PlatformSettings>("/platform-settings"),
-  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; resourceMonitor?: ResourceMonitorConfig; recordRetention?: RecordRetentionConfig }) =>
+  display: () => request<DisplaySettings>("/display-settings"),
+  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; liveLogBufferMiB?: number; resourceMonitor?: ResourceMonitorConfig; recordRetention?: RecordRetentionConfig }) =>
     request<PlatformSettings>("/platform-settings", {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

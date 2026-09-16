@@ -76,7 +76,7 @@ class SshSource:
         self.connected, self.closed = asyncio.Event(), asyncio.Event()
         self.commands: list[bytearray] = []
         self.sent: list[bytes] = []
-        self.active = self.connection_count = 0
+        self.active = self.connection_count = self.peak_active = 0
         self.emitting = asyncio.Event()
         self.emitting.set()
 
@@ -88,6 +88,7 @@ class SshSource:
             def connection_made(self, _connection) -> None:
                 source.connection_count += 1
                 source.active += 1
+                source.peak_active = max(source.peak_active, source.active)
                 self.number = source.connection_count
                 source.closed.clear()
                 source.connected.set()

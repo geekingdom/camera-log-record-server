@@ -94,6 +94,7 @@ await context.route("**/api/v1/**", async route => {
   }
   if (["/api/v1/command-templates", "/api/v1/nodes", "/api/v1/admin/nodes", "/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(path)) return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
+  if (path === "/api/v1/display-settings") return json(route, { liveLogBufferMiB: 10 });
   throw new Error(`未模拟请求：${request.method()} ${path}`);
 });
 await context.routeWebSocket("**/api/v1/tasks/*/logs*", socket => socket.close());

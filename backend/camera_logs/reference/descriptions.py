@@ -18,6 +18,7 @@ FIELD_DESCRIPTIONS = {
     "writeLatencyLimitMs": "该节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动中断已有采集。",
     "clearPassword": "编辑任务时是否明确清除已保存的设备登录密码。",
     "clusterCapacity": "平台允许同时运行的全部采集任务总上限。",
+    "liveLogBufferMiB": "实时日志页面在浏览器内存中保留的最大数据量，单位MiB，整数1至100，默认10。",
     "command": "发送给设备的一条单行命令正文。",
     "confirmIsolation": "是否确认旧运行实例已完成外部隔离，仅管理员可设为 true。",
     "confirmation": "执行节点隔离确认时必须填写的固定确认词。",

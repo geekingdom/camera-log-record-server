@@ -41,6 +41,9 @@ class Worker:
         self.releases = {}
         # 仅记录本实例亲自关闭过、但持久化收尾失败的运行；不能把任意 BLOCKED 当成可自动释放。
         self.failed_cleanups = {}
+        self.self_fenced = {}
+        # 数据库失联时自围栏的关闭失败必须由同一流程续做，不能落入普通 release。
+        self.self_fence_pending = {}
         self.disk_level = "NORMAL"
         self.write_pressure = WritePressure()
         self.coredump_scanner = None
@@ -261,14 +264,8 @@ class Worker:
         成功停止的实例才从 active 移除；停止失败的实例保留，后续人工或恢复后的
         周期可继续隔离，端点锁也不会被本节点错误删除。
         """
-        for task_id, runtime in list(self.active.items()):
-            try:
-                await runtime.stop()
-            except Exception:
-                logger.exception("数据库失联时关闭采集实例失败 task=%s", task_id)
-            else:
-                if self.active.get(task_id) is runtime:
-                    self.active.pop(task_id)
+        from camera_logs.node.failover import self_fence_active_sessions
+        await self_fence_active_sessions(self)
 
     async def tick(self):
         """更新资源心跳、处理期望状态并分发作业，不在本周期等待耗时归档。"""
@@ -334,6 +331,8 @@ class Worker:
             "configuredUrl": config.get("url"), "telemetry": self.telemetry.value,
             "capabilities": {"coredumpNfs": bool(self.repo.settings.nfs_server_ip)},
             "accepting": accepting}, "$unset": {"shuttingDownAt": ""}}, upsert=True)
+        from camera_logs.node.failover import persist_self_fenced_receipts, retry_self_fence_pending
+        await persist_self_fenced_receipts(self)
         for task_id, future in list(self.releases.items()):
             if future.done():
                 try:
@@ -341,6 +340,9 @@ class Worker:
                 except Exception:
                     logger.exception("运行实例释放失败 task=%s", task_id)
                 self.releases.pop(task_id, None)
+        # 已完成的失败自围栏先移出 releases，再由专属流程重试；不能在本周期
+        # 让普通 isolate/release 看见该运行并改写其关闭语义。
+        await retry_self_fence_pending(self)
         tasks = [t async for t in self.repo.db.tasks.find({"nodeId": self.repo.settings.node_id})]
         assigned = {task["id"]: task for task in tasks}
         # 仅成功取得数据库快照后核对归属；读取失败不能被解释成任务已经消失。

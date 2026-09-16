@@ -51,6 +51,7 @@ try {
         secondTaskReads += 1;
         body = { ...secondTask, status: secondTaskReads === 1 ? "STOPPED" : "COLLECTING" };
       }
+      else if (path === "/api/v1/display-settings") body = { liveLogBufferMiB: 10 };
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
     });
     await context.routeWebSocket("**/api/v1/tasks/*/logs*", socket => socket.close());

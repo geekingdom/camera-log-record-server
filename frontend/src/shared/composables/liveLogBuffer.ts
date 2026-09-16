@@ -1,4 +1,4 @@
-// 实时日志纯状态机：组件只处理连接和渲染，字节拼接、去重、限流在此保持可测试。
+// 实时日志纯状态机：组件只处理连接和渲染，字节拼接、去重和内容预算在此保持可测试。
 export interface LiveLogFrame {
   data?: string;
   cursor?: string;
@@ -15,7 +15,7 @@ export interface LiveLogRange {
   fileId?: string;
   start?: number;
   end?: number;
-  reason: "rate" | "transport" | "retention" | "server";
+  reason: "transport" | "retention" | "server";
   lines?: number;
   message?: string;
   // 服务端未知 gap 以两端已确认帧为锚点，目录接口据此跨文件定位，绝不猜测中间字节。
@@ -40,16 +40,24 @@ interface BytePiece {
 interface StoredLine {
   text: string;
   pieces: Array<Omit<BytePiece, "bytes">>;
+  byteLength: number;
 }
 
-const DISPLAY_LINE_LIMIT = 200;
-const RETAINED_LINE_LIMIT = 5000;
+export const DEFAULT_LIVE_LOG_BUFFER_BYTES = 10 * 1024 * 1024;
 const LONG_LINE_BYTE_LIMIT = 65536;
 const TRACKED_FILE_LIMIT = 200;
 const MISSING_RANGE_LIMIT = 200;
+const LINE_METADATA_BYTES = 64;
+const PIECE_METADATA_BYTES = 48;
 
 export class LiveLogBuffer {
-  readonly lines: string[] = [];
+  private readonly lineTexts: Array<string | undefined> = [];
+  // 读取时生成当前快照，组件本来就在 100ms 节流点复制；淘汰槽会立即清空正文引用。
+  get lines() {
+    return this.lineTexts.slice(this.lineStart).filter(
+      (line): line is string => line !== undefined,
+    );
+  }
   readonly missingRanges: LiveLogRange[] = [];
   omitted = 0;
   gaps = 0;
@@ -59,16 +67,28 @@ export class LiveLogBuffer {
   private partialByteLength = 0;
   private sessionId: string | undefined;
   private offsets = new Map<string, number>();
-  private visibleLines: StoredLine[] = [];
-  private rateStartedAt = 0;
-  private linesThisSecond = 0;
+  private visibleLines: Array<StoredLine | undefined> = [];
+  private lineStart = 0;
+  private retainedByteLength = 0;
   private nextRangeId = 1;
   private lastAnchor: LogAnchor | undefined;
   private pendingServerGap: LiveLogRange | undefined;
 
+  private contentBudgetBytes: number;
+
+  constructor(contentBudgetBytes = DEFAULT_LIVE_LOG_BUFFER_BYTES) {
+    this.contentBudgetBytes = this.validateContentBudget(contentBudgetBytes);
+  }
+
+  // 配置热更新只收缩本地行队列，绝不重置 cursor、offset 或正在接收的半行。
+  setContentBudgetBytes(contentBudgetBytes: number) {
+    this.contentBudgetBytes = this.validateContentBudget(contentBudgetBytes);
+    return this.enforceContentBudget();
+  }
+
   // 任务切换时必须切断所有旧任务状态，新的订阅从空 cursor 和空字节队列开始。
   reset() {
-    this.lines.splice(0);
+    this.lineTexts.splice(0);
     this.missingRanges.splice(0);
     this.omitted = 0;
     this.gaps = 0;
@@ -79,8 +99,8 @@ export class LiveLogBuffer {
     this.sessionId = undefined;
     this.offsets.clear();
     this.visibleLines = [];
-    this.rateStartedAt = 0;
-    this.linesThisSecond = 0;
+    this.lineStart = 0;
+    this.retainedByteLength = 0;
     this.nextRangeId = 1;
     this.lastAnchor = undefined;
     this.pendingServerGap = undefined;
@@ -88,12 +108,14 @@ export class LiveLogBuffer {
 
   // 用户“清空”只影响本地视图；保留 cursor/offset，后续帧仍能连续去重。
   clearView() {
-    this.lines.splice(0);
+    this.lineTexts.splice(0);
     this.missingRanges.splice(0);
     this.omitted = 0;
     this.gaps = 0;
     this.droppedRangeCount = 0;
     this.visibleLines = [];
+    this.lineStart = 0;
+    this.retainedByteLength = 0;
   }
 
   // offset 在解码前比较，避免重叠帧使同一字节进入行队列两次。
@@ -285,28 +307,52 @@ export class LiveLogBuffer {
     return 1;
   }
 
-  private emitLine(pieces: BytePiece[], now: number) {
-    if (now - this.rateStartedAt >= 1000) {
-      this.rateStartedAt = now;
-      this.linesThisSecond = 0;
-    }
-    this.linesThisSecond += 1;
-    if (this.linesThisSecond > DISPLAY_LINE_LIMIT) {
-      this.omitted += 1;
-      this.recordPieces(pieces, "rate", 1);
-      return;
-    }
+  private emitLine(pieces: BytePiece[], _now: number) {
+    const text = this.decodeLine(pieces);
+    const rangePieces = this.rangePieces(pieces);
     const line: StoredLine = {
-      text: this.decodeLine(pieces),
-      pieces: this.rangePieces(pieces),
+      text,
+      pieces: rangePieces,
+      // 内容预算估算 UTF-16 字符串、数组槽和区间对象，不承诺等同浏览器进程 RSS。
+      byteLength: this.estimateStoredLineBytes(text, rangePieces.length),
     };
-    this.lines.push(line.text);
+    this.lineTexts.push(line.text);
     this.visibleLines.push(line);
-    if (this.lines.length > RETAINED_LINE_LIMIT) {
-      const removed = this.visibleLines.shift();
-      this.lines.shift();
-      if (removed) this.recordPieces(removed.pieces, "retention", 1);
+    this.retainedByteLength += line.byteLength;
+    // 内容预算按已解码行所对应的原始字节计量；虚拟化只影响 DOM，不能阻断接收。
+    this.enforceContentBudget();
+  }
+
+  private validateContentBudget(contentBudgetBytes: number) {
+    if (!Number.isSafeInteger(contentBudgetBytes) || contentBudgetBytes < 1)
+      throw new TypeError("实时日志内容预算必须是正整数。");
+    return contentBudgetBytes;
+  }
+
+  private estimateStoredLineBytes(text: string, rangePieceCount: number) {
+    return LINE_METADATA_BYTES + text.length * 2 + rangePieceCount * PIECE_METADATA_BYTES;
+  }
+
+  private enforceContentBudget() {
+    let evicted = false;
+    while (this.retainedByteLength > this.contentBudgetBytes && this.lineStart < this.visibleLines.length) {
+      const removed = this.visibleLines[this.lineStart];
+      this.visibleLines[this.lineStart] = undefined;
+      this.lineTexts[this.lineStart] = undefined;
+      this.lineStart += 1;
+      if (removed) {
+        this.retainedByteLength -= removed.byteLength;
+        this.omitted += 1;
+        evicted = true;
+        this.recordPieces(removed.pieces, "retention", 1);
+      }
     }
+    if (this.lineStart >= 1024 && this.lineStart * 2 >= this.visibleLines.length) {
+      this.visibleLines.splice(0, this.lineStart);
+      this.lineTexts.splice(0, this.lineStart);
+      this.lineStart = 0;
+    }
+    return evicted;
   }
 
   private decodeLine(pieces: BytePiece[]) {

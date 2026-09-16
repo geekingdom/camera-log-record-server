@@ -13,7 +13,7 @@ from camera_logs.common.security import authorize
 from camera_logs.tasks.control import _guard_resources
 
 
-async def record_closed_receipt(repo, task, instance_id: str, session_id: str | None) -> None:
+async def record_closed_receipt(repo, task, instance_id: str, session_id: str | None, *, reason: str | None = None) -> None:
     """在传输和日志收尾完成后固化精确 owner 收据，供数据库收尾重试使用。"""
     if not session_id:
         raise RuntimeError("运行关闭后缺少实际会话标识，不能确认收据")
@@ -22,6 +22,18 @@ async def record_closed_receipt(repo, task, instance_id: str, session_id: str | 
         "nodeId": task.get("nodeId"), "sessionId": session_id,
         "instanceId": instance_id, "closedAt": now(),
     }
+    if reason:
+        receipt["reason"] = reason
+    # 自围栏已证明同一运行的物理关闭后，Tick 的普通隔离收尾可能稍后完成。
+    # 该收尾不得把完全相同 owner 的 AUTO_FAILOVER_FENCED 收据降级为普通收据。
+    if reason is None:
+        current = await repo.db.tasks.find_one(owner_filter(task), {"closedReceipt": 1})
+        existing = (current or {}).get("closedReceipt") or {}
+        if existing.get("reason") == "AUTO_FAILOVER_FENCED" and all(
+            existing.get(key) == receipt.get(key)
+            for key in ("taskId", "runId", "generation", "nodeId", "sessionId", "instanceId")
+        ):
+            return
     await repo.db.tasks.update_one(owner_filter(task), {"$set": {"closedReceipt": receipt}})
 
 

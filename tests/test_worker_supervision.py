@@ -50,6 +50,24 @@ async def setup_worker(tmp_path, monkeypatch):
     return worker, repo, runtime
 
 
+async def test_tick_retries_completed_self_fence_before_regular_runtime_reconciliation(tmp_path, monkeypatch):
+    """自围栏失败任务在下一 tick 先专属重试，不能落入普通 isolate 或 release。"""
+    worker, _repo, runtime = await setup_worker(tmp_path, monkeypatch)
+    runtime.collector = SimpleNamespace(session_id="session")
+    runtime.retired = False
+    runtime.stop = AsyncMock(side_effect=[OSError("archive publish failed"), None])
+
+    await worker.isolate_active_sessions()
+    await asyncio.gather(*worker.releases.values())
+    assert worker.self_fence_pending["task"] is runtime
+
+    await worker.tick()
+
+    assert runtime.stop.await_count == 2
+    assert "task" not in worker.self_fence_pending
+    assert "task" in worker.self_fenced
+
+
 @pytest.mark.parametrize("change", ["missing", "node", "generation", "run", "blocked", "isolated"])
 async def test_tick_closes_disowned_or_blocked_runtime_without_releasing_lock(tmp_path, monkeypatch, change):
     """隔离只证明本机连接关闭，不擅自放行任务锁或修改后继领取状态。"""

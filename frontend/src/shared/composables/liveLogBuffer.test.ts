@@ -156,28 +156,19 @@ describe("LiveLogBuffer", () => {
     expect(buffer.lines).toEqual(["new"]);
   });
 
-  it("records rate-limited UTF-8 lines with their original byte ranges", () => {
+  it("receives every high-frequency UTF-8 line without creating a rate gap", () => {
     const buffer = new LiveLogBuffer();
     const text = `${"a\n".repeat(200)}中\n`;
     buffer.ingest(binaryFrame(text, 0), 0);
-    const start = new TextEncoder().encode("a\n".repeat(200)).byteLength;
 
-    expect(buffer.lines).toHaveLength(200);
-    expect(buffer.omitted).toBe(1);
-    expect(buffer.missingRanges).toEqual([
-      expect.objectContaining({
-        reason: "rate",
-        sessionId: "one",
-        fileId: "file",
-        start,
-        end: start + new TextEncoder().encode("中\n").byteLength,
-        lines: 1,
-      }),
-    ]);
+    expect(buffer.lines).toHaveLength(201);
+    expect(buffer.lines.at(-1)).toBe("中");
+    expect(buffer.omitted).toBe(0);
+    expect(buffer.missingRanges).toEqual([]);
   });
 
   it("retains a partial line across file boundaries and records evicted bytes", () => {
-    const buffer = new LiveLogBuffer();
+    const buffer = new LiveLogBuffer(400);
     buffer.ingest(
       { data: btoa("before"), fileId: "first", offset: 0, sessionId: "one" },
       0,
@@ -187,7 +178,7 @@ describe("LiveLogBuffer", () => {
       0,
     );
     let offset = 7;
-    for (let index = 0; index < 5000; index += 1) {
+    for (let index = 0; index < 10; index += 1) {
       const text = `row-${index}\n`;
       buffer.ingest(
         { data: btoa(text), fileId: "second", offset, sessionId: "one" },
@@ -196,8 +187,7 @@ describe("LiveLogBuffer", () => {
       offset += text.length;
     }
 
-    expect(buffer.lines).toHaveLength(5000);
-    expect(buffer.lines[0]).toBe("row-0");
+    expect(buffer.lines).toEqual(["row-7", "row-8", "row-9"]);
     expect(buffer.missingRanges).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -210,14 +200,13 @@ describe("LiveLogBuffer", () => {
           reason: "retention",
           fileId: "second",
           start: 0,
-          end: 7,
         }),
       ]),
     );
   });
 
   it("coalesces a fragmented line into one retention range", () => {
-    const buffer = new LiveLogBuffer();
+    const buffer = new LiveLogBuffer(800);
     for (let index = 0; index < 300; index += 1)
       buffer.ingest(frame("x", index), index * 1000);
     buffer.ingest(frame("\n", 300), 301000);
@@ -228,8 +217,9 @@ describe("LiveLogBuffer", () => {
     expect(retained).toHaveLength(1);
     expect(retained[0]).toMatchObject({ start: 0, end: 301 });
     expect(retained[0].bytes).toBeUndefined();
+    buffer.setContentBudgetBytes(700);
     let offset = 301;
-    for (let index = 0; index < 5000; index += 1) {
+    for (let index = 0; index < 40; index += 1) {
       const text = `row-${index}\n`;
       buffer.ingest(frame(text, offset), (index + 302) * 1000);
       offset += text.length;
@@ -242,15 +232,47 @@ describe("LiveLogBuffer", () => {
     ).toHaveLength(1);
   });
 
-  it("does not merge omissions across bytes that stayed visible", () => {
-    const buffer = new LiveLogBuffer();
-    buffer.ingest(frame(`${"a\n".repeat(201)}`, 0), 0);
-    buffer.ingest(frame("visible\n", 402), 1000);
-    buffer.ingest(frame(`${"b\n".repeat(201)}`, 410), 1000);
+  it("evicts the oldest complete rows by content budget while offsets continue", () => {
+    const buffer = new LiveLogBuffer(200);
+    buffer.ingest(frame("one\n", 0), 0);
+    buffer.ingest(frame("two\n", 4), 0);
 
-    expect(
-      buffer.missingRanges.filter((range) => range.reason === "rate"),
-    ).toHaveLength(2);
+    expect(buffer.lines).toEqual(["two"]);
+    expect(buffer.omitted).toBe(1);
+    expect(buffer.missingRanges).toEqual([
+      expect.objectContaining({ reason: "retention", start: 0, end: 4 }),
+    ]);
+    buffer.ingest(frame("three\n", 8), 0);
+    expect(buffer.cursor).toBe("one:8");
+    expect(buffer.lines).toEqual(["three"]);
+  });
+
+  it("clears evicted text and range metadata references before batch compaction", () => {
+    const buffer = new LiveLogBuffer(200);
+    buffer.ingest(frame("first\n", 0), 0);
+    buffer.ingest(frame("second\n", 6), 0);
+
+    const internals = buffer as unknown as {
+      lineTexts: Array<string | undefined>;
+      visibleLines: Array<{ text: string; pieces: unknown[] } | undefined>;
+    };
+    expect(internals.lineTexts[0]).toBeUndefined();
+    expect(internals.visibleLines[0]).toBeUndefined();
+    expect(buffer.lines).toEqual(["second"]);
+  });
+
+  it("keeps receiving 1200 rows per second and evicts only the oldest suffix", () => {
+    const buffer = new LiveLogBuffer(1024 * 1024);
+    let offset = 0;
+    for (let index = 0; index < 24_000; index += 1) {
+      const text = `row-${index}\n`;
+      buffer.ingest(frame(text, offset), Math.floor(index / 1200) * 1000);
+      offset += text.length;
+    }
+
+    expect(buffer.omitted).toBeGreaterThan(0);
+    expect(buffer.lines.at(-1)).toBe("row-23999");
+    expect(buffer.missingRanges.every(range => range.reason === "retention")).toBe(true);
   });
 
   it("bounds retained missing ranges while preserving the dropped-range count", () => {

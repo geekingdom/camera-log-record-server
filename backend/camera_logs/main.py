@@ -42,6 +42,7 @@ def create_app(settings=None, db=None):
             # 固定分池降低高并发连接状态扫描成本，全部客户端归 API 生命周期管理。
             async with NodeHttpPool() as node_http:
                 app.state.node_http = node_http
+                repo.node_http = node_http
                 if settings.start_background:
                     from camera_logs.common.record_maintenance import record_maintenance_loop
                     from camera_logs.logs.job_lease import recovery_loop

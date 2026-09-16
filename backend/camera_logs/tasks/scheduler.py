@@ -11,6 +11,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.node.failover import consume_confirmed_failovers, request_reachable_worker_fencing
 from camera_logs.node.health import rank_nodes
 from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.resource_routing import routing_config
@@ -53,10 +54,14 @@ async def reconcile_stopped_tasks(db):
 async def schedule_once(repo, lease=None):
     """在一次持有调度租约的周期内处理停止、失联和待分配任务。"""
     db = repo.db
+    await consume_confirmed_failovers(repo)
     await reconcile_deleted_resources(repo)
     await reconcile_authorized_recoveries(repo)
     cutoff = now() - timedelta(seconds=30)
-    async for node in db.nodes.find({"heartbeat": {"$lt": cutoff}}):
+    stale_nodes = [node async for node in db.nodes.find({"heartbeat": {"$lt": cutoff}})]
+    await request_reachable_worker_fencing(repo, stale_nodes)
+    await consume_confirmed_failovers(repo)
+    for node in stale_nodes:
         await db.tasks.update_many({"nodeId": node["id"], "status": {"$nin": ["STOPPED", "BLOCKED"]}},
             {"$set": {"status": "BLOCKED", "error": "节点失联，必须确认旧实例停止或隔离后才能接管"}})
     await reconcile_stopped_tasks(db)
@@ -79,6 +84,7 @@ async def schedule_once(repo, lease=None):
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
+        nodes = [node for node in nodes if node["id"] != task.get("failoverExcludedNodeId")]
         # 候选排序直接采用已保存容量，关闭准入也不等待下一次Worker心跳才排除。
         nodes = [node | routing_config(node_configs.get(node["id"], {}))
                  | {"capacity": node_configs.get(node["id"], {}).get("capacity", node.get("capacity", repo.settings.node_capacity)),

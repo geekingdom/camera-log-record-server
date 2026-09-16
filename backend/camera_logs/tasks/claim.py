@@ -54,6 +54,8 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
     和未到期时间，失效时抛出 ``SchedulerLeaseLost`` 让调度循环停止本周期。
     """
     resuming = task["status"] == "PAUSED" and bool(task.get("runId"))
+    if task.get("failoverExcludedNodeId") == node_id:
+        return None
     run_id = task["runId"] if resuming else new_id()
     cutoff = timedelta(seconds=15)
 
@@ -101,6 +103,7 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             "desiredState": "RUNNING",
             "resourceDeleted": {"$ne": True},
             "status": task["status"],
+            "failoverExcludedNodeId": {"$ne": node_id},
         }
         if resuming:
             task_query.update({
@@ -163,8 +166,13 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             "$set": {"nodeId": node_id, "runId": run_id, "status": "PENDING", "error": None},
             "$inc": {"generation": 1},
         }
+        if current.get("failoverExcludedNodeId"):
+            claim_update.setdefault("$unset", {}).update({
+                "failoverExcludedNodeId": "", "failoverFromNodeId": "", "failoverReason": "",
+                "failoverFenceRetryAt": "", "failoverConsumeRetryAt": "",
+            })
         if resuming:
-            claim_update["$unset"] = {"resumeClaimToken": "", "resumeClaimExpires": ""}
+            claim_update.setdefault("$unset", {}).update({"resumeClaimToken": "", "resumeClaimExpires": ""})
         claimed = await db.tasks.find_one_and_update(
             task_query,
             claim_update,
@@ -188,6 +196,12 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             upsert=True,
             session=session,
         )
+        if current.get("failoverFromNodeId"):
+            await db.events.insert_one({
+                "type": "TASK_AUTO_MIGRATED", "taskId": task["id"], "runId": run_id,
+                "oldNodeId": current["failoverFromNodeId"], "newNodeId": node_id,
+                "nodeId": node_id, "actor": "system", "reason": current.get("failoverReason"), "createdAt": now(),
+            }, session=session)
         return claimed
 
     try:

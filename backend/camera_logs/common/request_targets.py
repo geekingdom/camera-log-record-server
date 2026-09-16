@@ -5,11 +5,11 @@ TARGET_LABELS = {
     "command-templates": "命令模板", "commands": "命令执行", "users": "用户账户",
     "service-tokens": "第三方服务账号", "downloads": "日志下载作业", "log-searches": "日志检索作业",
     "log-files": "日志文件", "coredumps": "Coredump文件", "coredump-exports": "Coredump导出作业",
-    "operations": "任务操作", "platform-settings": "后台配置", "ip-policy": "平台IP访问规则",
+    "operations": "任务操作", "platform-settings": "后台配置", "display-settings": "实时日志显示配置", "ip-policy": "平台IP访问规则",
     "auth": "平台登录会话", "api-reference": "开放API文档", "audit-events": "审计记录",
     "runtime-events": "运行事件", "request-events": "请求记录",
 }
-PLATFORM_TARGETS = {"platform-settings", "ip-policy", "auth", "api-reference"}
+PLATFORM_TARGETS = {"platform-settings", "display-settings", "ip-policy", "auth", "api-reference"}
 IDENTIFIERS = {"identifier", "task_id", "resource_id", "node_id"}
 
 

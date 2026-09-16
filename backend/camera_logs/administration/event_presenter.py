@@ -55,6 +55,7 @@ EVENT_SUMMARIES = {
     "IDLE_TIMEOUT": "采集日志空闲超时", "READ_ERROR": "采集连接读取失败",
     "COREDUMP_MOUNT": "核心转储挂载状态变化",
     "SLAVE_SSH_BOOTSTRAP": "从机SSH连接与引导状态",
+    "TASK_AUTO_MIGRATED": "节点异常后已分配至其他节点，等待重新采集",
 }
 COREDUMP_MOUNT_SUMMARIES = {
     "MOUNTED": "核心转储 NFS 已挂载",

@@ -5,6 +5,7 @@ import { AArrowDown, AArrowUp, LocateFixed, Pause, Play, Send, Trash2, FileSearc
 import { ElMessage, ElNotification } from "element-plus";
 import "element-plus/es/components/notification/style/css";
 import { api, getToken } from "../../shared/api";
+import { settingsApi } from "../settings/api";
 import type { Task } from "../../shared/types";
 import {
   LiveLogBuffer,
@@ -114,6 +115,41 @@ let socket: WebSocket | undefined;
 let generation = 0;
 let retry: number | undefined;
 let syncTimer: number | undefined;
+let forceViewRefresh = false;
+let displaySettingsTimer: number | undefined;
+let displaySettingsGeneration = 0;
+const DEFAULT_LIVE_LOG_BUFFER_MIB = 10;
+
+function liveLogContentBudgetBytes(value: unknown) {
+  const mib = Number(value);
+  // 服务端约束为 1 至 100；读取异常时维持默认预算，不能因配置响应阻塞实时接收。
+  const safeMiB = Number.isInteger(mib) && mib >= 1 && mib <= 100
+    ? mib : DEFAULT_LIVE_LOG_BUFFER_MIB;
+  return safeMiB * 1024 * 1024;
+}
+
+// 配置收缩只淘汰最旧本地内容，cursor、offset 和 socket 均保持；暂停仍生效，但旧快照必须同步裁剪。
+async function refreshDisplaySettings(current: number) {
+  try {
+    const settings = await settingsApi.display();
+    if (current !== displaySettingsGeneration) return;
+    forceViewRefresh = buffer.setContentBudgetBytes(
+      liveLogContentBudgetBytes(settings.liveLogBufferMiB),
+    ) || forceViewRefresh;
+    scheduleSync();
+  } catch {
+    // 临时读取失败继续沿用当前预算；日志通道和用户权限状态均由各自链路处理。
+  } finally {
+    if (current === displaySettingsGeneration)
+      displaySettingsTimer = window.setTimeout(() => void refreshDisplaySettings(current), 30_000);
+  }
+}
+
+function startDisplaySettingsRefresh() {
+  displaySettingsGeneration += 1;
+  window.clearTimeout(displaySettingsTimer);
+  void refreshDisplaySettings(displaySettingsGeneration);
+}
 
 // 每 100ms 批量复制一次数组，避免高频帧逐条触发虚拟列表重算。
 function scheduleSync() {
@@ -126,10 +162,14 @@ function scheduleSync() {
     missingRanges.value = buffer.missingRanges.map(range => ({ ...range }));
     droppedRangeCount.value = buffer.droppedRangeCount;
     // 查找时冻结显示快照，接收器和 buffer 仍继续写入，防止定位被新日志挤走。
-    if (pausedView.value || Boolean(findQuery.value && matches.value.length)) return;
-    lines.value = [...buffer.lines];
+    if (pausedView.value || Boolean(findQuery.value && matches.value.length)) {
+      if (!forceViewRefresh) return;
+    }
+    forceViewRefresh = false;
+    lines.value = buffer.lines;
     await nextTick();
-    if (follow.value)
+    if (activeMatchIndex.value >= matches.value.length) activeMatchIndex.value = 0;
+    if (follow.value && !pausedView.value)
       consoleRef.value?.scrollTo({ top: consoleRef.value.scrollHeight });
   }, 100);
 }
@@ -139,6 +179,7 @@ function close() {
   window.clearTimeout(syncTimer);
   retry = undefined;
   syncTimer = undefined;
+  forceViewRefresh = false;
   socket?.close();
   socket = undefined;
   connected.value = false;
@@ -262,6 +303,7 @@ function onCommandKeydown(event: KeyboardEvent) {
   command.value = commandHistoryIndex.value < 0 ? commandDraft.value : commandHistory.value[commandHistoryIndex.value];
 }
 watch(() => props.taskId, connect, { immediate: true });
+watch(() => props.taskId, startDisplaySettingsRefresh, { immediate: true });
 watch(() => props.taskId, () => {
   debugNotice?.close();
   debugNotice = undefined;
@@ -293,7 +335,7 @@ watch(consoleRef, (current, previous) => {
   if (previous) resize.unobserve(previous);
   if (current) resize.observe(current);
 });
-onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGeneration++; clearTimeout(stateTimer); resize.disconnect(); close(); });
+onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGeneration++; displaySettingsGeneration++; clearTimeout(stateTimer); clearTimeout(displaySettingsTimer); resize.disconnect(); close(); });
 </script>
 <template>
   <section class="form-section runtime runtime-terminal">
@@ -333,7 +375,7 @@ onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGenerati
     <LogFindBar v-if="findOpen" v-model="findQuery" :current="matches.length ? activeMatchIndex + 1 : 0" :total="matches.length" :truncated="matchesTruncated" @previous="locate(-1)" @next="locate(1)" @close="closeFind" />
     <p v-if="gaps || omitted || missingRanges.length" class="log-gap">
       <span v-if="gaps">检测到 {{ gaps }} 个传输缺口。</span>
-      <span v-if="omitted">本地已省略 {{ omitted }} 行高频日志。</span>
+      <span v-if="omitted">本地内容预算已移出 {{ omitted }} 行较早日志。</span>
       <span v-if="!gaps && !omitted">有日志已移出本地视图。</span>
       <el-button :icon="FileSearch" @click="rangesOpen = true">查看省略范围</el-button>
       <el-button :icon="FileSearch" @click="emit('history')">查看原始日志</el-button>

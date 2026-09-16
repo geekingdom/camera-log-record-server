@@ -97,6 +97,7 @@ try {
       if (request.method() === "POST" && path === `/api/v1/tasks/${task.id}/commands`) { commandRequests.push(request.postDataJSON()); return json(route, { id: `command-${commandRequests.length}`, status: "QUEUED" }); }
       if (request.method() === "GET" && ["/api/v1/command-templates", "/api/v1/nodes", "/api/v1/admin/nodes", "/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(path)) return json(route, pageOf([]));
       if (request.method() === "GET" && path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
+      if (request.method() === "GET" && path === "/api/v1/display-settings") return json(route, { liveLogBufferMiB: 10 });
       if (request.method() === "GET" && path.endsWith("/log-hours")) return json(route, pageOf([]));
       throw new Error(`未模拟的请求：${request.method()} ${path}`);
     });
@@ -231,6 +232,7 @@ try {
     if (request.method() === "GET" && path === `/api/v1/tasks/${task.id}`) return json(route, task);
     if (request.method() === "GET" && ["/api/v1/command-templates", "/api/v1/nodes", "/api/v1/admin/nodes", "/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(path)) return json(route, pageOf([]));
     if (request.method() === "GET" && path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
+    if (request.method() === "GET" && path === "/api/v1/display-settings") return json(route, { liveLogBufferMiB: 10 });
     if (request.method() === "GET" && path.endsWith("/log-hours")) return json(route, pageOf([]));
     throw new Error(`无权限验收未模拟请求：${request.method()} ${path}`);
   });

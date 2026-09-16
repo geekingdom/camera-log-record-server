@@ -183,8 +183,10 @@ def response_example(path, method, status):
         return token if method == "PATCH" else token | {"token": "<SERVICE_TOKEN>"}
     if "/ip-policy" in path:
         return {"version": 1, "enabled": False, "rules": [], "clientIp": "192.0.2.100"}
+    if "/display-settings" in path:
+        return {"liveLogBufferMiB": 10}
     if "/platform-settings" in path:
-        return {"retentionDays": 7, "clusterCapacity": 500, "recordRetention": {"auditDays": 90, "eventDays": 90, "runDays": 90},
+        return {"retentionDays": 7, "clusterCapacity": 500, "liveLogBufferMiB": 10, "recordRetention": {"auditDays": 90, "eventDays": 90, "runDays": 90},
                 "version": 1, "updatedAt": STAMP}
     if "/nodes" in path:
         if path.endswith("/confirm-isolation"):

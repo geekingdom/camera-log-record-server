@@ -44,6 +44,9 @@ from camera_logs.resource_metrics.models import (
 PLATFORM_SETTINGS_ID = "platform"
 DEFAULT_RETENTION_DAYS = 7
 MAX_RETENTION_DAYS = 3650
+DEFAULT_LIVE_LOG_BUFFER_MIB = 10
+MIN_LIVE_LOG_BUFFER_MIB = 1
+MAX_LIVE_LOG_BUFFER_MIB = 100
 
 
 class SettingsModel(BaseModel):
@@ -57,6 +60,9 @@ class PlatformSettingsPatch(SettingsModel):
 
     retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True)
     clusterCapacity: int | None = Field(default=None, ge=1, le=MAX_CLUSTER_CAPACITY, strict=True)
+    liveLogBufferMiB: int | None = Field(default=None, ge=MIN_LIVE_LOG_BUFFER_MIB,
+                                          le=MAX_LIVE_LOG_BUFFER_MIB, strict=True,
+                                          description="实时日志页面允许保留在浏览器内存中的最大数据量，单位MiB")
     resourceMonitor: ResourceMonitorConfig | None = None
     recordRetention: RecordRetentionConfig | None = None
     version: int = Field(ge=1, strict=True)
@@ -211,6 +217,7 @@ async def _platform_settings(repo, *, session=None) -> dict:
         {"id": PLATFORM_SETTINGS_ID},
         {"$setOnInsert": {"id": PLATFORM_SETTINGS_ID, "retentionDays": retention_days,
                            "clusterCapacity": cluster_capacity,
+                           "liveLogBufferMiB": DEFAULT_LIVE_LOG_BUFFER_MIB,
                            "resourceMonitor": default_monitor_config(),
                            "recordRetention": retention_config(),
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
@@ -229,11 +236,19 @@ def install_settings_routes(app):
         """返回版本化平台设置；首次读取建立可审计的默认配置记录。"""
         authorize(user, "admin")
         document = await _platform_settings(request.app.state.repo)
-        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "resourceMonitor", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "liveLogBufferMiB", "resourceMonitor", "version", "updatedAt")}
         result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
         result["recordRetention"] = retention_config(document.get("recordRetention"))
         result["clusterCapacity"] = result["clusterCapacity"] or request.app.state.repo.settings.cluster_capacity
+        result["liveLogBufferMiB"] = result["liveLogBufferMiB"] or DEFAULT_LIVE_LOG_BUFFER_MIB
         return result
+
+    @app.get("/api/v1/display-settings")
+    async def display_settings(request: Request, user: User):
+        """向所有已登录用户公开实时页面所需的最小显示限制，不泄露管理员配置。"""
+        del user
+        document = await _platform_settings(request.app.state.repo)
+        return {"liveLogBufferMiB": document.get("liveLogBufferMiB") or DEFAULT_LIVE_LOG_BUFFER_MIB}
 
     @app.patch("/api/v1/platform-settings")
     async def update_platform_settings(body: PlatformSettingsPatch, request: Request, user: User):
@@ -248,6 +263,8 @@ def install_settings_routes(app):
                 {"id": PLATFORM_SETTINGS_ID, "version": body.version},
                 {"$set": {"retentionDays": body.retentionDays, "updatedAt": now(),
                            **({"clusterCapacity": body.clusterCapacity} if body.clusterCapacity is not None else {}),
+                           **({"liveLogBufferMiB": body.liveLogBufferMiB}
+                              if body.liveLogBufferMiB is not None else {}),
                            **({"recordRetention": body.recordRetention.model_dump()}
                               if body.recordRetention is not None else {}),
                            **({"resourceMonitor": parse_monitor_config(body.resourceMonitor.model_dump())}
@@ -263,10 +280,11 @@ def install_settings_routes(app):
         document = await audited_mutation(
             repo, user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID, commit
         )
-        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "resourceMonitor", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "liveLogBufferMiB", "resourceMonitor", "version", "updatedAt")}
         result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
         result["recordRetention"] = retention_config(document.get("recordRetention"))
         result["clusterCapacity"] = result["clusterCapacity"] or repo.settings.cluster_capacity
+        result["liveLogBufferMiB"] = result["liveLogBufferMiB"] or DEFAULT_LIVE_LOG_BUFFER_MIB
         return result
 
     @app.get("/api/v1/admin/nodes")
