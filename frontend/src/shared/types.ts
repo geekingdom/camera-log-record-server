@@ -199,6 +199,9 @@ export interface NodeTelemetry {
   memoryPercent?: number | null;
   networkUploadBytesPerSecond?: number | null;
   networkDownloadBytesPerSecond?: number | null;
+  networkInterfaces?: string[];
+  networkSampleSeconds?: number | null;
+  networkAccounting?: string;
 }
 /** 服务端按当前遥测计算的节点健康状态与可审阅原因。 */
 export interface NodeHealth {

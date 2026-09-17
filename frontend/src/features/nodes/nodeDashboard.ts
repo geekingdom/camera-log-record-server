@@ -86,6 +86,12 @@ export function formatRate(value?: number | null) {
   return formatted === "暂无数据" ? formatted : `${formatted}/s`;
 }
 
+/** 网络按十进制比特率展示，与连接工具比较；存储及采集吞吐仍使用字节。 */
+export function formatNetworkRate(value?: number | null) {
+  if (!Number.isFinite(value) || value! < 0) return "暂无数据";
+  return `${(value! * 8 / 1_000_000).toFixed(2)} Mb/s`;
+}
+
 export function formatLatency(node: Node) {
   const samples = Number(node.writeLatencySamples ?? 0);
   const pending = Number(node.writeLatencyPendingMs ?? 0);

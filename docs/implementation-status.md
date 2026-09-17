@@ -1,5 +1,12 @@
 # 当前状态总表
 
+| 当前需求（2026-09-17） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 跨机Worker与平台时差正负8小时仍按持续心跳判断在线 | `node/worker.py`使用Mongo `$currentDate`写接收时间，节点时间仅存`workerReportedAt`；遥测单调年龄与`health.measurements`校准，API返回平台采样时刻 | 后端全量1518项、最后相关46项通过；真实Mongo随机库验证正负8小时心跳连续、CPU压力拒绝与恢复领取、停止上报31秒离线，验证器`verify_node_heartbeat_clock.py` | 公司节点需更新Worker与API；旧版心跳无法反推接收时间，不伪造历史在线；平台API与Mongo时间基准仍需一致，未放宽业务租约 |
+| Docker节点网络数据与MobaXterm的Mb/s对照 | `node/telemetry.py`返回实际网卡/采样窗口/统计口径；`NodeList.vue`上下载显示Mb/s并悬浮等效字节值，采集输入保留字节；收紧lo过滤避免误排long0 | 2秒接收2500000字节=1250000 B/s=10Mb/s回归；前端167项、构建及1440/390看板与悬浮浏览器验证通过 | 公司现场偏差根因未证实：需同一时段、同一网卡对照；当前源码宿主proc与排除容器重复流量口径已核对，不能把单位差异当作全部根因 |
+
+本轮收尾：本机API、Worker健康接口和5173前端均为200，正式节点接口`local-dev`为HEALTHY并返回校准遥测及网卡/采样窗口；独立审查无阻断项。完整证据见[心跳与网络核验](history/2026-09-17-heartbeat-clock-and-network.md)。公司网络差异和物理跨机验收仍按上表保留。
+
 | 当前需求（2026-09-16，已完成本机验证） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 异常节点上的运行任务自动在其他合格节点重新采集，旧日志不迁移 | `node/failover.py`、`tasks/scheduler.py`、`tasks/claim.py`、Worker内部关闭接口；精确旧运行关闭证明后创建新运行，保留用户暂停/停止意图，排除故障原节点；数据库恢复按专属状态重试未完成关闭 | 真实Mongo、回环SSH、双Worker确定性生产函数编排通过：新run、旧锁释放、全程峰值1连接、两侧独立READY归档；全量1512及末次相关86项通过，临时库和日志已清理；已接入CI | 完全失联且无可信关闭/隔离证明仍等待隔离；当前针对心跳/数据库失联，非任意健康预警迁移。自然后台时序、物理网络分区和目标Linux多机仍待验收，见[当前证据](history/2026-09-16-node-failover-live-budget.md) |
@@ -14,6 +21,8 @@
 | 当前问题 | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 跨机 Worker 在登记页在线、节点看板离线 | `administration/settings.py`、`node/health.py`统一30秒窗口并区分未来心跳；`commands/api.py`返回`assessedAt`；`nodeDashboard.ts`、`useWorkspaceCollections.ts`以服务器时间与浏览器单调计时更新快照 | 22项节点/设置回归、前端162项、生产构建、1440/390看板截图及浏览器快8小时验证通过；隔离真实API/Worker/WebSocket/小时下载通过并清理；见[心跳一致性证据](history/2026-09-15-node-heartbeat-consistency.md) | 公司目标机器的实际心跳和时钟尚未提供，不能认定其根因已证实；更新API/前端后核对`heartbeat`与`assessedAt`及A/B服务器UTC时间，真实时钟偏差须同步时间，不能放宽租约或伪造在线 |
+
+上表2026-09-15的时钟排障要求已由2026-09-17新需求更新：升级后的Worker用Mongo接收时刻上报心跳，Worker自身正负8小时时差不影响在线；原时钟同步要求仅保留于平台API与数据库时间基准，以及日志时间等独立业务。旧版Worker需升级，不按8小时延长失联窗口。
 
 CI恢复证据：修复提交`ae9c671`已推送，其[CI34958663525](https://github.com/geekingdom/camera-log-record-server/actions/runs/34958663525)的`cross-worker-read`作业104346735930已成功完成，覆盖双Worker补读、SSH暂停跨Worker恢复及本次失败的SIGTERM恢复步骤。记录时其它部署作业仍在运行，整条流水线结论须另核；不再将本项列为待修复。
 

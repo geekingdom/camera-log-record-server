@@ -24,6 +24,7 @@ import {
   currentTelemetry,
   formatBytes,
   formatLatency,
+  formatNetworkRate,
   formatRate,
   nodeAbnormal,
   nodeAdmissible,
@@ -37,6 +38,14 @@ let clock: ReturnType<typeof setInterval> | undefined;
 onMounted(() => { clock = setInterval(() => { now.value = Date.now(); }, 1000); });
 onUnmounted(() => clearInterval(clock));
 const orderedNodes = computed(() => [...props.items].sort((a, b) => a.id.localeCompare(b.id)));
+
+function networkDetails(node: Node, direction: "upload" | "download") {
+  const sample = currentTelemetry(node, now.value);
+  const rate = direction === "upload" ? sample?.networkUploadBytesPerSecond : sample?.networkDownloadBytesPerSecond;
+  const interfaces = sample?.networkInterfaces?.join("、") || "未上报";
+  const interval = sample?.networkSampleSeconds;
+  return `${formatRate(rate)}；统计网卡：${interfaces}；采样间隔：${interval == null ? "未知" : `${interval.toFixed(2)} 秒`}；不含回环及容器桥接重复流量`;
+}
 const onlineCount = computed(() => props.items.filter(node => nodeOnline(node, now.value)).length);
 const admissibleCount = computed(() => props.items.filter(node => nodeAdmissible(node, now.value)).length);
 const abnormalCount = computed(() => props.items.filter(node => nodeAbnormal(node, now.value)).length);
@@ -122,8 +131,8 @@ function memoryText(node: Node) {
         </div>
 
         <div class="node-footer">
-          <div class="node-rate"><ArrowUp :size="15" /><span>上行</span><strong>{{ formatRate(currentTelemetry(node, now)?.networkUploadBytesPerSecond) }}</strong></div>
-          <div class="node-rate"><ArrowDown :size="15" /><span>下行</span><strong>{{ formatRate(currentTelemetry(node, now)?.networkDownloadBytesPerSecond) }}</strong></div>
+          <el-tooltip :content="networkDetails(node, 'upload')"><div class="node-rate" tabindex="0"><ArrowUp :size="15" /><span>上行</span><strong>{{ formatNetworkRate(currentTelemetry(node, now)?.networkUploadBytesPerSecond) }}</strong></div></el-tooltip>
+          <el-tooltip :content="networkDetails(node, 'download')"><div class="node-rate" tabindex="0"><ArrowDown :size="15" /><span>下行</span><strong>{{ formatNetworkRate(currentTelemetry(node, now)?.networkDownloadBytesPerSecond) }}</strong></div></el-tooltip>
           <div class="node-rate"><Activity :size="15" /><span>采集输入</span><strong>{{ formatRate(node.inputBytesPerSecond) }}</strong></div>
           <div class="node-sample"><Timer :size="14" />{{ sampledAt(node) }}</div>
         </div>

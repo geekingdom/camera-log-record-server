@@ -9,7 +9,7 @@ from camera_logs.commands.manual_submission import submit_manual
 from camera_logs.common.database import now, public
 from camera_logs.common.models import InitialCommand, TokenCreate, TokenPatch, TokenRotate
 from camera_logs.common.security import actor, authorize, authorize_owner
-from camera_logs.node.health import node_health
+from camera_logs.node.health import measurements, node_health
 from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.write_pressure import write_latency_limit
 from camera_logs.users.service_tokens import (
@@ -64,6 +64,9 @@ def install_command_routes(app, repo, listing):
             node["inputRateLimitMiB"] = input_rate_limit(config)
             node["writeLatencyLimitMs"] = write_latency_limit(config)
             node["health"] = node_health(node, assessed_at)
+            if "telemetryAgeSeconds" in node:
+                # 浏览器只接收校准到平台时钟的样本；节点墙上时间另保留用于诊断。
+                node["telemetry"] = public(measurements(node, assessed_at))
             # 浏览器以此快照时间加单调计时评估新鲜度，不使用访问电脑的墙上时钟。
             node["assessedAt"] = assessed_at.isoformat()
         return result

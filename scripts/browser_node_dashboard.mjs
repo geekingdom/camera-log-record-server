@@ -14,7 +14,7 @@ const nodes = [
   {
     id: "healthy-node", name: "采集节点 A", url: "https://worker-a.example.test", heartbeat: fresh,
     accepting: true, capacity: 12, activeTasks: 3, diskPercent: 42, inputBytesPerSecond: 3_145_728, writeLatencyLimitMs: 500, writeLatencyMs: 28, writeLatencySamples: 84,
-    telemetry: { sampledAt: fresh, scope: "HOST", cpuPercent: 36, memoryPercent: 58, memoryUsedBytes: 4_000_000_000, memoryTotalBytes: 8_000_000_000, networkUploadBytesPerSecond: 1_024_000, networkDownloadBytesPerSecond: 2_048_000 },
+    telemetry: { sampledAt: fresh, scope: "HOST", cpuPercent: 36, memoryPercent: 58, memoryUsedBytes: 4_000_000_000, memoryTotalBytes: 8_000_000_000, networkUploadBytesPerSecond: 1_024_000, networkDownloadBytesPerSecond: 1_250_000, networkInterfaces: ["eth0"], networkSampleSeconds: 1.2 },
     health: { status: "HEALTHY", reasons: [] },
   },
   {
@@ -64,6 +64,10 @@ try {
   await page.getByText("4", { exact: true }).first().waitFor();
   await page.getByText("可接收新任务", { exact: true }).waitFor();
   await page.getByText("采集输入", { exact: true }).first().waitFor();
+  await page.getByText("10.00 Mb/s", { exact: true }).waitFor();
+  await page.getByText("10.00 Mb/s", { exact: true }).hover();
+  await page.getByRole("tooltip").filter({ hasText: "1.2 MiB/s；统计网卡：eth0；采样间隔：1.20 秒" }).waitFor();
+  await page.getByText("采集节点 A", { exact: true }).hover();
   await page.getByText("28 ms / 500 ms", { exact: true }).waitFor();
   await page.getByText("460 ms / 200 ms", { exact: true }).waitFor();
   await page.getByText("磁盘使用率较高；写入延迟超过阈值", { exact: true }).waitFor();

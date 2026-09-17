@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,13 @@ class TelemetryRuntime:
         self.task: asyncio.Task[None] | None = None
         self.work: asyncio.Task[dict[str, Any]] | None = None
         self.value: dict[str, Any] = dict(UNKNOWN_TELEMETRY)
+        self.sample_started: float | None = None
+
+    def age_seconds(self) -> float | None:
+        """使用单调时钟报告样本年龄，节点时区或校时不改变指标有效期。"""
+        if self.sample_started is None or not self.value.get("sampledAt"):
+            return None
+        return max(0.0, time.monotonic() - self.sample_started)
 
     def start_if_idle(self) -> None:
         """仅在线程和监督协程均结束后启动下一轮，禁止慢采样重叠。"""
@@ -30,9 +38,11 @@ class TelemetryRuntime:
 
     async def _sample(self) -> None:
         """有界等待线程采样；超时后固定未知结果，晚到结果不得覆盖心跳。"""
+        started = time.monotonic()
         work = self.work = asyncio.create_task(asyncio.to_thread(self.sampler.sample))
         try:
             self.value = await asyncio.wait_for(asyncio.shield(work), timeout=2)
+            self.sample_started = started
         except TimeoutError:
             self.value = dict(UNKNOWN_TELEMETRY) | {"error": "TimeoutError"}
             logger.warning("节点遥测采样超时，指标暂记为未知", extra={"context": {

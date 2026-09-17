@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive } from "vue";
 import type { Node } from "../../shared/types";
-import { anchorNodeSnapshot, currentHealth, currentTelemetry, formatRate, nodeAbnormal, nodeAdmissible, nodeOnline, writeLatencyLimitMs } from "./nodeDashboard";
+import { anchorNodeSnapshot, currentHealth, currentTelemetry, formatNetworkRate, formatRate, nodeAbnormal, nodeAdmissible, nodeOnline, writeLatencyLimitMs } from "./nodeDashboard";
+
+it("网络单位按每字节八比特换算，不把MiB与Mb混用", () => {
+  expect(formatNetworkRate(1_250_000)).toBe("10.00 Mb/s");
+  expect(formatRate(1_250_000)).toBe("1.2 MiB/s");
+  expect(formatNetworkRate(512 * 1024)).toBe("4.19 Mb/s");
+  expect(formatNetworkRate()).toBe("暂无数据");
+});
 
 const now = Date.parse("2026-09-10T00:00:00.000Z");
 const activeNode: Node = {

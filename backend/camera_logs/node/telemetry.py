@@ -8,7 +8,13 @@ from pathlib import Path
 import psutil
 
 _PROC_LOCK = threading.Lock()
-_INTERNAL = ("lo", "veth", "br-", "docker", "cni")
+_INTERNAL = ("veth", "br-", "docker", "cni")
+NETWORK_ACCOUNTING = "EXTERNAL_INTERFACES_EXCLUDING_LOOPBACK_AND_CONTAINER_BRIDGES"
+
+
+def _internal_interface(name):
+    """判断会重复同一报文的内部接口；lo0 兼容类 Unix，long0 不应误排除。"""
+    return name == "lo" or (name.startswith("lo") and name[2:].isdigit()) or name.startswith(_INTERNAL)
 
 
 class TelemetrySampler:
@@ -18,7 +24,7 @@ class TelemetrySampler:
         self.host_proc_root, self.previous = host_proc_root, None
 
     def sample(self):
-        """读取单次一致快照；host proc 切换受全局锁保护并立即恢复。"""
+        """读取单次一致快照，并公布实际参与网络累计的网卡与统计口径。"""
         host = self.host_proc_root is not None and (self.host_proc_root / "1/net/dev").is_file()
         scope = "HOST" if host or (os.name != "posix" or not Path("/.dockerenv").exists()) else "RUNTIME"
         with _PROC_LOCK:
@@ -31,7 +37,7 @@ class TelemetrySampler:
                 if original is not None:
                     psutil.PROCFS_PATH = original
         moment, counters = time.monotonic(), self._network(self.host_proc_root / "1/net/dev" if host else None)
-        cpu_percent = upload = download = None
+        cpu_percent = upload = download = network_sample_seconds = None
         if self.previous:
             old_moment, old_cpu, old_net = self.previous
             # guest/guest_nice 已包含在 user/nice，重复计入会低估真实使用率。
@@ -42,6 +48,8 @@ class TelemetrySampler:
             if total > 0:
                 cpu_percent = max(0, min(100, (total - idle) * 100 / total))
             elapsed = moment - old_moment
+            if elapsed > 0:
+                network_sample_seconds = elapsed
             if elapsed > 0 and counters.keys() == old_net.keys():
                 deltas = [
                     (counters[name][0] - old_net[name][0], counters[name][1] - old_net[name][1])
@@ -61,6 +69,11 @@ class TelemetrySampler:
             "memoryPercent": memory.percent,
             "networkUploadBytesPerSecond": upload,
             "networkDownloadBytesPerSecond": download,
+            # 外部物理/逻辑出口可能是 eth、ens、bond 或 VLAN；公布最终纳入集合，
+            # 以便现场将页面速率与宿主 /proc/1/net/dev 的同一口径直接对照。
+            "networkInterfaces": sorted(counters),
+            "networkAccounting": NETWORK_ACCOUNTING,
+            "networkSampleSeconds": network_sample_seconds,
         }
 
     @staticmethod
@@ -81,11 +94,11 @@ class TelemetrySampler:
             return {
                 name: (int(row[0]), int(row[8]))
                 for name, row in rows
-                if not name.startswith(_INTERNAL)
+                if not _internal_interface(name)
             }
         values = psutil.net_io_counters(pernic=True)
         return {
             name: (item.bytes_recv, item.bytes_sent)
             for name, item in values.items()
-            if not name.startswith(_INTERNAL)
+            if not _internal_interface(name)
         }

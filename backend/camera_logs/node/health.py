@@ -1,7 +1,7 @@
 """统一解释节点健康与调度成本；未知指标不能伪装为空闲，压力只限制新任务。"""
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
@@ -23,7 +23,7 @@ def fresh(timestamp, current, seconds=15):
 
 
 def heartbeat_freshness_reason(timestamp, current, seconds=15):
-    """返回心跳失效原因；未来时间必须显式暴露 API 与 Worker 的时钟偏差。"""
+    """判断接收时间的新鲜度；异常未来值提示平台时钟或历史节点格式问题。"""
     if timestamp is None:
         return "未收到节点心跳"
     if isinstance(timestamp, str):
@@ -35,15 +35,28 @@ def heartbeat_freshness_reason(timestamp, current, seconds=15):
         return "节点心跳时间无效"
     age = (current - timestamp.replace(tzinfo=UTC) if timestamp.tzinfo is None else current - timestamp).total_seconds()
     if age < -2:
-        return "节点心跳时间晚于API时间超过2秒，API与Worker时钟不同步"
+        return "心跳接收时间晚于API时间，请检查平台数据库时钟及Worker版本"
     if age > seconds:
         return f"超过{seconds}秒未收到节点心跳"
     return None
 
 
 def measurements(node, current=None):
-    """只使用最近15秒采样参与健康与调度；旧指标不能长期否决节点或假装健康。"""
+    """按接收时间减单调采样年龄判断新鲜度，兼容尚未升级节点的历史字段。"""
     sample = node.get("telemetry") or {}
+    if "telemetryAgeSeconds" in node:
+        age = number(node.get("telemetryAgeSeconds"))
+        received = node.get("heartbeat")
+        if age is None or age > 15 or not sample.get("sampledAt"):
+            return {}
+        if not fresh(received, current or now()):
+            return {}
+        if isinstance(received, str):
+            received = datetime.fromisoformat(received)
+        if received.tzinfo is None:
+            received = received.replace(tzinfo=UTC)
+        sample = sample | {"workerSampledAt": sample["sampledAt"],
+                           "sampledAt": received - timedelta(seconds=age)}
     return sample if fresh(sample.get("sampledAt"), current or now()) else {}
 
 

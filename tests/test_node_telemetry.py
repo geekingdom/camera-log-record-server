@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
-from camera_logs.node.telemetry import TelemetrySampler
+from camera_logs.node.telemetry import NETWORK_ACCOUNTING, TelemetrySampler
 from camera_logs.node.worker import Worker
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
@@ -34,8 +34,8 @@ class CpuWithGuest(Cpu):
 def test_network_proc_excludes_loopback_and_internal_interfaces(tmp_path):
     """宿主网络统计不能把 lo、veth 与 docker bridge 流量重复计入。"""
     proc = tmp_path / "net.dev"
-    proc.write_text("h\nh\n lo: 9 0 0 0 0 0 0 0 9\neth0: 10 0 0 0 0 0 0 0 20\nveth1: 30 0 0 0 0 0 0 0 40\n")
-    assert TelemetrySampler()._network(proc) == {"eth0": (10, 20)}
+    proc.write_text("h\nh\n lo: 9 0 0 0 0 0 0 0 9\nlo0: 9 0 0 0 0 0 0 0 9\nlong0: 11 0 0 0 0 0 0 0 12\neth0: 10 0 0 0 0 0 0 0 20\nveth1: 30 0 0 0 0 0 0 0 40\n")
+    assert TelemetrySampler()._network(proc) == {"eth0": (10, 20), "long0": (11, 12)}
 
 
 def test_first_sample_and_counter_reset_are_unknown(monkeypatch):
@@ -52,6 +52,28 @@ def test_first_sample_and_counter_reset_are_unknown(monkeypatch):
     assert second["networkUploadBytesPerSecond"] is second["networkDownloadBytesPerSecond"] is None
     assert first["sampledAt"].tzinfo is UTC
     assert second["cpuPercent"] == pytest.approx(50)
+    assert second["networkInterfaces"] == ["eth0"]
+    assert second["networkAccounting"] == NETWORK_ACCOUNTING
+    assert second["networkSampleSeconds"] is not None
+
+
+def test_network_rate_is_bytes_per_second_over_the_actual_sampling_window(monkeypatch):
+    """面板保存字节每秒；1,250,000 B/s 等于十进制 10 Mb/s，展示层负责单位换算。"""
+    sampler = TelemetrySampler()
+    cpu = iter([Cpu((1, 1, 8, 0)), Cpu((2, 1, 9, 0))])
+    counters = iter([{"eth0": (0, 0)}, {"eth0": (2_500_000, 1_250_000)}])
+    monotonic = iter([100.0, 102.0])
+    monkeypatch.setattr("camera_logs.node.telemetry.psutil.cpu_times", lambda: next(cpu))
+    monkeypatch.setattr("camera_logs.node.telemetry.psutil.virtual_memory", lambda: type("Memory", (), {"used": 1, "total": 2, "percent": 50})())
+    monkeypatch.setattr(sampler, "_network", lambda _: next(counters))
+    monkeypatch.setattr("camera_logs.node.telemetry.time.monotonic", lambda: next(monotonic))
+
+    first, second = sampler.sample(), sampler.sample()
+
+    assert first["networkSampleSeconds"] is None
+    assert second["networkSampleSeconds"] == 2
+    assert second["networkDownloadBytesPerSecond"] == 1_250_000
+    assert second["networkUploadBytesPerSecond"] == 625_000
 
 
 def test_guest_and_interface_change_do_not_create_false_rates(monkeypatch):
@@ -121,6 +143,22 @@ async def test_timeout_publishes_unknown_without_late_sample_overwrite(tmp_path,
         "status": "UNKNOWN",
         "error": "TimeoutError",
     }
+    assert worker.telemetry.age_seconds() is None
+
+
+async def test_telemetry_age_uses_monotonic_clock(tmp_path, monkeypatch):
+    """偏移八小时的采样墙钟只用于诊断，样本年龄随单调时长增长。"""
+    from datetime import timedelta
+
+    worker, _ = await make_worker(tmp_path)
+    monkeypatch.setattr(worker.telemetry.sampler, "sample", lambda: {
+        "sampledAt": datetime.now(UTC) + timedelta(hours=8), "status": "OK",
+    })
+    await worker.telemetry._sample()
+    assert 0 <= worker.telemetry.age_seconds() < 2
+    worker.telemetry.sample_started -= 20
+    assert worker.telemetry.age_seconds() >= 20
+    await worker.telemetry.close()
 
 
 async def test_close_waits_for_thread_after_sampling_timeout(tmp_path, monkeypatch):

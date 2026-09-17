@@ -321,7 +321,8 @@ class Worker:
         # 管理配置每周期重读；已分配但尚未建连的任务也必须等吞吐恢复。
         accepting = accepting and not input_rate_blocked({"inputBytesPerSecond": rate}, config)
         await self.repo.db.nodes.update_one({"id": self.repo.settings.node_id}, {"$set": {
-            "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "heartbeat": now(),
+            "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "workerReportedAt": now(),
+            "telemetryAgeSeconds": self.telemetry.age_seconds(),
             "capacity": capacity, "activeTasks": len(self.active),
             "inputRateLimitMiB": input_rate_limit(config),
             "writeLatencyLimitMs": write_latency_limit(config),
@@ -330,7 +331,9 @@ class Worker:
             "configurationMismatch": mismatch,
             "configuredUrl": config.get("url"), "telemetry": self.telemetry.value,
             "capabilities": {"coredumpNfs": bool(self.repo.settings.nfs_server_ip)},
-            "accepting": accepting}, "$unset": {"shuttingDownAt": ""}}, upsert=True)
+            # 心跳由平台数据库接收时生成，禁止将节点墙上时间作为在线依据。
+            "accepting": accepting}, "$currentDate": {"heartbeat": True},
+            "$unset": {"shuttingDownAt": ""}}, upsert=True)
         from camera_logs.node.failover import persist_self_fenced_receipts, retry_self_fence_pending
         await persist_self_fenced_receipts(self)
         for task_id, future in list(self.releases.items()):
