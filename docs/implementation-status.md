@@ -1,5 +1,7 @@
 # 当前状态总表
 
+CI修复（2026-09-17）：`b45ad7c`的[CI35174836312](https://github.com/geekingdom/camera-log-record-server/actions/runs/35174836312)仅backend静态检查失败，1519项后端测试及其余七作业均成功。CI Ruff0.16.8与本机0.16.6存在规则差异；升级本机后复现SIM117，合并`resources/authentication.py`上下文管理器并在`pyproject.toml`固定Ruff0.16.8。修复后全仓Ruff、认证相关57项通过；新提交远程CI待核验。详见[修复证据](history/2026-09-17-ci-ruff-version.md)。
+
 | 当前需求（2026-09-17） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 跨机Worker与平台时差正负8小时仍按持续心跳判断在线 | `node/worker.py`使用Mongo `$currentDate`写接收时间，节点时间仅存`workerReportedAt`；遥测单调年龄与`health.measurements`校准，API返回平台采样时刻 | 后端全量1518项、最后相关46项通过；真实Mongo随机库验证正负8小时心跳连续、CPU压力拒绝与恢复领取、停止上报31秒离线，验证器`verify_node_heartbeat_clock.py` | 公司节点需更新Worker与API；旧版心跳无法反推接收时间，不伪造历史在线；平台API与Mongo时间基准仍需一致，未放宽业务租约 |

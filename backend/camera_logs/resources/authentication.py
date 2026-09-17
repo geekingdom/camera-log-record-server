@@ -62,18 +62,20 @@ async def authenticate_network_resource(*, ip: str, username: str, password: str
     """以指定 HTTP 认证验证设备凭据，并返回来自设备的可信身份信息。"""
     auth = httpx.DigestAuth(username, password) if auth_type == "DIGEST" else httpx.BasicAuth(username, password)
     try:
-        async with asyncio.timeout(10):
-            async with httpx.AsyncClient(timeout=10, transport=transport, trust_env=False) as client:
-                async with client.stream("GET", _device_info_url(ip), auth=auth) as response:
-                    if response.status_code == 401:
-                        raise PermissionError("设备凭据错误")
-                    if response.status_code != 200:
-                        raise DeviceAuthenticationError("设备异常")
-                    chunks = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        chunks.extend(chunk)
-                        if len(chunks) > MAX_DEVICE_INFO_BYTES:
-                            raise ValueError("设备信息格式无效")
+        async with (
+            asyncio.timeout(10),
+            httpx.AsyncClient(timeout=10, transport=transport, trust_env=False) as client,
+            client.stream("GET", _device_info_url(ip), auth=auth) as response,
+        ):
+            if response.status_code == 401:
+                raise PermissionError("设备凭据错误")
+            if response.status_code != 200:
+                raise DeviceAuthenticationError("设备异常")
+            chunks = bytearray()
+            async for chunk in response.aiter_bytes():
+                chunks.extend(chunk)
+                if len(chunks) > MAX_DEVICE_INFO_BYTES:
+                    raise ValueError("设备信息格式无效")
     except TimeoutError as exc:
         # 周期健康检查需要区分超时离线与设备返回的其它异常；API 仍统一映射为 502。
         raise DeviceOfflineError("设备异常") from exc
