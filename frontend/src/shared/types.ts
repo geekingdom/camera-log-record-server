@@ -16,6 +16,8 @@ export interface Resource extends ResourceAuthentication {
   authType?: ResourceAuthType;
   /** 资源级 Coredump 采集开关，仅海康网络设备可用。 */
   enableCoredumpMonitor?: boolean;
+  /** 资源目录聚合出的 Coredump 文件存在标识，仅表示当前存在文件，不是未读状态。 */
+  hasCoredumps?: boolean;
   /** 资源级 CPU 和内存采样开关，仅海康网络设备可用。 */
   enableResourceMonitor?: boolean;
   version?: number;

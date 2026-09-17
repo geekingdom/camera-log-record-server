@@ -14,6 +14,16 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("审计工作区认证", () => {
+  it.each(["runtimeEventsCursor", "auditEventsCursor"] as const)("%s按中文摘要和对象查询并保留游标条件", async method => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ items: [], total: null, hasMore: false })));
+    await auditApi[method]("next-page", 20, { summary: "发现 Coredump", object: "摄像机 & 192.0.2.35" });
+    const query = new URL(fetchMock.mock.calls[0][0], "http://localhost").searchParams;
+    expect(query.get("summary")).toBe("发现 Coredump");
+    expect(query.get("object")).toBe("摄像机 & 192.0.2.35");
+    expect(query.get("cursor")).toBe("next-page");
+    expect(query.has("type")).toBe(false);
+  });
+
   it.each(["auditEventsCursor", "runtimeEventsCursor", "requestEventsCursor"] as const)("%s 显式空游标且默认不统计总数", async method => {
     fetchMock.mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ items: [], total: null, pageSize: 20, hasMore: false, nextCursor: null }))));
     await auditApi[method]("", 20, { requestId: "request-example" });

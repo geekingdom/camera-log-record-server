@@ -78,3 +78,69 @@ async def test_scanner_ignores_flag_files_in_all_subdirectories_and_keeps_resour
     assert await scanner.scan_once() >= 1
     assert await repo.db.coredump_files.find_one({"resourceId": "b", "name": "new.core"})
     assert await repo.db.coredump_files.count_documents({"name": {"$regex": "coredump_flag"}}) == 0
+
+
+async def test_scanner_records_one_discovery_event_and_recovers_a_failed_event_write(tmp_path, monkeypatch):
+    """目录登记成功而事件暂时失败时，下轮补记同一发现，成功后不再重复。"""
+    repo = await repository(tmp_path); directory = repo.settings.nfs_root / "192.0.2.35"; directory.mkdir(); (directory / "core.bin").write_bytes(b"core")
+    await repo.db.resources.insert_one({"id": "camera", "name": "大厅相机", "ip": "192.0.2.35", "kind": "HIKVISION_NETWORK", "deletedAt": None})
+    scanner, collection_type = CoredumpScanner(repo), type(repo.db.events); original_update, attempts = collection_type.update_one, 0
+    async def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1: raise RuntimeError("events temporarily unavailable")
+        return await original_update(*args, **kwargs)
+    monkeypatch.setattr(collection_type, "update_one", fail_once); await scanner.scan_once()
+    catalog = await repo.db.coredump_files.find_one({"resourceId": "camera", "name": "core.bin"})
+    assert catalog.get("discoveryEventRecordedAt") is None
+    await scanner.scan_once(); event = await repo.db.events.find_one({"type": "COREDUMP_DISCOVERED"})
+    assert event["resourceId"] == "camera" and event["fileId"] == catalog["id"] and event["createdAt"] == catalog["receivedAt"]
+    await scanner.scan_once(); assert await repo.db.events.count_documents({"type": "COREDUMP_DISCOVERED"}) == 1
+    await repo.db.events.delete_one({"_id": event["_id"]}); await scanner.scan_once()
+    assert await repo.db.events.count_documents({"type": "COREDUMP_DISCOVERED"}) == 0
+
+
+async def test_probe_marks_only_missing_leaf_and_keeps_snapshot_visible(tmp_path):
+    """源叶文件删除会撤销存在标记，固定快照仍保留可下载目录事实。"""
+    repo = await repository(tmp_path)
+    directory = repo.settings.nfs_root / "192.0.2.36"
+    directory.mkdir()
+    source = directory / "removed.core"
+    source.write_bytes(b"core")
+    await repo.db.resources.insert_one({"id": "camera", "ip": "192.0.2.36", "kind": "HIKVISION_NETWORK", "deletedAt": None})
+    scanner = CoredumpScanner(repo)
+    await scanner.scan_once()
+    catalog = await repo.db.coredump_files.find_one({"resourceId": "camera"})
+    source.unlink()
+    await scanner.scan_once()
+    assert (await repo.db.coredump_files.find_one({"id": catalog["id"]}))["sourcePresent"] is False
+    await repo.db.coredump_files.update_one({"id": catalog["id"]}, {"$set": {"status": "FROZEN", "snapshot": {"path": "fixed"}}})
+    assert await repo.db.coredump_files.count_documents({"$and": [
+        {"resourceId": "camera"}, {"$or": [{"sourcePresent": {"$ne": False}}, {"status": "FROZEN", "snapshot.path": {"$exists": True}}]},
+    ]}) == 1
+
+
+async def test_probe_keeps_last_known_status_when_root_or_device_directory_is_unavailable(tmp_path, monkeypatch):
+    """根目录、设备目录或权限失败不是叶文件删除，不能误清除红点。"""
+    repo = await repository(tmp_path)
+    scanner = CoredumpScanner(repo)
+    catalog = {"deviceIp": "192.0.2.37", "name": "core.bin"}
+    monkeypatch.setattr(scanner_module, "device_directory", lambda *_: (_ for _ in ()).throw(FileNotFoundError()))
+    assert scanner._source_is_present(catalog) is None
+    monkeypatch.setattr(scanner_module, "device_directory", lambda *_: (_ for _ in ()).throw(PermissionError()))
+    assert scanner._source_is_present(catalog) is None
+
+
+async def test_probe_cursor_rotates_between_registered_sources(tmp_path):
+    """探测游标以固定上限轮转，不让一个资源的历史目录长期占满扫描预算。"""
+    repo = await repository(tmp_path, maximum=1)
+    for identifier in ("a", "b"):
+        await repo.db.coredump_files.insert_one({"id": identifier, "nodeId": "node", "deviceIp": "192.0.2.1",
+                                                  "name": f"{identifier}.core", "sourcePresent": True})
+    scanner = CoredumpScanner(repo)
+    observed = []
+    scanner._source_is_present = lambda catalog: observed.append(catalog["id"]) or True
+    await scanner._probe_known_sources({})
+    state = await repo.db.coredump_scan_state.find_one({"id": "node"})
+    await scanner._probe_known_sources(state)
+    assert observed == ["a", "b"]

@@ -121,6 +121,29 @@ def test_audit_events_filter_action_actor_task_and_utc_range(client):
     assert response.json()["items"][0]["targetId"] == "task-a"
 
 
+def test_audit_events_filter_by_chinese_summary_and_action_compatibility(client):
+    """审计摘要按中文展示名筛选，同时接受旧操作代码以兼容现有调用。"""
+    repo = client.app.state.repo
+    stamp = datetime(2026, 9, 8, 8, tzinfo=UTC)
+    client.portal.call(repo.db.audit.insert_many, [
+        {"id": "started", "action": "control:RUNNING", "targetId": "task-a", "createdAt": stamp},
+        {"id": "paused", "action": "control:PAUSED", "targetId": "task-a", "createdAt": stamp},
+        {"id": "custom", "action": "custom-action", "summary": "人工排障备注", "createdAt": stamp},
+        {"id": "unknown", "action": "legacy:RECONCILE", "createdAt": stamp},
+    ])
+
+    readable = client.get("/api/v1/audit-events", params={"summary": "启动任务"})
+    compatible = client.get("/api/v1/audit-events", params={"summary": "control:RUNNING"})
+    stored = client.get("/api/v1/audit-events", params={"summary": "排障备注", "pageSize": 1})
+    legacy = client.get("/api/v1/audit-events", params={"summary": "legacy:RECONCILE"})
+
+    assert readable.status_code == compatible.status_code == stored.status_code == legacy.status_code == 200
+    assert [item["id"] for item in readable.json()["items"]] == ["started"]
+    assert [item["id"] for item in compatible.json()["items"]] == ["started"]
+    assert stored.json()["total"] == 1 and stored.json()["items"][0]["id"] == "custom"
+    assert [item["id"] for item in legacy.json()["items"]] == ["unknown"]
+
+
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
 def test_login_failed_audit_derives_failed_error_and_supports_filters(client):
     """认证失败审计必须展示为失败错误，并与 Mongo 派生筛选保持一致。"""
@@ -160,6 +183,78 @@ def test_runtime_events_filter_task_node_type_and_utc_range(client):
     assert item["type"] == "CONNECTION_GAP"
     assert item["summary"] == "采集连接中断"
     assert item["outcome"] == "UNKNOWN" and item["level"] == "WARNING"
+
+
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+def test_runtime_events_filter_by_chinese_summary_and_displayed_object(client):
+    """摘要接受中文名称或兼容事件代码，对象统一匹配资源、任务和核心文件展示字段。"""
+    repo = client.app.state.repo
+    stamp = datetime(2026, 9, 8, 8, tzinfo=UTC)
+    client.portal.call(repo.db.resources.insert_many, [
+        {"id": "resource-core", "name": "东门摄像机", "ip": "192.0.2.81"},
+        {"id": "resource-other", "name": "西门摄像机", "ip": "192.0.2.82"},
+    ])
+    client.portal.call(repo.db.tasks.insert_many, [
+        {"id": "task-core", "name": "东门采集", "resourceId": "resource-core"},
+        {"id": "task-other", "name": "西门采集", "resourceId": "resource-other"},
+    ])
+    client.portal.call(repo.db.coredump_files.insert_one, {
+        "id": "core-file", "name": "davinci-core-20260908", "resourceId": "resource-core",
+    })
+    client.portal.call(repo.db.events.insert_many, [
+        {"id": "core-hit", "type": "COREDUMP_DISCOVERED", "resourceId": "resource-core",
+         "fileId": "core-file", "name": "davinci-core-20260908", "nodeId": "node-a", "createdAt": stamp},
+        {"id": "core-other", "type": "COREDUMP_DISCOVERED", "resourceId": "resource-other",
+         "fileId": "other-file", "name": "other-core", "nodeId": "node-b", "createdAt": stamp},
+        {"id": "gap", "type": "CONNECTION_GAP", "taskId": "task-core", "createdAt": stamp},
+        {"id": "legacy-event", "type": "LEGACY_CORE_NOTICE", "resourceId": "resource-core", "createdAt": stamp},
+    ])
+
+    by_summary = client.get("/api/v1/runtime-events", params={"summary": "发现核心转储"})
+    by_type = client.get("/api/v1/runtime-events", params={"summary": "COREDUMP_DISCOVERED"})
+    by_resource_name = client.get("/api/v1/runtime-events", params={"object": "东门摄像机"})
+    by_ip = client.get("/api/v1/runtime-events", params={"object": "192.0.2.81", "pageSize": 1})
+    by_file = client.get("/api/v1/runtime-events", params={"object": "davinci-core"})
+    by_legacy_type = client.get("/api/v1/runtime-events", params={"summary": "LEGACY_CORE_NOTICE"})
+
+    assert by_summary.status_code == by_type.status_code == by_resource_name.status_code == by_ip.status_code == by_file.status_code == by_legacy_type.status_code == 200
+    assert [item["id"] for item in by_summary.json()["items"]] == ["core-other", "core-hit"]
+    assert [item["id"] for item in by_type.json()["items"]] == ["core-other", "core-hit"]
+    assert {item["id"] for item in by_resource_name.json()["items"]} == {"core-hit", "gap", "legacy-event"}
+    assert by_ip.json()["total"] == 3 and len(by_ip.json()["items"]) == 1
+    assert [item["id"] for item in by_file.json()["items"]] == ["core-hit"]
+    item = by_file.json()["items"][0]
+    assert item["summary"] == "发现核心转储文件"
+    assert item["targetName"] == "davinci-core-20260908"
+    assert item["resourceName"] == "东门摄像机" and item["deviceIp"] == "192.0.2.81"
+    assert [item["id"] for item in by_legacy_type.json()["items"]] == ["legacy-event"]
+
+
+@pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
+def test_runtime_summary_and_object_filters_keep_legacy_time_and_cursor_page(client):
+    """旧时间兼容条件必须与摘要、对象条件取交集，游标续页保持同一筛选。"""
+    repo = client.app.state.repo
+    stamp = datetime(2026, 9, 8, 8, tzinfo=UTC)
+    client.portal.call(repo.db.resources.insert_one, {"id": "resource-core", "name": "南门摄像机", "ip": "192.0.2.91"})
+    client.portal.call(repo.db.events.insert_many, [
+        {"id": "legacy-core", "type": "COREDUMP_DISCOVERED", "resourceId": "resource-core",
+         "name": "legacy-core", "detectedAt": stamp, "createdAt": None},
+        {"id": "modern-core", "type": "COREDUMP_DISCOVERED", "resourceId": "resource-core",
+         "name": "modern-core", "createdAt": stamp - timedelta(seconds=1)},
+        {"id": "legacy-gap", "type": "CONNECTION_GAP", "resourceId": "resource-core",
+         "detectedAt": stamp - timedelta(seconds=2), "createdAt": None},
+    ])
+    params = {"summary": "发现核心转储", "object": "南门摄像机", "pageSize": 1, "cursor": ""}
+    first = client.get("/api/v1/runtime-events", params=params)
+
+    assert first.status_code == 200, first.text
+    assert first.json()["total"] is None
+    assert [item["id"] for item in first.json()["items"]] == ["legacy-core"]
+    second = client.get("/api/v1/runtime-events", params={
+        **params, "cursor": first.json()["nextCursor"],
+    })
+    assert second.status_code == 200, second.text
+    assert [item["id"] for item in second.json()["items"]] == ["modern-core"]
 
 
 @pytest.mark.usefixtures("awaitable_mongomock_event_aggregate")
@@ -251,3 +346,4 @@ def test_admin_event_queries_reject_naive_or_excessive_time_ranges_and_non_admin
     })
     response = client.get("/api/v1/audit-events", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
+    assert client.get("/api/v1/runtime-events", headers={"Authorization": f"Bearer {token}"}).status_code == 403

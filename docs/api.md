@@ -244,12 +244,12 @@ DELETE /api/v1/service-tokens/{tokenId}
 管理员可查询操作审计、运行事件和请求排障事件。三个接口均支持 `page`（从 1 开始）和 `pageSize`（最多 100）：
 
 ```http
-GET /api/v1/audit-events?action=control%3ARUNNING&actor=admin&taskId=task-example&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
-GET /api/v1/runtime-events?taskId=task-example&nodeId=node-a&type=CONNECTION_GAP&level=WARNING&outcome=UNKNOWN&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
+GET /api/v1/audit-events?summary=%E5%90%AF%E5%8A%A8%E4%BB%BB%E5%8A%A1&actor=admin&taskId=task-example&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
+GET /api/v1/runtime-events?taskId=task-example&nodeId=node-a&summary=%E9%87%87%E9%9B%86%E8%BF%9E%E6%8E%A5&object=192.0.2.10&level=WARNING&outcome=UNKNOWN&start=2026-09-08T00:00:00%2B00:00&end=2026-09-09T00:00:00%2B00:00
 GET /api/v1/request-events?method=POST&route=%2Fapi%2Fv1%2Ftasks&status=202&requestId=request-example&taskId=task-example
 ```
 
-`audit-events` 可按 `action`、`actor`、`taskId`（审计目标）、`level`、`outcome`、`requestId` 和时间范围筛选；`runtime-events` 可按 `taskId`、`nodeId`、`type`、`level`、`outcome`、`requestId` 和时间范围筛选。`request-events` 可按 `method`、`route`、`status`（HTTP 状态）、`level`、`outcome`、`requestId`、`clientIp`、`taskId` 和时间范围筛选。
+`audit-events` 可按 `summary`（中文事件摘要，兼容输入操作代码）、`actor`、`taskId`（审计目标）、`level`、`outcome`、`requestId` 和时间范围筛选。旧 `action` 参数保留为内部操作代码精确筛选，页面不再要求用户输入它；`runtime-events` 可按 `taskId`、`nodeId`、`summary`（中文事件摘要，兼容输入事件代码）、`object`（资源、任务、节点或核心转储文件的名称、IP 或标识）、`level`、`outcome`、`requestId` 和时间范围筛选。旧 `type` 参数保留为内部事件类型精确筛选，页面不再要求用户输入它。`request-events` 可按 `method`、`route`、`status`（HTTP 状态）、`level`、`outcome`、`requestId`、`clientIp`、`taskId` 和时间范围筛选。
 
 三类接口支持可选游标分页：`cursor=`表示首屏，后续传入上页的`nextCursor`，并保持相同筛选与时间范围。响应为`items`、`pageSize`、`hasMore`、`nextCursor`及`total`；默认`total:null`，仅`includeTotal=true`额外统计匹配条件的精确总数。默认读取至多`pageSize+1`条匹配记录判断下一页，不执行深层skip或精确count；低选择性派生条件仍可能扫描较多候选。游标绑定集合、筛选和时间兼容模式，错误或跨条件游标返回422，不能与`page>1`同时使用。未传cursor的旧page/pageSize调用保持不变。游标不提供跨请求快照；新增事件需刷新首屏，TTL删除的记录不会补回。
 

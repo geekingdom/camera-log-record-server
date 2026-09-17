@@ -28,6 +28,7 @@ const primary = ref("");
 const taskId = ref("");
 const actor = ref("");
 const nodeId = ref("");
+const object = ref("");
 const level = ref<EventLevel>();
 const outcome = ref<EventOutcome>();
 const requestId = ref("");
@@ -37,8 +38,8 @@ const status = ref("");
 let generation = 0;
 
 const tabTitle = computed(() => ({ audit: "审计记录", runtime: "运行事件", request: "请求记录" })[activeTab.value]);
-const primaryLabel = computed(() => ({ audit: "操作", runtime: "事件类型", request: "请求方法" })[activeTab.value]);
-const primaryPlaceholder = computed(() => ({ audit: "例如 control:PAUSED", runtime: "例如 CONNECTION_GAP", request: "例如 POST" })[activeTab.value]);
+const primaryLabel = computed(() => ({ audit: "事件摘要", runtime: "事件摘要", request: "请求方法" })[activeTab.value]);
+const primaryPlaceholder = computed(() => ({ audit: "例如 创建设备资源、暂停采集任务", runtime: "例如 采集连接中断、Coredump", request: "例如 POST" })[activeTab.value]);
 const drawerTitle = computed(() => `${tabTitle.value}详情`);
 const filters = computed<QueryFilters>(() => {
   const range = dateRange.value;
@@ -47,10 +48,10 @@ const filters = computed<QueryFilters>(() => {
     level: level.value, requestId: requestId.value.trim(),
   };
   if (activeTab.value === "audit") return {
-    ...shared, action: primary.value.trim(), actor: actor.value.trim(), taskId: taskId.value.trim(), outcome: outcome.value,
+    ...shared, summary: primary.value.trim(), actor: actor.value.trim(), taskId: taskId.value.trim(), outcome: outcome.value,
   };
   if (activeTab.value === "runtime") return {
-    ...shared, type: primary.value.trim(), taskId: taskId.value.trim(), nodeId: nodeId.value.trim(), outcome: outcome.value,
+    ...shared, summary: primary.value.trim(), object: object.value.trim(), taskId: taskId.value.trim(), nodeId: nodeId.value.trim(), outcome: outcome.value,
   };
   return {
     ...shared, method: primary.value.trim(), taskId: taskId.value.trim(), route: route.value.trim(), status: status.value.trim(), clientIp: clientIp.value.trim(), outcome: outcome.value,
@@ -141,6 +142,7 @@ function resetFilters() {
   taskId.value = "";
   actor.value = "";
   nodeId.value = "";
+  object.value = "";
   level.value = undefined;
   outcome.value = undefined;
   requestId.value = "";
@@ -209,6 +211,7 @@ void load();
         </div>
         <div class="audit-filters">
           <el-input v-model="primary" :placeholder="primaryPlaceholder" :aria-label="`按${primaryLabel}筛选`" @keyup.enter="applyFilters"><template #prepend>{{ primaryLabel }}</template></el-input>
+          <el-input v-if="activeTab === 'runtime'" v-model="object" placeholder="名称、IP 或 ID" aria-label="按对象筛选" @keyup.enter="applyFilters"><template #prepend>对象</template></el-input>
           <el-select v-model="level" clearable placeholder="级别" aria-label="按级别筛选"><el-option label="信息" value="INFO" /><el-option label="警告" value="WARNING" /><el-option label="错误" value="ERROR" /></el-select>
           <el-select v-model="outcome" clearable placeholder="结果" aria-label="按结果筛选"><el-option label="成功" value="SUCCEEDED" /><el-option label="失败" value="FAILED" /><el-option label="处理中" value="PENDING" /><el-option label="已取消" value="CANCELLED" /><el-option label="未知" value="UNKNOWN" /></el-select>
           <el-input v-model="requestId" placeholder="请求编号" aria-label="按请求编号筛选" @keyup.enter="applyFilters" />

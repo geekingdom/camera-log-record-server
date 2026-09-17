@@ -9,6 +9,7 @@ from camera_logs.common.audited_mutations import audited_create, audited_mutatio
 from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize
 from camera_logs.coredumps.models import CoredumpExportCreate
+from camera_logs.coredumps.presence import visible_coredump_query
 from camera_logs.logs.api import proxy_file
 from camera_logs.logs.download_sessions import download_actor_for, issue_download_ticket
 
@@ -52,10 +53,7 @@ def install_coredump_routes(app):
         """按资源、首次发现时间和字面文件名分页；源稳定性与下载快照状态分别返回。"""
         await _resource(repo(), user, resource_id)
         # 历史设备会写入同名标志文件；catalog 保留原记录，列表不把它当作可导出的 coredump。
-        query: dict[str, Any] = {
-            "resourceId": resource_id,
-            "$nor": [{"name": {"$regex": r"(^|/)coredump_flag[.]cdf$", "$options": "i"}}],
-        }
+        query: dict[str, Any] = {"$and": [{"resourceId": resource_id}, visible_coredump_query()]}
         if name:
             import re
             query["name"] = {"$regex": re.escape(name), "$options": "i"}

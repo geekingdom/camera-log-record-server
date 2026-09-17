@@ -1,6 +1,9 @@
 """提供管理事件的共享分页、时间过滤和展示字段一致的数据库筛选。"""
 
 import inspect
+import re
+
+from fastapi import HTTPException
 
 from camera_logs.administration.event_cursor import (
     after_event_cursor_clause,
@@ -12,6 +15,7 @@ from camera_logs.administration.event_presenter import (
     COREDUMP_MOUNT_OUTCOMES,
     DEBUG_MODE_OUTCOMES,
     present_events,
+    runtime_event_summary_clause,
 )
 from camera_logs.common.database import public
 
@@ -102,6 +106,68 @@ def _and_clause(query: dict, clause: dict | None) -> dict:
     if clause is None:
         return query
     return {"$and": [query, clause]}
+
+
+_OBJECT_MATCH_LIMIT = 1_000
+
+
+async def _matching_identifiers(db, collection: str, query: dict) -> set[str]:
+    """受限读取对象标识，避免对象目录膨胀为无界事件 ``$in`` 条件。"""
+    items = [item async for item in db[collection].find(query, {"id": 1}).limit(_OBJECT_MATCH_LIMIT + 1)]
+    if len(items) > _OBJECT_MATCH_LIMIT:
+        raise HTTPException(422, "对象筛选匹配的关联对象超过1000条，请缩短关键词")
+    return {str(item["id"]) for item in items if item.get("id")}
+
+
+def _combine_identifiers(current: set[str], additional: set[str]) -> set[str]:
+    """合并关联对象标识时保持与单次读取相同的硬上限。"""
+    combined = current | additional
+    if len(combined) > _OBJECT_MATCH_LIMIT:
+        raise HTTPException(422, "对象筛选匹配的关联对象超过1000条，请缩短关键词")
+    return combined
+
+
+async def runtime_event_object_clause(db, value: str) -> dict:
+    """按页面对象展示所用的名称、IP 或 ID 关联运行事件。
+
+    事件历史不回填展示名称：先从资源、任务和节点解析匹配的稳定 ID，再与事件
+    已经保存的关联字段共同查询。核心文件名只匹配事件自身的 ``name``/``fileName``，
+    不扫描可能持续增长的文件目录。字面子串条件不能依赖普通 B-tree 消除扫描，
+    因此不为每个字段组合新增写入索引。
+    """
+    pattern = {"$regex": re.escape(value.strip()), "$options": "i"}
+    object_fields = ("resourceId", "taskId", "fileId", "nodeId", "deviceIp", "name", "fileName",
+                     "resourceName", "taskName")
+    clauses = [{field: pattern} for field in object_fields]
+    resource_ids = await _matching_identifiers(
+        db, "resources", {"$or": [{field: pattern} for field in ("id", "name", "ip")]},
+    )
+    task_ids = await _matching_identifiers(
+        db, "tasks", {"$or": [{field: pattern} for field in ("id", "name", "ip")]},
+    )
+    if resource_ids:
+        task_ids = _combine_identifiers(task_ids, await _matching_identifiers(
+            db, "tasks", {"resourceId": {"$in": sorted(resource_ids)}},
+        ))
+        clauses.append({"resourceId": {"$in": sorted(resource_ids)}})
+    node_ids = await _matching_identifiers(
+        db, "nodes", {"$or": [{field: pattern} for field in ("id", "name")]},
+    )
+    if task_ids:
+        clauses.append({"taskId": {"$in": sorted(task_ids)}})
+    if node_ids:
+        clauses.append({"nodeId": {"$in": sorted(node_ids)}})
+    return {"$or": clauses}
+
+
+async def runtime_event_filters(db, query: dict, *, summary: str | None, object_value: str | None) -> dict:
+    """在分页前追加摘要与对象条件，确保页码和游标使用同一完整查询。"""
+    result = dict(query)
+    if summary:
+        result = _and_clause(result, runtime_event_summary_clause(summary))
+    if object_value:
+        result = _and_clause(result, await runtime_event_object_clause(db, object_value))
+    return result
 
 
 async def _present_cursor_page(db, collection: str, query: dict, *, legacy_time: bool, page_size: int,
@@ -222,7 +288,9 @@ async def runtime_event_page(db, query, page, page_size, *, time_range=None):
         if legacy is None:
             query["createdAt"] = time_range
         else:
-            query["$or"] = [{"createdAt": time_range}, {"createdAt": None, "detectedAt": time_range}]
+            query = _and_clause(query, {"$or": [
+                {"createdAt": time_range}, {"createdAt": None, "detectedAt": time_range},
+            ]})
     if legacy is None:
         return await event_page(db, "events", query, page, page_size)
     database_query, derived = split_derived_filters(query)

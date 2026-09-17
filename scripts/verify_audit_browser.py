@@ -13,7 +13,8 @@ from uuid import uuid4
 
 import httpx
 from camera_logs.common.config import Settings
-from camera_logs.common.database import now
+from camera_logs.common.database import Repository, now
+from camera_logs.coredumps.scanner import CoredumpScanner
 from cryptography.fernet import Fernet
 from pymongo import AsyncMongoClient
 
@@ -107,6 +108,20 @@ async def main() -> None:
                 "type": "CONNECTION_GAP", "taskId": "audit-browser-task", "nodeId": "isolated-browser",
                 "createdAt": now(), "reason": "隔离验收模拟：连续十秒未收到输出，已请求重新连接",
             })
+            resource = {"id": "audit-core-resource", "name": "隔离核心转储设备", "ip": "192.0.2.35",
+                        "kind": "HIKVISION_NETWORK", "deletedAt": None, "createdAt": now(), "version": 1}
+            await mongo[database].resources.insert_one(resource)
+            source_root = Path(temporary) / "nfs"
+            device_root = source_root / resource["ip"]
+            device_root.mkdir(parents=True)
+            (device_root / "browser-core.gz").write_bytes(b"synthetic coredump browser fixture")
+            (device_root / "coredump_flag.cdf").write_bytes(b"ignored companion")
+            scan_settings = configured.model_copy(update={"node_id": "isolated-browser", "nfs_root": source_root})
+            scanner = CoredumpScanner(Repository(mongo[database], scan_settings))
+            await scanner.scan_once()
+            await scanner.scan_once()
+            if await mongo[database].events.count_documents({"type": "COREDUMP_DISCOVERED"}) != 1:
+                raise RuntimeError("重复扫描未保持一份Coredump发现事件")
             await mongo[database].audit.insert_many([
                 {"action": "cursor-browser", "actor": "system", "createdAt": now() - timedelta(seconds=index + 1),
                  "targetId": f"isolated-event-{index}"}

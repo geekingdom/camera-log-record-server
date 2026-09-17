@@ -69,6 +69,8 @@ export interface QueryFilters {
   nodeId?: string;
   type?: string;
   level?: EventLevel;
+  summary?: string;
+  object?: string;
   outcome?: EventOutcome;
   requestId?: string;
   clientIp?: string;

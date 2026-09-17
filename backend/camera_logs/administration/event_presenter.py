@@ -1,5 +1,6 @@
 """为审计、运行和请求事件批量补齐中文展示字段并脱敏原因。"""
 
+import re
 from collections.abc import Iterable
 
 from camera_logs.administration.event_sources import event_source, event_source_documents
@@ -54,6 +55,7 @@ EVENT_SUMMARIES = {
     "CLOCK_ROLLBACK": "服务器时间回拨",
     "IDLE_TIMEOUT": "采集日志空闲超时", "READ_ERROR": "采集连接读取失败",
     "COREDUMP_MOUNT": "核心转储挂载状态变化",
+    "COREDUMP_DISCOVERED": "发现核心转储文件",
     "SLAVE_SSH_BOOTSTRAP": "从机SSH连接与引导状态",
     "TASK_AUTO_MIGRATED": "节点异常后已分配至其他节点，等待重新采集",
 }
@@ -175,6 +177,48 @@ def _summary(item: dict) -> str:
     return "记录平台事件"
 
 
+def runtime_event_summary_clause(value: str) -> dict:
+    """将用户可见摘要转换为运行事件的兼容筛选条件。
+
+    旧接口的 ``type`` 仍精确匹配内部代码；本条件额外允许按中文摘要字面
+    子串筛选，并保留已持久化自定义摘要。查询条件只含 JSON 基础类型，游标可
+    以其稳定绑定续页请求。
+    """
+    needle = value.strip()
+    pattern = {"$regex": re.escape(needle), "$options": "i"}
+    clauses = [{"summary": pattern}]
+    upper = needle.upper()
+    matching_types = [event_type for event_type, summary in EVENT_SUMMARIES.items()
+                      if needle.casefold() in summary.casefold() or upper in event_type]
+    if matching_types:
+        clauses.append({"type": {"$in": matching_types}})
+    matching_statuses = [status for status, summary in COREDUMP_MOUNT_SUMMARIES.items()
+                         if needle.casefold() in summary.casefold()]
+    if matching_statuses:
+        clauses.append({"type": "COREDUMP_MOUNT", "status": {"$in": matching_statuses}})
+    matching_phases = [phase for phase, summary in DEBUG_MODE_SUMMARIES.items()
+                       if needle.casefold() in summary.casefold()]
+    if matching_phases:
+        clauses.append({"type": "DEBUG_MODE", "phase": {"$in": matching_phases}})
+    if re.fullmatch(r"[A-Za-z0-9_:-]+", needle):
+        clauses.append({"type": needle})
+    return {"$or": clauses}
+
+
+def audit_event_summary_clause(value: str) -> dict:
+    """将审计页面的中文事件摘要转换为动作和持久摘要的兼容条件。"""
+    needle = value.strip()
+    pattern = {"$regex": re.escape(needle), "$options": "i"}
+    matching_actions = [action for action, summary in ACTION_SUMMARIES.items()
+                        if needle.casefold() in summary.casefold() or needle.casefold() in action.casefold()]
+    clauses = [{"summary": pattern}]
+    if matching_actions:
+        clauses.append({"action": {"$in": matching_actions}})
+    if re.fullmatch(r"[A-Za-z0-9_:-]+", needle):
+        clauses.append({"action": needle})
+    return {"$or": clauses}
+
+
 def _reason(item: dict) -> str | None:
     """从可诊断字段提取单一安全原因，优先处理明确失败和异常字段。"""
     for field in ("reason", "error", "debugError", "message"):
@@ -202,13 +246,19 @@ async def present_events(db, items: Iterable[dict]) -> list[dict]:
     task_ids = {str(item["taskId"]) for item in raw_items if item.get("taskId")} | target_ids
     users = await _documents_by_id(db, "users", actor_ids | target_ids)
     source_tokens, source_nodes = await event_source_documents(db, raw_items)
-    documents = {name: await _documents_by_id(db, name, task_ids if name == "tasks" else target_ids)
-                 for name in _TARGET_COLLECTIONS if name != "users"}
+    file_ids = target_ids | {str(item["fileId"]) for item in raw_items if item.get("fileId")}
+    documents = {name: await _documents_by_id(
+        db, name, task_ids if name == "tasks" else file_ids if name == "coredump_files" else target_ids,
+    ) for name in _TARGET_COLLECTIONS if name != "users"}
     documents["users"] = users
     linked_task_ids = task_ids | {str(item["taskId"]) for name in ("jobs", "commands")
                                   for item in documents[name].values() if item.get("taskId")}
     if linked_task_ids != task_ids:
         documents["tasks"] = await _documents_by_id(db, "tasks", linked_task_ids)
+    resource_ids = ({str(item["resourceId"]) for item in raw_items if item.get("resourceId")} |
+                    {str(item["resourceId"]) for item in documents["tasks"].values() if item.get("resourceId")} |
+                    {str(item["resourceId"]) for item in documents["coredump_files"].values() if item.get("resourceId")})
+    documents["resources"] = await _documents_by_id(db, "resources", resource_ids | target_ids)
     result = []
     for raw in raw_items:
         item = public(redact(raw))
@@ -230,6 +280,7 @@ async def present_events(db, items: Iterable[dict]) -> list[dict]:
             item.setdefault("taskId", task["id"])
             item["taskName"] = task.get("name") or task["id"]
             item["deviceIp"] = task.get("ip")
+            item.setdefault("resourceId", task.get("resourceId"))
         target_id = str(item.get("targetId") or "")
         if target_id:
             target = next((group[target_id] for group in documents.values() if target_id in group), None)
@@ -246,6 +297,15 @@ async def present_events(db, items: Iterable[dict]) -> list[dict]:
                     item["taskId"] = linked_task["id"]
                     item["taskName"] = linked_task.get("name") or linked_task["id"]
                     item["deviceIp"] = linked_task.get("ip")
+        core_file = documents["coredump_files"].get(str(item.get("fileId")))
+        if core_file:
+            item["fileName"] = core_file.get("name") or core_file["id"]
+            item.setdefault("targetName", item["fileName"])
+            item.setdefault("resourceId", core_file.get("resourceId"))
+        resource = documents["resources"].get(str(item.get("resourceId")))
+        if resource:
+            item["resourceName"] = resource.get("name") or resource["id"]
+            item["deviceIp"] = resource.get("ip") or item.get("deviceIp")
         item.update(event_source(item, users=users, tokens=source_tokens, nodes=source_nodes, task=task))
         result.append(item)
     return result

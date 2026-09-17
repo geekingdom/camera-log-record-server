@@ -18,6 +18,8 @@ const resources = Array.from({ length: 25 }, (_, index) => ({
   subSerialNumber: index === 20 ? "SN-EDGE-2047" : `SN-${String(index + 1).padStart(3, "0")}`,
   createdBy: index === 20 ? "creator-b" : "creator-a",
   createdByName: index === 20 ? "乙创建者" : "甲创建者",
+  // 仅边缘入口带有文件，用于验证目录聚合标识和筛选，而不是向每行另发文件查询。
+  hasCoredumps: index === 20,
   deletedAt: index === 22 ? "2026-09-14T00:00:00Z" : null,
   version: 1,
 }));
@@ -32,6 +34,7 @@ function filtered(url) {
   const serial = url.searchParams.get("subSerialNumber") || "";
   const kind = url.searchParams.get("kind") || "";
   const createdBy = url.searchParams.get("createdBy") || "";
+  const hasCoredumps = url.searchParams.get("hasCoredumps");
   const includeDeleted = url.searchParams.get("includeDeleted") === "true";
   return resources.filter(resource =>
     (!search || `${resource.name} ${resource.ip}`.includes(search)) &&
@@ -39,6 +42,7 @@ function filtered(url) {
     (!serial || resource.subSerialNumber.includes(serial)) &&
     (!kind || resource.kind === kind) &&
     (!createdBy || resource.createdBy === createdBy) &&
+    (hasCoredumps === null || Boolean(resource.hasCoredumps) === (hasCoredumps === "true")) &&
     (includeDeleted || !resource.deletedAt),
   );
 }
@@ -59,6 +63,10 @@ await context.route("**/api/v1/**", async route => {
     const items = filtered(url);
     return json(route, { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize });
   }
+  if (request.method() === "GET" && pathname === "/api/v1/resources/resource-21/coredumps") return json(route, {
+    items: [{ id: "coredump-21", resourceId: "resource-21", nodeId: "mock-node", name: "core.21", size: 1024,
+      receivedAt: "2026-09-17T00:00:00Z", status: "FROZEN" }], total: 1, page: 1, pageSize: 50,
+  });
   if (request.method() === "GET" && pathname === "/api/v1/users/creators") return json(route, {
     items: [
       { id: "creator-a", username: "creator-a", displayName: "甲创建者" },
@@ -160,6 +168,41 @@ try {
   await creatorSelect.hover();
   await creatorSelect.locator(".el-select__clear").click();
   await clickFilter({ page: "1", pageSize: "20" });
+
+  // Element Plus 同时为输入框和打开后的 listbox 标记 aria-label，限定 combobox 避免严格定位歧义。
+  const coredumpSelect = page.getByRole("combobox", { name: "按 coredump 文件筛选", exact: true });
+  // 输入框被选中标签覆盖；点击组件容器与既有资源类型筛选的交互路径一致。
+  const coredumpControl = coredumpSelect.locator("xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' el-select ')][1]");
+  await coredumpControl.click();
+  await page.getByRole("option", { name: "存在文件", exact: true }).click();
+  await latestRequest({ page: "1", pageSize: "20", hasCoredumps: "true" });
+  const coredumpRow = page.getByRole("row").filter({ hasText: "边缘入口" });
+  await coredumpRow.waitFor();
+  const coredumpButton = coredumpRow.getByRole("button", { name: "查看 coredump 文件，当前存在文件", exact: true });
+  const coredumpDot = coredumpRow.locator(".coredump-presence-dot");
+  assert.equal(await coredumpDot.count(), 1, "存在 coredump 的资源必须显示红点");
+  const [dotBox, actionCellBox] = await Promise.all([
+    coredumpDot.boundingBox(),
+    coredumpButton.locator("xpath=ancestor::td[1]").boundingBox(),
+  ]);
+  assert.ok(dotBox && actionCellBox, "红点及操作单元格必须可见");
+  assert.equal(dotBox.width, 8, "红点宽度必须固定为 8px");
+  assert.equal(dotBox.height, 8, "红点高度必须固定为 8px");
+  assert.ok(dotBox.x >= actionCellBox.x && dotBox.y >= actionCellBox.y && dotBox.x + dotBox.width <= actionCellBox.x + actionCellBox.width && dotBox.y + dotBox.height <= actionCellBox.y + actionCellBox.height, "红点必须完整位于操作单元格内");
+  await coredumpButton.click();
+  const coredumpDrawer = page.getByRole("dialog", { name: /边缘入口.*Coredump 文件/ });
+  await coredumpDrawer.waitFor();
+  await coredumpDrawer.getByRole("button", { name: "关闭", exact: true }).click();
+  await coredumpDrawer.waitFor({ state: "detached" });
+  assert.equal(await coredumpRow.locator(".coredump-presence-dot").count(), 1, "打开 coredump 列表不能清除存在提示");
+
+  await coredumpControl.click();
+  await page.getByRole("option", { name: "无文件", exact: true }).click();
+  await latestRequest({ page: "1", pageSize: "20", hasCoredumps: "false" });
+  assert.equal(await page.locator(".resource-table .coredump-presence-dot").count(), 0, "不存在筛选结果不得显示 coredump 红点");
+  await coredumpControl.hover();
+  await coredumpControl.locator(".el-select__clear").click();
+  await latestRequest({ page: "1", pageSize: "20" });
 
   await page.locator(".el-pagination .btn-next:not([disabled])").click();
   await latestRequest({ page: "2", pageSize: "20" });

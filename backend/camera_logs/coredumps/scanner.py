@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import heapq
+import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from camera_logs.common.database import now
-from camera_logs.coredumps.safety import device_directory, regular_unlinked_file
+from camera_logs.coredumps.events import record_discovery_event
+from camera_logs.coredumps.safety import device_directory, regular_unlinked_file, source_path
+
+logger = logging.getLogger(__name__)
 
 
 def _scan_directory(
@@ -96,7 +100,7 @@ class CoredumpScanner:
                         "kind": "HIKVISION_NETWORK",
                         "deletedAt": None,
                     },
-                    {"id": 1, "ip": 1},
+                    {"id": 1, "ip": 1, "name": 1},
                 )
             ]
             state = await self.repo.db.coredump_scan_state.find_one({"id": self.repo.settings.node_id}) or {}
@@ -135,6 +139,7 @@ class CoredumpScanner:
             selected = discovered[: int(self.repo.settings.coredump_scan_max_files)]
             for resource, name, info in selected:
                 await self._record(resource, name, info)
+            await self._probe_known_sources(state)
             if selected:
                 await self.repo.db.coredump_scan_state.update_one(
                     {"id": self.repo.settings.node_id},
@@ -189,12 +194,14 @@ class CoredumpScanner:
                 "firstSeenAt": timestamp,
                 "sourceModifiedAt": datetime.fromtimestamp(info.st_mtime_ns / 1_000_000_000, UTC),
                 "sourceState": "OBSERVING",
+                "sourcePresent": True,
                 "sourceObservedAt": timestamp,
                 "sourceUnchangedSince": timestamp,
                 "sourceStableAt": None,
                 "updatedAt": timestamp,
             }
             await self.repo.db.coredump_files.insert_one(document)
+            await self._record_discovery_event(resource, document)
             return
         timestamp = now()
         unchanged_since = current.get("sourceUnchangedSince")
@@ -202,12 +209,18 @@ class CoredumpScanner:
             source_state, unchanged_since, stable_at = "CHANGING", timestamp, None
         else:
             unchanged_since = unchanged_since if isinstance(unchanged_since, datetime) else timestamp
-            unchanged_since = unchanged_since.replace(tzinfo=UTC) if unchanged_since.tzinfo is None else unchanged_since
+            unchanged_since = (
+                unchanged_since.replace(tzinfo=UTC) if unchanged_since.tzinfo is None else unchanged_since
+            )
             if timestamp - unchanged_since >= timedelta(seconds=10):
                 source_state = "STABLE"
                 stable_at = current.get("sourceStableAt") or timestamp
             else:
-                source_state = current.get("sourceState") if current.get("sourceState") in {"OBSERVING", "CHANGING"} else "OBSERVING"
+                source_state = (
+                    current.get("sourceState")
+                    if current.get("sourceState") in {"OBSERVING", "CHANGING"}
+                    else "OBSERVING"
+                )
                 stable_at = None
         await self.repo.db.coredump_files.update_one(
             {"id": current["id"], "status": "RECEIVING", "snapshot": {"$exists": False}},
@@ -217,6 +230,7 @@ class CoredumpScanner:
                     "size": info.st_size,
                     "sourceModifiedAt": datetime.fromtimestamp(info.st_mtime_ns / 1_000_000_000, UTC),
                     "sourceState": source_state,
+                    "sourcePresent": True,
                     "sourceObservedAt": timestamp,
                     "sourceUnchangedSince": unchanged_since,
                     "sourceStableAt": stable_at,
@@ -225,3 +239,56 @@ class CoredumpScanner:
                 },
             },
         )
+        await self._record_discovery_event(resource, current)
+
+    async def _record_discovery_event(self, resource: dict[str, Any], catalog: dict[str, Any]) -> None:
+        """事件失败只保留未确认 catalog，后续观察可补写且不阻断其它目录登记。"""
+        try:
+            await record_discovery_event(self.repo, resource, catalog)
+        except Exception:
+            logger.exception("Coredump 发现事件写入失败 file=%s", catalog["id"])
+
+    async def _probe_known_sources(self, state: dict[str, Any]) -> None:
+        """有界复核已登记源路径；仅明确缺失才撤销最后已知存在状态。"""
+        limit = int(self.repo.settings.coredump_scan_max_files)
+        cursor = str(state.get("probeCursor", ""))
+        query = {"nodeId": self.repo.settings.node_id, "sourcePresent": {"$ne": False}}
+        candidates = [
+            item
+            async for item in self.repo.db.coredump_files.find({**query, "id": {"$gt": cursor}})
+            .sort("id", 1)
+            .limit(limit)
+        ]
+        if not candidates and cursor:
+            candidates = [
+                item async for item in self.repo.db.coredump_files.find(query).sort("id", 1).limit(limit)
+            ]
+        for catalog in candidates:
+            present = await asyncio.to_thread(self._source_is_present, catalog)
+            if present is not None:
+                await self.repo.db.coredump_files.update_one(
+                    {"id": catalog["id"]},
+                    {"$set": {"sourcePresent": present, "updatedAt": now()}},
+                )
+        if candidates:
+            await self.repo.db.coredump_scan_state.update_one(
+                {"id": self.repo.settings.node_id},
+                {"$set": {"probeCursor": candidates[-1]["id"], "updatedAt": now()}},
+                upsert=True,
+            )
+
+    def _source_is_present(self, catalog: dict[str, Any]) -> bool | None:
+        """验证一个历史路径仍是安全普通文件；不可达和权限异常不推断为文件已删除。"""
+        try:
+            # 先单独确认受控根和设备目录。它们不存在时无法区分 NFS 未挂载和
+            # 设备文件删除，必须保留最后已知状态；只有其后的叶文件缺失才是删除。
+            device_directory(self.repo.settings, catalog["deviceIp"])
+        except (FileNotFoundError, PermissionError, ValueError, OSError):
+            return None
+        try:
+            regular_unlinked_file(source_path(self.repo.settings, catalog["deviceIp"], catalog["name"]))
+        except FileNotFoundError:
+            return False
+        except (PermissionError, ValueError, OSError):
+            return None
+        return True

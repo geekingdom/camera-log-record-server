@@ -91,6 +91,47 @@ def test_coredump_monitor_status_hides_mount_status_from_an_old_run(resource_cli
     }
 
 
+def test_resource_presence_fields_exclude_flag_and_deleted_source(resource_client):
+    """列表批量补齐和详情单项读取都按可见 Coredump 语义返回布尔字段。"""
+    repo = resource_client.app.state.repo
+    resource_client.portal.call(repo.db.resources.insert_many, [
+        {"id": "visible", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.81", "deletedAt": None},
+        {"id": "flag", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.82", "deletedAt": None},
+        {"id": "missing", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.83", "deletedAt": None},
+    ])
+    resource_client.portal.call(repo.db.coredump_files.insert_many, [
+        {"id": "visible-file", "resourceId": "visible", "name": "core.bin"},
+        {"id": "flag-file", "resourceId": "flag", "name": "nested/coredump_flag.cdf"},
+        {"id": "missing-file", "resourceId": "missing", "name": "gone.bin", "sourcePresent": False},
+    ])
+    page = resource_client.get("/api/v1/resources?pageSize=10").json()
+    values = {item["id"]: item["hasCoredumps"] for item in page["items"]}
+    assert values == {"visible": True, "flag": False, "missing": False}
+    assert resource_client.get("/api/v1/resources/visible").json()["hasCoredumps"] is True
+    assert resource_client.get("/api/v1/resources/flag").json()["hasCoredumps"] is False
+
+
+def test_resource_presence_filter_pipeline_limits_lookup_to_one_file():
+    """MongoMock 不支持 lookup let；结构断言保证真实 Mongo 在分页前执行存在性筛选。"""
+    from camera_logs.coredumps.presence import resource_presence_pipeline
+
+    pipeline = resource_presence_pipeline({"deletedAt": None}, page=2, page_size=20, has_coredumps=True)
+    lookup = pipeline[1]["$lookup"]
+    assert lookup["let"] == {"resourceId": "$id"}
+    assert lookup["pipeline"][-2:] == [{"$project": {"_id": 1}}, {"$limit": 1}]
+    assert pipeline[2] == {"$set": {"hasCoredumps": {"$gt": [{"$size": "$_coredumpPresence"}, 0]}}}
+    assert pipeline[3] == {"$match": {"hasCoredumps": True}}
+
+
+def test_resource_presence_requires_a_frozen_valid_snapshot_when_source_is_missing():
+    """冻结快照是可用副本；RETIRING/DELETING 或空快照引用不能继续显示红点。"""
+    from camera_logs.coredumps.presence import visible_coredump_query
+
+    conditions = visible_coredump_query()["$or"]
+    assert {"status": "FROZEN", "snapshot.path": {"$exists": True, "$ne": None}} in conditions
+    assert {"status": "FROZEN", "snapshot.reservationToken": {"$exists": True, "$ne": None}} in conditions
+
+
 @pytest.mark.asyncio
 async def test_network_authentication_parses_namespaced_hikvision_xml():
     """Digest 成功响应必须解析并返回由设备提供的只读元数据。"""

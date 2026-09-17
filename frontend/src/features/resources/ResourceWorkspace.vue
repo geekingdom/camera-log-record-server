@@ -22,6 +22,8 @@ const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTa
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const model = ref("");
 const subSerialNumber = ref("");
+// 空值表示不限制；字符串保留 API 布尔查询的 true/false 原值。
+const hasCoredumps = ref<"true" | "false" | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
 const coredumpOpen = ref(false), coredumpResource = ref<Resource>();
 const authenticationRecordsOpen = ref(false), authenticationRecordsResource = ref<Resource>();
@@ -54,6 +56,7 @@ async function load() {
     model: model.value.trim() || undefined,
     subSerialNumber: subSerialNumber.value.trim() || undefined,
     kind: kind.value,
+    hasCoredumps: hasCoredumps.value,
     includeDeleted: includeDeleted.value ? "true" : undefined,
     createdBy: showAll.value ? createdBy.value || undefined : props.userId,
   }; const data = await api.resources(page.value, 20, filters); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
@@ -168,6 +171,7 @@ defineExpose({ reload: load });
     <el-input v-model="model" aria-label="设备型号" placeholder="设备型号" clearable maxlength="256" @clear="filter" @keyup.enter="filter" />
     <el-input v-model="subSerialNumber" aria-label="设备序列号" placeholder="设备序列号" clearable maxlength="256" @clear="filter" @keyup.enter="filter" />
     <el-select v-model="kind" aria-label="按资源类型筛选" clearable placeholder="全部资源" @change="filter"><el-option label="海康网络设备" value="HIKVISION_NETWORK" /><el-option label="串口服务器" value="SERIAL_SERVER" /></el-select>
+    <el-select v-model="hasCoredumps" aria-label="按 coredump 文件筛选" clearable placeholder="Coredump 文件" @change="filter"><el-option label="存在文件" value="true" /><el-option label="无文件" value="false" /></el-select>
     <CreatorFilter v-if="showAll" v-model="createdBy" @change="filter" />
     </div>
     <div class="resource-toolbar-footer">
@@ -196,7 +200,7 @@ defineExpose({ reload: load });
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看认证记录"><el-button text :icon="History" aria-label="查看认证记录" @click="viewAuthenticationRecords(row)" /></el-tooltip>
       <el-tooltip v-if="canAuthenticate(row)" content="立即认证设备"><el-button text :icon="KeyRound" aria-label="立即认证设备" :loading="authenticating.has(row.id)" :disabled="authenticating.has(row.id)" @click="authenticate(row)" /></el-tooltip>
-      <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看 coredump 文件"><el-button text :icon="FileArchive" aria-label="查看 coredump 文件" @click="viewCoredumps(row)" /></el-tooltip>
+      <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" :content="row.hasCoredumps ? '查看 coredump 文件（当前存在文件）' : '查看 coredump 文件'"><span class="coredump-file-control"><el-button text :icon="FileArchive" :aria-label="row.hasCoredumps ? '查看 coredump 文件，当前存在文件' : '查看 coredump 文件'" @click="viewCoredumps(row)" /><i v-if="row.hasCoredumps" class="coredump-presence-dot" aria-hidden="true" /></span></el-tooltip>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK' && row.enableResourceMonitor && !row.deletedAt" content="查看 CPU 与内存趋势"><el-button text :icon="ChartLine" aria-label="查看 CPU 与内存趋势" @click="viewMetrics(row)" /></el-tooltip>
       <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
@@ -236,4 +240,8 @@ defineExpose({ reload: load });
 @media (max-width: 480px) { .resource-filter-actions { margin-left: 0; } }
 .resource-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
 .resource-actions :deep(.el-button + .el-button) { margin-left: 0; }
+/* 红点完全位于图标按钮的固定点击区内，避免表格单元格裁掉外伸徽标。 */
+.coredump-file-control { position: relative; display: inline-flex; width: 32px; height: 32px; flex: 0 0 32px; }
+.coredump-file-control :deep(.el-button) { width: 32px; height: 32px; padding: 0; }
+.coredump-presence-dot { position: absolute; top: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--el-color-danger); pointer-events: none; }
 </style>

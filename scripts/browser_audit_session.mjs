@@ -101,7 +101,7 @@ async function verifyAuditWorkspace() {
   await page.getByRole("heading", { name: "审计记录", exact: true }).waitFor();
 
   // 初始改密产生本次隔离环境的审计记录，筛选后可验证表格和详情没有依赖预置设备数据。
-  await page.getByLabel("按操作筛选", { exact: true }).fill("change_password");
+  await page.getByLabel("按事件摘要筛选", { exact: true }).fill("修改账户密码");
   await waitForApi("/api/v1/audit-events", async () => {
     await page.getByRole("button", { name: "查询", exact: true }).click();
   });

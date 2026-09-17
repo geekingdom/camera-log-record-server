@@ -6,18 +6,28 @@ import { api } from "./api";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("设备身份模糊筛选 API", () => {
-  it("独立编码型号和序列号，并保留已有组合条件", async () => {
+  it("独立编码型号、序列号和 coredump 存在状态，并保留已有组合条件", async () => {
     vi.stubGlobal("sessionStorage", { getItem: () => null });
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0 })));
     vi.stubGlobal("fetch", fetch);
     await api.resources(1, 20, {
-      model: "G2/VX3+", subSerialNumber: "GA[154]", search: "大厅", createdBy: "operator", includeDeleted: "true",
+      model: "G2/VX3+", subSerialNumber: "GA[154]", search: "大厅", createdBy: "operator", includeDeleted: "true", hasCoredumps: "false",
     });
     const params = new URL(fetch.mock.calls[0][0], "http://localhost").searchParams;
     expect(Object.fromEntries(params)).toEqual({
       page: "1", pageSize: "20", model: "G2/VX3+", subSerialNumber: "GA[154]", search: "大厅",
-      createdBy: "operator", includeDeleted: "true",
+      createdBy: "operator", includeDeleted: "true", hasCoredumps: "false",
     });
+  });
+
+  it("保留存在 coredump 的明确筛选值", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0 })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.resources(1, 20, { hasCoredumps: "true" });
+
+    expect(new URL(fetch.mock.calls[0][0], "http://localhost").searchParams.get("hasCoredumps")).toBe("true");
   });
 });
 

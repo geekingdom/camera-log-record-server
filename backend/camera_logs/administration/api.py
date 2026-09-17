@@ -8,10 +8,12 @@ from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Gauge, generate_latest
 from pydantic import BaseModel, Field
 
+from camera_logs.administration.event_presenter import audit_event_summary_clause
 from camera_logs.administration.event_queries import (
     event_cursor_page,
     event_page,
     runtime_event_cursor_page,
+    runtime_event_filters,
     runtime_event_page,
 )
 from camera_logs.administration.isolation import confirm_node_isolation
@@ -98,6 +100,7 @@ def install_admin_routes(app):
         cursor: str | None = Query(default=None, max_length=4096),
         includeTotal: bool = Query(default=False),
         action: str | None = Query(default=None, max_length=128), level: Annotated[EventLevel | None, Query()] = None,
+        summary: str | None = Query(default=None, max_length=128),
         outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
         actor_id: str | None = Query(default=None, alias="actor", max_length=128),
         task_id: str | None = Query(default=None, alias="taskId", max_length=128),
@@ -110,6 +113,8 @@ def install_admin_routes(app):
         query = {key: value for key, value in {
             "action": action, "actor": actor_id, "targetId": task_id, "level": level, "outcome": outcome, "requestId": request_id,
         }.items() if value}
+        if summary:
+            query = {"$and": [query, audit_event_summary_clause(summary)]}
         if stamp := _utc_range(start, end):
             query["createdAt"] = stamp
         if cursor is not None:
@@ -129,16 +134,19 @@ def install_admin_routes(app):
         task_id: str | None = Query(default=None, alias="taskId", max_length=128),
         node_id: str | None = Query(default=None, alias="nodeId", max_length=128),
         event_type: str | None = Query(default=None, alias="type", max_length=128), level: Annotated[EventLevel | None, Query()] = None,
+        summary: str | None = Query(default=None, max_length=128),
+        object_value: str | None = Query(default=None, alias="object", max_length=128),
         outcome: Annotated[EventOutcome | None, Query()] = None, request_id: str | None = Query(default=None, alias="requestId", max_length=128),
         start: str | None = Query(default=None, max_length=64),
         end: str | None = Query(default=None, max_length=64),
     ):
-        """按任务、节点、类别和受限 UTC 范围查询不含日志正文的运行事件。"""
+        """按任务、节点、摘要、对象和受限 UTC 范围查询不含日志正文的运行事件。"""
         authorize(user, "admin")
         db = request.app.state.repo.db
         query = {key: value for key, value in {
             "taskId": task_id, "nodeId": node_id, "type": event_type, "level": level, "outcome": outcome, "requestId": request_id,
         }.items() if value}
+        query = await runtime_event_filters(db, query, summary=summary, object_value=object_value)
         time_range = _utc_range(start, end)
         if cursor is not None:
             if page != 1:

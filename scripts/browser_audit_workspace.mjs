@@ -136,6 +136,11 @@ async function verifyWorkspace() {
   await selectFirstRecord("审计记录详情");
   await page.keyboard.press("Escape");
   await page.getByRole("dialog", { name: "审计记录详情", exact: true }).waitFor({ state: "hidden" });
+  await page.getByLabel("按事件摘要筛选", { exact: true }).fill("用户登录");
+  const auditSummary = await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "查询", exact: true }).click());
+  if (new URL(auditSummary.url()).searchParams.get("summary") !== "用户登录")
+    throw new Error("审计记录未提交中文事件摘要");
+  await page.locator(".audit-table").getByText("用户登录", { exact: true }).first().waitFor();
 
   await waitForApi("/api/v1/runtime-events", async () => {
     await page.getByRole("tab", { name: "运行事件", exact: true }).click();
@@ -143,7 +148,14 @@ async function verifyWorkspace() {
   await page.getByRole("heading", { name: "运行事件", exact: true }).waitFor();
   await page.getByText("采集连接中断", { exact: true }).waitFor();
   await page.getByText("隔离连接演示任务", { exact: true }).waitFor();
-  await page.getByText("采集节点：isolated-browser", { exact: true }).waitFor();
+  await page.getByText("采集节点：isolated-browser", { exact: true }).first().waitFor();
+  await page.getByLabel("按事件摘要筛选", { exact: true }).fill("采集连接中断");
+  await page.getByLabel("按对象筛选", { exact: true }).fill("隔离连接演示");
+  const filtered = await waitForApi("/api/v1/runtime-events", () => page.getByRole("button", { name: "查询", exact: true }).click());
+  const parameters = new URL(filtered.url()).searchParams;
+  if (parameters.get("summary") !== "采集连接中断" || parameters.get("object") !== "隔离连接演示")
+    throw new Error("运行事件未提交中文摘要和对象筛选");
+  await page.getByText("隔离连接演示任务", { exact: true }).waitFor();
   await selectFirstRecord("运行事件详情");
   await page.locator(".audit-event-drawer").getByText("节点 ID：isolated-browser", { exact: true }).waitFor();
   await prepareScreenshot();
@@ -152,6 +164,22 @@ async function verifyWorkspace() {
   await page.getByRole("dialog", { name: "运行事件详情", exact: true }).waitFor({ state: "hidden" });
   await prepareScreenshot();
   await page.screenshot({ path: `${screenshots}/audit-workspace-runtime-table.png`, fullPage: true });
+
+  await page.getByLabel("按事件摘要筛选", { exact: true }).fill("Coredump");
+  await page.getByLabel("按对象筛选", { exact: true }).fill("192.0.2.35");
+  await waitForApi("/api/v1/runtime-events", () => page.getByRole("button", { name: "查询", exact: true }).click());
+  await page.locator(".audit-workspace .el-table__row").first().waitFor();
+  if (await page.locator(".audit-workspace .el-table__row").count() !== 1)
+    throw new Error("Coredump发现记录重复或对象筛选未生效");
+  await selectFirstRecord("运行事件详情");
+  await page.locator(".audit-event-drawer dd").getByText("browser-core.gz", { exact: true }).first().waitFor();
+  await page.screenshot({ path: `${screenshots}/audit-workspace-coredump-detail.png`, fullPage: true });
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog", { name: "运行事件详情", exact: true }).waitFor({ state: "hidden" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertNoHorizontalOverflow("运行事件移动端");
+  await page.screenshot({ path: `${screenshots}/audit-workspace-runtime-mobile.png`, fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
 
   await createConflictRequest();
   await waitForApi("/api/v1/request-events", async () => {
@@ -178,7 +206,7 @@ async function verifyCursorPaging() {
   await page.waitForFunction(() => document.querySelectorAll(".audit-workspace .el-table__row").length === 50);
   const firstPage = await records.allTextContents();
   if (firstPage.length !== 50) throw new Error("隔离分页夹具不足一页");
-  await page.getByLabel("按操作筛选", { exact: true }).fill("未提交的筛选");
+  await page.getByLabel("按事件摘要筛选", { exact: true }).fill("未提交的筛选");
   const pattern = "**/api/v1/audit-events?**";
   await page.route(pattern, async route => {
     await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { message: "模拟翻页暂时失败" } }) });
@@ -187,7 +215,7 @@ async function verifyCursorPaging() {
   await page.getByText("模拟翻页暂时失败", { exact: false }).waitFor();
   if (JSON.stringify(await records.allTextContents()) !== JSON.stringify(firstPage)) throw new Error("翻页失败清除了当前成功页");
   const response = await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "下一页", exact: true }).click());
-  if (new URL(response.url()).searchParams.has("action")) throw new Error("续页错误使用未提交的筛选");
+  if (new URL(response.url()).searchParams.has("summary")) throw new Error("续页错误使用未提交的筛选");
   await page.getByText("第 2 页", { exact: false }).waitFor();
   const secondPage = await records.allTextContents();
   if (!secondPage.length || secondPage.some(row => firstPage.includes(row))) throw new Error("续页出现重复行或丢失尾页");
@@ -197,7 +225,7 @@ async function verifyCursorPaging() {
   const counted = await waitForApi("/api/v1/audit-events", () => page.getByRole("button", { name: "统计总数", exact: true }).click());
   if (new URL(counted.url()).searchParams.get("includeTotal") !== "true" || (await counted.json()).total < 55)
     throw new Error("按需总数未请求完整匹配数量");
-  await page.getByLabel("按操作筛选", { exact: true }).fill("");
+  await page.getByLabel("按事件摘要筛选", { exact: true }).fill("");
   let releaseCount;
   let markStarted;
   const heldCount = new Promise(resolve => { releaseCount = resolve; });

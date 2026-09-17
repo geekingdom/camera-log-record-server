@@ -112,6 +112,8 @@ class Repository:
         await self.db.log_gap_snapshots.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.coredump_files.create_index([("resourceId", 1), ("receivedAt", -1), ("id", 1)])
         await self.db.coredump_files.create_index([("nodeId", 1), ("status", 1), ("updatedAt", -1)])
+        # 源文件复核按节点和稳定游标限量读取，存在性条件在索引候选内过滤。
+        await self.db.coredump_files.create_index([("nodeId", 1), ("id", 1)])
         await self.db.coredump_files.create_index([("sourceKey", 1), ("nodeId", 1), ("version", -1)])
         # 快照孤儿回收按本节点 token 引用核对，避免每个过期 claim 扫描整个 catalog。
         await self.db.coredump_files.create_index([("nodeId", 1), ("freezeToken", 1)])

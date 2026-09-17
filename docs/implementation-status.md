@@ -1,6 +1,14 @@
 # 当前状态总表
 
-CI修复（2026-09-17）：`b45ad7c`的[CI35174836312](https://github.com/geekingdom/camera-log-record-server/actions/runs/35174836312)仅backend静态检查失败，1519项后端测试及其余七作业均成功。CI Ruff0.16.8与本机0.16.6存在规则差异；升级本机后复现SIM117，合并`resources/authentication.py`上下文管理器并在`pyproject.toml`固定Ruff0.16.8。修复后全仓Ruff、认证相关57项通过；新提交远程CI待核验。详见[修复证据](history/2026-09-17-ci-ruff-version.md)。
+CI修复（2026-09-17）：`b45ad7c`的[CI35174836312](https://github.com/geekingdom/camera-log-record-server/actions/runs/35174836312)仅backend静态检查失败，1519项后端测试及其余七作业均成功。CI Ruff0.16.8与本机0.16.6存在规则差异；升级本机后复现SIM117，合并`resources/authentication.py`上下文管理器并在`pyproject.toml`固定Ruff0.16.8。修复后全仓Ruff、认证相关57项通过；修复提交`058ad2c`的[CI35178903964](https://github.com/geekingdom/camera-log-record-server/actions/runs/35178903964)八项全部成功，已完成核验。详见[修复证据](history/2026-09-17-ci-ruff-version.md)。
+
+| 当前需求（Coredump提示与事件查询） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 资源存在Coredump时图标红点，并可筛选存在/无文件 | `coredumps/presence.py`、`scanner.py`、`resources/api.py`、`ResourceWorkspace.vue` | 真实Mongo分页前关联、删除源后消除提示及Explain通过；资源页1920/1440/1024/390/320浏览器验证，8px红点不裁剪、打开文件页不清除；相关75项通过 | Worker不可达时为最后已知状态，不承诺即时物理探测；公司环境需更新Worker/API/前端 |
+| 每资源每文件版本记录一次Coredump发现事件 | `coredumps/events.py`、`scanner.py`、事件展示器及详情抽屉 | 失败补写、重复扫描去重、保留期删除不复活、附属flag排除、源缺失和FROZEN副本语义测试通过；真实扫描与Cookie页面详情联通 | 按运行事件默认90天保留；旧文件再次被扫描时按原首次发现时间补记，未再可见的历史源不伪造事件 |
+| 运行事件与审计记录均按中文事件摘要检索，运行事件增加对象条件 | `administration/api.py`、`event_queries.py`、`event_presenter.py`、`AuditWorkspace.vue`、OpenAPI说明 | 中文摘要、对象名称/IP/ID、旧时间及游标组合、权限测试通过；真实Cookie浏览器验证两类摘要和Coredump对象、桌面移动截图通过 | 保留旧action/type参数；对象关联命中超过1000返回422要求细化，不静默截断 |
+
+本轮全量后端1526项通过后，最后相关75项、前端170项、构建、Ruff和差异检查通过。真实Mongo关联命中既有资源索引，源复核新增(nodeId,id)索引50结果/50键/50文档无排序；隔离真实API/Worker/WebSocket/小时下载通过并清理临时库与文件。本机新API/Worker健康200，四类新增筛选正式接口200。详见[本轮证据与边界](history/2026-09-17-coredump-presence-event-filters.md)。
 
 | 当前需求（2026-09-17） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |

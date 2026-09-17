@@ -60,7 +60,18 @@ async function copyRequestId() {
         </div>
       </section>
 
-      <el-alert v-if="hasReason" :title="String(row.reason)" type="error" :closable="false" show-icon class="reason-alert" />
+      <el-alert v-if="hasReason" :title="String(row.reason)" :type="row.level === 'ERROR' ? 'error' : row.level === 'WARNING' ? 'warning' : 'info'" :closable="false" show-icon class="reason-alert" />
+
+      <section v-if="row.type === 'COREDUMP_DISCOVERED'" class="detail-section">
+        <h4><Fingerprint :size="16" /> Coredump 文件</h4>
+        <dl class="detail-grid">
+          <dt>文件名</dt><dd>{{ value(row.name) }}</dd>
+          <dt>文件 ID</dt><dd>{{ value(row.fileId) }}</dd>
+          <dt>发现时大小</dt><dd>{{ row.size === undefined ? '-' : `${Number(row.size).toLocaleString('zh-CN')} 字节` }}</dd>
+          <dt>版本</dt><dd>{{ value(row.version) }}</dd>
+          <dt>设备资源</dt><dd>{{ value(row.resourceName || row.resourceId) }}</dd>
+        </dl>
+      </section>
 
       <section class="detail-section">
         <h4><Fingerprint :size="16" /> 关联对象</h4>

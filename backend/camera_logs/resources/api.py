@@ -11,6 +11,11 @@ from pymongo import ReturnDocument
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_owner
+from camera_logs.coredumps.presence import (
+    coredump_presence_by_resource_ids,
+    page_resources_by_presence,
+    visible_coredump_query,
+)
 from camera_logs.resources.address_claim import claim_address, release_address
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import (
@@ -38,9 +43,15 @@ def _lease_expired(value, timestamp) -> bool:
     return value <= timestamp
 
 
-async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100):
+async def _resource_has_coredumps(repo, identifier: str) -> bool:
+    """按 Coredump 列表相同规则确认单个资源是否存在可展示目录条目。"""
+    return await repo().db.coredump_files.find_one({"$and": [{"resourceId": identifier}, visible_coredump_query()]}, {"_id": 1}) is not None
+
+
+async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100, has_coredumps: bool | None = None):
     """返回有界任务列表，以及用于展示采集和删除风险的两类独立摘要。"""
     item = _resource_public(document)
+    item["hasCoredumps"] = await _resource_has_coredumps(repo, item["id"]) if has_coredumps is None else has_coredumps
     task_query = task_resource_query(item["id"])
     item["taskCount"] = await repo().db.tasks.count_documents(task_query)
     item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {
@@ -116,7 +127,7 @@ def install_resource_routes(app, repo, listing):
                         name: str | None = Query(None, max_length=128), ip: IPvAnyAddress | None = None,
                         model: str | None = Query(None, max_length=256),
                         subSerialNumber: str | None = Query(None, max_length=256),
-                        softwareVersion: str | None = Query(None, max_length=256)):
+                        softwareVersion: str | None = Query(None, max_length=256), hasCoredumps: bool | None = None):
         """资源发现：search跨名称/IP/型号/序列号/软件版本搜索；独立字段取交集，IP精确匹配。
 
         返回授权范围内任务摘要，默认最多100条；tasksTruncated为true时使用tasksUrl分页读取。
@@ -138,8 +149,13 @@ def install_resource_routes(app, repo, listing):
                 query[field] = {"$regex": re.escape(value), "$options": "i"}
         if ip is not None:
             query["ip"] = str(ip)
-        result = await listing("resources", query, page, pageSize)
-        result["items"] = [await _resource_view(repo, item, user, taskLimit) for item in result["items"]]
+        if hasCoredumps is None:
+            result = await listing("resources", query, page, pageSize)
+            present_ids = await coredump_presence_by_resource_ids(repo().db, [item["id"] for item in result["items"]])
+            result["items"] = [await _resource_view(repo, item, user, taskLimit, item["id"] in present_ids) for item in result["items"]]
+        else:
+            result = await page_resources_by_presence(repo().db, query, page, pageSize, hasCoredumps)
+            result["items"] = [await _resource_view(repo, item, user, taskLimit, item["hasCoredumps"]) for item in result["items"]]
         return result
 
     @app.get("/api/v1/resources/{identifier}")
