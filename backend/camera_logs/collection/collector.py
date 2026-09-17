@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -40,6 +41,8 @@ class Collector:
         update_execution: Callback | None = None,
         resolve_debug_password: Callback | None = None,
         on_debug: Callback | None = None,
+        on_receive: Callback | None = None,
+        on_liveness_reset: Callback | None = None,
     ) -> None:
         self.task = dict(task)
         self.task_id = str(task.get("id") or task.get("_id"))
@@ -74,6 +77,14 @@ class Collector:
         self._command_status: dict[str, str] = {}
         self._prefixer = LinePrefixer()
         self._terminal_error: Exception | None = None
+        # 存活判定只观察实际设备字节。时间在读协程取得字节后立刻记录，不能等待
+        # 批量写盘或目录回调，否则慢磁盘会被上层错误判断为设备静默。
+        self.last_received_monotonic: float | None = None
+        self.liveness_read_observation_started = time.monotonic()
+        self.liveness_waiting_for_read = False
+        self.liveness_storage_busy = False
+        self._on_receive = on_receive
+        self._on_liveness_reset = on_liveness_reset
         self._commands = CommandDispatcher(
             self.task | {"id": self.task_id, "runId": self.run_id, "sessionId": self.session_id},
             resolve_debug_password=resolve_debug_password,
@@ -94,6 +105,7 @@ class Collector:
         if connection is None:
             raise ConnectionError("connection factory did not return a connection")
         self._connection = connection
+        self.liveness_read_observation_started = time.monotonic()
         self._sender = asyncio.create_task(self._sender_loop())
         # 必须先启动接收协程：初始化命令发送后设备可能立即返回提示符。
         self._reader = asyncio.create_task(self._reader_loop())
@@ -284,7 +296,6 @@ class Collector:
         pending: list[tuple[bytes, object]] = []
         pending_bytes = 0
         flush_deadline = asyncio.get_running_loop().time() + 0.1
-        last_received = asyncio.get_running_loop().time()
         idle_timeout = float(self.task.get("logIdleTimeoutSeconds", 10))
         try:
             assert self._connection is not None
@@ -292,17 +303,27 @@ class Collector:
                 try:
                     # 已有待写数据时按原批截止时间缩短等待，避免末尾小包再延长整个窗口。
                     read_timeout = min(.1, max(.001, flush_deadline - asyncio.get_running_loop().time())) if pending else .1
-                    data = await asyncio.wait_for(self._connection.read(), timeout=read_timeout)
+                    self.liveness_waiting_for_read = True
+                    try:
+                        data = await asyncio.wait_for(self._connection.read(), timeout=read_timeout)
+                    finally:
+                        self.liveness_waiting_for_read = False
                 except TimeoutError:
                     if pending:
                         to_flush, pending = pending, []
                         pending_bytes = 0
                         await self._flush(to_flush)
                     await self._publish_archives()
-                    await self._writer.sync_due()
+                    self.liveness_storage_busy = True
+                    try:
+                        synced = await self._writer.sync_due()
+                    finally:
+                        self.liveness_storage_busy = False
+                    if synced:
+                        await self._reset_liveness_observation()
                     flush_deadline = asyncio.get_running_loop().time() + 0.1
-                    # 只有设备实际输出重置此计时，协议心跳和服务端动作不算日志。
-                    if asyncio.get_running_loop().time() - last_received >= idle_timeout:
+                    # 协议心跳不算日志；真实存储阻塞结束后重新观察，避免把背压算成静默。
+                    if time.monotonic() - self.liveness_read_observation_started >= idle_timeout:
                         await _call(self._on_state, "IDLE_TIMEOUT", {"taskId": self.task_id, "sessionId": self.session_id})
                         break
                     continue
@@ -324,7 +345,10 @@ class Collector:
                     break
                 if not data:
                     break
-                last_received = asyncio.get_running_loop().time()
+                received_monotonic = time.monotonic()
+                self.last_received_monotonic = received_monotonic
+                self.liveness_read_observation_started = received_monotonic
+                await _call(self._on_receive)
                 self._commands.observe_received(data)
                 received_at = datetime.now(UTC)
                 self.write_latency.begin()
@@ -354,7 +378,11 @@ class Collector:
                     to_flush, pending = pending, []
                     pending_bytes = 0
                     await self._flush(to_flush)
-                archive = await self._writer.close()
+                self.liveness_storage_busy = True
+                try:
+                    archive = await self._writer.close()
+                finally:
+                    self.liveness_storage_busy = False
                 if archive:
                     await _call(self._on_archive, archive)
                 await self._publish_archives()
@@ -382,9 +410,14 @@ class Collector:
     async def _flush(self, pending: list[tuple[bytes, object]]) -> None:
         if not pending:
             return
-        self.write_latency.begin()
-        positions = await self._writer.write_many(pending)
-        self.write_latency.finish()
+        self.liveness_storage_busy = True
+        try:
+            self.write_latency.begin()
+            positions = await self._writer.write_many(pending)
+            self.write_latency.finish()
+        finally:
+            self.liveness_storage_busy = False
+        await self._reset_liveness_observation()
         for position in positions:
             data, received_at = pending[position.source_index]
             piece = data[position.source_offset:position.source_offset + position.length]
@@ -408,6 +441,11 @@ class Collector:
                     "sequence": position.sequence, "path": str(position.path),
                 })
         await self._publish_archives()
+
+    async def _reset_liveness_observation(self) -> None:
+        """真实存储 I/O 结束后才重开静默观察，不能把背压时间算作设备无输出。"""
+        self.liveness_read_observation_started = time.monotonic()
+        await _call(self._on_liveness_reset, self.liveness_read_observation_started)
 
     async def _publish_archives(self) -> None:
         for archive in self._writer.drain_archives():

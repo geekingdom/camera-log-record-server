@@ -52,11 +52,11 @@ def after_cursor_clause(created_at: datetime, identifier: str) -> dict:
 
 async def record_authentication(repo, resource, *, source: str, result: str, before=None, after=None, message=None,
                                 completed_at=None, session=None):
-    """记录认证结果，并将同日连续周期成功合并为一条可查询历史。
+    """记录认证结果，并将同日连续相同周期结果合并为一条可查询历史。
 
-    认证失败、身份变化、首次认证及人工/创建/编辑认证都是顺序边界。每次写入均先
+    结果变化、身份变化、首次认证及人工/创建/编辑认证都是顺序边界。每次写入均先
     原子递增资源专属状态行，令并发事务竞争同一文档；重试后的事务才读取最新历史，
-    因而不能跨越失败记录合并成功次数。调用方已持有事务时复用该会话，否则建立独立
+    因而不能跨越不同结果累计次数。调用方已持有事务时复用该会话，否则建立独立
     事务，避免手动认证路径绕过这项串行保证。
     """
     if session is None:
@@ -97,7 +97,7 @@ async def _record_authentication_in_session(repo, resource, *, source: str, resu
         session=session,
     )
     day = timestamp.astimezone(UTC).date().isoformat() if timestamp.tzinfo else timestamp.replace(tzinfo=UTC).date().isoformat()
-    mergeable = source == "PERIODIC" and result == "SUCCESS" and not initial and not identity_changed
+    mergeable = source == "PERIODIC" and not initial and not identity_changed
     if mergeable:
         latest_id = head.get("latestRecordId") if head else None
         latest = await repo.db.authentication_records.find_one(
@@ -106,7 +106,7 @@ async def _record_authentication_in_session(repo, resource, *, source: str, resu
         latest_at = latest.get("latestAt", latest.get("createdAt")) if latest else None
         if isinstance(latest_at, datetime) and latest_at.tzinfo is None:
             latest_at = latest_at.replace(tzinfo=UTC)
-        if (latest and latest.get("source") == "PERIODIC" and latest.get("result") == "SUCCESS"
+        if (latest and latest.get("source") == "PERIODIC" and latest.get("result") == result
                 and not latest.get("initialAuthentication") and not latest.get("identityChanged")
                 and latest.get("utcDay") == day
                 and (latest.get("modelAfter", ""), latest.get("serialAfter", "")) == (model_after, serial_after)
@@ -117,7 +117,7 @@ async def _record_authentication_in_session(repo, resource, *, source: str, resu
                 {"_id": latest["_id"]},
                 {"$inc": {"occurrenceCount": 1},
                  "$max": {"latestAt": timestamp},
-                 "$set": {"historyLatestRevision": head["revision"]}},
+                 "$set": {"historyLatestRevision": head["revision"], "message": message}},
                 session=session,
             )
             return latest["id"]

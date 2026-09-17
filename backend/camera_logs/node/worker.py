@@ -267,6 +267,36 @@ class Worker:
         from camera_logs.node.failover import self_fence_active_sessions
         await self_fence_active_sessions(self)
 
+    async def stop_unresponsive_health_failed_runtimes(self, assigned, current_monotonic):
+        """用本地接收证据延后认证失败停止，避免 HTTP 探测盖过真实设备日志。
+
+        资源健康状态、运行归属和系统恢复标记都由事务 helper 再读再核对；这里不做
+        HTTP 请求，也不按每行写入数据库。TELNET_SERIAL 从运行时资格层直接排除。
+        """
+        from camera_logs.resources.health_policy import stop_unresponsive_task
+
+        for task_id, runtime in list(self.active.items()):
+            task = assigned.get(task_id)
+            if task is None or owner_filter(runtime.task) != owner_filter(task):
+                continue
+            liveness = getattr(runtime, "liveness", None)
+            eligible = getattr(liveness, "allows_health_stop", None)
+
+            def liveness_check(instant, eligible=eligible, task=runtime.task, runtime=runtime):
+                """未知运行时替身没有本机接收状态时保持保守，不发起系统停止。"""
+                return callable(eligible) and eligible(
+                    task, getattr(runtime, "collector", None), stopping=getattr(runtime, "stopping", False),
+                    retired=getattr(runtime, "retired", False), current_monotonic=instant,
+                )
+            if liveness_check(current_monotonic):
+                stopped = await stop_unresponsive_task(
+                    self.repo, task, liveness_check=lambda: liveness_check(time.monotonic()),
+                )
+                if stopped:
+                    # 同一 tick 后续仍使用该快照；立即反映事务已提交的停止意图，不能
+                    # 再领取手动命令或沿用 RUNNING 分支。
+                    task["desiredState"] = "STOPPED"
+
     async def tick(self):
         """更新资源心跳、处理期望状态并分发作业，不在本周期等待耗时归档。"""
         from camera_logs.collection.connections import connect
@@ -349,6 +379,7 @@ class Worker:
         tasks = [t async for t in self.repo.db.tasks.find({"nodeId": self.repo.settings.node_id})]
         assigned = {task["id"]: task for task in tasks}
         # 仅成功取得数据库快照后核对归属；读取失败不能被解释成任务已经消失。
+        await self.stop_unresponsive_health_failed_runtimes(assigned, time.monotonic())
         for task_id, runtime in list(self.active.items()):
             current = assigned.get(task_id)
             retry = self.failed_cleanups.get(task_id)

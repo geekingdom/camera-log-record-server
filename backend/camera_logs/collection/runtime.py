@@ -21,6 +21,7 @@ from camera_logs.collection.coredump_lease import (
     guard_coredump_monitor,
     record_coredump_status,
 )
+from camera_logs.collection.liveness import RuntimeLiveness
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.collection.runtime_events import (
@@ -61,6 +62,7 @@ class SessionRuntime:
         self.input_bytes = 0
         self.error = None
         self.connection_uncertain = None
+        self.liveness = RuntimeLiveness()
         self.resource_monitor_task = None
         self.last_already_ash = None
         self.started_at = now()
@@ -223,6 +225,11 @@ class SessionRuntime:
 
     async def on_state(self, state, details):
         """委托状态事件模块处理归属核验、审计事件与任务状态映射。"""
+        collector = getattr(self, "collector", None)
+        if collector is not None and details.get("sessionId") == collector.session_id:
+            liveness = getattr(self, "liveness", None)
+            if liveness is not None:
+                liveness.state_changed(state, collector, time.monotonic())
         await apply_runtime_state(self, state, details)
 
     async def reserve(self, command_id, details):
@@ -374,6 +381,13 @@ class SessionRuntime:
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
                     reserve_execution=self.reserve, update_execution=self.update_execution,
                     resolve_debug_password=self.debug_passwords, on_debug=self.on_debug)
+                collector = self.collector
+                collector._on_receive = lambda collector=collector: (
+                    self.liveness.received(collector) if collector is self.collector else None
+                )
+                collector._on_liveness_reset = lambda instant, collector=collector: (
+                    self.liveness.observation_reset(instant) if collector is self.collector else None
+                )
                 # 收尾条件绑定本次实际创建的会话，旧运行不能取消后继会话的命令。
                 session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
                                     "sessionId": self.collector.session_id}

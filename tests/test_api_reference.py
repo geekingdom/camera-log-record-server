@@ -158,7 +158,7 @@ def test_reference_distinguishes_saved_credential_authentication_from_editor_pre
     """资源行空请求认证会改变健康状态，编辑器完整输入预览不得被误解为同一操作。"""
     operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
     authentication = operations["POST /api/v1/resources/{identifier}/authenticate"]
-    for text in ("空请求体", "已保存", "健康状态", "停止关联任务", "完整 ResourceInput", "预览"):
+    for text in ("空请求体", "已保存", "健康状态", "不停止仍有日志输出", "持续无输出", "Telnet串口不受认证状态影响", "完整 ResourceInput", "预览"):
         assert text in authentication["description"]
     for text in ("resources:write", "tasks:control", "他人关联任务", "完整ResourceInput仅预览"):
         assert text in authentication["permission"]

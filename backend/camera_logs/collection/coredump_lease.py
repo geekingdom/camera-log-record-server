@@ -65,11 +65,11 @@ async def guard_coredump_monitor(repo, task, *, session_active, report_status, m
     if not resource_id:
         return False
     resource = await repo.db.resources.find_one(
-        {"id": resource_id}, {"deletedAt": 1, "healthStatus": 1, "enableCoredumpMonitor": 1,
+        {"id": resource_id}, {"deletedAt": 1, "enableCoredumpMonitor": 1,
                                "coredumpLeaseTarget": 1},
     )
-    if (not resource or resource.get("deletedAt") is not None or resource.get("healthStatus") != "ONLINE"
-            or not resource.get("enableCoredumpMonitor", False)):
+    # HTTP 健康检查和 SSH/Telnet 日志连接相互独立；有效采集仍可监控设备侧 coredump。
+    if not resource or resource.get("deletedAt") is not None or not resource.get("enableCoredumpMonitor", False):
         return False
     if mount_target and not resource.get("coredumpLeaseTarget"):
         # 首次来源用缺失字段 CAS 固定；并发候选随后必须读取赢家，绝不能覆盖来源节点。
@@ -82,7 +82,7 @@ async def guard_coredump_monitor(repo, task, *, session_active, report_status, m
         return None
     timestamp = now()
     lease = await repo.db.resources.find_one_and_update(
-        {"id": resource_id, "deletedAt": None, "healthStatus": "ONLINE", "enableCoredumpMonitor": True, "$or": [
+        {"id": resource_id, "deletedAt": None, "enableCoredumpMonitor": True, "$or": [
             {"coredumpLeaseUntil": {"$exists": False}},
             {"coredumpLeaseUntil": {"$lte": timestamp}},
             {"coredumpLeaseTaskId": task["id"], "coredumpLeaseRunId": task["runId"],
@@ -104,7 +104,7 @@ async def guard_coredump_cleanup(repo, task, *, session_active, mount_target=Non
     if not current_task or not task.get("resourceId"):
         return False
     resource = await repo.db.resources.find_one(
-        {"id": task["resourceId"]}, {"enableCoredumpMonitor": 1, "deletedAt": 1, "healthStatus": 1},
+        {"id": task["resourceId"]}, {"enableCoredumpMonitor": 1, "deletedAt": 1},
     )
     if resource is None:
         return False
@@ -114,7 +114,8 @@ async def guard_coredump_cleanup(repo, task, *, session_active, mount_target=Non
                    "coredumpLeaseNodeId": task.get("nodeId"), "coredumpLeaseUntil": {"$gt": timestamp}}
     if mount_target:
         lease_owner["$or"] = [{"coredumpLeaseTarget": {"$exists": False}}, {"coredumpLeaseTarget": mount_target}]
-    available = resource.get("deletedAt") is None and resource.get("healthStatus") == "ONLINE" and resource.get("enableCoredumpMonitor", False)
+    # HTTP 失败不能让旧会话卸载仍由有效采集运行接管的共享目录。
+    available = resource.get("deletedAt") is None and resource.get("enableCoredumpMonitor", False)
     successor = await repo.db.tasks.find_one(_eligible_coredump_task_query(task["resourceId"], exclude_task_id=task["id"]), {"id": 1})
     if available and successor is not None:
         # 先以 owner CAS 交棒。旧连接不得卸载，等待方会在下一次轻量竞争时续租。

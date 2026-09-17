@@ -22,6 +22,7 @@ class DeviceInfoSource:
         self.thread: threading.Thread | None = None
         self.requests_seen, self.allow_requests = threading.Event(), threading.Event()
         self.allow_requests.set()
+        self.response_status = 200
 
     async def start(self) -> None:
         """仅绑定回环地址；默认80用于真实 ISAPI URL，测试端口由隔离启动器适配。"""
@@ -46,6 +47,9 @@ class DeviceInfoSource:
                 source.requests_seen.set()
                 if not source.allow_requests.wait(15):
                     self.send_error(503)
+                    return
+                if source.response_status != 200:
+                    self.send_error(source.response_status)
                     return
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(payload)))

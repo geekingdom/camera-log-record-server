@@ -51,6 +51,10 @@ jobs:
         run: python scripts/verify_node_heartbeat_clock.py
       - name: 验证Coredump发现幂等及资源存在筛选索引
         run: python scripts/verify_coredump_discovery.py
+      - name: 验证全部认证结果的连续聚合与并发状态边界
+        run: python scripts/verify_authentication_history_concurrency.py
+      - name: 验证ISAPI异常时继续收集日志并在输出消失后停止
+        run: python scripts/verify_isapi_log_independence.py --isapi-test-port 18089
       - name: 验证Worker受控退出后自动恢复真实SSH采集
         run: sudo --preserve-env=MONGO_URI "$(command -v python)" scripts/verify_worker_sigterm_resume.py
       - name: 回收临时数据库容器

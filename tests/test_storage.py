@@ -130,7 +130,8 @@ async def test_metadata_records_index_digest_and_sequence(tmp_path):
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
     await writer.write(b"durable\n")
     writer._last_sync -= 2
-    await writer.sync_due()
+    assert await writer.sync_due() is True
+    assert await writer.sync_due() is False
     archive = await writer.close()
     member = _metadata(archive.path)["members"][0]
     index = archive.path.parent / member["indexName"]

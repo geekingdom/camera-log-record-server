@@ -247,6 +247,15 @@ async def test_active_task_rejects_paused_run(tmp_path):
         await active_task(repo, paused)
 
 
+async def test_active_task_keeps_running_slave_eligible_when_http_health_is_bad(tmp_path):
+    """从机重连复用中的采集会话不因独立 HTTP 健康检查失败而失去资格。"""
+    repo, config = _repo(tmp_path), _config()
+    await _insert_running(repo, config)
+    await repo.db.resources.update_one({"id": config["resourceId"]}, {"$set": {"healthStatus": "ERROR"}})
+
+    assert (await active_task(repo, config))["id"] == config["resourceId"]
+
+
 async def test_bootstrap_close_failure_is_uncertain_and_never_claims_closed():
     shell = ShellBootstrap(_CloseFailsConnection(), {"protocol": "SSH"})
     with pytest.raises(SshSlotUncertain) as raised:

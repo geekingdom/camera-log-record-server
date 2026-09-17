@@ -239,7 +239,6 @@ def install_resource_routes(app, repo, listing):
         inactive = {"active": False, "ownerTask": None, "mountStatus": None}
         if (resource.get("kind") != "HIKVISION_NETWORK" or not resource.get("enableCoredumpMonitor", False)
                 or resource.get("deletedAt") is not None
-                or resource.get("healthStatus") != "ONLINE"
                 or _lease_expired(resource.get("coredumpLeaseUntil"), timestamp)):
             return inactive
         owner = await repo().db.tasks.find_one({

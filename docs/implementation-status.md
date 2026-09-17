@@ -1,5 +1,18 @@
 # 当前状态总表
 
+| 当前需求（ISAPI与采集连接独立） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| ISAPI异常但SSH/Telnet设备仍输出日志时继续采集；二者均失效才系统停止，串口不受认证影响 | `resources/health_policy.py`、`health.py`、`collection/liveness.py`、Collector/Runtime/Worker与任务准入 | 真实HTTP 401/503/停止监听均保持同一SSH会话；后续源静默且下一次认证为次日仍自动停止，54行归档与源完全一致；串口三类异常下创建/启动/领取通过；全量1556项通过 | 本机已加载；公司需同时更新API与Worker。HTTP展示保留真实结果，未领取网络任务仍需成功认证；生产应用崩溃与真实网络故障待现场验收 |
+| HTTP应用故障期间保留有效连接上的Coredump和资源指标监控 | `collection/coredump_lease.py`、`resource_metrics/runtime.py`、资源监控状态接口与从机引导 | 监控/从机相关回归及最终全量通过；独立复审无阻断；统一单调时钟，真实存储阻塞不算静默，清洁文件不重复fsync重置窗口 | 本机已加载；真实NFS及公司设备故障场景未本轮重演 |
+
+本轮最终验证：后端1556项、Ruff与差异检查通过；真实Mongo认证历史并发聚合和资源停止/恢复事务通过；32路×1200行/秒×3秒共115200行，原文与归档逐路摘要一致、时间前缀正确，合成目录全部回收。隔离HTTP/SSH/Worker验证也已清理随机库与临时日志，未操作实体设备。重载前本机活动任务意图、节点归属和活动作业均为0，重载后API/Worker/前端健康200且local-dev新心跳允许接入。前端本轮仅共享类型注释，沿用本增量已通过的170项与构建，无布局或实时呈现更改。详见[ISAPI独立判定证据](history/2026-09-17-isapi-log-independence.md)；本轮提交CI需按最终SHA另核。
+
+| 当前需求（认证结果合并） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 连续周期认证的全部相同结果合并并累计次数 | `resources/authentication_records.py`、认证接口字段说明与前端共享类型；保留同UTC日/身份/来源边界，message为最近说明 | 成功、凭据失败、离线、异常各16路真实Mongo并发只存1段16次；状态交替3/2/4/3计数守恒、固定TTL、最近消息验证通过；最终联合回归1556项通过 | 本机已加载。历史不批量重写，后续观测可续现有末段；跨日、人工操作、身份变更或迟到观测仍新段，90天保留期不续延 |
+
+前一提交`259b0f2`的[CI35216973925](https://github.com/geekingdom/camera-log-record-server/actions/runs/35216973925)已成功，此结论不替代本轮认证聚合提交的CI。
+
 CI修复（2026-09-17）：`b45ad7c`的[CI35174836312](https://github.com/geekingdom/camera-log-record-server/actions/runs/35174836312)仅backend静态检查失败，1519项后端测试及其余七作业均成功。CI Ruff0.16.8与本机0.16.6存在规则差异；升级本机后复现SIM117，合并`resources/authentication.py`上下文管理器并在`pyproject.toml`固定Ruff0.16.8。修复后全仓Ruff、认证相关57项通过；修复提交`058ad2c`的[CI35178903964](https://github.com/geekingdom/camera-log-record-server/actions/runs/35178903964)八项全部成功，已完成核验。详见[修复证据](history/2026-09-17-ci-ruff-version.md)。
 
 | 当前需求（Coredump提示与事件查询） | 实现位置 | 验证证据 | 未完成与下一步 |

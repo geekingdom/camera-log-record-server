@@ -68,7 +68,7 @@ FIELD_DESCRIPTIONS = {
     "newPassword": "要设置给当前登录账户的新密码。",
     "newline": "发送命令时自动附加的换行符类型。",
     "ownerTask": "当前负责资源级 Coredump 监控的采集任务摘要。",
-    "occurrenceCount": "连续相同成功认证状态合并后的观测次数；旧单次记录为 1。",
+    "occurrenceCount": "同一UTC日内连续相同周期认证结果合并后的观测次数，包括成功、认证失败、离线和异常；旧单次记录为 1。",
     "password": "用于登录设备、认证资源或创建账户的密码；响应永不回传。",
     "passwordPrompt": "Telnet 登录阶段识别密码输入提示符的文本。",
     "port": "SSH、Telnet 设备或串口服务器的连接端口。",
@@ -99,7 +99,8 @@ FIELD_DESCRIPTIONS = {
 # 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
 OPERATION_DESCRIPTIONS = {
     ("POST", "/api/v1/resources/{identifier}/authenticate"): (
-        "空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；认证失败会记录状态并可能停止关联任务，"
+        "空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；ISAPI异常不停止仍有日志输出的SSH或Telnet设备任务，"
+        "Worker确认连接断开或持续无输出后才系统停止；Telnet串口不受认证状态影响。未领取的网络任务仍要求认证成功。"
         "但不推进周期认证失败计数。该操作要求 resources:write、tasks:control 及资源所有权；非管理员不能影响其他用户关联的任务。"
         "携带完整 ResourceInput 时仅用于编辑器凭据预览，不改变保存资源的健康状态或任务，因此不要求 tasks:control。"
     ),

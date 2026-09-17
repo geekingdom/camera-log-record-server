@@ -180,18 +180,42 @@ async def test_consecutive_periodic_successes_merge_without_extending_ttl_or_cro
 
 
 @pytest.mark.asyncio
-async def test_periodic_success_on_next_utc_day_creates_new_fixed_ttl_bucket(resource_client):
-    """UTC 跨日切分聚合桶，后续成功不可延长前一天记录的 TTL。"""
+@pytest.mark.parametrize("result", ["SUCCESS", "AUTH_FAILED", "OFFLINE", "ERROR"])
+async def test_periodic_success_on_next_utc_day_creates_new_fixed_ttl_bucket(resource_client, result):
+    """任意结果在 UTC 跨日切分聚合桶，后续观测不可延长前一天的 TTL。"""
     repo, resource = resource_client.app.state.repo, _resource()
     first = datetime(2026, 9, 11, 23, 59, tzinfo=UTC)
-    await record_authentication(repo, resource, source="PERIODIC", result="SUCCESS", before=resource,
+    await record_authentication(repo, resource, source="PERIODIC", result=result, before=resource,
                                 after=resource, completed_at=first)
-    await record_authentication(repo, resource, source="PERIODIC", result="SUCCESS", before=resource,
+    await record_authentication(repo, resource, source="PERIODIC", result=result, before=resource,
                                 after=resource, completed_at=first + timedelta(minutes=2))
     rows = [row async for row in repo.db.authentication_records.find({"resourceId": "camera"}).sort("createdAt", 1)]
     assert len(rows) == 2
     assert [row["utcDay"] for row in rows] == ["2026-09-11", "2026-09-12"]
     assert all(row["occurrenceCount"] == 1 for row in rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["AUTH_FAILED", "OFFLINE", "ERROR"])
+async def test_consecutive_failed_results_merge_with_latest_message_and_state_boundaries(resource_client, result):
+    """失败也只累计连续区间，保留固定首时/TTL、最新说明和中间状态边界。"""
+    repo, resource = resource_client.app.state.repo, _resource()
+    first = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    await repo.db.resources.insert_one(resource)
+    for minute, (outcome, message) in enumerate([
+        (result, "首次失败"), (result, "最近失败"), ("SUCCESS", None), (result, "再次失败"),
+    ]):
+        await record_authentication(repo, resource, source="PERIODIC", result=outcome, before=resource,
+                                    after=resource, message=message, completed_at=first + timedelta(minutes=minute))
+    rows = [row async for row in repo.db.authentication_records.find({}).sort("historyFirstRevision", 1)]
+    assert [(row["result"], row["occurrenceCount"]) for row in rows] == [(result, 2), ("SUCCESS", 1), (result, 1)]
+    assert rows[0]["createdAt"].replace(tzinfo=UTC) == first
+    assert rows[0]["latestAt"].replace(tzinfo=UTC) == first + timedelta(minutes=1)
+    assert rows[0]["expiresAt"].replace(tzinfo=UTC) == first + timedelta(days=90)
+    assert rows[0]["message"] == "最近失败"
+    response = resource_client.get("/api/v1/resources/camera/authentication-records", params={"result": result})
+    assert response.status_code == 200
+    assert sorted(row["occurrenceCount"] for row in response.json()["items"]) == [1, 2]
 
 
 def test_deleted_resource_remains_readable_and_reader_requires_authentication(resource_client):

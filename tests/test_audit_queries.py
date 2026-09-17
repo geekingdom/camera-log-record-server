@@ -66,6 +66,21 @@ def test_resource_offline_audit_identifies_device(client):
     assert item["targetName"] == "离线设备" and item["deviceIp"] == "192.0.2.4"
 
 
+@pytest.mark.parametrize("status", ["AUTH_FAILED", "OFFLINE", "ERROR"])
+def test_isapi_change_audit_does_not_claim_collection_stopped(client, status):
+    """HTTP观测变化按独立摘要查询，不能把仍有效的采集描述为已经停止。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.insert_one, {"id": "http-only", "name": "应用异常设备", "ip": "192.0.2.5"})
+    client.portal.call(repo.db.audit.insert_one, {
+        "actor": "system", "action": f"resource_health_changed:{status}", "targetId": "http-only", "createdAt": now(),
+    })
+    response = client.get("/api/v1/audit-events", params={"summary": "采集连接独立判断"})
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert "停止" not in item["summary"] and "ISAPI" in item["summary"]
+    assert item["targetName"] == "应用异常设备" and item["deviceIp"] == "192.0.2.5"
+
+
 @pytest.mark.parametrize("action,summary", [("reveal_token", "查看服务账号口令"), ("rotate_token", "重新生成服务账号口令")])
 def test_service_credential_audit_names_target_without_secret(client, action, summary):
     """口令操作可定位对应账号，但目标补充查询不能把摘要或加密口令带入审计页面。"""

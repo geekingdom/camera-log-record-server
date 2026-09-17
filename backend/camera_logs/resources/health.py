@@ -12,6 +12,7 @@ from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import record_authentication
+from camera_logs.resources.health_policy import resource_health_blocks_task, stop_for_resource_health
 from camera_logs.resources.lifecycle import task_resource_query
 from camera_logs.tasks.resource_binding import storage_identity
 
@@ -111,7 +112,7 @@ async def check_resource(repo, snapshot):
 
 
 async def _apply_failure_commit(repo, snapshot, status, *, source, advance_failure, session):
-    """在调用方事务内提交认证失败、任务停止和同一来源的认证历史。"""
+    """在调用方事务内提交认证失败及同一来源历史；活跃运行由 Worker 自行裁决停止。"""
     timestamp = now()
     failures = int(snapshot.get("healthFailureCount", 0)) + 1 if advance_failure else int(snapshot.get("healthFailureCount", 0))
     changed = await _commit_health_result(
@@ -128,6 +129,10 @@ async def _apply_failure_commit(repo, snapshot, status, *, source, advance_failu
                                 after=changed, message=status, completed_at=timestamp, session=session)
     query = task_resource_query(snapshot["id"])
     async for task in repo.db.tasks.find(query, session=session):
+        # 串口 Telnet 不使用设备 HTTP 身份或健康状态，既不应生成新恢复标记，
+        # 也不得改写遗留等待状态或用户暂停上下文。
+        if task.get("protocol") == "TELNET_SERIAL":
+            continue
         # 用户暂停意图一经落库即由 Worker 自行收尾，认证失败不能覆盖预算、会话或控制操作。
         if task.get("desiredState") == "PAUSED" or task.get("status") in {"PAUSED", "WAITING_DEVICE"}:
             if task.get("status") == "WAITING_DEVICE":
@@ -147,26 +152,10 @@ async def _apply_failure_commit(repo, snapshot, status, *, source, advance_failu
                     {"$set": {"resourceHealthRecovery": new_marker}}, session=session,
                 )
             continue
-        update = {"desiredState": "STOPPED", "restartRequested": False, "updatedAt": timestamp,
-                  "resourceHealthRecovery": {"resourceId": snapshot["id"], "stoppedAt": timestamp,
-                                             "desiredState": previous_state, "reason": status}}
-        await repo.db.tasks.update_one(
-            {"id": task["id"], "controlClaimVersion": task.get("controlClaimVersion")},
-            {"$set": update}, session=session,
-        )
-        await repo.db.operations.update_many(
-            {"taskId": task["id"], "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
-            {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session,
-        )
-        operation_id = new_id()
-        await repo.db.operations.insert_one({
-            "id": operation_id, "taskId": task["id"], "desiredState": "STOPPED", "action": "system-resource-health-stop",
-            "actor": "system", "status": "PENDING", "createdAt": timestamp,
-        }, session=session)
-        await repo.db.tasks.update_one({"id": task["id"], "desiredState": "STOPPED"},
-                                       {"$set": {"controlOperationId": operation_id}}, session=session)
+        if resource_health_blocks_task(task, changed):
+            await stop_for_resource_health(repo, task, changed, session)
     if source == "PERIODIC" and snapshot.get("healthStatus") != status:
-        await repo.audit("system", "resource_health_stop:" + status, snapshot["id"], session=session)
+        await repo.audit("system", "resource_health_changed:" + status, snapshot["id"], session=session)
     return True
 
 
@@ -205,6 +194,8 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
     # 显式 resume 的设备探测成功，只把同一暂停运行恢复至 PAUSED，领取层再沿用 runId。
     async for task in repo.db.tasks.find({"resourceId": snapshot["id"], "status": "WAITING_DEVICE",
                                           "desiredState": "RUNNING"}, session=session):
+        if task.get("protocol") == "TELNET_SERIAL":
+            continue
         waiting = task.get("resumeWaiting")
         same_paused_run = waiting and waiting.get("pausedRunId") == task.get("runId")
         replaced_device = waiting and waiting.get("identityChangedAt") and not task.get("runId")
@@ -253,6 +244,8 @@ async def apply_manual_result(repo, snapshot, *, status, metadata, actor,
 async def _authorize_offline_recoveries(repo, resource_id, timestamp, session):
     """仅为本资源 OFFLINE 产生的系统停止标记授权，实际恢复仍等待收尾确认。"""
     async for task in repo.db.tasks.find(task_resource_query(resource_id), session=session):
+        if task.get("protocol") == "TELNET_SERIAL":
+            continue
         marker = task.get("resourceHealthRecovery")
         if not marker or marker.get("resourceId") != resource_id or marker.get("reason") != "OFFLINE" \
                 or task.get("desiredState") != "STOPPED":
@@ -268,6 +261,8 @@ async def grant_after_user_authentication(repo, resource, session, *, identity_c
     timestamp = now()
     identity = storage_identity(resource)
     async for task in repo.db.tasks.find(task_resource_query(resource["id"]), session=session):
+        if task.get("protocol") == "TELNET_SERIAL":
+            continue
         marker = task.get("resourceHealthRecovery")
         if task.get("resourceId") == resource["id"]:
             if identity_changed:
@@ -284,6 +279,8 @@ async def grant_after_user_authentication(repo, resource, session, *, identity_c
 
 async def _transition_identity_task(repo, task, resource_id, identity, timestamp, session):
     """身份变更将旧暂停运行完整结束；活跃运行交给原 Worker 收尾，避免目录与预算跨设备混用。"""
+    if task.get("protocol") == "TELNET_SERIAL":
+        return
     update = {"storageIdentity": identity, "updatedAt": timestamp}
     if task.get("nodeId") is not None and task.get("desiredState") == "RUNNING":
         update.update(desiredState="STOPPED", restartRequested=True)
@@ -325,7 +322,8 @@ async def _consume_authorized_recovery(repo, resource_id, task_id):
         task = await repo.db.tasks.find_one({"id": task_id, "desiredState": "STOPPED",
                                              "resourceHealthRecovery.resourceId": resource_id,
                                              "resourceHealthRecovery.authorizedAt": {"$exists": True}}, session=session)
-        if task is None or task.get("nodeId") is not None or await repo.db.endpoint_locks.find_one({"taskId": task_id}, session=session):
+        if task is None or task.get("protocol") == "TELNET_SERIAL" or task.get("nodeId") is not None \
+                or await repo.db.endpoint_locks.find_one({"taskId": task_id}, session=session):
             return False
         run_id = task.get("runId")
         run = await repo.db.runs.find_one({"id": run_id}, session=session) if run_id else None

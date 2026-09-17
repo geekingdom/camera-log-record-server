@@ -307,12 +307,15 @@ class HourlyWriter:
             os.fsync(index.fileno())
         self._durable_size, self._last_sync = self._size, time.monotonic()
 
-    async def sync_due(self) -> None:
+    async def sync_due(self) -> bool:
+        """按秒执行必要的 fsync，并告知调用方本次是否真正阻塞于存储 I/O。"""
         async with self._lock:
             if self._close_error:
                 raise self._close_error
-            if time.monotonic() - self._last_sync >= 1:
+            if self._size != self._durable_size and time.monotonic() - self._last_sync >= 1:
                 await asyncio.to_thread(self._sync_files)
+                return True
+        return False
 
     def _close_files_sync(self) -> None:
         assert self._handle is not None

@@ -74,3 +74,27 @@ def test_coredump_monitor_status_accepts_telnet_device_owner(resource_client):
     assert response.json() == {
         "active": True, "ownerTask": {"id": "owner", "name": "Telnet 值守"}, "mountStatus": "MOUNTED",
     }
+
+
+def test_coredump_monitor_status_keeps_active_owner_when_http_health_is_bad(resource_client):
+    """HTTP 应用崩溃不应隐藏仍在接收日志的 Coredump owner。"""
+    repo = resource_client.app.state.repo
+    stamp = now()
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None, "healthStatus": "OFFLINE",
+        "enableCoredumpMonitor": True,
+        "coredumpLeaseTaskId": "owner", "coredumpLeaseRunId": "run-a", "coredumpLeaseGeneration": 4,
+        "coredumpLeaseNodeId": "node-a", "coredumpLeaseUntil": stamp + timedelta(seconds=60),
+    })
+    resource_client.portal.call(repo.db.tasks.insert_one, {
+        "id": "owner", "name": "SSH 值守", "resourceId": "camera", "runId": "run-a", "generation": 4,
+        "nodeId": "node-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING",
+    })
+    resource_client.portal.call(repo.db.nodes.insert_one, {"id": "node-a", "heartbeat": stamp})
+
+    response = resource_client.get("/api/v1/resources/camera/coredump-monitor")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "active": True, "ownerTask": {"id": "owner", "name": "SSH 值守"}, "mountStatus": None,
+    }

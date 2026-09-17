@@ -21,3 +21,30 @@ async def test_database_outage_stops_all_sessions_and_keeps_only_unconfirmed_ins
     failing.stop.assert_awaited_once()
     stopped.stop.assert_awaited_once()
     assert set(worker.active) == {"failed"}
+
+
+@pytest.mark.asyncio
+async def test_health_stop_uses_only_current_runtime_local_liveness(monkeypatch):
+    """Worker 只将本机十秒无输出证据交给事务策略，旧归属和未知替身不触发。"""
+    repo = SimpleNamespace(settings=SimpleNamespace(host_proc_root=None))
+    worker = Worker(repo)
+    current = {"id": "current", "runId": "run", "nodeId": "node", "generation": 1}
+    stale = current | {"id": "stale", "generation": 2}
+    eligible = SimpleNamespace(task=current, liveness=SimpleNamespace(
+        allows_health_stop=lambda *_args, **_kwargs: True), collector=None)
+    unknown = SimpleNamespace(task=current | {"id": "unknown"})
+    worker.active = {"current": eligible, "stale": SimpleNamespace(task=stale,
+                     liveness=SimpleNamespace(allows_health_stop=lambda *_args, **_kwargs: True), collector=None), "unknown": unknown}
+    stopped = []
+
+    async def record(_repo, task, *, liveness_check):
+        assert liveness_check()
+        stopped.append(task["id"])
+
+    monkeypatch.setattr("camera_logs.resources.health_policy.stop_unresponsive_task", record)
+    await worker.stop_unresponsive_health_failed_runtimes(
+        {"current": current, "stale": current | {"id": "stale", "generation": 1},
+         "unknown": current | {"id": "unknown"}}, 10,
+    )
+
+    assert stopped == ["current"]

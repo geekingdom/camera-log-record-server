@@ -1,6 +1,7 @@
 """使用真实 telnetlib3 和本地 TCP 服务验证保活控制字节及日志字节完整性。"""
 
 import asyncio
+from contextlib import suppress
 
 import telnetlib3
 from camera_logs.collection.collector import Collector
@@ -85,9 +86,13 @@ async def test_protocol_traffic_does_not_reset_default_ten_second_log_timeout(tm
                         break
                 except TimeoutError:
                     continue
+        except ConnectionError:
+            # 对端关闭时仍有协议 NOP 在途，TCP RST 同样是连接已回收的证据。
+            pass
         finally:
             writer.close()
-            await writer.wait_closed()
+            with suppress(ConnectionError):
+                await writer.wait_closed()
             peer_closed.set()
             handlers.discard(asyncio.current_task())
 

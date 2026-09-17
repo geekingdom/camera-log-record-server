@@ -14,6 +14,7 @@ from camera_logs.resources.health import (
     apply_manual_result,
     reconcile_authorized_recoveries,
 )
+from camera_logs.resources.health_policy import stop_unresponsive_task
 from camera_logs.tasks.control import request_control
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
@@ -37,6 +38,10 @@ async def main():
                                             "protocol": "SSH", "ip": "192.0.2.250", "port": 22, "createdBy": "owner"})
             # 真实离线停止先保留旧运行归属；Worker 收尾后才能允许 ONLINE 消费恢复。
             await _apply_failure(repo, await repo.db.resources.find_one({"id": "resource"}), "OFFLINE")
+            preserved = await repo.db.tasks.find_one({"id": "offline-recover"})
+            assert preserved["desiredState"] == "RUNNING"
+            # HTTP 失败不能代替日志连接证据；此处模拟 Worker 已确认持续无输出。
+            await stop_unresponsive_task(repo, preserved)
             offline = await repo.db.tasks.find_one({"id": "offline-recover"})
             assert offline["desiredState"] == "STOPPED"
             assert offline["resourceHealthRecovery"]["reason"] == "OFFLINE"

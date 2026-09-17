@@ -4,7 +4,11 @@ import logging
 from datetime import UTC, timedelta
 from types import SimpleNamespace
 
-from camera_logs.collection.coredump_lease import record_coredump_status, release_coredump_lease
+from camera_logs.collection.coredump_lease import (
+    guard_coredump_cleanup,
+    record_coredump_status,
+    release_coredump_lease,
+)
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from cryptography.fernet import Fernet
@@ -32,6 +36,27 @@ async def test_release_coredump_lease_keeps_successor_lease_and_releases_matchin
     await release_coredump_lease(repo, task)
     released = (await repo.db.resources.find_one({"id": "resource-a"}))["coredumpLeaseUntil"].replace(tzinfo=UTC)
     assert released <= now()
+
+
+async def test_coredump_cleanup_keeps_mount_for_successor_despite_http_failure(tmp_path):
+    """HTTP 失败时，旧会话交棒仍须保留给有效的后继采集运行。"""
+    repo = Repository(AsyncMongoMockClient().camera_logs, Settings(
+        _env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node-a"))
+    owner = {"id": "task-a", "runId": "run-a", "generation": 3, "nodeId": "node-a",
+             "resourceId": "resource-a", "protocol": "SSH", "desiredState": "STOPPED", "status": "STOPPING"}
+    successor = {"id": "task-b", "runId": "run-b", "generation": 4, "nodeId": "node-b",
+                 "resourceId": "resource-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING"}
+    await repo.db.tasks.insert_many([owner, successor])
+    await repo.db.resources.insert_one({
+        "id": "resource-a", "deletedAt": None, "healthStatus": "OFFLINE", "enableCoredumpMonitor": True,
+        "coredumpLeaseTaskId": owner["id"], "coredumpLeaseRunId": owner["runId"],
+        "coredumpLeaseGeneration": owner["generation"], "coredumpLeaseNodeId": owner["nodeId"],
+        "coredumpLeaseUntil": now() + timedelta(seconds=60),
+    })
+
+    assert await guard_coredump_cleanup(repo, owner, session_active=lambda: True) is False
+    stored = await repo.db.resources.find_one({"id": "resource-a"})
+    assert stored["coredumpLeaseUntil"].replace(tzinfo=UTC) <= now()
 
 
 async def test_coredump_mounted_event_deduplicates_by_session_but_keeps_status_fresh(tmp_path):

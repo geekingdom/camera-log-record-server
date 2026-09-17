@@ -54,7 +54,6 @@ async def _guard(runtime: Any, collector: Any) -> dict[str, Any] | None:
         {
             "id": task.get("resourceId"),
             "deletedAt": None,
-            "healthStatus": "ONLINE",
             "enableResourceMonitor": True,
             "$or": [
                 {"resourceMonitorLeaseUntil": {"$exists": False}},

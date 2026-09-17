@@ -9,6 +9,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.resources.health_policy import resource_health_blocks_task
 
 
 async def _claim_resources(db, document, session):
@@ -25,7 +26,7 @@ async def _claim_resources(db, document, session):
             if await db.resources.find_one({"id": identifier}, session=session) is None:
                 raise HTTPException(404, "设备资源不存在")
             raise HTTPException(409, "设备资源已删除，任务不会启动")
-        if resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
+        if resource_health_blocks_task(document, resource):
             raise HTTPException(409, "设备资源认证或连通性异常，任务不会启动")
 
 

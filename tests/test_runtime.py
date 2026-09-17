@@ -17,6 +17,7 @@ from camera_logs.collection.coredump_lease import (
     guard_coredump_cleanup,
     guard_coredump_monitor,
 )
+from camera_logs.collection.liveness import RuntimeLiveness
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
@@ -134,6 +135,44 @@ def test_runtime_stop_collector_accepts_closed_asyncssh_read_disconnect(tmp_path
     asyncio.run(scenario())
 
 
+def test_runtime_liveness_requires_real_receive_gap_and_never_uses_storage_backpressure():
+    """资源 HTTP 认证失败不能盖过仍在接收或正在落盘的设备日志。"""
+    runtime = object.__new__(SessionRuntime)
+    runtime.task = {"protocol": "SSH", "logIdleTimeoutSeconds": 10}
+    runtime.stopping = runtime.retired = False
+    runtime.liveness = RuntimeLiveness(100.0)
+    runtime.liveness.last_received_monotonic = 105.0
+    runtime.collector = SimpleNamespace(
+        liveness_waiting_for_read=True,
+        liveness_storage_busy=False,
+    )
+
+    allows = lambda instant: runtime.liveness.allows_health_stop(
+        runtime.task, runtime.collector, stopping=runtime.stopping, retired=runtime.retired,
+        current_monotonic=instant,
+    )
+    assert not allows(114.9)
+    assert allows(115.0)
+
+    runtime.collector.liveness_storage_busy = True
+    assert not allows(999.0)
+
+    runtime.collector.liveness_storage_busy = False
+    # 写盘结束才开始新的读观察窗口；写盘耗时本身不能作为设备静默。
+    runtime.liveness.observation_reset(999.0)
+    assert runtime.liveness.last_received_monotonic == 105.0
+    assert not allows(1008.9)
+    assert allows(1009.0)
+
+    runtime.collector.liveness_waiting_for_read = False
+    runtime.liveness.disconnected_monotonic = 120.0
+    assert not allows(129.9)
+    assert allows(130.0)
+
+    runtime.task["protocol"] = "TELNET_SERIAL"
+    assert not allows(999.0)
+
+
 def test_coredump_guard_claims_resource_once_and_rejects_stale_runtime(tmp_path):
     """真实数据库条件保证首次领取、资源健康与运行代次都在发送前复核。"""
     async def scenario():
@@ -221,21 +260,21 @@ def test_coredump_guard_does_not_renew_after_resource_switch_is_disabled(tmp_pat
     asyncio.run(scenario())
 
 
-def test_coredump_guard_rejects_non_collecting_or_unhealthy_resource(tmp_path):
-    """停止中的任务和离线资源均不得刷新租约或进入设备控制队列。"""
+def test_coredump_guard_keeps_collecting_connection_when_http_health_is_bad(tmp_path):
+    """HTTP 健康异常不能中断仍在接收日志的设备侧 Coredump 监控。"""
     async def scenario():
         database = AsyncMongoMockClient().camera_logs
         repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node-a"))
         task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
-                "resourceId": "resource-a", "desiredState": "RUNNING", "status": "COLLECTING"}
+                "resourceId": "resource-a", "protocol": "SSH", "desiredState": "RUNNING", "status": "COLLECTING"}
         await database.tasks.insert_one(task)
-        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "OFFLINE"})
+        await database.resources.insert_one({"id": "resource-a", "deletedAt": None, "healthStatus": "OFFLINE",
+                                             "enableCoredumpMonitor": True})
         runtime = object.__new__(SessionRuntime)
         runtime.repo, runtime.task = repo, task
         runtime.stopping = runtime.retired = False
         runtime.collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
-        assert await runtime.coredump_guard() is False
-        await database.resources.update_one({"id": "resource-a"}, {"$set": {"healthStatus": "ONLINE"}})
+        assert await runtime.coredump_guard() is True
         await database.tasks.update_one({"id": "task-a"}, {"$set": {"status": "STOPPING"}})
         assert await runtime.coredump_guard() is False
     asyncio.run(scenario())

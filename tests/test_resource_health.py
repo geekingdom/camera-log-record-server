@@ -14,6 +14,7 @@ from camera_logs.resources.health import (
     health_once,
     reconcile_authorized_recoveries,
 )
+from camera_logs.resources.health_policy import stop_unresponsive_task
 from camera_logs.tasks.control import request_control
 from mongomock_motor import AsyncMongoMockClient
 
@@ -90,6 +91,109 @@ def test_auth_failure_marks_resource_and_stops_only_running_tasks(tmp_path, monk
         assert running["resourceHealthRecovery"]["resourceId"] == "camera"
         assert paused["desiredState"] == "PAUSED"
         assert "resourceHealthRecovery" not in paused
+    asyncio.run(scenario())
+
+
+def test_auth_failure_keeps_live_network_runtime_but_stops_unowned_task(tmp_path, monkeypatch):
+    """周期 HTTP 凭据失败不打断仍有输出的已领取 SSH/Telnet 运行。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.8",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None})
+        await repo.db.tasks.insert_many([
+            {"id": "ssh-live", "resourceId": "camera", "protocol": "SSH", "desiredState": "RUNNING",
+             "status": "COLLECTING", "nodeId": "node-a", "runId": "run-a", "generation": 2},
+            {"id": "telnet-live", "resourceId": "camera", "protocol": "TELNET_DEVICE", "desiredState": "RUNNING",
+             "status": "RECONNECTING", "nodeId": "node-b", "runId": "run-b", "generation": 3},
+            {"id": "queued", "resourceId": "camera", "protocol": "SSH", "desiredState": "RUNNING", "status": "STOPPED"},
+        ])
+
+        async def rejected(**_kwargs):
+            raise PermissionError("bad")
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        assert (await repo.db.tasks.find_one({"id": "ssh-live"}))["desiredState"] == "RUNNING"
+        assert (await repo.db.tasks.find_one({"id": "telnet-live"}))["desiredState"] == "RUNNING"
+        queued = await repo.db.tasks.find_one({"id": "queued"})
+        assert queued["desiredState"] == "STOPPED"
+        assert queued["resourceHealthRecovery"]["reason"] == "AUTH_FAILED"
+
+    asyncio.run(scenario())
+
+
+def test_telnet_serial_ignores_resource_auth_failure_and_identity_change(tmp_path, monkeypatch):
+    """串口 Telnet 仅依赖串口链路，HTTP 认证状态和身份刷新均不可改变其任务。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.9",
+            "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
+            "model": "old", "subSerialNumber": "old", "deletedAt": None})
+        await repo.db.tasks.insert_one({"id": "serial", "resourceId": "camera", "protocol": "TELNET_SERIAL",
+            "desiredState": "RUNNING", "status": "COLLECTING", "nodeId": "node", "runId": "run", "generation": 1,
+            "storageIdentity": "preserved"})
+        await repo.db.tasks.insert_one({"id": "serial-waiting", "resourceId": "camera", "protocol": "TELNET_SERIAL",
+            "desiredState": "RUNNING", "status": "WAITING_DEVICE", "runId": "paused-run", "generation": 2,
+            "resumeWaiting": {"waitingReason": "unchanged"}, "storageIdentity": "waiting-preserved"})
+
+        async def rejected(**_kwargs):
+            raise PermissionError("bad")
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        unchanged = await repo.db.tasks.find_one({"id": "serial"})
+        assert (unchanged["desiredState"], unchanged["storageIdentity"]) == ("RUNNING", "preserved")
+        waiting = await repo.db.tasks.find_one({"id": "serial-waiting"})
+        assert waiting["resumeWaiting"]["waitingReason"] == "unchanged"
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource",
+                            lambda **_kwargs: asyncio.sleep(0, result={"model": "new", "subSerialNumber": "new", "softwareVersion": "V"}))
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        unchanged = await repo.db.tasks.find_one({"id": "serial"})
+        assert (unchanged["desiredState"], unchanged["storageIdentity"]) == ("RUNNING", "preserved")
+        waiting = await repo.db.tasks.find_one({"id": "serial-waiting"})
+        assert (waiting["status"], waiting["storageIdentity"]) == ("WAITING_DEVICE", "waiting-preserved")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("health_status", ["AUTH_FAILED", "OFFLINE", "ERROR"])
+def test_worker_unresponsive_stop_requires_current_bad_health_and_owner(tmp_path, health_status):
+    """Worker 的本地无输出证据只能停止同一代次且仍处于非成功 ISAPI 状态的运行。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None,
+                                            "healthStatus": health_status})
+        task = {"id": "runtime", "resourceId": "camera", "protocol": "SSH", "desiredState": "RUNNING",
+                "status": "RECONNECTING", "nodeId": "node", "runId": "run", "generation": 4,
+                "controlClaimVersion": 2}
+        await repo.db.tasks.insert_one(task)
+        assert await stop_unresponsive_task(repo, task) is True
+        stopped = await repo.db.tasks.find_one({"id": "runtime"})
+        assert stopped["desiredState"] == "STOPPED"
+        assert (await repo.db.operations.count_documents({"taskId": "runtime", "action": "system-resource-health-stop"})) == 1
+
+        await repo.db.tasks.update_one({"id": "runtime"}, {"$set": {"desiredState": "RUNNING", "generation": 5}})
+        assert await stop_unresponsive_task(repo, task) is False
+        assert (await repo.db.tasks.find_one({"id": "runtime"}))["desiredState"] == "RUNNING"
+
+    asyncio.run(scenario())
+
+
+def test_worker_unresponsive_stop_rechecks_liveness_before_task_cas(tmp_path):
+    """资源状态读取期间重获日志时，迟到的健康停止不得改写当前运行。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "deletedAt": None,
+                                            "healthStatus": "OFFLINE"})
+        task = {"id": "runtime", "resourceId": "camera", "protocol": "SSH", "desiredState": "RUNNING",
+                "status": "COLLECTING", "nodeId": "node", "runId": "run", "generation": 4}
+        await repo.db.tasks.insert_one(task)
+        assert await stop_unresponsive_task(repo, task, liveness_check=lambda: False) is False
+        current = await repo.db.tasks.find_one({"id": "runtime"})
+        assert current["desiredState"] == "RUNNING"
+        assert await repo.db.operations.count_documents({"taskId": "runtime"}) == 0
+
     asyncio.run(scenario())
 
 

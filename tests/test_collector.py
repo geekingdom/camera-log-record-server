@@ -73,6 +73,23 @@ async def test_pending_batch_read_wait_ends_at_original_flush_deadline(tmp_path,
     assert 0 < timeouts[2] <= .002
 
 
+async def test_liveness_uses_process_monotonic_clock_when_event_loop_clock_has_another_epoch(tmp_path, monkeypatch):
+    """uvloop 的 loop.time 可与进程单调时钟异基准，Worker 比较必须使用后者。"""
+    observed = []
+    collector = Collector({"id": "clock", "runId": "run", "storageIdentity": "synthetic"}, tmp_path,
+                          connection_factory=lambda _: FakeConnection(), on_liveness_reset=observed.append)
+    monkeypatch.setattr(collector_module.time, "monotonic", lambda: 123.0)
+    monkeypatch.setattr(collector_module, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: 9_999.0),
+        CancelledError=asyncio.CancelledError, current_task=asyncio.current_task,
+    ))
+
+    await collector._reset_liveness_observation()
+
+    assert collector.liveness_read_observation_started == 123.0
+    assert observed == [123.0]
+
+
 def test_collector_writes_received_chunks_in_exact_order_and_initializes_commands(tmp_path):
     async def scenario():
         connection = FakeConnection()

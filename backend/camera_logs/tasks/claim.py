@@ -13,6 +13,7 @@ from camera_logs.node.health import resource_pressure
 from camera_logs.node.input_admission import input_rate_blocked
 from camera_logs.node.resource_routing import accepts_resource
 from camera_logs.node.write_pressure import write_latency_blocked
+from camera_logs.resources.health_policy import resource_health_blocks_task
 
 
 class SchedulerLeaseLost(RuntimeError):
@@ -121,7 +122,7 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
         # 旧迁移夹具和历史任务可能尚无资源绑定；正式创建路径始终具备 resourceId。
         if current.get("resourceId"):
             resource = await db.resources.find_one({"id": current["resourceId"], "deletedAt": None}, session=session)
-            if resource is None or resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
+            if resource is None or resource_health_blocks_task(current, resource):
                 return None
             resource_ip = resource.get("ip")
             if requires_coredump_nfs(current, resource) and not (node.get("capabilities") or {}).get("coredumpNfs"):

@@ -13,6 +13,7 @@ from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.common.security import authorize, authorize_owner
+from camera_logs.resources.health_policy import resource_health_blocks_task
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ async def _guard_resources(db, task, session):
             if await db.resources.find_one({"id": identifier}, session=session) is None:
                 raise HTTPException(404, "设备资源不存在")
             raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
-        if resource.get("healthStatus") in {"AUTH_FAILED", "OFFLINE", "ERROR"}:
+        if resource_health_blocks_task(task, resource):
             raise HTTPException(409, "设备资源认证或连通性异常，暂不能启动采集")
 
 

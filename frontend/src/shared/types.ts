@@ -61,7 +61,7 @@ export interface AuthenticationRecord {
   createdAt?: string;
   /** 连续相同成功状态最后一次被认证观察到的时间。 */
   latestAt?: string;
-  /** 连续相同成功状态合并后的观测次数；旧记录默认按 1 展示。 */
+  /** 同日连续相同周期认证结果的观测次数，成功和失败均累计；旧记录默认按 1 展示。 */
   occurrenceCount?: number;
   source?: string;
   result: AuthenticationRecordResult | string;

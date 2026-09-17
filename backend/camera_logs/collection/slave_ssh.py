@@ -39,11 +39,11 @@ def dropbear_command(port):
 
 
 async def active_task(repo, config):
-    """每个引导阶段核验任务运行、资源认证及期望状态，暂停后不得再建连接。"""
+    """每个引导阶段核验运行归属和未删除资源；HTTP 健康结果不撤销既有采集。"""
     task = await repo.db.tasks.find_one({**owner_filter(config), "desiredState": "RUNNING",
                                        "status": {"$nin": ["ERROR", "BLOCKED", "STOPPED", "PAUSED", "PAUSING", "STOPPING"]}})
     resource = await repo.db.resources.find_one({"id": config["resourceId"], "deletedAt": None})
-    if not task or not resource or resource.get("healthStatus") in {"OFFLINE", "AUTH_FAILED", "ERROR"}:
+    if not task or not resource:
         raise OwnershipLost("从机引导的任务或设备资源已失去运行资格")
     return resource
 

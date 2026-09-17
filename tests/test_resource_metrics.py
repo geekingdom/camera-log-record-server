@@ -370,7 +370,7 @@ async def test_sample_runtime_disabled_guard_never_writes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resource_monitor_guard_rejects_ssh_slave_but_keeps_legacy_host(monkeypatch):
-    """资源级采样只可复用主机 SSH；缺省 sshTarget 的历史任务仍按 HOST 兼容。"""
+    """资源级采样只可复用主机 SSH；HTTP 健康异常不撤销既有连接的采样资格。"""
     from camera_logs.resource_metrics import runtime
 
     database = AsyncMongoMockClient().db
@@ -382,7 +382,7 @@ async def test_resource_monitor_guard_rejects_ssh_slave_but_keeps_legacy_host(mo
     rt.task.pop("sshTarget")
     await database.tasks.insert_one({"id": "t", "runId": "r", "resourceId": "x", "protocol": "SSH",
                                     "desiredState": "RUNNING", "status": "COLLECTING"})
-    await database.resources.insert_one({"id": "x", "deletedAt": None, "healthStatus": "ONLINE",
+    await database.resources.insert_one({"id": "x", "deletedAt": None, "healthStatus": "ERROR",
                                         "enableResourceMonitor": True})
     assert await runtime._guard(rt, collector) is not None
 
