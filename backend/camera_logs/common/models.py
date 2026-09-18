@@ -98,6 +98,7 @@ class TaskCreate(TemplateCreate):
     sourceTemplateVersion: int | None = None
     resourceId: str = Field(min_length=1, max_length=64)
     serialServerResourceId: str | None = Field(default=None, min_length=1, max_length=64)
+    useResourceCredentials: bool | None = None
     autoStart: bool = False
     encoding: str = "utf-8"
     loginPrompt: str = Field(default="login:", max_length=256)
@@ -120,7 +121,11 @@ class TaskCreate(TemplateCreate):
     @model_validator(mode="after")
     def credentials(self):
         """SSH 与 Telnet 设备必须有账号密码，且从机目标只由 SSH 使用。"""
-        if self.protocol != "TELNET_SERIAL" and (not self.username.strip() or not self.password):
+        if self.protocol != "TELNET_SERIAL" and self.useResourceCredentials is None:
+            # 兼容既有 API：显式传入口令继续创建独立任务；只有两项都省略时才默认复用资源。
+            self.useResourceCredentials = not (self.username.strip() or self.password)
+        if self.protocol != "TELNET_SERIAL" and not self.useResourceCredentials \
+                and (not self.username.strip() or not self.password):
             raise ValueError("SSH 和 Telnet 设备必须填写用户名和密码")
         if self.protocol != "SSH" and self.sshTarget != "HOST":
             raise ValueError("仅 SSH 任务可选择从机日志采集目标")

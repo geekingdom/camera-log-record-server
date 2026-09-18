@@ -3,6 +3,7 @@
 接口只修改期望状态，由调度器和节点完成连接操作。配置使用版本号防止覆盖，
 密码留空表示保留；运行中更改连接或命令会触发受控停止再启动。
 """
+import inspect
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
@@ -17,6 +18,51 @@ from camera_logs.tasks.recovery import request_blocked_restart
 from camera_logs.tasks.resource_binding import bind_resource
 
 
+def _task_sort(sort_by: str | None, sort_order: str | None) -> list[tuple[str, int]]:
+    """解析任务列表排序；清除排序后回到稳定的创建时间默认顺序。"""
+    fields = {"name": "name", "connection": "ip", "status": "status", "desiredState": "desiredState",
+              "createdAt": "createdAt", "resourceDeletedAt": "resourceDeletedAt"}
+    if sort_by is None and sort_order is None:
+        return [("createdAt", -1), ("id", 1)]
+    if sort_by in fields and sort_order in {"asc", "desc"}:
+        direction = 1 if sort_order == "asc" else -1
+        if sort_by == "connection":
+            return [("ip", direction), ("port", direction), ("protocol", direction), ("id", 1)]
+        return [(fields[sort_by], direction), ("id", 1)]
+    raise HTTPException(422, "任务排序字段或方向无效")
+
+
+async def _page_tasks(repo, query: dict, page: int, page_size: int,
+                      sort_by: str | None, sort_order: str | None) -> dict:
+    """在资源删除时间排序时先关联资源，保证派生列也在完整筛选集内排序。"""
+    sort = _task_sort(sort_by, sort_order)
+    if sort_by != "resourceDeletedAt":
+        cursor = repo().db.tasks.find(query).sort(sort).skip((page - 1) * page_size).limit(page_size)
+        items = [public(task) async for task in cursor]
+    else:
+        pipeline = [
+            {"$match": query},
+            {"$lookup": {"from": "resources", "localField": "resourceId", "foreignField": "id", "as": "_resources"}},
+            {"$lookup": {"from": "resources", "localField": "serialServerResourceId", "foreignField": "id", "as": "_serialResources"}},
+            {"$set": {"_boundResources": {"$concatArrays": ["$_resources", "$_serialResources"]}}},
+            {"$set": {"_deletedResource": {"$arrayElemAt": [{"$filter": {
+                "input": "$_boundResources", "as": "resource",
+                "cond": {"$ne": ["$$resource.deletedAt", None]},
+            }}, 0]}}},
+            {"$set": {"resourceDeletedAt": {"$cond": [
+                {"$eq": ["$resourceDeleted", True]}, "$_deletedResource.deletedAt", None,
+            ]}}},
+            {"$sort": dict(sort)},
+            {"$skip": (page - 1) * page_size}, {"$limit": page_size},
+            {"$project": {"_resources": 0, "_serialResources": 0, "_boundResources": 0, "_deletedResource": 0}},
+        ]
+        cursor = repo().db.tasks.aggregate(pipeline)
+        if inspect.isawaitable(cursor):
+            cursor = await cursor
+        items = [public(task) async for task in cursor]
+    return {"items": items, "total": await repo().db.tasks.count_documents(query), "page": page, "pageSize": page_size}
+
+
 def install_task_routes(app, repo, listing):
     """注册任务路由，统一复用身份校验、分页和仓储服务。"""
     User = Annotated[dict, Depends(actor)]
@@ -24,7 +70,8 @@ def install_task_routes(app, repo, listing):
     @app.get("/api/v1/tasks")
     async def tasks(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
                     status: str | None = None, search: str | None = None,
-                    resourceId: str | None = None, createdBy: str | None = None):
+                    resourceId: str | None = None, createdBy: str | None = None,
+                    sortBy: str | None = Query(None, max_length=32), sortOrder: str | None = Query(None, max_length=4)):
         authorize(user, "tasks:read")
         conditions = []
         if status:
@@ -37,7 +84,7 @@ def install_task_routes(app, repo, listing):
             import re
             conditions.append({"$or": [{key: {"$regex": re.escape(search), "$options": "i"}} for key in ("name", "ip")]})
         query = {} if not conditions else conditions[0] if len(conditions) == 1 else {"$and": conditions}
-        result = await listing("tasks", query, page, pageSize)
+        result = await _page_tasks(repo, query, page, pageSize, sortBy, sortOrder)
         identifiers = {identifier for task in result["items"] for identifier in (
             task.get("resourceId"), task.get("serialServerResourceId"),
         ) if identifier}
@@ -46,6 +93,8 @@ def install_task_routes(app, repo, listing):
             async for resource in repo().db.resources.find({"id": {"$in": list(identifiers)}}, {"id": 1, "deletedAt": 1})
         }
         for task in result["items"]:
+            if "resourceDeletedAt" in task:
+                continue
             if task.get("resourceDeleted"):
                 deleted_at = next((resources.get(identifier) for identifier in (
                     task.get("resourceId"), task.get("serialServerResourceId"),
@@ -68,7 +117,7 @@ def install_task_routes(app, repo, listing):
                 template = await readable_template(repo(), user, body.sourceTemplateId)
                 if source_version is None:
                     source_version = template["version"]
-            binding = await bind_resource(repo(), body)
+            binding = await bind_resource(repo(), body, require_current_auth=True)
             doc = body.model_dump()
             doc["sourceTemplateVersion"] = source_version
             password = doc.pop("password")

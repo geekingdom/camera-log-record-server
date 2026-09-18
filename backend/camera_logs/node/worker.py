@@ -482,6 +482,8 @@ class Worker:
         await recover_expired_jobs(self.repo)
         await maintain(self.repo)
         await cleanup_expired_exports(self.repo)
+        from camera_logs.logs.search_index_maintenance import backfill_search_indexes
+        await backfill_search_indexes(self.repo)
         if not self.repo.settings.nfs_server_ip:
             return
         from camera_logs.coredumps.snapshots import reconcile_snapshots

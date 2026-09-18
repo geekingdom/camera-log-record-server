@@ -247,7 +247,7 @@ async def verify_auto_start_creation(client, repo, db, token):
     await db.resources.insert_one({
         "id": resource_id, "version": 1, "deletedAt": None, "kind": "HIKVISION_NETWORK",
         "ip": "192.0.2.60", "model": "verify-model", "subSerialNumber": "verify-serial",
-        "authenticatedAt": now(),
+        "authenticatedAt": now(), "healthStatus": "ONLINE",
     })
     body = {"name": name, "protocol": "SSH", "ip": "192.0.2.60", "port": 22,
             "resourceId": resource_id, "username": "root", "password": "temporary", "autoStart": True}
@@ -275,7 +275,7 @@ async def verify_auto_start_creation(client, repo, db, token):
     await db.resources.insert_one({
         "id": failed_resource, "version": 1, "deletedAt": None, "kind": "HIKVISION_NETWORK",
         "ip": "192.0.2.61", "model": "verify-model", "subSerialNumber": "failed-serial",
-        "authenticatedAt": now(),
+        "authenticatedAt": now(), "healthStatus": "ONLINE",
     })
     before_resource = await db.resources.find_one({"id": failed_resource})
     before_counts = {name: await db[name].count_documents({}) for name in ("tasks", "operations", "idempotency", "audit")}

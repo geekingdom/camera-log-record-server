@@ -60,7 +60,7 @@ async def _prepared(repo, user, task_id, body):
     ) if value})
     # 快照必须早于绑定计算，避免资源身份在两次读取之间变化而混用旧存储身份和新版本。
     snapshots = {identifier: await repo.get("resources", identifier) for identifier in identifiers}
-    document = checked.model_dump(exclude={"autoStart", "password"})
+    document = checked.model_dump(exclude={"autoStart", "password", "useResourceCredentials"})
     document.update(await bind_resource(_ResourceSnapshots(snapshots), checked))
     if "scheduledCommands" in updates:
         for command in document["scheduledCommands"]:

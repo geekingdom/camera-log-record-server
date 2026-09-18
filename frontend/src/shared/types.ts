@@ -124,6 +124,7 @@ export interface Task {
   port?: number;
   username?: string;
   password?: string;
+  useResourceCredentials?: boolean;
   status?: TaskActualStatus;
   desiredState?: TaskDesiredState;
   error?: string | null;

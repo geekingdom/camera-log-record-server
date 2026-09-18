@@ -31,6 +31,8 @@ const metricsOpen = ref(false), metricsResource = ref<Resource>();
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
 const showAll = ref(Boolean(props.isAdmin));
 const createdBy = ref("");
+const sortBy = ref<string>();
+const sortOrder = ref<"asc" | "desc">();
 const deleting = ref(new Set<string>());
 const authenticating = ref(new Set<string>());
 const selected = ref<Resource[]>([]);
@@ -59,6 +61,8 @@ async function load() {
     hasCoredumps: hasCoredumps.value,
     includeDeleted: includeDeleted.value ? "true" : undefined,
     createdBy: showAll.value ? createdBy.value || undefined : props.userId,
+    sortBy: sortBy.value,
+    sortOrder: sortOrder.value,
   }; const data = await api.resources(page.value, 20, filters); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
   catch (error) { if (current === generation) ElMessage.error(error instanceof Error ? error.message : "读取资源失败"); }
   finally { if (current === generation) loading.value = false; }
@@ -68,6 +72,11 @@ function clearSelection(invalidate = false) {
   selected.value = []; table.value?.clearSelection();
 }
 function filter() { clearSelection(true); if (page.value === 1) void load(); else page.value = 1; }
+function changeSort({ prop, order }: { prop: string; order: "ascending" | "descending" | null }) {
+  sortBy.value = order ? prop : undefined;
+  sortOrder.value = order === "ascending" ? "asc" : order === "descending" ? "desc" : undefined;
+  filter();
+}
 function changeScope(value: boolean | string | number) {
   showAll.value = Boolean(value);
   createdBy.value = "";
@@ -186,16 +195,16 @@ defineExpose({ reload: load });
       </div>
     </div>
   </div>
-  <el-table ref="table" row-key="id" reserve-selection :data="resources" v-loading="loading" scrollbar-always-on class="data-table resource-table" empty-text="暂无设备资源" @selection-change="updateSelection">
+  <el-table ref="table" row-key="id" reserve-selection :data="resources" v-loading="loading" scrollbar-always-on class="data-table resource-table" empty-text="暂无设备资源" @selection-change="updateSelection" @sort-change="changeSort">
     <el-table-column type="selection" width="48" :selectable="canBulkDelete" />
-    <el-table-column label="资源身份" min-width="250"><template #default="{ row }"><div class="resource-identity"><span class="resource-kind-icon" :class="row.kind === 'HIKVISION_NETWORK' ? 'network' : 'serial'"><component :is="kindIcon(row.kind)" :size="17" /></span><div><strong>{{ row.name }}</strong><div class="resource-type-line"><span>{{ kindLabel(row.kind) }}</span><el-tag v-if="row.deletedAt" type="info" size="small">已删除 · 日志保留</el-tag></div></div></div></template></el-table-column>
-    <el-table-column label="网络地址" min-width="165"><template #default="{ row }"><span class="resource-ip">{{ row.ip }}</span><small class="resource-subtle">{{ row.kind === 'HIKVISION_NETWORK' ? 'HTTP 设备入口' : 'Telnet 串口入口' }}</small></template></el-table-column>
-    <el-table-column label="设备身份" min-width="270"><template #default="{ row }"><div class="resource-device-meta"><strong>{{ row.model || (row.kind === 'SERIAL_SERVER' ? '串口服务器' : '-') }}</strong><span>序列号 {{ row.subSerialNumber || '-' }}</span><span>软件 {{ row.softwareVersion || '-' }}</span></div></template></el-table-column>
-    <el-table-column label="设备认证" min-width="175"><template #default="{ row }"><template v-if="row.kind === 'HIKVISION_NETWORK'"><el-tag :type="healthTone(row.healthStatus)" size="small">{{ healthLabel(row.healthStatus) }}</el-tag><small class="resource-subtle">检查 {{ formatDate(row.healthCheckedAt) }}</small></template><span v-else>-</span></template></el-table-column>
-    <el-table-column label="任务" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 采集中</span></div></template></el-table-column>
-    <el-table-column label="创建用户" min-width="130"><template #default="{ row }">{{ row.createdByName || row.createdBy || "未知" }}</template></el-table-column>
-    <el-table-column label="创建时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
-    <el-table-column label="删除时间（北京时间）" min-width="180"><template #default="{ row }">{{ formatDate(row.deletedAt) }}</template></el-table-column>
+    <el-table-column label="资源身份" prop="identity" sortable="custom" min-width="250"><template #default="{ row }"><div class="resource-identity"><span class="resource-kind-icon" :class="row.kind === 'HIKVISION_NETWORK' ? 'network' : 'serial'"><component :is="kindIcon(row.kind)" :size="17" /></span><div><strong>{{ row.name }}</strong><div class="resource-type-line"><span>{{ kindLabel(row.kind) }}</span><el-tag v-if="row.deletedAt" type="info" size="small">已删除 · 日志保留</el-tag></div></div></div></template></el-table-column>
+    <el-table-column label="网络地址" prop="ip" sortable="custom" min-width="165"><template #default="{ row }"><span class="resource-ip">{{ row.ip }}</span><small class="resource-subtle">{{ row.kind === 'HIKVISION_NETWORK' ? 'HTTP 设备入口' : 'Telnet 串口入口' }}</small></template></el-table-column>
+    <el-table-column label="设备身份" prop="deviceIdentity" sortable="custom" min-width="270"><template #default="{ row }"><div class="resource-device-meta"><strong>{{ row.model || (row.kind === 'SERIAL_SERVER' ? '串口服务器' : '-') }}</strong><span>序列号 {{ row.subSerialNumber || '-' }}</span><span>软件 {{ row.softwareVersion || '-' }}</span></div></template></el-table-column>
+    <el-table-column label="设备认证" prop="health" sortable="custom" min-width="175"><template #default="{ row }"><template v-if="row.kind === 'HIKVISION_NETWORK'"><el-tag :type="healthTone(row.healthStatus)" size="small">{{ healthLabel(row.healthStatus) }}</el-tag><small class="resource-subtle">检查 {{ formatDate(row.healthCheckedAt) }}</small></template><span v-else>-</span></template></el-table-column>
+    <el-table-column label="任务" prop="tasks" sortable="custom" width="120" align="right"><template #default="{ row }"><div class="resource-task-count"><strong>{{ row.taskCount ?? 0 }}</strong><span><Activity :size="13" />{{ row.activeTaskCount ?? 0 }} 采集中</span></div></template></el-table-column>
+    <el-table-column label="创建用户" prop="creator" sortable="custom" min-width="130"><template #default="{ row }">{{ row.createdByName || row.createdBy || "未知" }}</template></el-table-column>
+    <el-table-column label="创建时间（北京时间）" prop="createdAt" sortable="custom" min-width="180"><template #default="{ row }">{{ formatDate(row.createdAt) }}</template></el-table-column>
+    <el-table-column label="删除时间（北京时间）" prop="deletedAt" sortable="custom" min-width="180"><template #default="{ row }">{{ formatDate(row.deletedAt) }}</template></el-table-column>
     <el-table-column label="操作" width="364" :fixed="narrowViewport ? false : 'right'"><template #default="{ row }"><div class="resource-actions">
       <el-button text type="primary" :icon="row.deletedAt ? Archive : Eye" @click="emit('tasks', row)">{{ row.deletedAt ? '查看历史日志' : '查看任务' }}</el-button>
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK'" content="查看认证记录"><el-button text :icon="History" aria-label="查看认证记录" @click="viewAuthenticationRecords(row)" /></el-tooltip>

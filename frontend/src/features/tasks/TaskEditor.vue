@@ -3,6 +3,7 @@
 import { computed, ref, watch } from "vue";
 import { ElMessage, ElMessageBox, type FormInstance } from "element-plus";
 import { api } from "../../shared/api";
+import { revealResourceCredential } from "../resources/resourceCredentialApi";
 import { confirmAction } from "../../shared/confirm";
 import { usePermissions } from "../../shared/permissions";
 import type { Resource, Task, Template } from "../../shared/types";
@@ -25,6 +26,7 @@ const blank = (): Task => ({
   port: 22,
   username: "",
   password: "",
+  useResourceCredentials: true,
   initialCommands: [],
   scheduledCommands: [],
   resourceId: "",
@@ -41,6 +43,7 @@ const autoStart = ref(false),
   templatePage = ref(1),
   templateTotal = ref(0),
   templateLoading = ref(false),
+  savingTemplate = ref(false),
   saving = ref(false),
   loading = ref(false);
 const resources = ref<Resource[]>([]), resourceLoading = ref(false);
@@ -54,9 +57,14 @@ const linkedSerialServer = computed(() => resources.value.find((item) => item.id
 const serialUsesResource = computed(() => serial.value && Boolean(form.value.serialServerResourceId));
 const serialServerOwnedTask = computed(() => linkedResource.value?.kind === "SERIAL_SERVER" ||
   (!props.task && props.initialResource?.id === form.value.resourceId && props.initialResource?.kind === "SERIAL_SERVER"));
+const networkResourceUnavailable = computed(() => linkedResource.value?.kind === "HIKVISION_NETWORK" &&
+  linkedResource.value.healthStatus !== "ONLINE");
 let generation = 0;
 let templateGeneration = 0;
 let resourceGeneration = 0;
+let credentialGeneration = 0;
+const credentialLoading = ref(false);
+const usingSavedResourceCredentials = computed(() => !serial.value && form.value.useResourceCredentials !== false && Boolean(linkedResource.value));
 // 模板选择器独立分页；序号保证抽屉关闭、重开或翻页时旧响应不会覆盖当前页。
 async function loadTemplatePage(page: number) {
   if (!permissions.can("templates:read")) return;
@@ -95,6 +103,27 @@ async function loadResources() {
     if (current === resourceGeneration) resourceLoading.value = false;
   }
 }
+async function applyResourceCredential(resource: Resource | undefined) {
+  const current = ++credentialGeneration;
+  if (!open.value || props.task || !resource || resource.kind !== "HIKVISION_NETWORK" || serial.value) return;
+  form.value.useResourceCredentials = true;
+  form.value.username = resource.username ?? "";
+  form.value.password = "";
+  if (!permissions.can("resources:write")) return;
+  credentialLoading.value = true;
+  try {
+    const credential = await revealResourceCredential(resource.id);
+    if (current !== credentialGeneration || props.task || form.value.resourceId !== resource.id || !form.value.useResourceCredentials) return;
+    form.value.username = credential.username;
+    form.value.password = credential.password;
+  } catch {
+    // 非创建者可继续由服务端复用密文；不向其暴露资源所有权或凭据读取失败细节。
+    if (current === credentialGeneration && form.value.resourceId === resource.id && form.value.useResourceCredentials)
+      form.value.password = "";
+  } finally {
+    if (current === credentialGeneration) credentialLoading.value = false;
+  }
+}
 const rules = computed(() => ({
   name: [
     {
@@ -120,7 +149,7 @@ const rules = computed(() => ({
   ],
   password: [
     {
-      required: !serial.value && !props.task,
+      required: !serial.value && !props.task && !usingSavedResourceCredentials.value,
       message: "此协议需要密码",
       trigger: "blur",
     },
@@ -135,10 +164,13 @@ watch(
   async ([visible, task]) => {
     const current = ++generation;
     ++templateGeneration;
+    ++credentialGeneration;
     if (!visible) {
       templateLoading.value = false;
+      savingTemplate.value = false;
       ++resourceGeneration;
       resourceLoading.value = false;
+      credentialLoading.value = false;
       return;
     }
     if (!canSave.value || (task && !permissions.can("tasks:read"))) { open.value = false; return; }
@@ -194,6 +226,11 @@ watch([linkedResource, serial], ([resource]) => {
   if (!resource || (serial.value && resource.kind === "HIKVISION_NETWORK")) return;
   form.value.ip = resource.ip;
 }, { immediate: true });
+// 仅资源选择本身变化时预填，资源列表刷新会替换对象引用，不能覆盖用户已编辑的凭据。
+watch(
+  () => [linkedResource.value?.id, serial.value] as const,
+  ([resourceId]) => { void applyResourceCredential(resources.value.find(item => item.id === resourceId)); },
+);
 watch(linkedSerialServer, (resource) => {
   if (!resource || !serial.value) return;
   form.value.ip = resource.ip;
@@ -236,6 +273,38 @@ async function replaceTemplate() {
   form.value.sourceTemplateId = template.id;
   form.value.sourceTemplateVersion = template.version;
 }
+async function quickSaveTemplate() {
+  if (!permissions.can("templates:write") || templateId.value || saving.value || savingTemplate.value
+      || !editorRef.value?.validate()) return;
+  const current = generation;
+  const commands = JSON.stringify([form.value.initialCommands, form.value.scheduledCommands]);
+  savingTemplate.value = true;
+  try {
+    const result = await ElMessageBox.prompt("模板默认仅自己可见。", "保存为命令模板", {
+      inputPlaceholder: "模板名称", inputValidator: value => !value.trim() ? "请输入模板名称"
+        : value.trim().length > 128 ? "模板名称不能超过 128 个字符" : true,
+      confirmButtonText: "保存", cancelButtonText: "取消",
+    });
+    const name = result.value.trim();
+    if (current !== generation || !open.value || commands !== JSON.stringify([form.value.initialCommands, form.value.scheduledCommands])) return;
+    const [initialCommands, scheduledCommands] = JSON.parse(commands);
+    const template = await api.createTemplate({ name, description: "", initialCommands,
+      scheduledCommands, sharedWith: [], sharedWithAll: false });
+    if (current !== generation || !open.value || commands !== JSON.stringify([form.value.initialCommands, form.value.scheduledCommands])) return;
+    await loadTemplatePage(1);
+    if (current !== generation || !open.value || commands !== JSON.stringify([form.value.initialCommands, form.value.scheduledCommands])) return;
+    // 翻页响应可能尚未包含刚创建的模板；刷新后再插入，确保可立即选择。
+    templateItems.value = [template, ...templateItems.value.filter(item => item.id !== template.id)];
+    templateId.value = template.id;
+    form.value.sourceTemplateId = template.id;
+    form.value.sourceTemplateVersion = template.version;
+    ElMessage.success("命令模板已保存");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(error instanceof Error ? error.message : "保存命令模板失败");
+  } finally {
+    if (current === generation) savingTemplate.value = false;
+  }
+}
 // 仅提交与初始快照不同的字段，保留编辑密码为空时“不覆盖原密码”的后端语义。
 async function save() {
   if (!canSave.value) return;
@@ -258,6 +327,7 @@ async function save() {
         Object.entries(payload).filter(
           ([key, value]) =>
             key !== "resourceId" &&
+            key !== "useResourceCredentials" &&
             JSON.stringify(value) !==
             JSON.stringify(original.value[key as keyof Task]),
         ),
@@ -314,10 +384,10 @@ async function save() {
                 ><el-input v-model="form.name" maxlength="128"
               /></el-form-item>
               <el-form-item label="连接协议" required
-                ><el-select v-model="form.protocol" :disabled="serialServerOwnedTask"
-                  ><el-option label="SSH" value="SSH" /><el-option
+                  ><el-select v-model="form.protocol" :disabled="serialServerOwnedTask"
+                  ><el-option label="SSH" value="SSH" :disabled="networkResourceUnavailable" /><el-option
                     label="Telnet 设备"
-                    value="TELNET_DEVICE" /><el-option
+                    value="TELNET_DEVICE" :disabled="networkResourceUnavailable" /><el-option
                     label="Telnet 串口"
                     value="TELNET_SERIAL" /></el-select
               ></el-form-item>
@@ -331,6 +401,7 @@ async function save() {
                   <el-option v-for="item in resources.filter(resource => resource.kind === 'HIKVISION_NETWORK')" :key="item.id" :label="`${item.name} · ${item.ip}`" :value="item.id" />
                 </el-select>
                 <small v-if="props.task?.resourceId" class="inline-option">已关联任务不能转移资源</small>
+                <small v-else-if="networkResourceUnavailable" class="inline-option">当前认证未成功，只能创建 Telnet 串口任务</small>
               </el-form-item>
               <template v-else-if="serial">
                 <el-form-item label="关联设备资源" prop="resourceId">
@@ -363,7 +434,7 @@ async function save() {
                   @change="portTouched = true"
               /></el-form-item>
               <el-form-item label="用户名" prop="username"
-                ><el-input v-model="form.username" autocomplete="off"
+                ><el-input v-model="form.username" autocomplete="off" @input="form.useResourceCredentials = false"
               /></el-form-item>
               <el-form-item
                 :label="props.task ? '密码（留空保持原值）' : '密码'"
@@ -374,6 +445,9 @@ async function save() {
                   show-password
                   autocomplete="new-password"
                   :disabled="clearPassword"
+                  :placeholder="usingSavedResourceCredentials ? '使用资源已保存的密码' : ''"
+                  :loading="credentialLoading"
+                  @input="form.useResourceCredentials = false"
               /></el-form-item>
             </div>
             <el-checkbox v-if="serial && props.task" v-model="clearPassword">清除已保存密码</el-checkbox>
@@ -384,6 +458,7 @@ async function save() {
           <section class="form-section">
             <div class="section-heading">
               <h2>命令配置</h2>
+              <el-button v-if="!templateId && permissions.can('templates:write')" text type="primary" :loading="savingTemplate" :disabled="savingTemplate || (!form.initialCommands.length && !form.scheduledCommands.length)" @click="quickSaveTemplate">另存为模板</el-button>
               <el-select
                 v-if="permissions.can('templates:read')"
                 v-model="templateId"

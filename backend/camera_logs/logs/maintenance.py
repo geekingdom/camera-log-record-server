@@ -23,6 +23,7 @@ from pymongo import ReturnDocument
 from camera_logs.common.database import now
 from camera_logs.logs.compression import _hash_stream, compress_hour
 from camera_logs.logs.export_locks import ExportLock
+from camera_logs.logs.search_index import index_path
 
 logger = logging.getLogger(__name__)
 EXPORT_CLEANUP_BATCH_SIZE = 100
@@ -312,7 +313,7 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
             if path.suffixes[-2:] != [".tar", ".gz"]:
                 raise ValueError("retention only deletes published archives")
             await asyncio.to_thread(path.unlink, missing_ok=True)
-            sidecars = {_metadata_path(path)}
+            sidecars = {_metadata_path(path), index_path(path)}
             for member in claimed_group:
                 if member.get("indexPath"):
                     sidecars.add(_contained(repo, member["indexPath"]))

@@ -28,6 +28,7 @@ const requests = [];
 const contentRequests = [];
 let delayMetadata = false;
 let searchRequest;
+let finishSearch = false;
 
 async function assertViewerLayout(page, dialog, viewport, screenshotName) {
   await page.setViewportSize(viewport);
@@ -83,7 +84,7 @@ await context.route("**/api/v1/**", async route => {
   if (path === `/api/v1/tasks/${task.id}`) return json(route, task);
   if (path === `/api/v1/tasks/${task.id}/log-hours`) return json(route, { items: [{ hourId: "hour", hour: "2026-09-11T00:00:00Z", status: "READY", integrity: "VERIFIED", bytes: file.bytes, archiveBytes: 2, files: [file] }], total: 1, page: 1, pageSize: 24 });
   if (path === "/api/v1/log-searches" && request.method() === "POST") { searchRequest = request.postDataJSON(); return json(route, { id: "search" }); }
-  if (path === "/api/v1/log-searches/search") return json(route, { id: "search", status: "SUCCEEDED", progress: 100 });
+  if (path === "/api/v1/log-searches/search") return json(route, { id: "search", status: finishSearch ? "SUCCEEDED" : "RUNNING", progress: finishSearch ? 100 : 50, resultCount: 2 });
   if (path === "/api/v1/log-searches/search/results") return json(route, { items: [{ fileId: file.id, offset: matchOffset, text: `\u001b[31m前置 ${keyword} 完整匹配行\u001b[0m` }, { fileId: lateFile.id, offset: 12, text: "迟到元数据匹配行" }], total: 2, page: 1, pageSize: 100 });
   if (path === `/api/v1/log-files/${lateFile.id}`) { await new Promise(resolve => setTimeout(resolve, 400)); return json(route, lateFile); }
   if (path === `/api/v1/log-files/${file.id}/content`) {
@@ -132,6 +133,10 @@ try {
   await page.getByRole("button", { name: "检索", exact: true }).click();
   const result = page.getByText(`前置 ${keyword} 完整匹配行`, { exact: true });
   await result.waitFor();
+  await page.getByText("检索中，结果尚未完整", { exact: false }).waitFor();
+  assert.ok(requests.some(url => url.pathname === "/api/v1/log-searches/search" && url.searchParams.get("includeResults") === "false"), "状态轮询不重复传输全部结果");
+  finishSearch = true;
+  await page.getByText("检索中，结果尚未完整", { exact: false }).waitFor({ state: "hidden" });
   assert.deepEqual(searchRequest, { taskId: task.id, keyword, start: "2026-09-11T00:15:00.000Z", end: "2026-09-11T01:45:00.000Z" });
   assert.equal(await result.evaluate(element => element.textContent), `前置 ${keyword} 完整匹配行`);
   await mkdir(resolve("output/playwright"), { recursive: true });

@@ -11,8 +11,10 @@ import os
 import shutil
 import tarfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -35,6 +37,9 @@ from camera_logs.logs.hour_download import (
 from camera_logs.logs.job_completion import complete_job
 from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.naming import safe_filename_component
+from camera_logs.logs.search_archives import ReadyArchiveGroup
+from camera_logs.logs.search_candidates import search_candidates
+from camera_logs.logs.search_results import publish_search_results
 from camera_logs.logs.search_stream import StreamSearch, index_entries
 from camera_logs.logs.time_range import TimeRangeScan
 
@@ -42,6 +47,7 @@ OUTPUT_LIMIT = 20_000_000_000
 TEMP_LIMIT = 100_000_000_000
 SEARCH_SNAPSHOT_LIMIT = 20_000_000_000
 SEARCH_RESULTS_TEXT_LIMIT = 8 * 1024 * 1024
+SEARCH_RESULT_PUBLISH_SECONDS = 1
 _jobs = asyncio.Semaphore(2)
 _temp_reservation_lock = asyncio.Lock()
 _temp_reservations: dict[str, int] = {}
@@ -234,6 +240,27 @@ class JobProgress:
             self.persisted = candidate
 
 
+class SearchResultPublisher:
+    """按成员检查点发布搜索前缀，首项立即可见并限制高频大文档覆写。"""
+
+    def __init__(self, repo: Any, job: dict[str, Any]) -> None:
+        self.repo, self.job = repo, job
+        self.count, self.published_at = 0, 0.0
+
+    async def publish(self, results: list[dict[str, Any]], *, force: bool = False) -> None:
+        """新结果首项立即写入，其余至少相隔一秒；丢失归属后不再继续扫描。"""
+        if len(results) == self.count:
+            return
+        current = monotonic()
+        if not force and self.count and current - self.published_at < SEARCH_RESULT_PUBLISH_SECONDS:
+            return
+        if not await publish_search_results(self.repo, self.job, results):
+            if await _cancelled(self.repo, self.job["id"]):
+                raise asyncio.CancelledError()
+            raise RuntimeError("execution ownership lost while publishing search results")
+        self.count, self.published_at = len(results), current
+
+
 async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     """按小时重组用户下载；用户包只包含日志 tar，不包含索引或清单。"""
     exports = _root(repo) / "exports"
@@ -385,6 +412,43 @@ def _finish_search_limited(scanner: StreamSearch, limit: int, text_limit: int):
     return results, text_bytes, False
 
 
+async def _ready_archive_group(repo: Any, frozen_files: list[dict[str, Any]], position: int,
+                               first_file: dict[str, Any]):
+    """取得连续的同包 READY 成员；任何不完整旁路索引均回退到单文件快照流程。"""
+    first = frozen_files[position]
+    if first.get("status") != "READY" or first_file.get("nodeId") != repo.settings.node_id:
+        return []
+    path = _file_path(repo, first_file)
+    if path.suffixes[-2:] != [".tar", ".gz"] or not first_file.get("archiveMember"):
+        return []
+    try:
+        index = _contained(repo, first_file["indexPath"])
+    except (KeyError, ValueError):
+        return []
+    if not index.is_file():
+        return []
+    if first_file.get("archiveMember") != first.get("archiveMember") or int(first_file.get("bytes", -1)) != int(first.get("bytes", -2)):
+        return []
+    group = [(first, index)]
+    for candidate in frozen_files[position + 1:]:
+        if candidate.get("status") != "READY":
+            break
+        file = await _file_doc(repo, candidate)
+        if file.get("nodeId") != repo.settings.node_id or not file.get("archiveMember"):
+            break
+        try:
+            candidate_path = _file_path(repo, file)
+            candidate_index = _contained(repo, file["indexPath"])
+        except (KeyError, ValueError):
+            break
+        if (candidate_path != path or not candidate_index.is_file()
+                or file.get("archiveMember") != candidate.get("archiveMember")
+                or int(file.get("bytes", -1)) != int(candidate.get("bytes", -2))):
+            break
+        group.append((candidate, candidate_index))
+    return group
+
+
 async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     """搜索最多返回一千项，记录截断标识并始终清理本作业临时目录。"""
     needle = job.get("keyword", "").encode()
@@ -393,16 +457,57 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     scanner = StreamSearch(needle, start, end) if needle else TimeRangeScan(start, end)
     results, truncated, result_text_bytes = [], False, 0
     progress: JobProgress | None = job.get("_progress")
+    publisher = SearchResultPublisher(repo, job)
     scratch, stopped = _root(repo) / "exports" / ".tmp" / job["id"], threading.Event()
     # 每次只保留一个快照；以实际写入上限预留，不能把正文大小当作含索引压缩包上限。
     await _reserve_temp(repo, job["id"], SEARCH_SNAPSHOT_LIMIT)
     try:
         await job_thread(scratch.mkdir, parents=True, exist_ok=True)
-        for frozen in job["files"]:
+        candidate_ids = await search_candidates(repo, job["files"], job.get("keyword", ""),
+                                               cancelled=lambda: _cancelled(repo, job["id"]))
+        position = 0
+        while position < len(job["files"]):
+            frozen = job["files"][position]
             if await _cancelled(repo, job["id"]):
                 stopped.set()
                 raise asyncio.CancelledError()
+            if frozen["id"] not in candidate_ids:
+                if progress is not None:
+                    await progress.advance()
+                position += 1
+                continue
             file = await _file_doc(repo, frozen)
+            # 分组只包含连续候选；跳过部分不能令扫描器误拼接不相邻的日志。
+            end = position + 1
+            while end < len(job["files"]) and job["files"][end]["id"] in candidate_ids:
+                end += 1
+            group = await _ready_archive_group(repo, job["files"][:end], position, file)
+            if group:
+                archive_group = ReadyArchiveGroup(_file_path(repo, file), scanner, stopped.is_set)
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="log-search") as executor:
+                    try:
+                        await job_thread(archive_group.open, stop=stopped, executor=executor)
+                        for member_frozen, index in group:
+                            if await _cancelled(repo, job["id"]):
+                                stopped.set()
+                                raise asyncio.CancelledError()
+                            matches, text_bytes, bounded = await job_thread(
+                                archive_group.scan_member, member_frozen, index, 1000 - len(results),
+                                SEARCH_RESULTS_TEXT_LIMIT - result_text_bytes, stopped.is_set,
+                                stop=stopped, executor=executor,
+                            )
+                            results.extend(matches)
+                            result_text_bytes += text_bytes
+                            await publisher.publish(results)
+                            if progress is not None:
+                                await progress.advance()
+                            position += 1
+                            if bounded:
+                                await publisher.publish(results, force=True)
+                                return {"results": results, "resultCount": len(results), "truncated": True}
+                    finally:
+                        await job_thread(archive_group.close, executor=executor)
+                continue
             path, temporary = await _archive(repo, frozen, scratch, include_index=True, max_output_bytes=SEARCH_SNAPSHOT_LIMIT)
             matches, text_bytes, bounded = await job_thread(
                 _search_limited, path, scanner, frozen, 1000 - len(results),
@@ -415,8 +520,11 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 await progress.advance()
             results.extend(matches)
             result_text_bytes += text_bytes
+            await publisher.publish(results)
             if bounded:
-                return {"results": results, "truncated": True}
+                await publisher.publish(results, force=True)
+                return {"results": results, "resultCount": len(results), "truncated": True}
+            position += 1
         if isinstance(scanner, StreamSearch):
             matches, text_bytes, bounded = await job_thread(
                 _finish_search_limited, scanner, 1000 - len(results),
@@ -424,9 +532,11 @@ async def _search(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             )
             results.extend(matches)
             result_text_bytes += text_bytes
+            await publisher.publish(results, force=True)
             if bounded:
-                return {"results": results, "truncated": True}
-        return {"results": results, "truncated": truncated}
+                return {"results": results, "resultCount": len(results), "truncated": True}
+        await publisher.publish(results, force=True)
+        return {"results": results, "resultCount": len(results), "truncated": truncated}
     finally:
         stopped.set()
         try:

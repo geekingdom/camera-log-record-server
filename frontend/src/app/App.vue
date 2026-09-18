@@ -115,6 +115,8 @@ const {
   taskStatus,
   taskCreatedBy,
   taskShowAll,
+  taskSortBy,
+  taskSortOrder,
   taskSelectionKey,
   templateCreatedBy,
   templateShowAll,
@@ -215,6 +217,12 @@ function applyTaskFilters() {
 function applyTaskOwnershipFilters(filters: { createdBy: string; showAll: boolean }) {
   taskCreatedBy.value = filters.createdBy;
   taskShowAll.value = filters.showAll;
+  page.value = 1;
+  navigation.requestRefresh();
+}
+function applyTaskSort(sort: { sortBy?: string; sortOrder?: "asc" | "desc" }) {
+  taskSortBy.value = sort.sortBy;
+  taskSortOrder.value = sort.sortOrder;
   page.value = 1;
   navigation.requestRefresh();
 }
@@ -366,6 +374,7 @@ onBeforeUnmount(() => {
                 view: viewTask,
                 changed: () => navigation.requestRefresh(),
                 filters: applyTaskOwnershipFilters,
+                sort: applyTaskSort,
               }"
             />
           </template>

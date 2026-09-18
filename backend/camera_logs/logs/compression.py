@@ -13,6 +13,8 @@ from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from camera_logs.logs.search_index import build_index
+
 _pool: ProcessPoolExecutor | None = None
 
 
@@ -138,6 +140,8 @@ def publish_hour_archive(segments: Iterable[dict], target: Path) -> Path:
         for segment in all_segments:
             Path(segment["logPath"]).unlink(missing_ok=True)
         pending_path.unlink(missing_ok=True)
+        # 索引只是搜索候选加速器；SQLite/磁盘故障绝不能撤销已验证发布的小时包。
+        build_index(target)
         return target
     except BaseException:
         partial.unlink(missing_ok=True)
@@ -167,6 +171,29 @@ async def compress_hour(segments: list[dict], target: Path) -> Path:
     if _pool is None:
         _pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
     return await asyncio.get_running_loop().run_in_executor(_pool, publish_hour_archive, segments, target)
+
+
+async def build_search_index(target: Path) -> bool:
+    """复用唯一压缩进程池异步补建旧小时包索引，不与采集线程争抢 GIL。"""
+    global _pool
+    if _pool is None:
+        _pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+    future = asyncio.get_running_loop().run_in_executor(_pool, build_index, Path(target))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        # 子进程不能随父协程取消而安全中断 SQLite 写入。等待其收尾后才能让维护
+        # 任务退出，防止保留清理或下一轮维护与仍在写入的临时索引竞争。
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # noqa: BLE001 - 原取消仍需传播，后台失败只负责收尾取回。
+                break
+        if not future.cancelled():
+            future.exception()
+        raise
 
 
 async def shutdown_compression() -> None:

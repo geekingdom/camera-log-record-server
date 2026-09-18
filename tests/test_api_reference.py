@@ -5,6 +5,23 @@ from pydantic import TypeAdapter
 from test_api import client  # noqa: F401
 
 
+def test_credentials_sorting_and_progressive_search_are_documented(client):
+    """新凭据权限、全局排序与渐进结果的完整性边界必须在站内目录一致展示。"""
+    catalog = client.get("/api/v1/api-reference").json()
+    operations = {item["id"]: item for item in catalog["operations"]}
+    credential = operations["POST /api/v1/resources/{identifier}/credential"]
+    assert "resources:write" in credential["permission"]
+    assert "仅创建者" in credential["permission"]
+    assert set(credential["responseExample"]) == {"username", "password"}
+    for path in ("resources", "tasks"):
+        parameters = {item["name"]: item for item in operations[f"GET /api/v1/{path}"]["parameters"]}
+        assert "分页" in parameters["sortBy"]["description"]
+    parameters = {item["name"]: item for item in operations["GET /api/v1/log-searches/{identifier}"]["parameters"]}
+    assert "轮询" in parameters["includeResults"]["description"]
+    guide = next(item["text"] for item in catalog["guides"] if item["title"] == "渐进式历史检索")
+    assert "已扫描部分" in guide and "truncated=false" in guide
+
+
 def test_node_write_latency_limit_is_documented_with_valid_examples(client):
     """节点配置目录需解释毫秒阈值和准入边界，并提供可直接提交的示例。"""
     reference = client.get("/api/v1/api-reference").json()

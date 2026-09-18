@@ -28,7 +28,7 @@ def seed_resource(client, identifier, *, serial=False, ip="192.0.2.10"):
     resource = {"id": identifier, "name": identifier, "kind": "SERIAL_SERVER" if serial else "HIKVISION_NETWORK",
                 "ip": ip, "deletedAt": None, "version": 1}
     if not serial:
-        resource.update(model="DS-2CD", subSerialNumber=identifier, authenticatedAt=datetime.now(UTC))
+        resource.update(model="DS-2CD", subSerialNumber=identifier, authenticatedAt=datetime.now(UTC), healthStatus="ONLINE")
     client.portal.call(client.app.state.repo.db.resources.insert_one, resource)
 
 

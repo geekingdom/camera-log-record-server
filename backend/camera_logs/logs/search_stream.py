@@ -156,10 +156,18 @@ class StreamSearch:
         if not continuous:
             yield from self._complete_line()
 
+        cached_entry, cached_end, cached_stamp = None, -1, None
+
         def origin(position):
-            entry = cursor.locate(position)
-            stamp = datetime.fromisoformat(entry["receivedAt"]) if entry else None
-            return file.get("id"), position, stamp
+            """复用同一接收块的时间解析，长关键词尾窗不应逐字节重复解析 ISO 时间。"""
+            nonlocal cached_entry, cached_end, cached_stamp
+            if cached_entry is None or position >= cached_end:
+                cached_entry = cursor.locate(position)
+                cached_end = (cached_entry["offset"] + cached_entry["length"]
+                              if cached_entry is not None else -1)
+                cached_stamp = (datetime.fromisoformat(cached_entry["receivedAt"])
+                                if cached_entry is not None else None)
+            return file.get("id"), position, cached_stamp
 
         offset = 0
         while chunk := stream.read(256 * 1024):

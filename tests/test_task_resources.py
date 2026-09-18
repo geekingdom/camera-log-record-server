@@ -11,7 +11,7 @@ def seed_resource(client, identifier="network", **changes):
     """注入已由资源认证模块验证的资源，隔离设备网络依赖。"""
     resource = {"id": identifier, "kind": "HIKVISION_NETWORK", "ip": "127.0.0.1",
                 "name": identifier, "model": "camera/model", "subSerialNumber": "SN001",
-                "authenticatedAt": "2026-09-08T00:00:00Z"} | changes
+                "authenticatedAt": "2026-09-08T00:00:00Z", "healthStatus": "ONLINE"} | changes
     client.portal.call(client.app.state.repo.db.resources.insert_one, resource)
     return resource
 
@@ -55,6 +55,21 @@ def test_ssh_target_is_saved_and_editable_without_changing_resource(client):
     })
     assert edited.status_code == 200, edited.text
     assert edited.json()["sshTarget"] == "SLAVE_3"
+
+
+def test_creation_authentication_gate_does_not_block_editing_existing_offline_task(client):
+    """新建准入不扩大到已有任务配置编辑，避免离线排障时无法修正凭据。"""
+    seed_resource(client)
+    task = create(client).json()
+    client.portal.call(client.app.state.repo.db.resources.update_one,
+                       {"id": "network"}, {"$set": {"healthStatus": "OFFLINE"}})
+    changed = client.patch(f'/api/v1/tasks/{task["id"]}', json={
+        "version": 1, "name": "离线排障", "username": "corrected", "password": "updated-secret",
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["username"] == "corrected"
+    assert "useResourceCredentials" not in changed.json()
+    assert create(client).status_code == 409
 
 
 def test_serial_resource_only_serial_protocol_and_own_ip(client):

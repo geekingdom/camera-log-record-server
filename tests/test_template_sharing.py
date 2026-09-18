@@ -26,7 +26,7 @@ def seed_resource(client):
         "id": "template-sharing-device", "name": "模板共享设备",
         "kind": "HIKVISION_NETWORK", "ip": "192.0.2.88", "version": 1,
         "deletedAt": None, "model": "DS-2CD", "subSerialNumber": "template-sharing",
-        "authenticatedAt": datetime.now(UTC),
+        "authenticatedAt": datetime.now(UTC), "healthStatus": "ONLINE",
     })
 
 

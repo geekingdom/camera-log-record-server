@@ -17,6 +17,7 @@ ACTION_SUMMARIES = {
     "edit_template": "修改命令模板", "delete_template": "删除命令模板",
     "create_token": "创建服务令牌", "revoke_token": "撤销服务令牌",
     "update_token": "编辑服务账号", "reveal_token": "查看服务账号口令", "rotate_token": "重新生成服务账号口令",
+    "reveal_resource_credential": "查看设备资源登录凭据",
     "DOWNLOAD": "创建日志下载作业", "SEARCH": "创建日志检索作业",
     "cancel_download": "取消日志下载作业", "cancel_search": "取消日志检索作业",
     "update_platform_settings": "修改平台设置", "update_ip_policy": "修改来源访问规则",

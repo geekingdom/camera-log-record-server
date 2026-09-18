@@ -51,6 +51,7 @@ const results = ref<Record<string, unknown>[]>([]),
   allowPartial = ref(false);
 const status = ref(""),
   truncated = ref(false);
+const searchResultStatus = ref("");
 let generation = 0;
 let hoursGeneration = 0;
 let resultsGeneration = 0;
@@ -77,7 +78,7 @@ async function load() {
     if (workspace === generation && current === hoursGeneration) fail(error);
   }
 }
-// 服务端以异步 job 处理下载与检索，统一轮询到终态后再取结果或授权 URL。
+// 搜索在扫描期间显示已经确认的结果；下载仍须等待完整产物生成。
 async function poll(
   id: string,
   kind: "downloads" | "log-searches",
@@ -91,7 +92,13 @@ async function poll(
         : await api.searchStatus(id);
     if (current !== jobGeneration) throw new Error("页面已切换");
     status.value = job.status;
+    if (kind === "log-searches") searchResultStatus.value = job.status;
     progress.value = job.progress ?? 0;
+    if (kind === "log-searches" && job.status === "RUNNING") {
+      const count = "resultCount" in job ? job.resultCount : undefined;
+      if (count === undefined || count !== resultTotal.value) await loadResultPage();
+      if (current !== jobGeneration) throw new Error("页面已切换");
+    }
     if (job.status === "SUCCEEDED") return job;
     if (["FAILED", "CANCELLED", "EXPIRED"].includes(job.status))
       throw new Error(job.error || "作业状态：" + job.status);
@@ -152,6 +159,7 @@ async function search() {
   resultPage.value = 1;
   resultTotal.value = 0;
   resultJob.value = "";
+  searchResultStatus.value = "QUEUED";
   progress.value = 0;
   truncated.value = false;
   try {
@@ -166,14 +174,19 @@ async function search() {
     runningJob = { id: job.id, kind: "log-searches" };
     resultJob.value = job.id;
     const finished = await poll(job.id, "log-searches", current);
-    const found = await api.searchResults(job.id);
-    if (current === jobGeneration) {
+    truncated.value = "truncated" in finished && Boolean(finished.truncated);
+    // 扫描过程中允许翻页，最终刷新仍保持用户正在查看的结果页。
+    const finalResultsGeneration = ++resultsGeneration;
+    const found = await api.searchResults(job.id, resultPage.value);
+    if (current === jobGeneration && finalResultsGeneration === resultsGeneration) {
       results.value = found.items;
       resultTotal.value = found.total;
-      truncated.value = "truncated" in finished && Boolean(finished.truncated);
     }
   } catch (error) {
-    if (current === jobGeneration) fail(error);
+    if (current === jobGeneration) {
+      if (["RUNNING", "QUEUED"].includes(searchResultStatus.value)) searchResultStatus.value = "INTERRUPTED";
+      fail(error);
+    }
   } finally {
     if (current === jobGeneration) {
       busy.value = false;
@@ -195,7 +208,10 @@ async function loadResultPage() {
   const current = ++resultsGeneration;
   try {
     const found = await api.searchResults(resultJob.value, resultPage.value);
-    if (workspace === generation && current === resultsGeneration) results.value = found.items;
+    if (workspace === generation && current === resultsGeneration) {
+      results.value = found.items;
+      resultTotal.value = found.total;
+    }
   } catch (error) { if (workspace === generation && current === resultsGeneration) fail(error); }
 }
 watch(date, () => {
@@ -222,6 +238,11 @@ watch(
     viewerOpen.value = false;
     fileLookupGeneration++;
     results.value = [];
+    resultJob.value = "";
+    searchResultStatus.value = "";
+    resultTotal.value = 0;
+    resultPage.value = 1;
+    truncated.value = false;
     const range = shanghaiDateTimeRange();
     searchStart.value = range.start;
     searchEnd.value = range.end;
@@ -313,6 +334,11 @@ onBeforeUnmount(() => {
       type="warning"
       :closable="false"
     />
+    <div v-if="resultJob" class="search-result-status" role="status">
+      <span>已找到 {{ resultTotal }} 条匹配记录</span>
+      <span v-if="searchResultStatus === 'RUNNING' || searchResultStatus === 'QUEUED'" class="search-result-pending">检索中，结果尚未完整</span>
+      <span v-else-if="searchResultStatus !== 'SUCCEEDED'" class="search-result-pending">检索未完成，仅显示已扫描部分</span>
+    </div>
     <el-table
       scrollbar-always-on
       :data="results"
@@ -344,6 +370,8 @@ onBeforeUnmount(() => {
 .search-time-range label { display: grid; gap: 4px; min-width: min(100%, 210px); }
 .search-time-range input { box-sizing: border-box; width: 210px; max-width: 100%; min-height: 32px; padding: 4px 8px; border: 1px solid #d6dfe0; border-radius: 4px; color: #34474b; font: inherit; }
 .search-line { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.search-result-status { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 12px 0; font-size: 12px; color: #34474b; }
+.search-result-pending { color: #9a6400; }
 :deep(.el-date-editor) {
   max-width: 100%;
 }

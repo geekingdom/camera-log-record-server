@@ -16,7 +16,7 @@ def client(tmp_path):
         client.portal.call(client.app.state.repo.db.resources.insert_one, {
             "id": "fixture-device", "name": "测试设备", "kind": "HIKVISION_NETWORK",
             "ip": "127.0.0.1", "model": "test-model", "subSerialNumber": "test-serial",
-            "authenticatedAt": "2026-09-08T00:00:00Z"})
+            "authenticatedAt": "2026-09-08T00:00:00Z", "healthStatus": "ONLINE"})
         yield client
 
 
@@ -42,6 +42,8 @@ def test_task_idempotency_and_password_secrecy(client):
     task = result.json()
     assert "password" not in task and "passwordEncrypted" not in task
     assert task["hasPassword"]
+    stored = client.portal.call(client.app.state.repo.db.tasks.find_one, {"id": task["id"]})
+    assert stored["username"] == "root" and client.app.state.repo.decrypt(stored["passwordEncrypted"]) == " secret "
     repeated = client.post("/api/v1/tasks", json=body, headers=headers)
     assert repeated.json()["id"] == task["id"]
     assert client.post("/api/v1/tasks", json=body | {"name": "other"}, headers=headers).status_code == 409
@@ -49,6 +51,59 @@ def test_task_idempotency_and_password_secrecy(client):
     assert changed.status_code == 200, changed.text
     assert changed.json()["hasPassword"]
     assert client.patch(f'/api/v1/tasks/{task["id"]}', json={"version": 1, "name": "stale"}).status_code == 409
+
+
+def test_task_creation_reuses_latest_authenticated_resource_credentials_without_returning_them(client, monkeypatch):
+    """prepare 后资源凭据变化时，事务必须复制最新密文且公开读模型继续脱敏。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.update_one, {"id": "fixture-device"}, {"$set": {
+        "username": "resource-admin", "passwordEncrypted": repo.encrypt("resource-secret"),
+        "authenticatedAt": "2026-09-08T00:00:00Z",
+    }})
+    from camera_logs.tasks import api as task_api
+
+    original_create = task_api.create_task_atomic
+
+    async def create_after_credential_change(repository, user, key, payload, build):
+        async def prepare(identifier):
+            result = await build(identifier)
+            await repository.db.resources.update_one({"id": "fixture-device"}, {"$set": {
+                "username": "new-resource-admin", "passwordEncrypted": repository.encrypt("new-resource-secret"),
+            }})
+            return result
+        return await original_create(repository, user, key, payload, prepare)
+
+    monkeypatch.setattr(task_api, "create_task_atomic", create_after_credential_change)
+    result = client.post("/api/v1/tasks", headers={"Idempotency-Key": "resource-default"}, json={
+        "name": "resource-default", "protocol": "SSH", "ip": "127.0.0.1", "port": 22,
+        "resourceId": "fixture-device", "useResourceCredentials": True,
+    })
+    assert result.status_code == 201, result.text
+    task = result.json()
+    stored = client.portal.call(repo.db.tasks.find_one, {"id": task["id"]})
+    assert stored["username"] == "new-resource-admin" and repo.decrypt(stored["passwordEncrypted"]) == "new-resource-secret"
+    assert "useResourceCredentials" not in stored
+    assert "password" not in task and "passwordEncrypted" not in task
+
+
+@pytest.mark.parametrize("health_status", [None, "AUTH_FAILED", "OFFLINE", "ERROR"])
+def test_network_task_creation_requires_current_successful_authentication(client, health_status):
+    """历史认证时间不能替代当前认证成功；Telnet 串口仍走独立准入路径。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.update_one, {"id": "fixture-device"}, {"$set": {
+        "healthStatus": health_status,
+        "authenticatedAt": "2026-09-08T00:00:00Z",
+    }})
+    response = client.post("/api/v1/tasks", headers={"Idempotency-Key": f"current-health-{health_status}"}, json={
+        "name": "requires-current-health", "protocol": "SSH", "ip": "127.0.0.1", "port": 22,
+        "resourceId": "fixture-device", "username": "root", "password": "secret",
+    })
+    assert response.status_code == 409
+    serial = client.post("/api/v1/tasks", headers={"Idempotency-Key": f"serial-health-{health_status}"}, json={
+        "name": "serial-ignores-network-health", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9000,
+        "resourceId": "fixture-device",
+    })
+    assert serial.status_code == 201, serial.text
 
 
 def test_template_snapshot_and_separate_command_ids(client):
@@ -121,6 +176,36 @@ def test_task_list_combines_creator_filters_and_resource_deletion_time(client):
     assert response.json()["items"][0]["resourceDeletedAt"] == "2026-09-09T10:00:00Z"
     owner_b = client.get("/api/v1/tasks?createdBy=owner-b").json()["items"]
     assert "resourceDeletedAt" not in next(item for item in owner_b if item["id"] == "other-owner")
+
+
+def test_task_list_sorts_full_result_set_and_resource_deletion_time(client):
+    """任务表排序在分页前完成，关联资源删除时间也不能退化为当前页内排序。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.insert_many, [
+        {"id": "deleted-earlier", "deletedAt": "2026-09-09T09:00:00Z"},
+        {"id": "deleted-later", "deletedAt": "2026-09-09T11:00:00Z"},
+    ])
+    client.portal.call(repo.db.tasks.insert_many, [
+        {"id": "task-b", "name": "sort-case-b", "ip": "192.0.2.12", "status": "STOPPED",
+         "desiredState": "STOPPED", "createdAt": "2026-09-10T10:00:00Z"},
+        {"id": "task-a", "name": "sort-case-b", "ip": "192.0.2.11", "status": "STOPPED",
+         "desiredState": "STOPPED", "createdAt": "2026-09-10T10:00:00Z"},
+        {"id": "task-c", "name": "sort-case-a", "ip": "192.0.2.13", "status": "STOPPED",
+         "desiredState": "STOPPED", "createdAt": "2026-09-10T09:00:00Z"},
+        {"id": "deleted-a", "name": "sort-case-d", "resourceId": "deleted-earlier", "resourceDeleted": True},
+        {"id": "deleted-b", "name": "sort-case-c", "resourceId": "deleted-later", "resourceDeleted": True},
+    ])
+
+    by_name = client.get("/api/v1/tasks?search=sort-case&sortBy=name&sortOrder=asc&pageSize=2")
+    by_deleted = client.get("/api/v1/tasks?search=sort-case&sortBy=resourceDeletedAt&sortOrder=desc&pageSize=2")
+    default = client.get("/api/v1/tasks?search=sort-case&pageSize=3")
+
+    assert by_name.status_code == by_deleted.status_code == default.status_code == 200
+    assert [item["id"] for item in by_name.json()["items"]] == ["task-c", "task-a"]
+    assert [item["id"] for item in by_deleted.json()["items"]] == ["deleted-b", "deleted-a"]
+    assert [item["id"] for item in default.json()["items"]] == ["task-a", "task-b", "task-c"]
+    assert client.get("/api/v1/tasks?sortBy=name").status_code == 422
+    assert client.get("/api/v1/tasks?sortBy=unknown&sortOrder=asc").status_code == 422
 
 
 def test_stop_idempotence_and_start_endpoints(client):

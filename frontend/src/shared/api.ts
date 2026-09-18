@@ -132,6 +132,7 @@ const taskFields = [
   "port",
   "username",
   "password",
+  "useResourceCredentials",
   "initialCommands",
   "scheduledCommands",
   "sourceTemplateId",
@@ -162,7 +163,7 @@ export const api = {
   resources: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; model?: string; subSerialNumber?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string; hasCoredumps?: "true" | "false" },
+    filters?: { search?: string; model?: string; subSerialNumber?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string; hasCoredumps?: "true" | "false"; sortBy?: string; sortOrder?: "asc" | "desc" },
   ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
   resource: (id: string) => request<Resource>(`/resources/${id}`),
   /** 监控历史按资源读取；仅拼接已定义参数，避免把 undefined 送入服务端。 */
@@ -261,7 +262,7 @@ export const api = {
   tasks: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; status?: string; resourceId?: string; createdBy?: string },
+    filters?: { search?: string; status?: string; resourceId?: string; createdBy?: string; sortBy?: string; sortOrder?: "asc" | "desc" },
   ) => request<Page<Task>>(`/tasks${query(page, pageSize, filters)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (
@@ -362,7 +363,8 @@ export const api = {
       progress?: number;
       error?: string;
       truncated?: boolean;
-    }>(`/log-searches/${id}`),
+      resultCount?: number;
+    }>(`/log-searches/${id}?includeResults=false`),
   cancelJob: (id: string, kind: "downloads" | "log-searches") =>
     request<void>(`/${kind}/${id}`, { method: "DELETE" }),
   browserDownload: (id: string) =>

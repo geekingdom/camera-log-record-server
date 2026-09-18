@@ -14,6 +14,7 @@ FIELD_DESCRIPTIONS = {
     "allowPartial": "小时归档存在缺失片段时，是否仍允许生成部分下载包。",
     "authType": "访问海康 ISAPI 设备信息接口时使用的 HTTP 认证方式。",
     "autoStart": "创建采集任务后是否立即提交启动操作。",
+    "useResourceCredentials": "SSH或Telnet设备任务是否在服务端复制所属海康资源的登录凭据；省略且用户名密码均未填写时默认启用。任务保存独立凭据副本。",
     "capacity": "该 Worker 节点允许同时承载的采集任务数量。",
     "writeLatencyLimitMs": "该节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动中断已有采集。",
     "clearPassword": "编辑任务时是否明确清除已保存的设备登录密码。",
@@ -69,7 +70,7 @@ FIELD_DESCRIPTIONS = {
     "newline": "发送命令时自动附加的换行符类型。",
     "ownerTask": "当前负责资源级 Coredump 监控的采集任务摘要。",
     "occurrenceCount": "同一UTC日内连续相同周期认证结果合并后的观测次数，包括成功、认证失败、离线和异常；旧单次记录为 1。",
-    "password": "用于登录设备、认证资源或创建账户的密码；响应永不回传。",
+    "password": "用于登录设备、认证资源或创建账户的密码；普通查询不返回，仅专用凭据查看接口向有权限的资源所有者或管理员返回。",
     "passwordPrompt": "Telnet 登录阶段识别密码输入提示符的文本。",
     "port": "SSH、Telnet 设备或串口服务器的连接端口。",
     "prompt": "命令发送后需要等待设备输出匹配的可选提示符。",
@@ -98,6 +99,15 @@ FIELD_DESCRIPTIONS = {
 
 # 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
 OPERATION_DESCRIPTIONS = {
+    ("POST", "/api/v1/tasks"): (
+        "创建资源所属采集任务。SSH和Telnet设备类型仅允许当前认证成功的海康网络资源；"
+        "Telnet串口不受设备HTTP认证状态限制。可用useResourceCredentials在服务端复制资源登录凭据，"
+        "autoStart默认false，启动与新建均受当前账号权限约束。"
+    ),
+    ("POST", "/api/v1/resources/{identifier}/credential"): (
+        "读取资源登录凭据供任务创建表单使用。仅具有resources:write权限的资源所有者或管理员可调用；"
+        "禁止缓存并记录查看审计。普通资源查询不返回密码；其他有任务创建权限的用户可在服务端复用凭据，无需获得明文。"
+    ),
     ("POST", "/api/v1/resources/{identifier}/authenticate"): (
         "空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；ISAPI异常不停止仍有日志输出的SSH或Telnet设备任务，"
         "Worker确认连接断开或持续无输出后才系统停止；Telnet串口不受认证状态影响。未领取的网络任务仍要求认证成功。"
@@ -126,6 +136,9 @@ PARAMETER_DESCRIPTIONS = {
     "hasCoredumps": "是否存在已登记且未确认缺失的 Coredump 源文件或有效冻结副本；true存在，false不存在，省略不过滤，附属标志文件不计入。",
     "includeDeleted": "是否在列表中包含已经软删除的资源或模板。",
     "includeTotal": "管理事件游标查询是否额外统计精确总数，默认false并返回total:null；统计会增加数据库扫描成本。",
+    "includeResults": "检索作业状态是否包含完整结果和冻结文件清单，默认true兼容原接口；轮询建议false并从results接口分页读取已确认命中。",
+    "sortBy": "列表排序字段，须与sortOrder同时指定；在全部筛选结果排序后分页，相同值以稳定ID排序。省略恢复创建时间倒序。",
+    "sortOrder": "排序方向：asc升序或desc降序；与sortBy同时指定。",
     "ip": "按设备资源或节点的精确网络地址筛选。",
     "kind": "按设备资源类别或命令执行类别筛选。",
     "level": "按事件告警级别筛选：INFO、WARNING 或 ERROR。",

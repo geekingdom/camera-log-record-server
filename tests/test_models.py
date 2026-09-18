@@ -10,13 +10,28 @@ def test_serial_optional_credentials_and_ssh_required():
     assert task.name == "test"
     assert task.initialCommands == []
     with pytest.raises(ValidationError):
-        TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22, resourceId="device")
+        TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22, resourceId="device",
+                   useResourceCredentials=False)
 
 
 def test_password_spaces_are_preserved():
     task = TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22,
                       username="root", password="  secret  ", resourceId="device")
     assert task.password == "  secret  "
+
+
+def test_network_task_can_explicitly_reuse_saved_resource_credentials():
+    """复用已认证资源时不要求浏览器再次携带设备密码。"""
+    task = TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22,
+                      resourceId="device", useResourceCredentials=True)
+    assert task.useResourceCredentials is True and task.password == ""
+
+
+def test_network_task_without_resource_reuse_still_requires_credentials():
+    """关闭资源凭据复用后，空凭据不能绕过连接参数校验。"""
+    with pytest.raises(ValueError):
+        TaskCreate(name="test", protocol="SSH", ip="127.0.0.1", port=22,
+                   resourceId="device", useResourceCredentials=False)
 
 
 def test_ssh_target_defaults_to_host_and_rejects_slaves_for_non_ssh_protocols():

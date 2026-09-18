@@ -68,7 +68,7 @@ def seed_network_resource(client, identifier="task-resource"):
     client.portal.call(client.app.state.repo.db.resources.insert_one, {
         "id": identifier, "name": identifier, "kind": "HIKVISION_NETWORK", "ip": "203.0.113.77",
         "model": "DS-2CD", "subSerialNumber": identifier, "authenticatedAt": datetime.now(UTC),
-        "deletedAt": None, "version": 1,
+        "deletedAt": None, "version": 1, "healthStatus": "ONLINE",
     })
 
 

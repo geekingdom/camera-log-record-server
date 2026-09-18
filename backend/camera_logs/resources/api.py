@@ -4,7 +4,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Depends, HTTPException, Query, Request, Response
 from pydantic import IPvAnyAddress
 from pymongo import ReturnDocument
 
@@ -13,7 +13,6 @@ from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_owner
 from camera_logs.coredumps.presence import (
     coredump_presence_by_resource_ids,
-    page_resources_by_presence,
     visible_coredump_query,
 )
 from camera_logs.resources.address_claim import claim_address, release_address
@@ -26,6 +25,7 @@ from camera_logs.resources.authentication_records import (
 )
 from camera_logs.resources.health import apply_manual_result, grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
+from camera_logs.resources.listing import page_resources
 from camera_logs.resources.models import CoredumpMonitorStatus, ResourceInput, ResourcePatch
 
 
@@ -48,19 +48,21 @@ async def _resource_has_coredumps(repo, identifier: str) -> bool:
     return await repo().db.coredump_files.find_one({"$and": [{"resourceId": identifier}, visible_coredump_query()]}, {"_id": 1}) is not None
 
 
-async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100, has_coredumps: bool | None = None):
+async def _resource_view(repo, document, user: dict | None = None, task_limit: int = 100, has_coredumps: bool | None = None,
+                         summary_present: bool = False):
     """返回有界任务列表，以及用于展示采集和删除风险的两类独立摘要。"""
     item = _resource_public(document)
     item["hasCoredumps"] = await _resource_has_coredumps(repo, item["id"]) if has_coredumps is None else has_coredumps
     task_query = task_resource_query(item["id"])
-    item["taskCount"] = await repo().db.tasks.count_documents(task_query)
-    item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {
-        "status": "COLLECTING", "desiredState": "RUNNING",
-    }]})
-    item["unsettledTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {"$or": [
-        {"nodeId": {"$exists": True, "$ne": None}}, {"desiredState": {"$in": ["RUNNING", "PAUSED"]}},
-        {"status": "BLOCKED"},
-    ]}]})
+    if not summary_present:
+        item["taskCount"] = await repo().db.tasks.count_documents(task_query)
+        item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {
+            "status": "COLLECTING", "desiredState": "RUNNING",
+        }]})
+        item["unsettledTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {"$or": [
+            {"nodeId": {"$exists": True, "$ne": None}}, {"desiredState": {"$in": ["RUNNING", "PAUSED"]}},
+            {"status": "BLOCKED"},
+        ]}]})
     fields = {key: 1 for key in ("id", "name", "protocol", "ip", "port", "status", "desiredState",
                                  "resourceId", "serialServerResourceId", "createdBy", "createdByName")}
     item["tasks"] = [public(task) async for task in repo().db.tasks.find(task_query, fields).sort("id", 1).limit(task_limit)]
@@ -127,7 +129,8 @@ def install_resource_routes(app, repo, listing):
                         name: str | None = Query(None, max_length=128), ip: IPvAnyAddress | None = None,
                         model: str | None = Query(None, max_length=256),
                         subSerialNumber: str | None = Query(None, max_length=256),
-                        softwareVersion: str | None = Query(None, max_length=256), hasCoredumps: bool | None = None):
+                        softwareVersion: str | None = Query(None, max_length=256), hasCoredumps: bool | None = None,
+                        sortBy: str | None = Query(None, max_length=32), sortOrder: str | None = Query(None, max_length=4)):
         """资源发现：search跨名称/IP/型号/序列号/软件版本搜索；独立字段取交集，IP精确匹配。
 
         返回授权范围内任务摘要，默认最多100条；tasksTruncated为true时使用tasksUrl分页读取。
@@ -149,13 +152,14 @@ def install_resource_routes(app, repo, listing):
                 query[field] = {"$regex": re.escape(value), "$options": "i"}
         if ip is not None:
             query["ip"] = str(ip)
+        result = await page_resources(repo().db, query, page, pageSize, has_coredumps=hasCoredumps,
+                                      sort_by=sortBy, sort_order=sortOrder)
         if hasCoredumps is None:
-            result = await listing("resources", query, page, pageSize)
-            present_ids = await coredump_presence_by_resource_ids(repo().db, [item["id"] for item in result["items"]])
-            result["items"] = [await _resource_view(repo, item, user, taskLimit, item["id"] in present_ids) for item in result["items"]]
-        else:
-            result = await page_resources_by_presence(repo().db, query, page, pageSize, hasCoredumps)
-            result["items"] = [await _resource_view(repo, item, user, taskLimit, item["hasCoredumps"]) for item in result["items"]]
+            present = await coredump_presence_by_resource_ids(repo().db, [item["id"] for item in result["items"]])
+            for item in result["items"]:
+                item["hasCoredumps"] = item["id"] in present
+        result["items"] = [await _resource_view(repo, item, user, taskLimit, item["hasCoredumps"], True)
+                           for item in result["items"]]
         return result
 
     @app.get("/api/v1/resources/{identifier}")
@@ -350,6 +354,20 @@ def install_resource_routes(app, repo, listing):
         else:
             await record_manual_authentication(old, user, result="SUCCESS", before=old, after=old | metadata)
         return metadata
+
+    @app.post("/api/v1/resources/{identifier}/credential")
+    async def reveal_resource_credential(identifier: str, user: User, response: Response):
+        """按资源所有权一次性返回连接凭据，普通资源读取接口始终保持脱敏。"""
+        authorize(user, "resources:write")
+        resource = await repo().get("resources", identifier)
+        authorize_owner(user, resource)
+        if resource.get("deletedAt") is not None:
+            raise HTTPException(409, "资源已删除，不能读取连接凭据")
+        if resource.get("kind") != "HIKVISION_NETWORK":
+            raise HTTPException(422, "串口服务器没有设备登录凭据")
+        await repo().audit(user["id"], "reveal_resource_credential", identifier)
+        response.headers["Cache-Control"] = "no-store"
+        return {"username": resource["username"], "password": repo().decrypt(resource.get("passwordEncrypted", ""))}
 
     @app.patch("/api/v1/resources/{identifier}")
     async def edit_resource(identifier: str, body: ResourcePatch, user: User):

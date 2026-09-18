@@ -86,6 +86,8 @@ def response_example(path, method, status):
         return None
     if path == "/health":
         return {"status": "ok"}
+    if path.endswith("/credential"):
+        return {"username": "admin", "password": "<设备资源已保存的密码>"}
     if path == "/metrics":
         return "# TYPE camera_tasks gauge\ncamera_tasks 2\n"
     if path.endswith("/authentication-records"):

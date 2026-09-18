@@ -4,6 +4,8 @@ from camera_logs.reference.descriptions import describe_operation, describe_para
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
+    {"title": "渐进式历史检索", "text": "POST /api/v1/log-searches冻结文件范围后返回作业。GET /api/v1/log-searches/{identifier}?includeResults=false用于轻量轮询，resultCount为当前已确认结果数；通过/results分页读取。RUNNING中的结果只是已扫描部分，SUCCEEDED且truncated=false才表示本次冻结范围扫描完成。FAILED/CANCELLED/EXPIRED中的已有结果不能证明其余范围没有匹配。普通状态接口默认仍包含结果以兼容现有调用。"},
+    {"title": "历史检索全文候选索引", "text": "小时归档旁自动维护SQLite FTS5候选索引，仅保存分卷边界和检索词候选，不保存日志正文，也不加入下载包。索引只用于跳过不可能命中的分卷，最终仍按原始字节确认；索引缺失、损坏、版本或归档指纹不符时自动回退原文扫描。短关键词和高频关键词可能扫描全部原文，结果上限与时间范围限制不变。"},
     {"title": "节点写入延迟限制", "text": "管理员通过POST /api/v1/admin/nodes登记、PATCH /api/v1/admin/nodes/{node_id}带version编辑writeLatencyLimitMs。单位毫秒，整数1至60000，默认200；每节点独立保存，达到75%预警，超过阈值限制新采集会话。保存后调度使用新配置，Worker下一周期更新心跳和准入，无需重启；旧心跳仍拒绝准入时需要等待新心跳。已有采集不因超限被主动停止。提高阈值只调整准入和健康判断，不提高磁盘吞吐、不改变日志顺序、批量写入或同步策略。"},
     {"title": "管理事件游标分页", "text": "audit-events、runtime-events和request-events仅管理员可访问。传cursor=开启游标首屏，使用返回nextCursor续页并保持原筛选和时间范围；返回items、pageSize、hasMore、nextCursor及total。默认不统计总数，total为null，显式includeTotal=true才执行精确统计。未传cursor仍保持page/pageSize旧接口。游标不能跨事件类别或筛选条件使用，页码大于1与游标同时提供返回422。游标是翻页位置而非历史快照，新记录在刷新首屏后可见，保留期内删除的记录不会补回。"},
     {"title": "Coredump时间含义", "text": "receivedAt和firstSeenAt是服务器首次扫描观测时间，不代表文件传输完成。sourceModifiedAt来自设备文件系统mtime，会受设备时间影响，因此可能早于或晚于接收观测时间；不能只比较这两个时间判断丢失或延迟。"},
@@ -41,6 +43,7 @@ SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网�
            "restart": "重新启动等待隔离任务", "log-gap-catalog": "定位实时缺口已保存片段",
            "creators": "查询历史创建用户",
            "reveal": "查看服务账号口令", "rotate": "重新生成服务账号口令",
+           "credential": "查看设备资源登录凭据",
            "authenticate": "认证设备资源", "login": "账号登录", "logout": "退出登录", "password": "修改本人密码",
            "me": "查询当前登录用户", "reset-password": "重置子账户密码", "confirm-isolation": "确认旧节点已隔离",
            "browser-session": "签发浏览器下载授权", "results": "分页查询检索结果", "log-hours": "查询任务小时日志",
@@ -90,6 +93,8 @@ def permission(path, method):
     if "/resources" in path:
         if method == "GET":
             return "tasks:read"
+        if path.endswith("/credential"):
+            return "resources:write + 仅创建者或admin（明文凭据，不缓存）"
         if path == "/api/v1/resources/{identifier}/authenticate" and method == "POST":
             return "resources:write + 仅创建者或admin；空请求体另需tasks:control且非管理员不得影响他人关联任务，完整ResourceInput仅预览"
         if method == "POST":

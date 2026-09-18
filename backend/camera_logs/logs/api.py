@@ -208,8 +208,14 @@ def install_log_routes(app):
 
     @app.get("/api/v1/downloads/{identifier}")
     @app.get("/api/v1/log-searches/{identifier}")
-    async def job(identifier: str, user: User):
-        doc = await repo().get("jobs", identifier)
+    async def job(identifier: str, user: User, includeResults: bool = True):
+        """查询作业状态；轮询可省略较大的结果正文与冻结文件目录。"""
+        if includeResults:
+            doc = await repo().get("jobs", identifier)
+        else:
+            doc = await repo().db.jobs.find_one({"id": identifier}, {"results": 0, "files": 0})
+            if doc is None:
+                raise HTTPException(404, "记录不存在")
         authorize(user, "logs:download" if doc["kind"] == "DOWNLOAD" else "logs:read", doc["taskId"])
         return public(doc)
 

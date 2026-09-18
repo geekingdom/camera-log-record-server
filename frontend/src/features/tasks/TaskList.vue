@@ -18,7 +18,7 @@ import { sshTargetLabel } from "./sshTarget";
 const loadTaskDiagnostics = () => import("./TaskDiagnostics.vue");
 
 const props = defineProps<{ items: Task[]; loading: boolean; canWrite?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean; createdBy?: string; showAll?: boolean; selectionKey?: string }>();
-const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: []; filters: [filters: { createdBy: string; showAll: boolean }] }>();
+const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: []; filters: [filters: { createdBy: string; showAll: boolean }]; sort: [sort: { sortBy?: string; sortOrder?: "asc" | "desc" }] }>();
 const pendingIds = ref(new Set<string>());
 const diagnosticId = ref<string>();
 const diagnosticsOpen = ref(false);
@@ -112,6 +112,9 @@ async function applySelected(action: Exclude<TaskAction, "restart">) {
   if (submitted.some(item => item.status === "success")) emit("changed");
 }
 function applyFilters(change: Partial<{ createdBy: string; showAll: boolean }>) { emit("filters", { createdBy: props.createdBy || "", showAll: Boolean(props.showAll), ...change }); }
+function changeSort({ prop, order }: { prop: string; order: "ascending" | "descending" | null }) {
+  emit("sort", { sortBy: order ? prop : undefined, sortOrder: order === "ascending" ? "asc" : order === "descending" ? "desc" : undefined });
+}
 onBeforeUnmount(() => { mounted = false; pageGeneration += 1; });
 // pendingIds 以任务 ID 隔离，避免某一行提交操作时误禁用其它任务。
 async function state(
@@ -149,17 +152,18 @@ const rows = computed(() => props.items);
     reserve-selection
     @pointerdown.capture="markSelectionInteraction"
     @selection-change="updateSelection"
+    @sort-change="changeSort"
     class="data-table"
     empty-text="暂无任务"
   >
     <el-table-column type="selection" width="48" :selectable="selectable" />
-    <el-table-column label="任务" min-width="220"
+    <el-table-column label="任务" prop="name" sortable="custom" min-width="220"
       ><template #default="{ row }"
         ><button class="task-name" @click="emit('view', row)" :aria-label="`查看实时打印 · ${row.name}`">{{ row.name }}</button>
         <small class="task-id">创建用户：{{ row.createdByName || row.createdBy || "未知" }} · ID: {{ row.id }}</small></template
       ></el-table-column
     >
-    <el-table-column label="连接" min-width="200"
+    <el-table-column label="连接" prop="connection" sortable="custom" min-width="200"
       ><template #default="{ row }"
         ><el-tag size="small" effect="plain">{{
           protocolLabels[row.protocol] ?? row.protocol
@@ -169,7 +173,7 @@ const rows = computed(() => props.items);
         ></template
       ></el-table-column
     >
-    <el-table-column label="状态" width="120"
+    <el-table-column label="状态" prop="status" sortable="custom" width="120"
       ><template #default="{ row }"
         ><el-tag
           size="small"
@@ -178,13 +182,13 @@ const rows = computed(() => props.items);
         ></template
       ></el-table-column
     >
-    <el-table-column label="期望状态" width="120"
+    <el-table-column label="期望状态" prop="desiredState" sortable="custom" width="120"
       ><template #default="{ row }">{{
         label(row.desiredState, desiredLabels)
       }}</template></el-table-column
     >
-    <el-table-column label="创建时间" min-width="180"><template #default="{ row }">{{ row.createdAt ? new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-' }}</template></el-table-column>
-    <el-table-column label="资源删除时间" min-width="180"><template #default="{ row }">{{ row.resourceDeletedAt ? new Date(row.resourceDeletedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-' }}</template></el-table-column>
+    <el-table-column label="创建时间" prop="createdAt" sortable="custom" min-width="180"><template #default="{ row }">{{ row.createdAt ? new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-' }}</template></el-table-column>
+    <el-table-column label="资源删除时间" prop="resourceDeletedAt" sortable="custom" min-width="180"><template #default="{ row }">{{ row.resourceDeletedAt ? new Date(row.resourceDeletedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-' }}</template></el-table-column>
     <el-table-column label="操作" width="250" fixed="right"
       ><template #default="{ row }">
         <el-tooltip :content="`查看任务状态 · ID: ${row.id}`">

@@ -7,14 +7,15 @@ import re
 from fastapi import HTTPException
 
 
-async def bind_resource(repo, task):
+async def bind_resource(repo, task, *, require_current_auth: bool = False):
     """每个任务必须引用已添加资源，存储身份只能由服务端生成。"""
     resource = await repo.get("resources", task.resourceId)
     if resource.get("deletedAt"):
         raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
     network = resource["kind"] == "HIKVISION_NETWORK"
-    if network and not resource.get("authenticatedAt"):
-        raise HTTPException(409, "海康网络设备资源尚未通过认证")
+    if network and task.protocol != "TELNET_SERIAL" and (
+            not resource.get("authenticatedAt") or (require_current_auth and resource.get("healthStatus") != "ONLINE")):
+        raise HTTPException(409, "海康网络设备当前未认证成功，不能创建 SSH 或 Telnet 设备任务")
     if not network and task.protocol != "TELNET_SERIAL":
         raise HTTPException(422, "串口服务器只能创建 Telnet 串口任务")
     if not network or task.protocol != "TELNET_SERIAL":

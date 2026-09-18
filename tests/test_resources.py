@@ -123,6 +123,27 @@ def test_resource_presence_filter_pipeline_limits_lookup_to_one_file():
     assert pipeline[3] == {"$match": {"hasCoredumps": True}}
 
 
+def test_resource_list_passes_task_sort_to_production_pager(resource_client, monkeypatch):
+    """路由只验证排序参数传递；完整 Mongo 排序语义由专用真实库脚本覆盖。"""
+    calls = []
+
+    async def page(_db, _query, page, page_size, *, has_coredumps, sort_by, sort_order):
+        calls.append((page, page_size, has_coredumps, sort_by, sort_order))
+        return {"items": [{"id": "resource-b", "hasCoredumps": False, "taskCount": 2,
+                            "activeTaskCount": 0, "unsettledTaskCount": 0}], "total": 2,
+                "page": page, "pageSize": page_size}
+
+    monkeypatch.setattr("camera_logs.resources.api.page_resources", page)
+    response = resource_client.get("/api/v1/resources?sortBy=tasks&sortOrder=desc&page=2&pageSize=20")
+
+    assert response.status_code == 200
+    assert calls == [(2, 20, None, "tasks", "desc")]
+    from camera_logs.resources.listing import resource_sort
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException):
+        resource_sort("tasks", None)
+
+
 def test_resource_presence_requires_a_frozen_valid_snapshot_when_source_is_missing():
     """冻结快照是可用副本；RETIRING/DELETING 或空快照引用不能继续显示红点。"""
     from camera_logs.coredumps.presence import visible_coredump_query
@@ -262,6 +283,26 @@ def test_resource_authenticate_create_list_and_hide_password(resource_client, mo
     assert resource_client.get(f"/api/v1/resources/{resource['id']}").json()["id"] == resource["id"]
     listed = resource_client.get("/api/v1/resources?search=大厅&kind=HIKVISION_NETWORK").json()
     assert listed["total"] == 1 and listed["items"][0]["id"] == resource["id"]
+
+
+def test_resource_credential_reveal_is_owner_only_no_store_and_audited(resource_client):
+    """资源列表保持脱敏，只有资源写权限的创建者才可主动读取一次凭据。"""
+    from camera_logs.common.security import actor
+
+    repo = resource_client.app.state.repo
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "credential", "kind": "HIKVISION_NETWORK", "deletedAt": None, "createdBy": "owner",
+        "username": "admin", "passwordEncrypted": repo.encrypt("secret"),
+    })
+    owner = {"id": "owner", "isAdmin": False, "scopes": ["resources:write", "tasks:read"]}
+    resource_client.app.dependency_overrides[actor] = lambda: owner
+    revealed = resource_client.post("/api/v1/resources/credential/credential")
+    assert revealed.status_code == 200 and revealed.json() == {"username": "admin", "password": "secret"}
+    assert revealed.headers["cache-control"] == "no-store"
+    assert (resource_client.portal.call(repo.db.audit.find_one, {"action": "reveal_resource_credential"}))["targetId"] == "credential"
+    resource_client.app.dependency_overrides[actor] = lambda: owner | {"id": "other"}
+    assert resource_client.post("/api/v1/resources/credential/credential").status_code == 403
+    resource_client.app.dependency_overrides.clear()
 
 
 def test_network_authentication_previews_write_sanitized_audit_events(resource_client, monkeypatch):

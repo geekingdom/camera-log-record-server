@@ -17,6 +17,7 @@ async def _claim_resources(db, document, session):
     identifiers = sorted({item for item in (
         document["resourceId"], document.get("serialServerResourceId")
     ) if item})
+    claimed = {}
     for identifier in identifiers:
         resource = await db.resources.find_one_and_update(
             {"id": identifier, "deletedAt": None}, {"$inc": {"controlClaimVersion": 1}},
@@ -26,8 +27,15 @@ async def _claim_resources(db, document, session):
             if await db.resources.find_one({"id": identifier}, session=session) is None:
                 raise HTTPException(404, "设备资源不存在")
             raise HTTPException(409, "设备资源已删除，任务不会启动")
+        # 创建使用当前认证成功作为准入条件；历史 authenticatedAt 不能证明本次提交时
+        # 仍可用。此处在事务内重读，避免认证状态在 prepare 与提交之间变化。
+        if document["protocol"] != "TELNET_SERIAL" and resource.get("kind") == "HIKVISION_NETWORK" and (
+                not resource.get("authenticatedAt") or resource.get("healthStatus") != "ONLINE"):
+            raise HTTPException(409, "海康网络设备当前未认证成功，任务不会创建")
         if resource_health_blocks_task(document, resource):
             raise HTTPException(409, "设备资源认证或连通性异常，任务不会启动")
+        claimed[identifier] = resource
+    return claimed
 
 
 def _response(document):
@@ -78,9 +86,18 @@ async def create_task(repo, user, key, payload, prepare):
         current = await _confirmed(repo.db, actor, key, digest, session=session)
         if current is not None:
             return current
-        await _claim_resources(repo.db, document, session)
+        claimed = await _claim_resources(repo.db, document, session)
         timestamp = now()
         task = document.copy()
+        if task.pop("useResourceCredentials", False) and task["protocol"] != "TELNET_SERIAL":
+            # 资源声明与最新凭据读取共用事务快照。直接复制密文，不在内存中解密，
+            # 也不允许 prepare 阶段的旧密码覆盖本次提交时已更新的资源凭据。
+            resource = claimed[task["resourceId"]]
+            if resource.get("kind") != "HIKVISION_NETWORK" or not resource.get("authenticatedAt"):
+                raise HTTPException(409, "海康网络设备当前未认证成功，任务不会创建")
+            task["username"] = resource.get("username", "")
+            task["passwordEncrypted"] = resource.get("passwordEncrypted", "")
+            task["hasPassword"] = bool(task["passwordEncrypted"])
         task.update(desiredState="RUNNING" if auto_start else "STOPPED", status="STOPPED", nodeId=None,
                     createdAt=timestamp, updatedAt=timestamp, generation=0,
                     createdBy=user["id"], createdByName=user.get("displayName") or user.get("username") or user["id"])

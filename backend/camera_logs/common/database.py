@@ -109,6 +109,8 @@ class Repository:
         # 每个任务只保留一个活动运行锁；不同任务可以使用同一设备端点。
         await self.db.endpoint_locks.create_index("taskId", unique=True)
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
+        # 旧归档全文索引按节点/READY/稳定ID游标补建，避免每轮扫全部历史目录。
+        await self.db.files.create_index([("nodeId", 1), ("status", 1), ("id", 1)])
         await self.db.log_gap_snapshots.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.coredump_files.create_index([("resourceId", 1), ("receivedAt", -1), ("id", 1)])
         await self.db.coredump_files.create_index([("nodeId", 1), ("status", 1), ("updatedAt", -1)])

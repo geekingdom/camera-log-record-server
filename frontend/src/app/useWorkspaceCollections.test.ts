@@ -70,6 +70,29 @@ describe("useWorkspaceCollections", () => {
     expect(subject.totals.value.tasks).toBe(0);
   });
 
+  it("排序状态进入任务请求并使迟到响应失效", async () => {
+    const user = ref({ id: "user-a", isAdmin: false });
+    const sessionGeneration = ref(1);
+    const requests: Array<Record<string, string | undefined>> = [];
+    const subject = useWorkspaceCollections({
+      user, sessionGeneration, can: () => true,
+      api: {
+        tasks: async (_page, _size, filters) => {
+          requests.push(filters ?? {});
+          return page([]);
+        },
+        templates: async () => page([]), nodes: async () => page([]),
+      },
+      onError: () => {},
+    });
+
+    subject.taskSortBy.value = "name";
+    subject.taskSortOrder.value = "asc";
+    await subject.loadTasks();
+
+    expect(requests).toEqual([expect.objectContaining({ sortBy: "name", sortOrder: "asc" })]);
+  });
+
   it("忽略跨会话的模板迟到响应", async () => {
     const user = ref({ id: "user-a", isAdmin: false });
     const sessionGeneration = ref(1);

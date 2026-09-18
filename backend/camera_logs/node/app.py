@@ -40,6 +40,8 @@ def create_worker_app(settings=None):
             app.state.repo, app.state.worker = repo, worker
             from camera_logs.node.files import install_node_routes
             reads = install_node_routes(app, repo, worker)
+            from camera_logs.node.search_index_routes import install_search_index_routes
+            install_search_index_routes(app, repo)
             worker_task = asyncio.create_task(worker.run())
             yield
         finally:
