@@ -7,6 +7,8 @@ from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from random import Random
 
+import pytest
+from camera_logs.logs import search_index
 from camera_logs.logs.search_index import build_index, index_path, query_index
 from camera_logs.logs.search_plan import plan_candidate_files
 from camera_logs.logs.search_stream import StreamSearch
@@ -64,6 +66,44 @@ def test_index_keeps_candidate_after_body_nul_and_invalidates_hot_cache_on_repla
     assert build_index(replacement)
     shutil.copyfile(index_path(replacement), index_path(archive))
     assert query_index(archive, "needle") is None
+
+
+@pytest.mark.parametrize("prefix", [b"prefix", b"x" * (32 * 1024 - 1), b"x" * (256 * 1024 - 1)],
+                         ids=["short", "fts-chunk-boundary", "decoder-block-boundary"])
+def test_index_handles_tokenizers_that_stop_at_nul(tmp_path, monkeypatch, prefix):
+    """模拟旧SQLite在NUL处截断词法输入；整块与尾块写入都不能丢失后续词。"""
+    connect = sqlite3.connect
+
+    class NulTerminatedConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql.startswith("INSERT INTO terms"):
+                parameters = (parameters[0], parameters[1].split("\0", 1)[0])
+            return super().execute(sql, parameters)
+
+    monkeypatch.setattr(search_index.sqlite3, "connect",
+                        lambda *args, **kwargs: connect(*args, **kwargs, factory=NulTerminatedConnection))
+    archive = tmp_path / "hour.tar.gz"
+    payload = prefix + b"\0needle\0" + "中文关键词".encode() + b"\n"
+    _archive(archive, {"part.log": payload})
+    assert build_index(archive)
+    for keyword in ("needle", "中文关键词"):
+        assert query_index(archive, keyword)["part.log"]["mayMatch"]
+    with tarfile.open(archive) as source:
+        assert source.extractfile("part.log").read() == payload
+    assert query_index(archive, "needle\0") is None
+
+
+def test_legacy_nul_unsafe_index_is_rejected_and_rebuilt(tmp_path):
+    """旧schema即使有健康缓存也必须回退，并可被后台同一建库逻辑替换。"""
+    archive = tmp_path / "hour.tar.gz"
+    _archive(archive, {"part.log": b"prefix\0needle\n"})
+    assert build_index(archive)
+    assert query_index(archive, "needle")
+    with sqlite3.connect(index_path(archive)) as database:
+        database.execute("UPDATE metadata SET value='1' WHERE key='schemaVersion'")
+    assert query_index(archive, "needle") is None
+    assert build_index(archive)
+    assert query_index(archive, "needle")["part.log"]["mayMatch"]
 
 
 def test_index_candidates_never_lose_unicode_or_invalid_utf8_stream_matches(tmp_path):

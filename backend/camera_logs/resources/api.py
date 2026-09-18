@@ -291,7 +291,9 @@ def install_resource_routes(app, repo, listing):
                         "enableResourceMonitor": body.enableResourceMonitor}
             if body.kind == "HIKVISION_NETWORK":
                 document.update(username=body.username, authType=body.authType,
-                                passwordEncrypted=repo().encrypt(body.password), authenticatedAt=now(), **metadata)
+                                passwordEncrypted=repo().encrypt(body.password), authenticatedAt=now(),
+                                healthStatus="ONLINE", healthCheckedAt=now(), healthFailureCount=0,
+                                nextHealthCheckAt=now() + timedelta(seconds=60), **metadata)
             return document
 
         async def reserve(document, session):

@@ -276,7 +276,13 @@ def test_resource_authenticate_create_list_and_hide_password(resource_client, mo
     assert resource["name"] == "大厅摄像机"
     assert resource["version"] == 1
     assert resource["model"] == "DS-2CD"
+    assert resource["healthStatus"] == "ONLINE"
     assert "password" not in resource and "passwordEncrypted" not in resource
+    task = resource_client.post("/api/v1/tasks", headers={"Idempotency-Key": "immediate-network-task"}, json={
+        "name": "认证后立即采集", "protocol": "SSH", "ip": "192.0.2.10", "port": 22,
+        "resourceId": resource["id"], "username": "admin", "password": "secret",
+    })
+    assert task.status_code == 201, task.text
     repeated = resource_client.post("/api/v1/resources", json=body, headers={"Idempotency-Key": "resource-create"})
     assert repeated.json()["id"] == resource["id"]
     assert calls == 2

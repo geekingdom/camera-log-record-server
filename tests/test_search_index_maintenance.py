@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
+import tarfile
+from io import BytesIO
 from types import SimpleNamespace
 
 from camera_logs.logs import search_index_maintenance
+from camera_logs.logs.search_index import build_index, index_path, query_index
 from mongomock_motor import AsyncMongoMockClient
 
 
@@ -67,3 +71,29 @@ async def test_backfill_moves_cursor_over_healthy_window_then_wraps_next_cycle(t
     assert (await repo.db.nodes.find_one({"id": "local"}))["searchIndexCursor"] == "063"
     assert await search_index_maintenance.backfill_search_indexes(repo) == 1
     assert built == ["064.tar.gz"]
+
+
+async def test_backfill_rebuilds_real_schema_one_sidecar_and_advances_catalog_cursor(tmp_path, monkeypatch):
+    """旧 schema 探针返回未知后，维护入口必须重建真实索引并提交本机目录游标。"""
+    archive = tmp_path / "legacy.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        member = tarfile.TarInfo("part.log")
+        payload = b"prefix\x00needle\n"
+        member.size = len(payload)
+        output.addfile(member, BytesIO(payload))
+    assert build_index(archive)
+    with sqlite3.connect(index_path(archive)) as database:
+        database.execute("UPDATE metadata SET value='1' WHERE key='schemaVersion'")
+        database.commit()
+    assert query_index(archive, "needle") is None
+    repo = await _repo(tmp_path, [{"id": "legacy", "nodeId": "local", "status": "READY", "path": str(archive)}])
+
+    async def build_inline(path):
+        return build_index(path)
+
+    monkeypatch.setattr(search_index_maintenance, "build_search_index", build_inline)
+    assert await search_index_maintenance.backfill_search_indexes(repo) == 1
+    assert query_index(archive, "needle")["part.log"]["mayMatch"]
+    with sqlite3.connect(index_path(archive)) as database:
+        assert dict(database.execute("SELECT key, value FROM metadata"))["schemaVersion"] == "2"
+    assert (await repo.db.nodes.find_one({"id": "local"}))["searchIndexCursor"] == "legacy"

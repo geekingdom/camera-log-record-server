@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_INDEX_BYTES = 256 * 1024 * 1024
 MIN_FREE_BYTES = 128 * 1024 * 1024
 PAGE_SIZE = 4096
@@ -119,7 +119,9 @@ def build_index(archive_path: Path) -> bool:
                                     head.extend(raw[:16 - len(head)])
                                 tail[:] = (tail + raw)[-16:]
                                 has_newline = has_newline or b"\n" in raw
-                                pending += decoder.decode(raw)
+                                # 部分SQLite词法器在NUL处停止；只替换候选文本，原文与边界保留。
+                                # 含NUL的查询本就回退，替换至多增加候选，不会漏掉非NUL关键词。
+                                pending += decoder.decode(raw).replace("\0", " ")
                                 while len(pending) >= CHUNK_CHARS:
                                     rowid += 1
                                     connection.execute("INSERT INTO chunks(rowid, member) VALUES (?, ?)", (rowid, member.name))
