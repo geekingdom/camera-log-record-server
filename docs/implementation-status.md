@@ -2,8 +2,10 @@
 
 | 当前CI修复（2026-09-18） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| Linux SQLite遇NUL后未索引后续文本，可能漏检 | `logs/search_index.py`候选文本NUL转空格，schema升2；原始日志和边界不改 | CI35298177693的backend明确1失败1598通过；新增模拟词法截断/分块边界/旧schema回退4项改前失败、改后通过；全量1603项通过，另补实际维护入口schema1重建schema2通过 | 已修复；旧schema自动回退原文并由Worker补建，新提交CI待核验 |
-| 新资源认证成功后立即新建SSH任务被409拒绝 | `resources/api.py`创建成功文档同步初始化ONLINE、检查时间、失败计数和下次认证时间 | 正式API资源创建后立即SSH任务201回归；真实Mongo/SSH双Worker暂停、同run跨节点恢复、重新认证和预算验证通过，临时数据清理完成 | 已修复，保持当前认证成功准入门槛；新提交CI待核验 |
+| Linux SQLite遇NUL后未索引后续文本，可能漏检 | `logs/search_index.py`候选文本NUL转空格，schema升2；原始日志和边界不改 | 确定性词法截断/分块/旧schema回退测试先失败后通过；修复提交d4a08ea的Linux CI后端1604项及Ruff通过，维护入口重建通过 | 已修复；旧schema自动回退原文并由Worker补建，部署时更新全部Worker |
+| 新资源认证成功后立即新建SSH任务被409拒绝 | `resources/api.py`创建成功文档同步初始化ONLINE、检查时间、失败计数和下次认证时间 | 正式API资源创建后立即SSH任务201回归；真实Mongo/SSH双Worker暂停、同run恢复、重新认证及预算验证通过；修复CI的cross-worker-read成功 | 已修复，保持当前认证成功准入门槛；本机已重载且健康200 |
+
+修复提交`d4a08ea`的[CI35299148782](https://github.com/geekingdom/camera-log-record-server/actions/runs/35299148782)八个作业全部成功，包含Linux后端1604项、前端、跨Worker、完整容器、独立组件、原生部署、NFS及提交规范。此处为已完成的代码提交证据，后续纯文档提交的CI不能冒用该SHA。
 
 | 当前需求（2026-09-18） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |

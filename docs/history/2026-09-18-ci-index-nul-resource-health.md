@@ -17,3 +17,5 @@ cross-worker-read的真实ISAPI返回200、资源创建201，紧随的新建SSH�
 修复后创建成功文档同步写入ONLINE、healthCheckedAt、healthFailureCount=0和nextHealthCheckAt。正式资源创建后立即SSH任务201回归通过；`verify_cross_worker_ssh_resume.py --isapi-test-port 62137`真实Mongo/回环SSH双Worker链路通过，包括暂停释放、同run跨节点恢复、ISAPI复验、命令预算及停止；随机数据库和临时日志目录均删除，未访问真实设备。
 
 本机全量1603项通过，末次资源/任务/索引维护另行回归；Ruff与差异检查通过。新增真实schema1 sidecar通过维护入口重建schema2测试，确认节点游标推进。前端无修改，不重复布局验证。新提交CI需按对应SHA核验，不能用本机成功代替Linux证据。
+
+最终证据：修复提交d4a08ea的CI35299148782八作业全部成功，Linux后端最终1604项及Ruff通过，原失败的cross-worker-read全链路成功，前端/完整容器/独立组件/原生部署/NFS/提交规范均成功。本机末次51项通过，确认没有活动任务意图、归属或作业后重载API/Worker，健康均200；未影响真实采集数据。
