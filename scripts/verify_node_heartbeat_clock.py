@@ -72,6 +72,9 @@ def telemetry(cpu_percent: float) -> dict[str, object]:
         "status": "OK",
         "cpuPercent": cpu_percent,
         "memoryPercent": 12.0,
+        # 本脚本隔离墙上时钟；新性能准入仍需要明确的可用资源，不能用缺失值冒充空闲。
+        "resourceLimits": {"effectiveCpu": 4, "memoryLimitBytes": 2 * 1024**3,
+                           "memoryAvailableBytes": 1024**3, "source": "TEST"},
         "networkUploadBytesPerSecond": 100.0,
         "networkDownloadBytesPerSecond": 200.0,
     }
