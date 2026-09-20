@@ -139,13 +139,13 @@ try {
     const editDialog = page.getByRole("dialog", { name: "编辑节点配置", exact: true });
     assert.equal(await editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true }).inputValue(), "750");
     await editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true }).fill("1200");
-    // 新字段位于可滚动正文末尾，窄屏也必须能同时看见输入项和固定保存区。
+    // 推荐区扩展了正文；先让目标字段进入滚动可视区，再检查它没有被固定保存区覆盖。
     const latencyField = editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true });
     await latencyField.scrollIntoViewIfNeeded();
-    await editDialog.locator('.el-dialog__body').evaluate(body => { body.scrollTop = body.scrollHeight; });
     const fieldBox = await latencyField.boundingBox();
+    const bodyBox = await editDialog.locator('.el-dialog__body').boundingBox();
     const saveBox = await editDialog.getByRole("button", { name: "保存配置", exact: true }).boundingBox();
-    assert.ok(fieldBox && saveBox && fieldBox.y >= 0 && fieldBox.y + fieldBox.height <= saveBox.y,
+    assert.ok(fieldBox && bodyBox && saveBox && fieldBox.y >= bodyBox.y && fieldBox.y + fieldBox.height <= bodyBox.y + bodyBox.height && fieldBox.y + fieldBox.height <= saveBox.y,
       "写入延迟输入不得被保存区遮挡");
     assert.ok(saveBox.y + saveBox.height <= 900, "保存区应在视口内可见");
     await page.screenshot({ path: `output/playwright/node-write-latency-settings-${width}.png`, animations: "disabled" });

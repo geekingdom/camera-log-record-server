@@ -15,6 +15,7 @@ const scripts = [
   "browser_resource_authentication_records", "browser_node_dashboard",
   "browser_live_terminal_workbench", "browser_archive_viewer", "browser_live_ranges", "browser_resource_metrics",
   "browser_resource_monitor_settings",
+  "browser_node_performance_policy",
   "browser_ssh_target_editor",
   "browser_resource_manual_authentication",
   "browser_resource_identity_filters",
