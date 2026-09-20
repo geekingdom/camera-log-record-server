@@ -1,6 +1,7 @@
 // 资源身份筛选浏览器验收：全部 API 路由由本地 mock 响应，校验页面与查询参数同步。
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 
 const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
@@ -9,6 +10,8 @@ const baseUrl = process.env.BASE_URL || "http://127.0.0.1:5173";
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
 const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 const requests = [];
+// 默认刻意慢于旧100ms等待，持续覆盖请求发出与列表真正更新之间的竞态。
+const responseDelayMs = Number(process.env.RESOURCE_RESPONSE_DELAY_MS || 600);
 const resources = Array.from({ length: 25 }, (_, index) => ({
   id: `resource-${index + 1}`,
   name: index === 20 ? "边缘入口" : `设备资源 ${index + 1}`,
@@ -61,6 +64,7 @@ await context.route("**/api/v1/**", async route => {
     const page = Number(url.searchParams.get("page") || "1");
     const pageSize = Number(url.searchParams.get("pageSize") || "20");
     const items = filtered(url);
+    if (responseDelayMs > 0) await new Promise(resolve => setTimeout(resolve, responseDelayMs));
     return json(route, { items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize });
   }
   if (request.method() === "GET" && pathname === "/api/v1/resources/resource-21/coredumps") return json(route, {
@@ -86,8 +90,20 @@ page.on("pageerror", error => errors.push(error.message));
 page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
 
 async function latestRequest(expected) {
-  await page.waitForTimeout(100);
+  const deadline = Date.now() + 12_000;
+  while (!isDeepStrictEqual(requests.at(-1), expected) && Date.now() < deadline)
+    await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(requests.at(-1), expected);
+  const url = new URL(`/api/v1/resources?${new URLSearchParams(expected)}`, baseUrl);
+  const currentPage = Number(expected.page || 1), size = Number(expected.pageSize || 20);
+  const expectedIps = filtered(url).slice((currentPage - 1) * size, currentPage * size).map(item => item.ip);
+  // 请求参数正确不等于页面已经刷新；同时确认目标行与加载遮罩完成。
+  await page.waitForFunction(ips => {
+    const table = document.querySelector(".resource-table");
+    if (!table || [...table.querySelectorAll(".el-loading-mask")].some(mask => mask.getBoundingClientRect().height > 0)) return false;
+    const actual = [...table.querySelectorAll(".resource-ip")].map(cell => cell.textContent.trim());
+    return JSON.stringify(actual) === JSON.stringify(ips);
+  }, expectedIps);
 }
 
 async function clickFilter(expected) {
@@ -206,8 +222,14 @@ try {
 
   await page.locator(".el-pagination .btn-next:not([disabled])").click();
   await latestRequest({ page: "2", pageSize: "20" });
-  await page.locator(".resource-table .el-checkbox__input").nth(1).click();
-  await page.locator(".resource-table .el-checkbox__input").nth(2).click();
+  for (const name of ["边缘入口", "设备资源 22"]) {
+    const row = page.locator(".resource-table .el-table__row").filter({
+      has: page.locator(".resource-identity strong", { hasText: name }),
+    });
+    await row.locator(".el-checkbox__input").click();
+    await row.locator(".el-checkbox__input.is-checked").waitFor();
+    assert.equal(await row.getByRole("checkbox").isChecked(), true, `${name}应保持选中`);
+  }
   assert.equal(await page.locator(".resource-table .el-checkbox__input.is-checked").count(), 2, "第二页应保留多选状态");
   const batchDelete = page.getByRole("button", { name: /删除已选/ });
   assert.equal(await batchDelete.isDisabled(), false, "第二页选中资源后批量删除按钮必须可用");
