@@ -10,13 +10,19 @@ _archives = {}
 
 
 def background_settings():
-    """压缩作业启动时冻结后台预算，不在原子发布中途强行取消。"""
+    """压缩作业实际执行时读取后台预算，不在原子发布中途强行取消。"""
     return _effective["readMiBPerSecond"] * 1024 * 1024, not _pressured
 
 
 def archive_started(token):
     """只保留活动归档的开始时刻，完成后删除，不增加数据库历史集合。"""
-    _archives[token] = time.monotonic()
+    _archives[token] = {"queuedAt": time.monotonic(), "runningAt": None}
+
+
+def archive_running(token):
+    """只有获得压缩执行槽后才计入处理中，避免把进程队列当作磁盘耗时。"""
+    if token in _archives:
+        _archives[token]["runningAt"] = time.monotonic()
 
 
 def archive_finished(token):
@@ -25,8 +31,17 @@ def archive_finished(token):
 
 
 def archive_snapshot():
-    """包含已提交排队及正在压缩的作业，长时间积压可以独立于瞬时压力观察。"""
-    return {"pendingJobs": len(_archives), "oldestSeconds": max(0, time.monotonic() - min(_archives.values())) if _archives else 0}
+    """分别报告排队和执行时间；总耗时保留以兼容旧节点看板的告警合同。"""
+    tick = time.monotonic()
+    waiting = [item["queuedAt"] for item in _archives.values() if item["runningAt"] is None]
+    running = [item["runningAt"] for item in _archives.values() if item["runningAt"] is not None]
+
+    def oldest(values):
+        return max(0, tick - min(values)) if values else 0
+
+    return {"pendingJobs": len(_archives), "waitingJobs": len(waiting), "runningJobs": len(running),
+            "oldestSeconds": oldest([item["queuedAt"] for item in _archives.values()]),
+            "oldestWaitingSeconds": oldest(waiting), "oldestRunningSeconds": oldest(running)}
 
 
 async def update_performance(worker, config, write_latency, disk_percent):
@@ -45,7 +60,8 @@ async def update_performance(worker, config, write_latency, disk_percent):
         telemetry = {}
     status = worker.performance_controller.evaluate(
         PerformancePolicy.model_validate(config.get("performance") or {}), telemetry,
-        write_latency | {"limitMs": write_latency_limit(config)},
+        write_latency | {"writeLatencyMs": write_latency.get("writeIoLatencyMs", write_latency.get("writeLatencyMs")),
+                         "limitMs": write_latency_limit(config)},
         limits=ResourceLimits(**(telemetry.get("resourceLimits") or {
             "effectiveCpu": 1, "memoryLimitBytes": 0, "memoryAvailableBytes": 0, "source": "UNKNOWN"})),
         disk_percent=disk_percent)
@@ -55,6 +71,13 @@ async def update_performance(worker, config, write_latency, disk_percent):
     write_io.configure(_effective["writeConcurrency"])
     read_limiter.configure(_effective["readMiBPerSecond"] * 1024 * 1024)
     status.update(buffer=buffering.snapshot(), writeIo=write_io.snapshot(), archives=archive_snapshot())
+    if "writeIoLatencyMs" in write_latency:
+        status["writeIoLatency"] = {
+            "p99Ms": write_latency.get("writeIoLatencyP99Ms", write_latency["writeIoLatencyMs"]),
+            "pendingMs": write_latency.get("writeIoLatencyPendingMs", 0),
+            "samples": write_latency.get("writeIoLatencySamples", 0),
+            "windowSeconds": write_latency.get("writeIoLatencyWindowSeconds", 60),
+        }
     status["admissionBlocked"] = status.get("admissionBlocked", False) or (
         status["buffer"]["reservedBytes"] >= status["buffer"]["limitBytes"] * .9
         and status["buffer"]["oldestPendingMs"] > write_latency_limit(config))

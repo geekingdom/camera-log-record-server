@@ -11,6 +11,26 @@ from camera_logs.node import performance_runtime
 MIB = 1024 * 1024
 
 
+def test_archive_snapshot_distinguishes_queue_and_processing(monkeypatch):
+    """一个慢归档执行时，后续归档应明确显示排队而非把全部等待算作压缩耗时。"""
+    tick = [10.0]
+    monkeypatch.setattr(performance_runtime.time, "monotonic", lambda: tick[0])
+    monkeypatch.setattr(performance_runtime, "_archives", {})
+    first, second = object(), object()
+    performance_runtime.archive_started(first)
+    tick[0] = 20
+    performance_runtime.archive_running(first)
+    performance_runtime.archive_started(second)
+    tick[0] = 320
+    assert performance_runtime.archive_snapshot() == {
+        "pendingJobs": 2, "waitingJobs": 1, "runningJobs": 1,
+        "oldestSeconds": 310, "oldestWaitingSeconds": 300, "oldestRunningSeconds": 300,
+    }
+    performance_runtime.archive_finished(first)
+    performance_runtime.archive_finished(second)
+    assert performance_runtime.archive_snapshot()["pendingJobs"] == 0
+
+
 @pytest.fixture(autouse=True)
 def restore_runtime_globals():
     """运行时模块保存进程级预算，测试结束必须恢复避免污染后续采集回归。"""
@@ -94,3 +114,13 @@ async def test_runtime_auto_pressure_is_bounded_and_keeps_admin_latency_threshol
     assert status["effective"]["batchKiB"] == 256
     assert status["effective"]["flushIntervalMs"] == 100
     assert config["writeLatencyLimitMs"] == 333
+
+
+async def test_batch_wait_does_not_throttle_background_when_actual_write_is_fast():
+    """采集总延迟保留准入用途，AUTO降后台预算只看实际写入等待和执行耗时。"""
+    subject = worker({"cpuPercent": 20, "memoryPercent": 20, "resourceLimits": limits()})
+    for _ in range(4):
+        status = await performance_runtime.update_performance(
+            subject, {"writeLatencyLimitMs": 100}, {"writeLatencyMs": 150, "writeIoLatencyMs": 5}, 20)
+    assert status["state"] == "NORMAL"
+    assert status["effective"]["readMiBPerSecond"] == 50

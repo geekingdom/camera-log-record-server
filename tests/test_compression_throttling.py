@@ -68,12 +68,10 @@ async def test_failed_process_pool_submission_finishes_archive_lifecycle(monkeyp
     """进程池已损坏时提交同步失败，也必须移除已登记的归档等待计时。"""
     started, finished = [], []
 
-    class BrokenLoop:
-        def run_in_executor(self, *_args):
-            raise RuntimeError("synthetic broken process pool")
+    async def broken_submission(*_args):
+        raise RuntimeError("synthetic broken process pool")
 
-    monkeypatch.setattr(compression, "_pool", object())
-    monkeypatch.setattr(compression.asyncio, "get_running_loop", BrokenLoop)
+    monkeypatch.setattr(compression, "_run_in_pool", broken_submission)
     monkeypatch.setattr(performance_runtime, "background_settings", lambda: (50 * 1024 * 1024, True))
     monkeypatch.setattr(performance_runtime, "archive_started", started.append)
     monkeypatch.setattr(performance_runtime, "archive_finished", finished.append)

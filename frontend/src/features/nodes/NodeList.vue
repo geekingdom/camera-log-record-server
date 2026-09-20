@@ -31,6 +31,8 @@ import {
   nodeOnline,
   percentage,
 } from "./nodeDashboard";
+import { archiveDiagnostics } from "./nodeArchiveDiagnostics";
+import { writeIoDiagnostics } from "./nodeWriteIoDiagnostics";
 
 const props = defineProps<{ items: Node[]; loading: boolean }>();
 const now = ref(Date.now());
@@ -136,6 +138,8 @@ function batchWait(node: Node) {
   if (!stage || !stage.samples) return undefined;
   return `批次等待 P99：${Number(stage.p99Ms ?? 0).toFixed(1)} ms（${stage.samples} 个样本）`;
 }
+function archiveStatus(node: Node) { return archiveDiagnostics(node.performanceStatus?.archives); }
+function actualWriteStatus(node: Node) { return writeIoDiagnostics(node.performanceStatus?.writeIoLatency); }
 </script>
 
 <template>
@@ -170,6 +174,8 @@ function batchWait(node: Node) {
           <span v-if="node.performanceStatus.reason" class="node-performance-reason">{{ node.performanceStatus.reason }}</span>
           <span v-if="performanceAdmission(node)" class="node-performance-admission">{{ performanceAdmission(node) }}</span>
           <span v-if="batchWait(node)" class="node-performance-write-io">{{ batchWait(node) }}</span>
+          <span v-if="actualWriteStatus(node)" class="node-performance-actual-write">{{ actualWriteStatus(node) }}</span>
+          <span v-if="archiveStatus(node)" class="node-performance-archives">{{ archiveStatus(node) }}</span>
         </section>
 
         <div class="node-gauges" :class="{ unavailable: !currentTelemetry(node, now) }">
@@ -221,7 +227,7 @@ function batchWait(node: Node) {
 .node-facts span { color: #819093; font-size: 11px; }
 .node-facts strong { color: #344447; font-size: 12px; overflow-wrap: anywhere; }
 .node-facts strong.admitted { color: #168267; }.node-facts strong.blocked { color: #a66820; }
-.node-performance { display: grid; gap: 6px; padding: 11px 12px; border: 1px solid #e4ecea; background: #f8fbfa; font-size: 12px; }.node-performance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #637477; font-weight: 600; }.node-performance-state { flex: 0 0 auto; padding: 2px 7px; border: 1px solid #cfdcda; border-radius: 4px; color: #637477; background: #fff; font-size: 11px; line-height: 18px; }.node-performance-state.success { border-color: #a8d8c9; color: #16745d; background: #f1fbf6; }.node-performance-state.warning { border-color: #ead0a6; color: #98621e; background: #fff8e9; }.node-performance > strong { min-width: 0; color: #334649; font-weight: 600; overflow-wrap: anywhere; }.node-performance-backlog, .node-performance-reason, .node-performance-admission, .node-performance-write-io { color: #718084; overflow-wrap: anywhere; }.node-performance-reason, .node-performance-admission { color: #9b5d1e; }
+.node-performance { display: grid; gap: 6px; padding: 11px 12px; border: 1px solid #e4ecea; background: #f8fbfa; font-size: 12px; }.node-performance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #637477; font-weight: 600; }.node-performance-state { flex: 0 0 auto; padding: 2px 7px; border: 1px solid #cfdcda; border-radius: 4px; color: #637477; background: #fff; font-size: 11px; line-height: 18px; }.node-performance-state.success { border-color: #a8d8c9; color: #16745d; background: #f1fbf6; }.node-performance-state.warning { border-color: #ead0a6; color: #98621e; background: #fff8e9; }.node-performance > strong { min-width: 0; color: #334649; font-weight: 600; overflow-wrap: anywhere; }.node-performance-backlog, .node-performance-reason, .node-performance-admission, .node-performance-write-io, .node-performance-actual-write, .node-performance-archives { color: #718084; overflow-wrap: anywhere; }.node-performance-reason, .node-performance-admission { color: #9b5d1e; }.node-performance-actual-write, .node-performance-archives { font-variant-numeric: tabular-nums; }
 .node-gauges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .node-gauge { display: grid; gap: 7px; min-width: 0; }
 .gauge-label { display: flex; justify-content: space-between; gap: 8px; color: #748488; font-size: 11px; }.gauge-label span { display: flex; align-items: center; gap: 5px; }.gauge-label strong { color: #354649; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }

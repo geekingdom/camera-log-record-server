@@ -88,16 +88,21 @@ class PerformanceController:
             self.state, self.reason, self.changed_at = "NORMAL", safety_reason or "当前预算已满足", moment
         elif safety_reason and self.state == "NORMAL" and self.reason != safety_reason:
             self.reason, self.changed_at = safety_reason, moment
-        if _under_pressure(telemetry, write_latency, disk_percent):
+        pressure_reason = _pressure_reason(telemetry, write_latency)
+        if pressure_reason:
             self.pressure_samples += 1
             self.stable_since = None
-            if self.pressure_samples >= PRESSURE_SAMPLES and self._adjustable(tick):
+            if self.pressure_samples >= PRESSURE_SAMPLES:
+                if self.state != "THROTTLED" or self.reason != pressure_reason:
+                    self.state, self.reason, self.changed_at = "THROTTLED", pressure_reason, moment
+                if not self._adjustable(tick):
+                    return self._result(resource_limits, admission_blocked)
                 lowered = dict(self.effective)
                 lowered["readMiBPerSecond"] = max(1, lowered["readMiBPerSecond"] // 2)
                 if _compute_pressure(telemetry):
                     lowered["writeConcurrency"] = max(1, lowered["writeConcurrency"] - 1)
                 if lowered != self.effective:
-                    self.effective, self.state, self.reason = lowered, "THROTTLED", "持续资源或后台读取压力"
+                    self.effective = lowered
                     self.changed_at, self.last_adjusted = moment, tick
                     # 从最后一个高压样本开始计稳定窗口；后续任何高压样本会在入口清空它。
                     self.stable_since = tick
@@ -109,9 +114,11 @@ class PerformanceController:
         self.stable_since = self.stable_since or tick
         if (self.state in {"THROTTLED", "RECOVERING"} and self._adjustable(tick)
                 and self.stable_since is not None and tick - self.stable_since >= RECOVERY_SECONDS):
-            raised = dict(self.effective)
-            raised["readMiBPerSecond"] = min(baseline["readMiBPerSecond"], raised["readMiBPerSecond"] + 1)
-            raised["writeConcurrency"] = min(baseline["writeConcurrency"], raised["writeConcurrency"] + 1)
+            raised = {
+                name: _recover_step(self.effective[name], baseline[name])
+                if name in {"readMiBPerSecond", "writeConcurrency"} else self.effective[name]
+                for name in baseline
+            }
             if raised != self.effective:
                 self.effective, self.state, self.reason = raised, "RECOVERING", "持续稳定后小步恢复"
                 self.changed_at, self.last_adjusted, self.stable_since = moment, tick, tick
@@ -155,15 +162,23 @@ def _bounded(current: Mapping[str, int], ceiling: Mapping[str, int]) -> dict[str
     }
 
 
-def _under_pressure(telemetry: Mapping[str, object] | None, write_latency: Mapping[str, object] | None,
-                    disk_percent: object) -> bool:
-    """仅可信数值触发降级；写延迟阈值由上游注入，控制器不提高任何管理阈值。"""
+def _pressure_reason(telemetry: Mapping[str, object] | None, write_latency: Mapping[str, object] | None) -> str | None:
+    """仅 CPU、内存和写入延迟触发降级；磁盘容量仍由 Worker 独立拒绝新准入。"""
     values = telemetry or {}
-    return (
-        _compute_pressure(values)
-        or _at_least(disk_percent, 90)
-        or _greater((write_latency or {}).get("writeLatencyMs"), (write_latency or {}).get("limitMs"))
-    )
+    reasons = []
+    if _at_least(values.get("cpuPercent"), 90):
+        reasons.append("CPU")
+    if _at_least(values.get("memoryPercent"), 90):
+        reasons.append("内存")
+    if _greater((write_latency or {}).get("writeLatencyMs"), (write_latency or {}).get("limitMs")):
+        reasons.append("写入延迟")
+    return "持续" + "、".join(reasons) + "压力" if reasons else None
+
+
+def _recover_step(current: int, ceiling: int) -> int:
+    """每次稳定恢复至少一步并收回一半差额，始终不超过最新管理员或资源上限。"""
+    remaining = max(0, ceiling - current)
+    return min(ceiling, current + max(1, math.ceil(remaining / 2))) if remaining else current
 
 
 def _compute_pressure(telemetry: Mapping[str, object] | None) -> bool:

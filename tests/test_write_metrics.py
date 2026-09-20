@@ -84,18 +84,21 @@ async def test_collector_measures_batch_wait_and_write_but_not_websocket_callbac
 
     collector = Collector({"id": "task", "storageIdentity": "testingdevice"}, tmp_path, connection_factory=lambda _: None, on_log=publish)
     collector.write_latency = WriteLatency(clock=lambda: clock[0])
+    collector.write_io_latency = WriteLatency(clock=lambda: clock[0])
     write = collector._writer.write_many
 
     async def slow_write(chunks):
-        clock[0] += .15
+        clock[0] += .125
         return await write(chunks)
 
     collector._writer.write_many = slow_write
     collector.write_latency.begin()
-    clock[0] += .1
+    clock[0] += .125
     await collector._flush([(b"logged\n", datetime.now(UTC))])
     assert collector.write_latency.snapshot()["p99Ms"] == pytest.approx(250)
     assert collector.write_latency.snapshot()["samples"] == 1
+    assert collector.write_io_latency.snapshot()["p99Ms"] == pytest.approx(125)
+    assert collector.write_io_latency.snapshot()["samples"] == 1
     await collector._writer.close()
 
 
@@ -103,6 +106,7 @@ async def test_failed_write_never_becomes_a_successful_latency_sample(tmp_path):
     clock = [0.0]
     collector = Collector({"id": "task", "storageIdentity": "testingdevice"}, tmp_path, connection_factory=lambda _: None)
     collector.write_latency = WriteLatency(clock=lambda: clock[0])
+    collector.write_io_latency = WriteLatency(clock=lambda: clock[0])
 
     async def failed_write(_chunks):
         clock[0] = .3
@@ -113,3 +117,5 @@ async def test_failed_write_never_becomes_a_successful_latency_sample(tmp_path):
         await collector._flush([(b"logged\n", datetime.now(UTC))])
     assert collector.write_latency.snapshot()["samples"] == 0
     assert collector.write_latency.snapshot()["pendingMs"] == 300
+    assert collector.write_io_latency.snapshot()["samples"] == 0
+    assert collector.write_io_latency.snapshot()["pendingMs"] == 300

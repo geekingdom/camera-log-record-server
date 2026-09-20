@@ -78,7 +78,12 @@ def node_health(node, current=None):
     if performance.get("admissionBlocked"):
         critical.append("节点有效内存不足或采集缓冲积压，暂停新任务准入")
     if (performance.get("archives") or {}).get("oldestSeconds", 0) >= 300:
-        warnings.append("小时归档等待超过5分钟，请检查磁盘与后台处理预算")
+        archives = performance["archives"]
+        if "waitingJobs" in archives:
+            warnings.append(f"小时归档超过5分钟：排队{archives['waitingJobs']}个、处理中{archives.get('runningJobs', 0)}个；"
+                            "请结合后台读取预算和处理时长排查")
+        else:
+            warnings.append("小时归档等待超过5分钟，请检查磁盘与后台处理预算")
     if input_rate_blocked(node):
         critical.append(f"日志输入速率达到准入上限或测量缺失（{input_rate_limit(node)} MiB/s）")
     if node.get("isolated"):

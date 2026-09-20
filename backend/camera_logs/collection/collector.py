@@ -65,6 +65,9 @@ class Collector:
             storage_identity=self.task["storageIdentity"],
         )
         self.write_latency = WriteLatency()
+        # 总延迟保留批处理等待，用于新会话准入；实际写盘延迟只包围 write_many，
+        # 供 AUTO 判断后台 I/O 是否确有争用，避免正常批等待触发归档降速。
+        self.write_io_latency = WriteLatency()
         self._buffer_reserved = 0
         self._sender: asyncio.Task[None] | None = None
         self._reader: asyncio.Task[None] | None = None
@@ -449,11 +452,13 @@ class Collector:
         self.liveness_storage_busy = True
         try:
             self.write_latency.begin()
+            self.write_io_latency.begin()
             from camera_logs.logs.write_io import record_stage
             started = buffering.budget().pending.get(id(self))
             if started is not None:
                 record_stage("batchWaitMs", max(0, time.monotonic() - started) * 1000)
             positions = await self._writer.write_many(pending)
+            self.write_io_latency.finish()
             self.write_latency.finish()
         finally:
             self.liveness_storage_busy = False

@@ -163,8 +163,8 @@ def test_write_latency_pressure_only_reduces_background_read_not_write_concurren
     assert result["effective"]["flushIntervalMs"] == policy.flushIntervalMs
 
 
-def test_auto_recovers_one_step_only_after_sixty_seconds_of_stable_samples():
-    """恢复须持续 60 秒且每次只提高一个小步，不能在压力消失后立即冲高。"""
+def test_auto_recovers_a_bounded_proportional_step_after_sixty_seconds_of_stable_samples():
+    """恢复须持续 60 秒；每阶收回一半差额，避免低速预算长期压缩积压。"""
     controller = PerformanceController()
     policy = PerformancePolicy(readMiBPerSecond=8, writeConcurrency=4)
     for seconds in (0, 1, 2):
@@ -178,8 +178,53 @@ def test_auto_recovers_one_step_only_after_sixty_seconds_of_stable_samples():
     restored = controller.evaluate(policy, telemetry(), {"writeLatencyMs": 1, "limitMs": 200}, limits=limits(),
                                    disk_percent=20, clock=lambda: START + timedelta(seconds=63))
     assert restored["state"] == "RECOVERING"
-    assert restored["effective"]["readMiBPerSecond"] == 5
+    assert restored["effective"]["readMiBPerSecond"] == 6
     assert restored["effective"]["writeConcurrency"] == 4
+
+
+def test_disk_capacity_does_not_throttle_background_archive_reads_or_hide_pressure_reason():
+    """磁盘容量仍由 Worker 拒绝新准入，不能被误作 I/O 压力而降低归档读取预算。"""
+    controller = PerformanceController()
+    policy = PerformancePolicy(readMiBPerSecond=50)
+    for second in (0, 1, 2):
+        result = controller.evaluate(policy, telemetry(), {"writeLatencyMs": 1, "limitMs": 200},
+                                     limits=limits(), disk_percent=99,
+                                     clock=lambda second=second: START + timedelta(seconds=second))
+    assert result["state"] == "NORMAL"
+    assert result["effective"]["readMiBPerSecond"] == 50
+
+
+@pytest.mark.parametrize(("sample", "latency", "reason"), [
+    (telemetry(cpuPercent=95), {"writeLatencyMs": 1, "limitMs": 200}, "持续CPU压力"),
+    (telemetry(memoryPercent=95), {"writeLatencyMs": 1, "limitMs": 200}, "持续内存压力"),
+    (telemetry(), {"writeLatencyMs": 201, "limitMs": 200}, "持续写入延迟压力"),
+])
+def test_auto_throttle_reason_identifies_the_pressure_source(sample, latency, reason):
+    """节点状态必须区分资源、内存和写延迟压力，方便排查预算变化原因。"""
+    controller = PerformanceController()
+    for second in (0, 1, 2):
+        result = controller.evaluate(PerformancePolicy(), sample, latency, limits=limits(), disk_percent=20,
+                                     clock=lambda second=second: START + timedelta(seconds=second))
+    assert result["state"] == "THROTTLED"
+    assert result["reason"] == reason
+
+
+def test_auto_updates_pressure_reason_after_read_budget_reaches_its_minimum():
+    """读预算已到下限时仍显示当前压力类别，避免状态页保留过期原因。"""
+    controller = PerformanceController()
+    policy = PerformancePolicy(readMiBPerSecond=1)
+    for second in (0, 1, 2):
+        result = controller.evaluate(policy, telemetry(), {"writeLatencyMs": 201, "limitMs": 200},
+                                     limits=limits(), disk_percent=20,
+                                     clock=lambda second=second: START + timedelta(seconds=second))
+    assert result["state"] == "THROTTLED"
+    assert result["reason"] == "持续写入延迟压力"
+    for second in (3, 4, 5):
+        result = controller.evaluate(policy, telemetry(cpuPercent=95), {"writeLatencyMs": 1, "limitMs": 200},
+                                     limits=limits(), disk_percent=20,
+                                     clock=lambda second=second: START + timedelta(seconds=second))
+    assert result["state"] == "THROTTLED"
+    assert result["reason"] == "持续CPU压力"
 
 
 def test_manual_never_adapts_but_hard_cpu_and_memory_limits_constrain_it():

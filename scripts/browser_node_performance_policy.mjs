@@ -54,7 +54,10 @@ try {
       }
       if (path === "/api/v1/admin/nodes") return json({ items: [...registeredNodes, discoveredNode] });
       if (path === "/api/v1/nodes") {
-        return json(nodePage([{ id: `worker-${width}`, name: "采集节点", url: "http://worker.example.test:8001", capacity: 8, accepting: true, activeTasks: 2, online: true, reportedAt: "2026-09-20T08:00:00Z", writeLatencyMs: 12, writeLatencyLimitMs: 200, diskPercent: 30, performanceStatus: { effective: { mode: "MANUAL", bufferMiB: 128, writeConcurrency: 6, batchKiB: 512, flushIntervalMs: 80, readMiBPerSecond: 75 }, state: "MANUAL", reason: "管理员固定参数", admissionBlocked: true, changedAt: "2026-09-20T08:00:00Z", resources: {}, buffer: { reservedBytes: 33554432, limitBytes: 134217728, oldestPendingMs: 45, scope: "APPLICATION_BATCH_RESERVATIONS" }, writeIo: { stages: { batchWaitMs: { samples: 12, p99Ms: 48.5 } } } } }]));
+        const archives = width === 1440
+          ? { pendingJobs: 5, waitingJobs: 3, runningJobs: 2, oldestSeconds: 45, oldestWaitingSeconds: 13, oldestRunningSeconds: 45 }
+          : { pendingJobs: 4, oldestSeconds: 18 };
+        return json(nodePage([{ id: `worker-${width}`, name: "采集节点", url: "http://worker.example.test:8001", capacity: 8, accepting: true, activeTasks: 2, online: true, reportedAt: "2026-09-20T08:00:00Z", writeLatencyMs: 12, writeLatencyLimitMs: 200, diskPercent: 30, performanceStatus: { effective: { mode: "MANUAL", bufferMiB: 128, writeConcurrency: 6, batchKiB: 512, flushIntervalMs: 80, readMiBPerSecond: 75 }, state: "MANUAL", reason: "管理员固定参数", admissionBlocked: true, changedAt: "2026-09-20T08:00:00Z", resources: {}, buffer: { reservedBytes: 33554432, limitBytes: 134217728, oldestPendingMs: 45, scope: "APPLICATION_BATCH_RESERVATIONS" }, writeIo: { stages: { batchWaitMs: { samples: 12, p99Ms: 48.5 } } }, writeIoLatency: { p99Ms: 512.4, pendingMs: 2000, samples: 24, windowSeconds: 60 }, archives } }]));
       }
       return json(nodePage([]));
     });
@@ -122,6 +125,10 @@ try {
     assert.match(statusText ?? "", /管理员固定参数/);
     assert.match(statusText ?? "", /性能保护已暂停本节点新任务准入；已建立的采集会话继续运行。/);
     assert.match(statusText ?? "", /批次等待 P99：48.5 ms（12 个样本）/);
+    assert.match(statusText ?? "", /实际写入 P99：512.4 ms；未完成写入等待：2000 ms（60 秒窗口，24 个样本）/);
+    assert.match(statusText ?? "", width === 1440
+      ? /归档：排队 3 个，最长 13 秒；执行中 2 个，最长 45 秒/
+      : /归档：未完成 4 个，最长 18 秒（旧节点未区分排队与执行）/);
     const geometry = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));
     assert.ok(geometry.scrollWidth <= geometry.width + 1, JSON.stringify(geometry));
     await page.screenshot({ path: `output/playwright/node-performance-status-${width}.png`, fullPage: true });

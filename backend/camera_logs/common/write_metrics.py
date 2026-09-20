@@ -72,8 +72,10 @@ class WriteLatency:
 
     @staticmethod
     def _upper_bound(delay_ms: float) -> int:
-        """一秒内以毫秒上界统计，超过一秒使用下一档 2 的幂保持有限 bin 种类。"""
+        """一秒内精确到毫秒，1至60秒按100毫秒上界；更久故障采用幂次桶限制内存。"""
         rounded = math.ceil(delay_ms)
         if rounded <= 1000:
             return rounded
+        if rounded <= 60_000:
+            return math.ceil(rounded / 100) * 100
         return 1 << (rounded-1).bit_length()

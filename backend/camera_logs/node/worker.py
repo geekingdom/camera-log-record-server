@@ -141,20 +141,30 @@ class Worker:
         return True
 
     def write_latency(self):
-        """汇总活动会话的最近写入快照；最慢会话决定新会话准入。"""
-        snapshots = []
+        """汇总总等待和实际写盘快照；前者准入，后者供 AUTO 判断后台 I/O 压力。"""
+        snapshots, io_snapshots = [], []
         for runtime in self.active.values():
             collector = getattr(runtime, "collector", None)
             tracker = getattr(collector, "write_latency", None)
             if tracker is not None:
                 snapshots.append(tracker.snapshot())
+            io_tracker = getattr(collector, "write_io_latency", None)
+            if io_tracker is not None:
+                io_snapshots.append(io_tracker.snapshot())
         p99_ms = max((float(snapshot["p99Ms"]) for snapshot in snapshots), default=0.0)
         pending_ms = max((float(snapshot["pendingMs"]) for snapshot in snapshots), default=0.0)
+        io_p99_ms = max((float(snapshot["p99Ms"]) for snapshot in io_snapshots), default=0.0)
+        io_pending_ms = max((float(snapshot["pendingMs"]) for snapshot in io_snapshots), default=0.0)
         return {
             "writeLatencyMs": max(p99_ms, pending_ms),
             "writeLatencySamples": sum(int(snapshot["samples"]) for snapshot in snapshots),
             "writeLatencyPendingMs": pending_ms,
             "writeLatencyWindowSeconds": 60,
+            "writeIoLatencyMs": max(io_p99_ms, io_pending_ms),
+            "writeIoLatencyP99Ms": io_p99_ms,
+            "writeIoLatencySamples": sum(int(snapshot["samples"]) for snapshot in io_snapshots),
+            "writeIoLatencyPendingMs": io_pending_ms,
+            "writeIoLatencyWindowSeconds": 60,
         }
 
     async def report_disk_pressure(self, percent):

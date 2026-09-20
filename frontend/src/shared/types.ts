@@ -222,6 +222,22 @@ export interface NodePerformanceStatus {
     execution?: NodePerformanceStage;
     stages?: Record<string, NodePerformanceStage | undefined>;
   };
+  /** 实际写入 tracker 的滑动窗口，不包含主动批等待，涵盖排队及 write_many 执行。 */
+  writeIoLatency?: {
+    p99Ms?: number;
+    pendingMs?: number;
+    samples?: number;
+    windowSeconds?: number;
+  };
+  /** 归档压缩工作状态；旧 Worker 仅上报 pendingJobs 和 oldestSeconds。 */
+  archives?: {
+    pendingJobs?: number;
+    waitingJobs?: number;
+    runningJobs?: number;
+    oldestSeconds?: number;
+    oldestWaitingSeconds?: number;
+    oldestRunningSeconds?: number;
+  };
 }
 /** Worker 的写入阶段滚动统计；例如 `stages.batchWaitMs` 表示批次等待。 */
 export interface NodePerformanceStage {

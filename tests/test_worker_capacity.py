@@ -143,6 +143,9 @@ async def test_slow_write_blocks_new_connection_without_stopping_existing_collec
         assert heartbeat["writeLatencyMs"] == 250.0
         assert heartbeat["writeLatencySamples"] == 3
         assert heartbeat["writeLatencyWindowSeconds"] == 60
+        assert heartbeat["writeIoLatencyMs"] == 0.0
+        assert heartbeat["writeIoLatencyP99Ms"] == 0.0
+        assert heartbeat["writeIoLatencySamples"] == 0
         assert runtime.stop.await_count == 0
 
         metrics.update({"p99Ms": 0.0, "samples": 0, "pendingMs": 0.0})
@@ -152,7 +155,37 @@ async def test_slow_write_blocks_new_connection_without_stopping_existing_collec
         assert heartbeat["accepting"] is True
         assert heartbeat["writeLatencyMs"] == 0.0
         assert heartbeat["writeLatencySamples"] == 0
+        assert heartbeat["writeIoLatencyMs"] == 0.0
+        assert heartbeat["writeIoLatencyP99Ms"] == 0.0
+        assert heartbeat["writeIoLatencySamples"] == 0
         assert runtime.stop.await_count == 0
+
+
+async def test_worker_reports_actual_write_io_latency_separately_from_batch_wait(tmp_path):
+    """节点心跳保留总等待准入指标，并单列真实写盘耗时供 AUTO 判断。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+    await repo.initialize()
+    total = {"p99Ms": 100.0, "samples": 3, "pendingMs": 250.0, "windowSeconds": 60}
+    io = {"p99Ms": 12.0, "samples": 2, "pendingMs": 8.0, "windowSeconds": 60}
+    collector = SimpleNamespace(
+        write_latency=SimpleNamespace(snapshot=lambda: dict(total)),
+        write_io_latency=SimpleNamespace(snapshot=lambda: dict(io)),
+    )
+    worker = Worker(repo)
+    worker.active["active"] = SimpleNamespace(collector=collector)
+
+    assert worker.write_latency() == {
+        "writeLatencyMs": 250.0,
+        "writeLatencySamples": 3,
+        "writeLatencyPendingMs": 250.0,
+        "writeLatencyWindowSeconds": 60,
+        "writeIoLatencyMs": 12.0,
+        "writeIoLatencyP99Ms": 12.0,
+        "writeIoLatencySamples": 2,
+        "writeIoLatencyPendingMs": 8.0,
+        "writeIoLatencyWindowSeconds": 60,
+    }
 
 
 async def test_write_pressure_events_only_record_threshold_crossings(tmp_path):
