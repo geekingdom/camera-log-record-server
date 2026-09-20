@@ -2,9 +2,9 @@
 
 | 当前CI修复（2026-09-20） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 资源身份筛选浏览器验收在慢响应时读取旧表格，第二页多选断言偶发失败 | `scripts/browser_resource_identity_filters.mjs` | 原脚本在600ms响应下复现旧表格断言失败；修复后相同延迟专项及生产页面22项全量回归通过，保留两条选中及批量删除可用断言；语法/差异检查与独立审查通过 | 等待请求匹配、加载结束及目标IP列表渲染；逐行点击可见复选框。新提交CI待核验 |
+| 资源身份筛选浏览器验收在慢响应时读取旧表格，第二页多选断言偶发失败 | `scripts/browser_resource_identity_filters.mjs` | 原脚本在600ms响应下复现旧表格断言失败；修复后相同延迟专项及生产页面22项全量回归通过，保留两条选中及批量删除可用断言；语法/差异检查、独立审查和[CI35505458845](https://github.com/geekingdom/camera-log-record-server/actions/runs/35505458845)八项全通过 | 等待请求匹配、加载结束及目标IP列表渲染；逐行点击可见复选框。已完成 |
 
-失败提交`2921616`的[CI35502758638](https://github.com/geekingdom/camera-log-record-server/actions/runs/35502758638)仅frontend失败，其余七项成功；原因及验证见[CI修复记录](history/2026-09-20-resource-filter-ci.md)。本次仅调整验收同步方式，未改采集或资源页面业务逻辑。
+失败提交`2921616`的[CI35502758638](https://github.com/geekingdom/camera-log-record-server/actions/runs/35502758638)仅frontend失败，其余七项成功；修复提交`f7002fd`的[CI35505458845](https://github.com/geekingdom/camera-log-record-server/actions/runs/35505458845)八项全部通过。原因及验证见[CI修复记录](history/2026-09-20-resource-filter-ci.md)。本次仅调整验收同步方式，未改采集或资源页面业务逻辑。
 
 | 当前问题（2026-09-20，已修复并完成本机验证） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
