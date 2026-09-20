@@ -1,5 +1,12 @@
 # 当前状态总表
 
+| 当前需求（2026-09-20） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 单节点重新部署时运行任务不再长期停留等待隔离；优先转移到其他可用节点，无其他节点时等待原节点恢复后自动重新采集；任务页支持批量重新启动等待隔离任务 | `node/shutdown.py`、`node/recovery.py`、`node/app.py`、`tasks/scheduler.py`、`frontend/src/features/tasks/TaskList.vue`、`taskActions.ts` | 计划重启恢复与普通失联不误恢复专项29项通过；前端生命周期10项通过，前端构建通过；恢复后任务保留`desiredState=RUNNING`并清理旧锁/run，调度器按可用节点排序；只有旧Worker写入`shutdownCompletedAt`后才允许批量恢复 | 需要在实际 deploy-all 单节点/双节点环境执行一次重部署验收；未知失联、旧Worker未完成收尾仍要求隔离证明，不自动接管 |
+| Worker 重启后继续完成未归档小时日志 | `node/app.py`、`logs/maintenance.py`、`logs/compression.py` | `recover_orphan_archives` 维护测试覆盖待提交归档恢复、已发布归档重登记和重复运行幂等；Worker 启动在重新开启监督周期前执行该恢复 | 真实生产中断压缩后的大文件恢复仍需部署环境容量验收；恢复失败保留待处理文件并记录异常，不删除原始日志 |
+
+本次计划重启恢复会使用节点持久化的`shuttingDownAt`、`shutdownCompletedAt`、`shutdownToken`和`accepting=false`作为联合条件，避免把普通节点失联或强制终止误判为可恢复。恢复阶段不直接绑定原节点：任务回到待调度状态，其他健康节点优先领取；原节点没有替代节点时，等新心跳恢复后再领取。
+
 | 当前CI修复（2026-09-20） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 资源身份筛选浏览器验收在慢响应时读取旧表格，第二页多选断言偶发失败 | `scripts/browser_resource_identity_filters.mjs` | 原脚本在600ms响应下复现旧表格断言失败；修复后相同延迟专项及生产页面22项全量回归通过，保留两条选中及批量删除可用断言；语法/差异检查、独立审查和[CI35505458845](https://github.com/geekingdom/camera-log-record-server/actions/runs/35505458845)八项全通过 | 等待请求匹配、加载结束及目标IP列表渲染；逐行点击可见复选框。已完成 |

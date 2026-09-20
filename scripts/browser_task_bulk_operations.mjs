@@ -14,11 +14,14 @@ const tasks = [
   task("stopped", "可启动任务", "STOPPED", "STOPPED", { createdBy: "admin", createdByName: "管理员" }),
   task("collecting", "可停止任务", "COLLECTING", "RUNNING", { createdBy: "admin", createdByName: "管理员" }),
   task("paused", "可继续任务", "PAUSED", "PAUSED", { createdBy: "admin", createdByName: "管理员" }),
+  task("blocked", "等待隔离任务", "BLOCKED", "RUNNING", { createdBy: "admin", createdByName: "管理员" }),
+  task("blocked-ok", "可重启隔离任务", "BLOCKED", "RUNNING", { createdBy: "admin", createdByName: "管理员" }),
   task("deleted", "资源已删除任务", "STOPPED", "STOPPED", { createdBy: "admin", resourceDeleted: true, resourceDeletedAt: "2026-09-09T11:00:00Z" }),
   task("other", "他人任务", "STOPPED", "STOPPED", { createdBy: "other", createdByName: "其他用户" }),
   task("mine", "本人任务", "STOPPED", "STOPPED", { createdBy: "user", createdByName: "普通用户" }),
 ];
 const operations = [];
+const restartBodies = [];
 const errors = [];
 
 async function newPage(isAdmin) {
@@ -36,9 +39,14 @@ async function newPage(isAdmin) {
       const items = tasks.filter(item => !createdBy || item.createdBy === createdBy).map(item => ({ ...item }));
       return route.fulfill({ json: { items, total: items.length, page: 1, pageSize: 20 } });
     }
-    const match = path.match(/^\/api\/v1\/tasks\/([^/]+)\/(start|stop|pause|resume)$/);
+    const match = path.match(/^\/api\/v1\/tasks\/([^/]+)\/(start|stop|pause|resume|restart)$/);
     if (match && request.method() === "POST") {
       operations.push(`${match[1]}:${match[2]}`);
+      if (match[2] === "restart") {
+        restartBodies.push(request.postDataJSON() ?? {});
+        if (match[1] === "blocked") return route.fulfill({ status: 409, json: { detail: { code: "ISOLATION_REQUIRED", message: "旧节点不可达，需要隔离确认" } } });
+        return route.fulfill({ status: 202, json: { id: "operation-blocked-ok" } });
+      }
       if (match[1] === "collecting") return route.fulfill({ status: 500, json: { message: "模拟失败" } });
       return route.fulfill({ status: 202, json: { id: `operation-${match[1]}` } });
     }
@@ -95,6 +103,18 @@ try {
   await admin.page.getByText("失败 1 项", { exact: false }).waitFor();
   assert.deepEqual(operations.slice(-2), ["collecting:stop", "paused:stop"], "失败项不能阻断后续任务");
   assert.ok((await admin.page.locator(".bulk-operation-result").textContent()).includes("可停止任务：失败（模拟失败）"));
+  await admin.page.reload({ waitUntil: "networkidle" });
+  await admin.page.getByRole("tab", { name: "采集任务", exact: true }).click();
+  await admin.page.getByText("等待隔离任务", { exact: true }).waitFor();
+  await select(admin.page, "等待隔离任务");
+  await select(admin.page, "可重启隔离任务");
+  const restartButton = admin.page.getByRole("button", { name: /批量重新启动 \(2\/2\)/ });
+  assert.equal(await restartButton.isDisabled(), false, "阻塞任务应允许批量重新启动入口");
+  await restartButton.click();
+  await admin.page.getByRole("button", { name: "确认", exact: true }).click();
+  await admin.page.getByText("失败 1 项", { exact: false }).last().waitFor();
+  assert.deepEqual(operations.slice(-2), ["blocked:restart", "blocked-ok:restart"], "一项隔离失败不能阻断后续重启");
+  assert.deepEqual(restartBodies, [{}, {}], "批量重启不得自动携带隔离确认");
   for (const width of [390, 320]) {
     await admin.page.setViewportSize({ width, height: 844 });
     await admin.page.waitForTimeout(150);

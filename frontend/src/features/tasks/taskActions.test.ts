@@ -79,6 +79,7 @@ describe("availableTaskActions", () => {
   it("隔离等待任务允许重新启动或停止，批量停止沿用同一状态矩阵", () => {
     const blocked = task({ status: "BLOCKED", desiredState: "RUNNING" });
     expect(availableTaskActions(blocked)).toEqual(["restart", "stop"]);
+    expect(applicableTaskActions([blocked], "restart").applicable).toEqual([blocked]);
     expect(applicableTaskActions([blocked], "stop").applicable).toEqual([blocked]);
   });
 });

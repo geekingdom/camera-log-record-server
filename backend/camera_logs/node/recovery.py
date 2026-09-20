@@ -13,6 +13,46 @@ from camera_logs.common.security import authorize
 from camera_logs.tasks.control import _guard_resources
 
 
+async def recover_planned_restart_tasks(repo, node_id: str) -> int:
+    """消费同节点计划重启窗口产生的 BLOCKED 任务并重新交给调度器。
+
+    deploy-all 重启 Worker 时，旧心跳可能在进程退出与新进程启动之间过期，
+    调度器会先把运行任务标为 BLOCKED。只有节点自身已经持久化
+    ``shuttingDownAt``、``shutdownCompletedAt``和实例 token、节点仍未重新准入时，才允许把本节点
+    的任务视为旧实例已随计划重启结束；未知失联节点仍必须走原有隔离收据流程。
+    每个任务独立清理运行锁和结束旧 run，保留 desiredState=RUNNING，下一轮调度
+    会在可用节点上创建新运行。
+    """
+    node = await repo.db.nodes.find_one({"id": node_id})
+    if not node or node.get("accepting") or not node.get("shuttingDownAt") \
+            or not node.get("shutdownCompletedAt") or not node.get("shutdownToken"):
+        return 0
+    recovered = 0
+    async for task in repo.db.tasks.find({
+        "nodeId": node_id, "plannedRestart": True, "desiredState": "RUNNING",
+        "status": {"$in": ["BLOCKED", "PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]},
+        "resourceDeleted": {"$ne": True},
+    }):
+        timestamp = now()
+        run_id = task.get("runId")
+        if run_id:
+            await repo.db.endpoint_locks.delete_one({"taskId": task["id"], "runId": run_id})
+            await repo.db.runs.update_one({"id": run_id, "taskId": task["id"], "endedAt": None},
+                                          {"$set": {"endedAt": timestamp, "endReason": "PLANNED_NODE_RESTART"}})
+        changed = await repo.db.tasks.update_one(
+            {"id": task["id"], "nodeId": node_id, "plannedRestart": True,
+             "status": {"$in": ["BLOCKED", "PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]},
+             "desiredState": "RUNNING"},
+            {"$set": {"nodeId": None, "status": "STOPPED", "error": None,
+                      "restartRequested": False, "updatedAt": timestamp,
+                      "recoveryReason": "PLANNED_NODE_RESTART"},
+             "$unset": {"closedReceipt": "", "failoverFenceRetryAt": "", "failoverConsumeRetryAt": ""}},
+        )
+        if changed.matched_count:
+            recovered += 1
+    return recovered
+
+
 async def record_closed_receipt(repo, task, instance_id: str, session_id: str | None, *, reason: str | None = None) -> None:
     """在传输和日志收尾完成后固化精确 owner 收据，供数据库收尾重试使用。"""
     if not session_id:

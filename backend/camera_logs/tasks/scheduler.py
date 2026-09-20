@@ -62,7 +62,8 @@ async def schedule_once(repo, lease=None):
     await request_reachable_worker_fencing(repo, stale_nodes)
     await consume_confirmed_failovers(repo)
     for node in stale_nodes:
-        await db.tasks.update_many({"nodeId": node["id"], "status": {"$nin": ["STOPPED", "BLOCKED"]}},
+        await db.tasks.update_many({"nodeId": node["id"], "plannedRestart": {"$ne": True},
+                                    "status": {"$nin": ["STOPPED", "BLOCKED"]}},
             {"$set": {"status": "BLOCKED", "error": "节点失联，必须确认旧实例停止或隔离后才能接管"}})
     await reconcile_stopped_tasks(db)
     # 调度租约内只有本调度者新增归属，节点收尾只会释放归属。一次投影扫描统计

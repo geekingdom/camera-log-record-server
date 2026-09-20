@@ -1,6 +1,7 @@
 """节点收尾归属测试：过期实例必须释放连接而不能结束后继运行。"""
 
 import time
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,7 @@ import pytest
 from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
+from camera_logs.node.recovery import recover_planned_restart_tasks
 from camera_logs.node.worker import Worker
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
@@ -64,6 +66,40 @@ async def test_stale_release_removes_only_its_own_closed_instance(tmp_path):
     runtime.stop.assert_awaited_once()
     assert "task" not in worker.active
     assert (await repo.db.tasks.find_one({"id": "task"}))["status"] == "COLLECTING"
+
+
+async def test_planned_worker_restart_requeues_blocked_tasks(tmp_path):
+    """同节点计划重启造成的 BLOCKED 任务应一次性释放旧归属并重新调度。"""
+    repo = isolated_repository(tmp_path, "collector-01")
+    stale = now() - timedelta(minutes=2)
+    await repo.db.nodes.insert_one({"id": "collector-01", "heartbeat": stale,
+                                    "accepting": False, "shuttingDownAt": stale,
+                                    "shutdownCompletedAt": stale, "shutdownToken": "old-instance"})
+    for index in range(3):
+        await repo.db.tasks.insert_one({"id": f"task-{index}", "nodeId": "collector-01",
+                                        "runId": f"run-{index}", "status": "BLOCKED",
+                                        "desiredState": "RUNNING", "plannedRestart": True,
+                                        "resourceDeleted": False})
+        await repo.db.runs.insert_one({"id": f"run-{index}", "taskId": f"task-{index}", "endedAt": None})
+        await repo.db.endpoint_locks.insert_one({"taskId": f"task-{index}", "runId": f"run-{index}"})
+
+    assert await recover_planned_restart_tasks(repo, "collector-01") == 3
+    tasks = [item async for item in repo.db.tasks.find({}).sort("id", 1)]
+    assert all(item["status"] == "STOPPED" and item["nodeId"] is None
+               and item["desiredState"] == "RUNNING" for item in tasks)
+    assert await repo.db.endpoint_locks.count_documents({}) == 0
+    assert await repo.db.runs.count_documents({"endedAt": None}) == 0
+
+
+async def test_unplanned_stale_node_does_not_requeue_blocked_tasks(tmp_path):
+    """没有计划关闭标记的普通失联任务仍必须等待原隔离流程。"""
+    repo = isolated_repository(tmp_path, "collector-01")
+    await repo.db.nodes.insert_one({"id": "collector-01", "heartbeat": now() - timedelta(minutes=2),
+                                    "accepting": False, "shuttingDownAt": now() - timedelta(minutes=2)})
+    await repo.db.tasks.insert_one({"id": "task", "nodeId": "collector-01", "runId": "run",
+                                    "status": "BLOCKED", "desiredState": "RUNNING", "resourceDeleted": False})
+    assert await recover_planned_restart_tasks(repo, "collector-01") == 0
+    assert (await repo.db.tasks.find_one({"id": "task"}))['status'] == "BLOCKED"
 
 
 @pytest.mark.parametrize("failed", [False, True])

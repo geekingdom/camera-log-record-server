@@ -27,6 +27,10 @@ def create_worker_app(settings=None):
                                       w="majority", journal=True)
             repo = Repository(client[settings.database_name], settings)
             await repo.initialize()
+            # deploy-all 的计划重启可能与调度器的心跳扫描交错；新 Worker 先消费
+            # 同节点计划窗口产生的 BLOCKED 任务，再开始新一轮调度。
+            from camera_logs.node.recovery import recover_planned_restart_tasks
+            await recover_planned_restart_tasks(repo, settings.node_id)
             worker = Worker(repo)
             from camera_logs.logs.job_lease import recover_expired_jobs
             await recover_expired_jobs(repo)

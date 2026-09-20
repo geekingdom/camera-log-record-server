@@ -43,7 +43,7 @@ const protocolLabels: Record<string, string> = {
   TELNET_DEVICE: "Telnet 设备",
   TELNET_SERIAL: "Telnet 串口",
 };
-const taskActions: Exclude<TaskAction, "restart">[] = ["start", "stop", "pause", "resume"];
+const taskActions: TaskAction[] = ["start", "restart", "stop", "pause", "resume"];
 
 function label(value: string | undefined, labels: Record<string, string>) {
   return labels[value ?? ""] ?? value ?? "未知";
@@ -83,13 +83,13 @@ watch(() => props.items, async items => {
   await nextTick();
   setTimeout(() => { restoringSelection = false; }, 0);
 });
-function applicable(action: Exclude<TaskAction, "restart">) { return applicableTaskActions(selected.value, action); }
+function applicable(action: TaskAction) { return applicableTaskActions(selected.value, action); }
 function actionLabel(action: TaskAction) { return ({ start: "启动", restart: "重新启动", stop: "停止", pause: "暂停", resume: "继续" } as const)[action]; }
 function openBlockedRestart(task: Task) {
   if (!props.canControl || !owns(task) || busy(task) || !showsAction(task, "restart")) return;
   blockedRestartTask.value = task;
 }
-async function applySelected(action: Exclude<TaskAction, "restart">) {
+async function applySelected(action: TaskAction) {
   if (applying.value || !selected.value.length) return;
   const generation = pageGeneration;
   const classified = applicable(action);
@@ -100,7 +100,10 @@ async function applySelected(action: Exclude<TaskAction, "restart">) {
   if (!mounted || pageGeneration !== generation) return;
   applying.value = true; results.value = [];
   const skipped = frozenSkipped.map(item => ({ ...item, status: "skipped" as const }));
-  const submitted = await runSequentially(frozenApplicable, async (id) => { await api.operation(id, action); }, {
+  const submitted = await runSequentially(frozenApplicable, async (id) => {
+    if (action === "restart") await api.restartBlocked(id);
+    else await api.operation(id, action);
+  }, {
     shouldContinue: () => mounted && pageGeneration === generation,
     onProgress: entries => { results.value = [...skipped, ...entries]; },
   });

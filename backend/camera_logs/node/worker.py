@@ -262,7 +262,10 @@ class Worker:
         if failed:
             await self.repo.db.operations.update_many({"taskId": task["id"], "desiredState": "RUNNING", "status": "PENDING"},
                 {"$set": {"status": "FAILED", "completedAt": now()}})
-        await self.repo.db.tasks.update_one(owner_filter(task), {"$set": update})
+        await self.repo.db.tasks.update_one(owner_filter(task), {
+            "$set": update,
+            "$unset": {"plannedRestart": "", "plannedRestartNodeId": ""},
+        })
         await self.repo.db.tasks.find_one_and_update(
             {**owner_filter(task), "nodeId": None, "status": update["status"], "restartRequested": True},
             {"$set": {"desiredState": "RUNNING", "restartRequested": False}}, return_document=ReturnDocument.AFTER)
@@ -528,6 +531,13 @@ class Worker:
         else:
             allow_release = True
         await shutdown_runtimes(self, allow_release=allow_release)
+        # 只有本 Worker 的所有运行和收尾都完成后，新的 Worker 才能消费计划重启
+        # 标记。超时或异常退出不会写完成标记，旧归属继续走隔离证明流程。
+        if allow_release and not self.active and not self.releases:
+            await self.repo.db.nodes.update_one(
+                {"id": self.repo.settings.node_id, "shutdownToken": self.instance_id, "accepting": False},
+                {"$set": {"shutdownCompletedAt": now()}},
+            )
         for job in self.jobs | set(self.manual_jobs.values()):
             job.cancel()
         tasks = [*self.jobs, *self.manual_jobs.values()]

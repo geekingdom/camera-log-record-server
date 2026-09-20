@@ -19,10 +19,19 @@ async def mark_unavailable_for_shutdown(worker):
     """关闭前撤销节点准入，防止旧心跳有效期内被再次分配任务。"""
     changed = await worker.repo.db.nodes.update_one(
         {"id": worker.repo.settings.node_id},
-        {"$set": {"accepting": False, "shuttingDownAt": now()}},
+        {"$set": {"accepting": False, "shuttingDownAt": now(), "shutdownToken": worker.instance_id},
+         "$unset": {"shutdownCompletedAt": ""}},
     )
     if not changed.matched_count:
         raise RuntimeError("关闭前未找到节点心跳，不能确认已经撤销准入")
+    # 这是 deploy-all 的受控退出标记。调度器看到节点心跳过期时不会把这些
+    # 任务误判成普通失联；旧 Worker 随后会逐项关闭并清理运行归属。
+    await worker.repo.db.tasks.update_many(
+        {"nodeId": worker.repo.settings.node_id, "desiredState": "RUNNING",
+         "status": {"$in": ["PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]}},
+        {"$set": {"plannedRestart": True, "plannedRestartNodeId": worker.repo.settings.node_id,
+                   "updatedAt": now()}},
+    )
 
 
 async def shutdown_runtime(worker, runtime, *, allow_release=True):
