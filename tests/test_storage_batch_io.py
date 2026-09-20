@@ -7,6 +7,7 @@ import time
 from datetime import UTC, datetime
 
 import pytest
+from camera_logs.logs import write_io
 from camera_logs.logs.storage import HourlyWriter
 
 
@@ -37,6 +38,20 @@ async def test_batch_uses_one_append_and_preserves_each_source_position(tmp_path
     assert [row["sequence"] for row in indexes] == list(range(1, 122))
     assert handle.calls == 1
     await writer.close()
+
+
+async def test_writer_reuses_index_handle_and_records_write_stages(tmp_path):
+    """同一分卷不应为每批重开索引；阶段指标需覆盖正文和旁路写入。"""
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
+    await writer.write(b"first\n")
+    index_handle = writer._index_handle
+    await writer.write(b"second\n")
+    assert writer._index_handle is index_handle and not index_handle.closed
+    stages = write_io.snapshot()["stages"]
+    assert stages["bodyAppendMs"]["samples"] >= 2
+    assert stages["indexAppendMs"]["samples"] >= 2
+    await writer.close()
+    assert index_handle.closed
 
 
 async def test_cancelled_slow_write_keeps_lock_until_thread_finishes(tmp_path):
@@ -74,7 +89,7 @@ async def test_partial_write_error_poison_writer_without_replaying_batch(tmp_pat
     """部分字节写入后失败必须保留原文件并拒绝继续，不能归档成完整文件。"""
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
     await writer.write(b"head\n")
-    original, path = writer._handle, writer.active_path
+    original, index_handle, path = writer._handle, writer._index_handle, writer.active_path
 
     class FailedWrite:
         calls = 0
@@ -97,6 +112,7 @@ async def test_partial_write_error_poison_writer_without_replaying_batch(tmp_pat
         assert path.read_bytes() == b"head\nta"
         assert not list(tmp_path.rglob("*.tar.gz"))
         assert original.closed
+        assert index_handle.closed
     finally:
         original.close()
 
@@ -125,4 +141,7 @@ async def test_slow_partial_writes_preserve_duplicate_lines_and_durable_watermar
     expected = b"head\nsame\nsame\nlast\n"
     assert writer.active_path.read_bytes() == expected
     assert writer.snapshot()["bytesDurable"] == len(expected)
+    stages = write_io.snapshot()["stages"]
+    assert stages["bodyFsyncMs"]["samples"] >= 1
+    assert stages["indexFsyncMs"]["samples"] >= 1
     await writer.close()

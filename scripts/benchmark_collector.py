@@ -17,6 +17,7 @@ import tarfile
 import time
 from pathlib import Path
 
+from camera_logs.collection import buffering
 from camera_logs.collection.collector import Collector
 
 
@@ -24,9 +25,17 @@ class Source:
     """用有界异步队列模拟单条设备连接的输入流。"""
     def __init__(self) -> None:
         self.queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=128)
+        self._remaining = b""
 
-    async def read(self, _size: int = 65536) -> bytes:
-        return (await self.queue.get()) or b""
+    async def read(self, size: int = 65536) -> bytes:
+        """遵循连接读取上限，保留未返回的网络块供下次采集读取。"""
+        while not self._remaining:
+            value = await self.queue.get()
+            if value is None:
+                return b""
+            self._remaining = value
+        value, self._remaining = self._remaining[:size], self._remaining[size:]
+        return value
 
     async def write(self, _data: bytes) -> None:
         return None
@@ -110,6 +119,8 @@ async def execute(args: argparse.Namespace) -> dict[str, object]:
     await asyncio.gather(*(collector.wait_closed() for collector in collectors))
     await asyncio.gather(*(collector.stop() for collector in collectors))
     total_elapsed = time.monotonic() - source_started
+    buffer = buffering.snapshot()
+    assert buffer["reservedBytes"] == 0, "all collector reservations must drain after close"
     actual = []
     stored_bytes = compressed_bytes = 0
     for route in range(args.routes):
@@ -130,6 +141,7 @@ async def execute(args: argparse.Namespace) -> dict[str, object]:
         "storedBytes": stored_bytes, "compressedBytes": compressed_bytes,
         "timestampPrefixVerified": True,
         "verified": passed,
+        "buffer": buffer,
         "rssBytes": maximum_rss,
         "archives": len({item.path for route_archives in archives for item in route_archives}),
         "logParts": sum(len(value) for value in archives),

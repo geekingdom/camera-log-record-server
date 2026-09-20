@@ -35,6 +35,13 @@ class ReadLimiter:
         if target > now:
             time.sleep(target - now)
 
+    def configure(self, rate: int) -> None:
+        """热更新后续预约速率；保留已预约负债，避免配置抖动突破读取预算。"""
+        if rate <= 0:
+            raise ValueError("读取速率必须为正数")
+        with self.lock:
+            self.rate = rate
+
 
 read_limiter = ReadLimiter()
 

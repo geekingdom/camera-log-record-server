@@ -49,7 +49,7 @@ async def test_collector_sync_failure_closes_device_and_reports_stop_failure(tmp
         closed = False
         received = False
 
-        async def read(self):
+        async def read(self, _size):
             if not self.received:
                 self.received = True
                 return b"device-output\n"

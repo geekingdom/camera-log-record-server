@@ -188,8 +188,46 @@ export interface Node {
   writeLatencySamples?: number;
   writeLatencyPendingMs?: number;
   writeLatencyWindowSeconds?: number;
+  /** Worker 根据节点性能策略生成的只读运行结论，不由浏览器推导。 */
+  performanceStatus?: NodePerformanceStatus | null;
   telemetry?: NodeTelemetry;
   health?: NodeHealth;
+}
+export interface NodePerformanceStatus {
+  state?: string;
+  /** 性能控制器要求暂停新任务准入；不影响已建立的采集会话。 */
+  admissionBlocked?: boolean;
+  effective?: {
+    mode?: "AUTO" | "MANUAL" | string;
+    bufferMiB?: number;
+    writeConcurrency?: number;
+    batchKiB?: number;
+    flushIntervalMs?: number;
+    readMiBPerSecond?: number;
+  };
+  reason?: string | null;
+  changedAt?: string | null;
+  resources?: Record<string, number | string | boolean | null>;
+  buffer?: {
+    reservedBytes?: number | null;
+    limitBytes?: number | null;
+    oldestPendingMs?: number | null;
+    scope?: string | null;
+  };
+  writeIo?: {
+    concurrency?: number;
+    active?: number;
+    waiting?: number;
+    queue?: NodePerformanceStage;
+    execution?: NodePerformanceStage;
+    stages?: Record<string, NodePerformanceStage | undefined>;
+  };
+}
+/** Worker 的写入阶段滚动统计；例如 `stages.batchWaitMs` 表示批次等待。 */
+export interface NodePerformanceStage {
+  samples?: number;
+  sampleWindow?: number;
+  p99Ms?: number;
 }
 /** Worker 上报的瞬时资源遥测；HOST 与 RUNTIME 范围由服务端明确标注。 */
 export interface NodeTelemetry {

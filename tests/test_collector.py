@@ -52,7 +52,7 @@ async def test_pending_batch_read_wait_ends_at_original_flush_deadline(tmp_path,
     clock, timeouts = [0.0], []
     chunks = iter([(.06, b"first"), (.099, b"second"), (.1, b"")])
 
-    async def read():
+    async def read(_size):
         clock[0], data = next(chunks)
         return data
 

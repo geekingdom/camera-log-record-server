@@ -29,6 +29,7 @@ from camera_logs.node.input_admission import (
     MAX_INPUT_RATE_LIMIT_MIB,
     input_rate_limit,
 )
+from camera_logs.node.performance import PerformancePolicy
 from camera_logs.node.resource_routing import normalize_resource_networks, routing_config
 from camera_logs.node.write_pressure import (
     DEFAULT_WRITE_LATENCY_LIMIT_MS,
@@ -81,6 +82,8 @@ class NodeRegistration(SettingsModel):
                                      description="写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
     isGeneralNode: bool = True
     resourceNetworks: list[str] = Field(default_factory=list, max_length=128)
+    performance: PerformancePolicy = Field(default_factory=PerformancePolicy,
+                                           description="节点采集性能策略；AUTO 使用预算上限自适应，MANUAL 使用明确参数。")
 
     @field_validator("resourceNetworks")
     @classmethod
@@ -143,6 +146,8 @@ class NodeConfigPatch(SettingsModel):
                                              description="节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
     isGeneralNode: bool | None = None
     resourceNetworks: list[str] | None = Field(default=None, max_length=128)
+    performance: PerformancePolicy | None = Field(default=None,
+                                                   description="完整替换节点采集性能策略；省略时保留已有策略。")
 
     @field_validator("resourceNetworks")
     @classmethod
@@ -172,6 +177,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
         "registered": True,
         "inputRateLimitMiB": input_rate_limit(config),
         "writeLatencyLimitMs": write_latency_limit(config),
+        "performance": PerformancePolicy.model_validate(config.get("performance") or {}).model_dump(),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
         **routing_config(config),
@@ -181,6 +187,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
         result["urlMismatch"] = node.get("url") != config["url"]
         result["activeTasks"] = node.get("activeTasks", 0)
         result["diskPercent"] = node.get("diskPercent")
+        result["performanceStatus"] = node.get("performanceStatus")
     return result
 
 
@@ -196,10 +203,12 @@ def _public_discovered_node(node: dict) -> dict:
         "registered": False,
         "inputRateLimitMiB": input_rate_limit(node),
         "writeLatencyLimitMs": write_latency_limit(node),
+        "performance": PerformancePolicy().model_dump(),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
         "activeTasks": node.get("activeTasks", 0),
         "diskPercent": node.get("diskPercent"),
+        "performanceStatus": node.get("performanceStatus"),
         **routing_config({}),
     }
 

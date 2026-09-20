@@ -63,7 +63,8 @@ def measurements(node, current=None):
 def resource_pressure(node, current=None):
     """新鲜CPU或内存达到95%时暂停新任务，不主动断开已有连接。"""
     sample = measurements(node, current)
-    return any(number(sample.get(key)) is not None and sample[key] >= 95 for key in ("cpuPercent", "memoryPercent"))
+    return bool((node.get("performanceStatus") or {}).get("admissionBlocked")) or any(
+        number(sample.get(key)) is not None and sample[key] >= 95 for key in ("cpuPercent", "memoryPercent"))
 
 
 def node_health(node, current=None):
@@ -73,6 +74,11 @@ def node_health(node, current=None):
     if heartbeat_reason:
         return {"status": "OFFLINE", "reasons": [heartbeat_reason]}
     critical, warnings, unknown = [], [], []
+    performance = node.get("performanceStatus") or {}
+    if performance.get("admissionBlocked"):
+        critical.append("节点有效内存不足或采集缓冲积压，暂停新任务准入")
+    if (performance.get("archives") or {}).get("oldestSeconds", 0) >= 300:
+        warnings.append("小时归档等待超过5分钟，请检查磁盘与后台处理预算")
     if input_rate_blocked(node):
         critical.append(f"日志输入速率达到准入上限或测量缺失（{input_rate_limit(node)} MiB/s）")
     if node.get("isolated"):
@@ -140,6 +146,9 @@ def rank_nodes(nodes, occupancy, task=None):
                  + .10 * ((number(node.get("diskPercent")) or 0) / 100)
                  + .10 * min(1, (number(node.get("writeLatencyMs")) or 0) / write_latency_limit(node))
                  + .10 * (network / peak_network if network is not None else .75))
+        buffer = (node.get("performanceStatus") or {}).get("buffer") or {}
+        limit = number(buffer.get("limitBytes")) or 1
+        score += .10 * min(1, (number(buffer.get("reservedBytes")) or 0) / limit)
         # 健康专用节点优先；同一类别仍使用原加权成本，硬准入失败已在上面剔除。
         priority = 2 if task is not None and node.get("isGeneralNode", True) else 0
         ranked.append((priority + score, node["id"]))

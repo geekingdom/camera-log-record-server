@@ -95,7 +95,7 @@ async def test_scheduler_and_claim_recheck_saved_write_latency_limit(tmp_path):
     assert await repo.db.endpoint_locks.count_documents({}) == 0
 
 
-async def test_worker_reloads_saved_write_latency_limit_without_stopping_existing_connection(tmp_path):
+async def test_worker_reloads_saved_write_latency_limit_without_stopping_existing_connection(tmp_path, known_node_resources):
     """管理员放宽后心跳恢复准入；后续收紧只拒绝新会话，不关闭既有采集。"""
     repo = Repository(AsyncMongoMockClient().db, Settings(
         encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,

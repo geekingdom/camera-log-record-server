@@ -51,6 +51,16 @@ export interface DisplaySettings {
   liveLogBufferMiB: number;
 }
 
+/** 节点采集性能策略；AUTO 的数值是节点自动调节时可使用的资源上限。 */
+export interface PerformancePolicy {
+  mode: "AUTO" | "MANUAL";
+  bufferMiB: number;
+  writeConcurrency: number;
+  batchKiB: number;
+  flushIntervalMs: number;
+  readMiBPerSecond: number;
+}
+
 export interface NodeConfig {
   id: string;
   url: string;
@@ -68,6 +78,8 @@ export interface NodeConfig {
   diskPercent?: number | null;
   isGeneralNode?: boolean;
   resourceNetworks?: string[];
+  performance: PerformancePolicy;
+  performanceStatus?: Record<string, unknown> | null;
 }
 
 export interface NodeRegistration {
@@ -79,6 +91,7 @@ export interface NodeRegistration {
   writeLatencyLimitMs?: number;
   isGeneralNode?: boolean;
   resourceNetworks?: string[];
+  performance?: PerformancePolicy;
 }
 
 export const settingsApi = {
@@ -99,7 +112,7 @@ export const settingsApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(body),
     }),
-  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks" | "inputRateLimitMiB" | "writeLatencyLimitMs">) =>
+  updateNode: (id: string, body: Pick<NodeConfig, "version" | "capacity" | "accepting" | "isGeneralNode" | "resourceNetworks" | "inputRateLimitMiB" | "writeLatencyLimitMs" | "performance">) =>
     request<NodeConfig>(`/admin/nodes/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

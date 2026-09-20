@@ -18,10 +18,12 @@ from camera_logs.logs.search_index import build_index
 _pool: ProcessPoolExecutor | None = None
 
 
-def _hash_stream(stream):
+def _hash_stream(stream, limiter=None):
     """分块计算摘要和字节数，避免大文件在压缩进程中占用整块内存。"""
     digest, size = hashlib.sha256(), 0
     while chunk := stream.read(1024 * 1024):
+        if limiter:
+            limiter.consume(len(chunk))
         digest.update(chunk)
         size += len(chunk)
     return digest.hexdigest(), size
@@ -56,9 +58,21 @@ def _write_json_atomic(path: Path, value: dict) -> None:
         raise
 
 
-def publish_hour_archive(segments: Iterable[dict], target: Path) -> Path:
+def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate: int | None = None,
+                         create_index: bool = True) -> Path:
     """合并小时包；正文、索引与 pending 清单全部核验后才删除原始正文。"""
     target = Path(target)
+    from camera_logs.logs.archive_access import LimitedReader, ReadLimiter
+    limiter = ReadLimiter(background_rate) if background_rate else None
+
+    class ArchiveReader(LimitedReader):
+        """仅在节点持续压力时节流压缩输入；独立于查询进程的读取预算。"""
+        def read(self, size=-1):
+            data = self.source.read(self.remaining if size < 0 else min(size, self.remaining))
+            self.remaining -= len(data)
+            if limiter:
+                limiter.consume(len(data))
+            return data
     new_segments = [dict(segment) for segment in segments]
     metadata_path = _metadata_path(target)
     pending_path = _pending_path(target)
@@ -96,24 +110,26 @@ def publish_hour_archive(segments: Iterable[dict], target: Path) -> Path:
                             raise OSError("已有小时归档包含非日志成员")
                         stream = previous.extractfile(member)
                         assert stream is not None
-                        bundle.addfile(member, stream)
+                        bundle.addfile(member, ArchiveReader(stream, member.size))
                         existing_names.add(member.name)
             for segment in all_segments:
                 log = Path(segment["logPath"])
                 index = target.parent / str(segment["indexName"])
                 with index.open("rb") as source:
-                    index_digest, index_size = _hash_stream(source)
+                    index_digest, index_size = _hash_stream(source, limiter)
                 if (index_digest, index_size) != (segment["indexSha256"], segment["indexBytes"]):
                     raise OSError("原始索引摘要校验失败")
                 if log.exists():
                     with log.open("rb") as source:
-                        digest, size = _hash_stream(source)
+                        digest, size = _hash_stream(source, limiter)
                     if digest != segment["sha256"] or size != segment["rawSize"]:
                         raise OSError("原始日志摘要校验失败")
                 elif segment["logName"] not in existing_names:
                     raise OSError("待恢复原始日志不存在")
                 if segment["logName"] not in existing_names:
-                    bundle.add(log, arcname=segment["logName"])
+                    info = bundle.gettarinfo(str(log), arcname=segment["logName"])
+                    with log.open("rb") as source:
+                        bundle.addfile(info, ArchiveReader(source, info.size))
                     existing_names.add(segment["logName"])
         additions = [{key: value for key, value in segment.items() if key != "logPath"}
                      for segment in all_segments if str(segment["logName"]) not in old_by_name]
@@ -126,7 +142,7 @@ def publish_hour_archive(segments: Iterable[dict], target: Path) -> Path:
                 raise OSError("小时归档成员不符合日志合同")
             for member in members:
                 stream = bundle.extractfile(str(member["logName"]))
-                if stream is None or _hash_stream(stream) != (member["sha256"], member["rawSize"]):
+                if stream is None or _hash_stream(stream, limiter) != (member["sha256"], member["rawSize"]):
                     raise OSError("小时归档正文校验失败")
         with partial.open("rb") as handle:
             os.fsync(handle.fileno())
@@ -141,7 +157,8 @@ def publish_hour_archive(segments: Iterable[dict], target: Path) -> Path:
             Path(segment["logPath"]).unlink(missing_ok=True)
         pending_path.unlink(missing_ok=True)
         # 索引只是搜索候选加速器；SQLite/磁盘故障绝不能撤销已验证发布的小时包。
-        build_index(target)
+        if create_index:
+            build_index(target)
         return target
     except BaseException:
         partial.unlink(missing_ok=True)
@@ -170,7 +187,27 @@ async def compress_hour(segments: list[dict], target: Path) -> Path:
     global _pool
     if _pool is None:
         _pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
-    return await asyncio.get_running_loop().run_in_executor(_pool, publish_hour_archive, segments, target)
+    from camera_logs.node.performance_runtime import archive_finished, archive_started, background_settings
+    rate, create_index = background_settings()
+    token = object()
+    archive_started(token)
+    try:
+        future = asyncio.get_running_loop().run_in_executor(
+            _pool, publish_hour_archive, segments, target, None if create_index else rate, create_index)
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # noqa: BLE001 - 完成实际归档后才允许释放生命周期。
+                break
+        if not future.cancelled():
+            future.exception()
+        raise
+    finally:
+        archive_finished(token)
 
 
 async def build_search_index(target: Path) -> bool:
@@ -200,5 +237,10 @@ async def shutdown_compression() -> None:
     """在节点收尾后等待压缩进程退出。"""
     global _pool
     if _pool is not None:
-        pool, _pool = _pool, None
-        await asyncio.to_thread(pool.shutdown, wait=True)
+        from camera_logs.logs.job_threads import job_thread
+        pool = _pool
+        try:
+            await job_thread(pool.shutdown, wait=True)
+        finally:
+            if _pool is pool:
+                _pool = None

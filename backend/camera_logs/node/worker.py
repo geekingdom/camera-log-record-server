@@ -336,6 +336,8 @@ class Worker:
         mismatch = bool(config.get("url") and config["url"].rstrip("/") != self.repo.settings.node_url.rstrip("/"))
         reported = await self.repo.db.nodes.find_one({"id": self.repo.settings.node_id}) or {}
         write_latency = self.write_latency()
+        from camera_logs.node.performance_runtime import update_performance
+        performance_status = await update_performance(self, config, write_latency, disk_percent)
         await self.write_pressure.report(self.repo.db, self.repo.settings.node_id, write_latency, config)
         accepting = (
             disk_percent < 90
@@ -346,6 +348,7 @@ class Worker:
             and not reported.get("isolated", False)
             and not write_latency_blocked(write_latency, config)
             and not resource_pressure({"telemetry": self.telemetry.value})
+            and not performance_status.get("admissionBlocked")
         )
         rate = self.input_rate.sample(self.active.values())
         # 管理配置每周期重读；已分配但尚未建连的任务也必须等吞吐恢复。
@@ -354,6 +357,7 @@ class Worker:
             "id": self.repo.settings.node_id, "url": self.repo.settings.node_url, "workerReportedAt": now(),
             "telemetryAgeSeconds": self.telemetry.age_seconds(),
             "capacity": capacity, "activeTasks": len(self.active),
+            "performanceStatus": performance_status,
             "inputRateLimitMiB": input_rate_limit(config),
             "writeLatencyLimitMs": write_latency_limit(config),
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
@@ -483,7 +487,9 @@ class Worker:
         await maintain(self.repo)
         await cleanup_expired_exports(self.repo)
         from camera_logs.logs.search_index_maintenance import backfill_search_indexes
-        await backfill_search_indexes(self.repo)
+        from camera_logs.node.performance_runtime import background_settings
+        if background_settings()[1]:
+            await backfill_search_indexes(self.repo)
         if not self.repo.settings.nfs_server_ip:
             return
         from camera_logs.coredumps.snapshots import reconcile_snapshots

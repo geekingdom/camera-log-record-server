@@ -18,6 +18,8 @@ JOB = {"id": "job-example", "taskId": "task-example", "kind": "DOWNLOAD", "statu
 COMMAND = {"id": "command-example", "taskId": "task-example", "kind": "MANUAL", "command": "ls", "status": "QUEUED"}
 NODE = {"id": "collector-01", "url": "http://192.0.2.20:18081", "capacity": 100, "accepting": True,
         "isGeneralNode": True, "resourceNetworks": [], "writeLatencyLimitMs": 200,
+        "performance": {"mode": "AUTO", "bufferMiB": 64, "writeConcurrency": 4, "batchKiB": 256,
+                        "flushIntervalMs": 100, "readMiBPerSecond": 50},
         "version": 1, "registered": True, "online": True}
 VALUES = {"name": "示例名称", "username": "integration-user", "password": "Example-password-123!",
           "currentPassword": "Example-current-123!", "newPassword": "Example-new-password-123!",
@@ -72,7 +74,9 @@ def request_example(schema, schemas):
     if name == "TaskPatch":
         return {"version": 1, "name": "更新后的任务名称", "sshTarget": "SLAVE_1"}
     if name == "NodeConfigPatch":
-        return {"version": 1, "writeLatencyLimitMs": 500}
+        return {"version": 1, "writeLatencyLimitMs": 500,
+                "performance": {"mode": "MANUAL", "bufferMiB": 128, "writeConcurrency": 6,
+                                "batchKiB": 512, "flushIntervalMs": 80, "readMiBPerSecond": 75}}
     return schema_example(schema, schemas)
 
 

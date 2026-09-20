@@ -12,6 +12,8 @@ from camera_logs.node.worker import Worker
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 
+pytestmark = pytest.mark.usefixtures("known_node_resources")
+
 
 @pytest.mark.parametrize("percent", [90, 95, 100])
 async def test_pending_task_waits_for_disk_recovery_before_connecting(tmp_path, percent):

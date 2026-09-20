@@ -35,6 +35,18 @@ def test_node_write_latency_limit_is_documented_with_valid_examples(client):
     assert operations["POST /api/v1/admin/nodes"]["responseExample"]["writeLatencyLimitMs"] == 200
 
 
+def test_node_performance_policy_is_documented_with_valid_nested_examples(client):
+    """节点性能策略的范围、默认值和 PATCH 全量替换示例必须可直接提交。"""
+    reference = client.get("/api/v1/api-reference").json()
+    policy = reference["schemas"]["PerformancePolicy"]["properties"]
+    assert policy["mode"]["default"] == "AUTO"
+    assert policy["bufferMiB"]["minimum"] == 16 and policy["bufferMiB"]["maximum"] == 4096
+    assert policy["writeConcurrency"]["minimum"] == 1 and policy["writeConcurrency"]["maximum"] == 32
+    operations = {item["id"]: item for item in reference["operations"]}
+    assert operations["POST /api/v1/admin/nodes"]["requestExample"]["performance"]["mode"] == "AUTO"
+    assert operations["PATCH /api/v1/admin/nodes/{node_id}"]["requestExample"]["performance"]["mode"] == "MANUAL"
+
+
 def test_management_event_cursor_contract_is_documented(client):
     """站内目录必须解释空游标首屏、按需统计和保持旧调用的兼容边界。"""
     reference = client.get("/api/v1/api-reference").json()

@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from camera_logs.logs.compression import compress_hour
 from camera_logs.logs.naming import safe_device_address, safe_filename_component
+from camera_logs.logs.write_io import record_stage, write_thread
 
 MAX_PENDING_ARCHIVES = 2
 MAX_LOG_BYTES = 10 * 1024 * 1024
@@ -86,6 +87,7 @@ class HourlyWriter:
         self.storage_identity = safe_filename_component(storage_identity)
         self.root, self.zone, self._now = Path(root), ZoneInfo(timezone), now or (lambda: datetime.now(UTC))
         self._lock, self._hour, self._log, self._index, self._handle = asyncio.Lock(), None, None, None, None
+        self._index_handle = None
         self._size, self._sequence, self._durable_size = 0, 0, 0
         self._digest = hashlib.sha256()
         self._first_sequence = self._last_sequence = None
@@ -162,7 +164,14 @@ class HourlyWriter:
                 handle.close()
                 log.unlink(missing_ok=True)
                 raise
-            self._handle, self._log, self._index, self._hour = handle, log, index, hour
+            try:
+                index_handle = index.open("a", encoding="utf-8")
+            except BaseException:
+                handle.close()
+                log.unlink(missing_ok=True)
+                index.unlink(missing_ok=True)
+                raise
+            self._handle, self._index_handle, self._log, self._index, self._hour = handle, index_handle, log, index, hour
             break
         self._size = self._durable_size = 0
         self._digest = hashlib.sha256()
@@ -204,20 +213,20 @@ class HourlyWriter:
                 if normalized:
                     hour = self._hour_of(normalized[0][2], self.zone)
                     if self._hour is None:
-                        await asyncio.to_thread(self._open_sync, hour)
+                        await write_thread(self._open_sync, hour)
                     stamps = [entry[2] for entry in normalized]
                     if (self._hour == hour and all(self._hour_of(stamp, self.zone) == hour for stamp in stamps)
                             and all(a <= b for a, b in pairwise(stamps))
                             and (self._last_received_at is None or stamps[0] >= self._last_received_at)
                             and self._size + sum(len(entry[1]) for entry in normalized) <= MAX_LOG_BYTES):
-                        return await asyncio.to_thread(self._append_batch_sync, normalized)
+                        return await write_thread(self._append_batch_sync, normalized)
                 return await self._write_rotating_locked(normalized)
             except Exception as error:
                 # 部分写入不重试、不发布完整归档，保留原错误及原文件供受控恢复。
                 self._close_error = error
                 if self._handle is not None:
                     try:
-                        await asyncio.to_thread(self._handle.close)
+                        await write_thread(self._close_after_error_sync)
                     except Exception as close_error:
                         # 保持原始写入故障为主错误，同时保留句柄关闭失败供诊断。
                         raise error from close_error
@@ -230,30 +239,30 @@ class HourlyWriter:
             rollback = self._last_received_at if self._last_received_at and instant < self._last_received_at else None
             hour = self._hour_of(instant, self.zone)
             if self._hour is None:
-                await asyncio.to_thread(self._open_sync, hour)
+                await write_thread(self._open_sync, hour)
             elif hour != self._hour or rollback:
                 await self._seal_locked()
                 await self._publish_pending_locked(background=True)
-                await asyncio.to_thread(self._open_sync, hour)
+                await write_thread(self._open_sync, hour)
             consumed = 0
             while consumed < len(data):
                 if self._size == MAX_LOG_BYTES:
                     await self._seal_locked()
-                    await asyncio.to_thread(self._open_sync, hour)
+                    await write_thread(self._open_sync, hour)
                 count = min(MAX_LOG_BYTES - self._size, len(data) - consumed)
                 piece = data[consumed:consumed + count]
                 self._sequence += 1
                 position = ChunkPosition(self._sequence, self._size, count, self._log, rollback if consumed == 0 else None,
                                          source_index, consumed)
                 assert self._handle is not None and self._index is not None and self._log is not None
-                await asyncio.to_thread(self._append_sync, piece, position, instant)
+                await write_thread(self._append_sync, piece, position, instant)
                 positions.append(position)
                 self._size += count
                 self._digest.update(piece)
                 self._first_sequence = self._first_sequence or position.sequence
                 self._last_sequence = position.sequence
                 if time.monotonic() - self._last_sync >= 1:
-                    await asyncio.to_thread(self._sync_files)
+                    await write_thread(self._sync_files)
                 consumed += count
             self._last_received_at = instant
         return positions
@@ -271,13 +280,22 @@ class HourlyWriter:
             offset += len(data)
         payload = b"".join(data for _, data, _ in chunks)
         view = memoryview(payload)
-        while view:
-            written = self._handle.write(view)
-            if not written:
-                raise OSError("log file did not accept a complete write")
-            view = view[written:]
-        with self._index.open("a", encoding="utf-8") as index:
-            index.write("".join(rows))
+        started = time.monotonic()
+        try:
+            while view:
+                written = self._handle.write(view)
+                if not written:
+                    raise OSError("log file did not accept a complete write")
+                view = view[written:]
+        finally:
+            record_stage("bodyAppendMs", (time.monotonic() - started) * 1000)
+        assert self._index_handle is not None
+        started = time.monotonic()
+        try:
+            self._index_handle.write("".join(rows))
+            self._index_handle.flush()
+        finally:
+            record_stage("indexAppendMs", (time.monotonic() - started) * 1000)
         self._size = offset
         self._sequence = self._last_sequence = positions[-1].sequence
         self._first_sequence = self._first_sequence or positions[0].sequence
@@ -290,21 +308,37 @@ class HourlyWriter:
     def _append_sync(self, data: bytes, position: ChunkPosition, instant: datetime) -> None:
         assert self._handle is not None and self._index is not None
         view = memoryview(data)
-        while view:
-            written = self._handle.write(view)
-            if not written:
-                raise OSError("log file did not accept a complete write")
-            view = view[written:]
-        with self._index.open("a", encoding="utf-8") as index:
-            index.write(json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
+        started = time.monotonic()
+        try:
+            while view:
+                written = self._handle.write(view)
+                if not written:
+                    raise OSError("log file did not accept a complete write")
+                view = view[written:]
+        finally:
+            record_stage("bodyAppendMs", (time.monotonic() - started) * 1000)
+        assert self._index_handle is not None
+        started = time.monotonic()
+        try:
+            self._index_handle.write(json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
                 "receivedAt": instant.astimezone(UTC).isoformat()}, separators=(",", ":")) + "\n")
+            self._index_handle.flush()
+        finally:
+            record_stage("indexAppendMs", (time.monotonic() - started) * 1000)
 
     def _sync_files(self) -> None:
-        if self._handle is None or self._index is None:
+        if self._handle is None or self._index_handle is None:
             return
-        os.fsync(self._handle.fileno())
-        with self._index.open("rb") as index:
-            os.fsync(index.fileno())
+        started = time.monotonic()
+        try:
+            os.fsync(self._handle.fileno())
+        finally:
+            record_stage("bodyFsyncMs", (time.monotonic() - started) * 1000)
+        started = time.monotonic()
+        try:
+            os.fsync(self._index_handle.fileno())
+        finally:
+            record_stage("indexFsyncMs", (time.monotonic() - started) * 1000)
         self._durable_size, self._last_sync = self._size, time.monotonic()
 
     async def sync_due(self) -> bool:
@@ -313,7 +347,7 @@ class HourlyWriter:
             if self._close_error:
                 raise self._close_error
             if self._size != self._durable_size and time.monotonic() - self._last_sync >= 1:
-                await asyncio.to_thread(self._sync_files)
+                await write_thread(self._sync_files)
                 return True
         return False
 
@@ -323,7 +357,20 @@ class HourlyWriter:
             self._handle.flush()
             self._sync_files()
         finally:
-            self._handle.close()
+            try:
+                self._handle.close()
+            finally:
+                assert self._index_handle is not None
+                self._index_handle.close()
+
+    def _close_after_error_sync(self) -> None:
+        """写入失败后关闭正文与复用的索引句柄，保留原始写入错误作为主因。"""
+        try:
+            if self._handle is not None:
+                self._handle.close()
+        finally:
+            if self._index_handle is not None:
+                self._index_handle.close()
 
     async def _seal_locked(self) -> None:
         if self._close_error:
@@ -333,11 +380,11 @@ class HourlyWriter:
         log, index, hour = self._log, self._index, self._hour
         assert log is not None and index is not None and hour is not None
         try:
-            await asyncio.to_thread(self._close_files_sync)
+            await write_thread(self._close_files_sync)
         except Exception as error:
             self._close_error = error
             raise
-        self._handle = self._log = self._index = self._hour = None
+        self._handle = self._index_handle = self._log = self._index = self._hour = None
         if self._size:
             self._pending.append(_Segment(log, index, hour, self._size, self._digest.hexdigest(),
                 self._first_sequence, self._last_sequence))
@@ -406,7 +453,7 @@ class HourlyWriter:
             await self._seal_locked()
             archives = await self._publish_pending_locked(background=False)
             if now is not None:
-                await asyncio.to_thread(self._open_sync, self._hour_of(now, self.zone))
+                await write_thread(self._open_sync, self._hour_of(now, self.zone))
             if archives and len(archives) > 1:
                 self._sealed.extend(archives[1:])
             return archives[0] if archives else None

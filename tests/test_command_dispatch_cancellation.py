@@ -14,7 +14,7 @@ class Connection:
         self.received = asyncio.Queue()
         self.sent = []
 
-    async def read(self):
+    async def read(self, _size):
         return await self.received.get()
 
     async def write(self, data):

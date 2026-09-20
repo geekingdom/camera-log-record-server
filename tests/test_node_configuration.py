@@ -12,7 +12,7 @@ from mongomock_motor import AsyncMongoMockClient
 from pydantic import ValidationError
 
 
-async def test_configured_admission_and_capacity_apply_before_connections(tmp_path):
+async def test_configured_admission_and_capacity_apply_before_connections(tmp_path, known_node_resources):
     repo = Repository(AsyncMongoMockClient().db, Settings(
         encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_capacity=2))
     await repo.initialize()

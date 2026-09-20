@@ -59,10 +59,13 @@ class TelemetrySampler:
                     download = sum(delta[0] for delta in deltas) / elapsed
                     upload = sum(delta[1] for delta in deltas) / elapsed
         self.previous = moment, cpu, counters
+        from camera_logs.node.resource_limits import ResourceLimits
+        limits = ResourceLimits.detect()
         return {
             "sampledAt": datetime.now(UTC),
             "scope": scope,
             "status": "OK",
+            "resourceLimits": limits.public(),
             "cpuPercent": cpu_percent,
             "memoryUsedBytes": memory.used,
             "memoryTotalBytes": memory.total,

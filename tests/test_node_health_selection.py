@@ -52,6 +52,30 @@ def test_selection_keeps_unknown_metrics_conservative():
     assert rank_nodes([measured], {})[0][1] == "measured"
 
 
+def test_buffer_pressure_affects_admission_and_cost_without_hiding_old_nodes():
+    """缓冲拥塞独立参与准入和排序；旧版无性能字段的节点仍按既有规则判断。"""
+    congested, clear = node("a"), node("b")
+    congested["performanceStatus"] = {
+        "buffer": {"reservedBytes": 900, "limitBytes": 1000},
+        "admissionBlocked": False,
+    }
+    assert rank_nodes([congested, clear], {})[0][1] == "b"
+    congested["performanceStatus"]["admissionBlocked"] = True
+    assert resource_pressure(congested)
+    assert rank_nodes([congested, clear], {}) == rank_nodes([clear], {})
+    assert node_health(congested)["status"] == "CRITICAL"
+    assert "缓冲" in " ".join(node_health(congested)["reasons"])
+
+
+def test_archive_backlog_warns_without_disconnecting_collection():
+    """归档等待告警不等于采集连接失败，也不自动阻断尚有余量的节点。"""
+    delayed = node("archive")
+    delayed["performanceStatus"] = {"archives": {"pendingJobs": 3, "oldestSeconds": 301}}
+    assert node_health(delayed)["status"] == "WARNING"
+    assert not resource_pressure(delayed)
+    assert rank_nodes([delayed], {})[0][1] == "archive"
+
+
 @pytest.mark.usefixtures("mock_claim_transaction")
 async def test_claim_rechecks_pressure_before_creating_run_or_lock(tmp_path):
     repo = await _repository(tmp_path)

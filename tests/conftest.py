@@ -4,6 +4,27 @@ import pytest
 from mongomock_motor import AsyncMongoMockClient, AsyncMongoMockDatabase
 
 
+@pytest.fixture
+def known_node_resources(monkeypatch):
+    """节点容量专项固定已采样资源，未知内存的保守拒绝由性能专项覆盖。"""
+    import time
+
+    from camera_logs.common.database import now
+    from camera_logs.node.telemetry_runtime import TelemetryRuntime
+
+    original = TelemetryRuntime.__init__
+
+    def initialize(self, root):
+        original(self, root)
+        self.value = {"sampledAt": now(), "cpuPercent": 10, "memoryPercent": 20,
+                      "resourceLimits": {"effectiveCpu": 4, "memoryLimitBytes": 1024**3,
+                                         "memoryAvailableBytes": 512 * 1024**2, "source": "TEST"}}
+        self.sample_started = time.monotonic()
+
+    monkeypatch.setattr(TelemetryRuntime, "__init__", initialize)
+    monkeypatch.setattr(TelemetryRuntime, "start_if_idle", lambda self: None)
+
+
 @pytest.fixture(autouse=True)
 def mock_audited_mutation_transaction(monkeypatch):
     """只为内存 Mongo 运行路由回调；真实数据库依然使用生产事务执行器。

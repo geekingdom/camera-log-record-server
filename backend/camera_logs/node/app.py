@@ -61,11 +61,15 @@ def create_worker_app(settings=None):
                         await shutdown_compression()
                     finally:
                         try:
-                            if client is not None:
-                                await client.close()
+                            from camera_logs.logs.write_io import shutdown as shutdown_write_io
+                            await shutdown_write_io()
                         finally:
-                            if listener is not None:
-                                listener.stop()
+                            try:
+                                if client is not None:
+                                    await client.close()
+                            finally:
+                                if listener is not None:
+                                    listener.stop()
 
     app = FastAPI(title="采集节点内部服务", lifespan=lifespan)
     from camera_logs.node.slave_routes import install_slave_routes

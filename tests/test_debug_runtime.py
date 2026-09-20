@@ -124,7 +124,7 @@ async def test_debug_without_challenge_keeps_runtime_collecting_without_password
             self.received.put_nowait(b"Protect Shell (psh)\r\n# ")
             self.sent, self.closed = [], False
 
-        async def read(self):
+        async def read(self, size=65536):
             return await self.received.get()
 
         async def write(self, data):

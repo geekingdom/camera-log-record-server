@@ -169,7 +169,7 @@ async def test_collector_queue_rechecks_owner_before_business_write(tmp_path):
         def __init__(self):
             self.received, self.writes = asyncio.Queue(), []
 
-        async def read(self):
+        async def read(self, _size):
             return await self.received.get()
 
         async def write(self, data):

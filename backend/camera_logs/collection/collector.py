@@ -19,6 +19,7 @@ import asyncssh
 from camera_logs.common.write_metrics import WriteLatency
 from camera_logs.logs.storage import HourlyWriter
 
+from . import buffering
 from .command_dispatcher import BudgetExhausted, CommandChannelBlocked, CommandDispatcher
 from .contracts import AsyncConnection, Callback, LogChunk
 from .contracts import call_callback as _call
@@ -64,6 +65,7 @@ class Collector:
             storage_identity=self.task["storageIdentity"],
         )
         self.write_latency = WriteLatency()
+        self._buffer_reserved = 0
         self._sender: asyncio.Task[None] | None = None
         self._reader: asyncio.Task[None] | None = None
         self._scheduled: list[asyncio.Task[None]] = []
@@ -295,17 +297,22 @@ class Collector:
     async def _reader_loop(self) -> None:
         pending: list[tuple[bytes, object]] = []
         pending_bytes = 0
-        flush_deadline = asyncio.get_running_loop().time() + 0.1
+        flush_deadline = asyncio.get_running_loop().time() + buffering.batch_parameters()[1]
         idle_timeout = float(self.task.get("logIdleTimeoutSeconds", 10))
         try:
             assert self._connection is not None
             while self._accepting_commands or getattr(self._connection, "has_buffered_data", False):
+                # 持有正文时先排空再等预算，避免多个会话互相等待造成死锁。
+                if pending and not buffering.budget().available():
+                    to_flush, pending = pending, []
+                    pending_bytes = 0
+                    await self._flush(to_flush)
                 try:
                     # 已有待写数据时按原批截止时间缩短等待，避免末尾小包再延长整个窗口。
                     read_timeout = min(.1, max(.001, flush_deadline - asyncio.get_running_loop().time())) if pending else .1
                     self.liveness_waiting_for_read = True
                     try:
-                        data = await asyncio.wait_for(self._connection.read(), timeout=read_timeout)
+                        data = await self._read_budgeted(read_timeout)
                     finally:
                         self.liveness_waiting_for_read = False
                 except TimeoutError:
@@ -321,7 +328,7 @@ class Collector:
                         self.liveness_storage_busy = False
                     if synced:
                         await self._reset_liveness_observation()
-                    flush_deadline = asyncio.get_running_loop().time() + 0.1
+                    flush_deadline = asyncio.get_running_loop().time() + buffering.batch_parameters()[1]
                     # 协议心跳不算日志；真实存储阻塞结束后重新观察，避免把背压算成静默。
                     if time.monotonic() - self.liveness_read_observation_started >= idle_timeout:
                         await _call(self._on_state, "IDLE_TIMEOUT", {"taskId": self.task_id, "sessionId": self.session_id})
@@ -353,13 +360,16 @@ class Collector:
                 received_at = datetime.now(UTC)
                 self.write_latency.begin()
                 prefixed = self._prefixer.prefix(data, received_at)
+                buffering.budget().release(buffering.RESERVATION_BYTES - len(prefixed))
+                self._buffer_reserved += len(prefixed) - buffering.RESERVATION_BYTES
+                buffering.budget().pending.setdefault(id(self), received_monotonic)
                 pending.append((prefixed, received_at))
                 pending_bytes += len(prefixed)
-                if pending_bytes >= 256 * 1024 or asyncio.get_running_loop().time() >= flush_deadline:
+                if pending_bytes >= buffering.batch_parameters()[0] or asyncio.get_running_loop().time() >= flush_deadline:
                     to_flush, pending = pending, []
                     pending_bytes = 0
                     await self._flush(to_flush)
-                    flush_deadline = asyncio.get_running_loop().time() + 0.1
+                    flush_deadline = asyncio.get_running_loop().time() + buffering.batch_parameters()[1]
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - 将读取异常转为可审计状态，再由运行时重连。
@@ -394,6 +404,9 @@ class Collector:
                     {"taskId": self.task_id, "sessionId": self.session_id, "error": str(error)},
                 )
             finally:
+                buffering.budget().release(self._buffer_reserved)
+                self._buffer_reserved = 0
+                buffering.budget().pending.pop(id(self), None)
                 for task in self._scheduled:
                     task.cancel()
                 if self._sender and self._sender is not asyncio.current_task():
@@ -407,16 +420,46 @@ class Collector:
                 self._terminal_error = cleanup_error
                 raise cleanup_error
 
+    async def _read_budgeted(self, timeout):
+        """读前预留最坏前缀空间；背压等待不计设备静默，失败/EOF及时释放。"""
+        waited = not buffering.budget().available()
+        self.liveness_storage_busy = True
+        try:
+            await buffering.budget().acquire()
+        finally:
+            self.liveness_storage_busy = False
+        self._buffer_reserved += buffering.RESERVATION_BYTES
+        try:
+            if waited:
+                await self._reset_liveness_observation()
+            data = await asyncio.wait_for(self._connection.read(buffering.READ_BYTES), timeout=timeout)
+            if data:
+                return data
+        except BaseException:
+            buffering.budget().release(buffering.RESERVATION_BYTES)
+            self._buffer_reserved -= buffering.RESERVATION_BYTES
+            raise
+        buffering.budget().release(buffering.RESERVATION_BYTES)
+        self._buffer_reserved -= buffering.RESERVATION_BYTES
+        return data
+
     async def _flush(self, pending: list[tuple[bytes, object]]) -> None:
         if not pending:
             return
         self.liveness_storage_busy = True
         try:
             self.write_latency.begin()
+            from camera_logs.logs.write_io import record_stage
+            started = buffering.budget().pending.get(id(self))
+            if started is not None:
+                record_stage("batchWaitMs", max(0, time.monotonic() - started) * 1000)
             positions = await self._writer.write_many(pending)
             self.write_latency.finish()
         finally:
             self.liveness_storage_busy = False
+            buffering.budget().release(self._buffer_reserved)
+            self._buffer_reserved = 0
+            buffering.budget().pending.pop(id(self), None)
         await self._reset_liveness_observation()
         for position in positions:
             data, received_at = pending[position.source_index]

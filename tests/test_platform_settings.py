@@ -107,6 +107,8 @@ def test_node_registration_does_not_create_heartbeat_and_merges_live_status(clie
         "isGeneralNode": True, "resourceNetworks": [],
         "inputRateLimitMiB": 50,
         "writeLatencyLimitMs": 200,
+        "performance": {"mode": "AUTO", "bufferMiB": 64, "writeConcurrency": 4, "batchKiB": 256,
+                        "flushIntervalMs": 100, "readMiBPerSecond": 50},
     }]
 
     client.portal.call(client.app.state.repo.db.nodes.insert_one, {
@@ -124,6 +126,28 @@ def test_node_registration_does_not_create_heartbeat_and_merges_live_status(clie
     assert edited.status_code == 200, edited.text
     assert edited.json()["version"] == 2
     assert edited.json()["accepting"] is False
+
+
+def test_node_performance_policy_defaults_replaces_as_a_whole_and_exposes_heartbeat_status(client):  # noqa: F811
+    """策略默认值兼容旧配置；PATCH 省略保留，传入对象按完整新策略替换。"""
+    created = client.post("/api/v1/admin/nodes", json={
+        "id": "performance-node", "url": "http://performance-node:8001", "capacity": 8,
+    })
+    assert created.status_code == 201, created.text
+    default = {"mode": "AUTO", "bufferMiB": 64, "writeConcurrency": 4, "batchKiB": 256,
+               "flushIntervalMs": 100, "readMiBPerSecond": 50}
+    assert created.json()["performance"] == default
+    unchanged = client.patch("/api/v1/admin/nodes/performance-node", json={"version": 1, "capacity": 9})
+    assert unchanged.status_code == 200 and unchanged.json()["performance"] == default
+    replacement = default | {"mode": "MANUAL", "bufferMiB": 128, "writeConcurrency": 6}
+    updated = client.patch("/api/v1/admin/nodes/performance-node", json={"version": 2, "performance": replacement})
+    assert updated.status_code == 200 and updated.json()["performance"] == replacement
+    client.portal.call(client.app.state.repo.db.nodes.insert_one, {
+        "id": "performance-node", "url": "http://performance-node:8001", "heartbeat": now(),
+        "performanceStatus": {"state": "MANUAL", "effective": {"bufferMiB": 128}, "reason": "手动预算"},
+    })
+    item = next(value for value in client.get("/api/v1/admin/nodes").json()["items"] if value["id"] == "performance-node")
+    assert item["performanceStatus"] == {"state": "MANUAL", "effective": {"bufferMiB": 128}, "reason": "手动预算"}
 
 
 def test_unregistered_heartbeat_node_is_discoverable_without_creating_config(client):  # noqa: F811
