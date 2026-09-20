@@ -61,6 +61,20 @@ export interface PerformancePolicy {
   readMiBPerSecond: number;
 }
 
+/** Worker 基于新鲜遥测给出的只读推荐；应用前始终由管理员确认。 */
+export interface PerformanceRecommendation {
+  available: boolean;
+  reason: string;
+  policy: PerformancePolicy | null;
+  resources: {
+    effectiveCpu: number;
+    memoryLimitBytes: number;
+    memoryAvailableBytes: number;
+    source: string;
+  } | null;
+  reportedAt: string | null;
+}
+
 export interface NodeConfig {
   id: string;
   url: string;
@@ -80,6 +94,7 @@ export interface NodeConfig {
   resourceNetworks?: string[];
   performance: PerformancePolicy;
   performanceStatus?: Record<string, unknown> | null;
+  performanceRecommendation?: PerformanceRecommendation | null;
 }
 
 export interface NodeRegistration {

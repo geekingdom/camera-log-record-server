@@ -109,6 +109,10 @@ def test_node_registration_does_not_create_heartbeat_and_merges_live_status(clie
         "writeLatencyLimitMs": 200,
         "performance": {"mode": "AUTO", "bufferMiB": 64, "writeConcurrency": 4, "batchKiB": 256,
                         "flushIntervalMs": 100, "readMiBPerSecond": 50},
+        "performanceRecommendation": {
+            "available": False, "reason": "节点心跳已过期，无法推荐", "policy": None,
+            "resources": None, "reportedAt": None,
+        },
     }]
 
     client.portal.call(client.app.state.repo.db.nodes.insert_one, {

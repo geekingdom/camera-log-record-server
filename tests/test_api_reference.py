@@ -45,6 +45,9 @@ def test_node_performance_policy_is_documented_with_valid_nested_examples(client
     operations = {item["id"]: item for item in reference["operations"]}
     assert operations["POST /api/v1/admin/nodes"]["requestExample"]["performance"]["mode"] == "AUTO"
     assert operations["PATCH /api/v1/admin/nodes/{node_id}"]["requestExample"]["performance"]["mode"] == "MANUAL"
+    recommendation = operations["GET /api/v1/admin/nodes"]["responseExample"]["items"][0]["performanceRecommendation"]
+    assert recommendation["available"] and recommendation["resources"]["effectiveCpu"] == 4
+    assert recommendation["policy"]["readMiBPerSecond"] == 25
 
 
 def test_management_event_cursor_contract_is_documented(client):

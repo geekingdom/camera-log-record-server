@@ -20,6 +20,15 @@ try {
   for (const width of [1440, 390]) {
     const writes = [];
     let registeredNodes = [];
+    const recommendedId = `recommended-${width}`;
+    const recommendation = {
+      available: true,
+      reason: "依据新鲜容器配额与可用内存生成推荐值。",
+      policy: { mode: "AUTO", bufferMiB: 128, writeConcurrency: 6, batchKiB: 256, flushIntervalMs: 100, readMiBPerSecond: 25 },
+      resources: { effectiveCpu: 6, memoryLimitBytes: 0, memoryAvailableBytes: 1073741824, source: "CGROUP_V2" },
+      reportedAt: "2026-09-20T08:00:00Z",
+    };
+    const discoveredNode = { id: recommendedId, url: "http://recommendation.example.test:18081", capacity: 8, accepting: true, version: 0, registered: false, online: true, reportedAt: recommendation.reportedAt, performance: defaultPolicy, performanceRecommendation: recommendation };
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.addInitScript(() => sessionStorage.setItem("camera-log-record-token", "node-performance-fixture"));
     await context.route("**/api/v1/**", route => {
@@ -43,7 +52,7 @@ try {
         registeredNodes = registeredNodes.map(node => node.id === id ? { ...node, ...body, version: node.version + 1 } : node);
         return json(registeredNodes.find(node => node.id === id));
       }
-      if (path === "/api/v1/admin/nodes") return json({ items: registeredNodes });
+      if (path === "/api/v1/admin/nodes") return json({ items: [...registeredNodes, discoveredNode] });
       if (path === "/api/v1/nodes") {
         return json(nodePage([{ id: `worker-${width}`, name: "采集节点", url: "http://worker.example.test:8001", capacity: 8, accepting: true, activeTasks: 2, online: true, reportedAt: "2026-09-20T08:00:00Z", writeLatencyMs: 12, writeLatencyLimitMs: 200, diskPercent: 30, performanceStatus: { effective: { mode: "MANUAL", bufferMiB: 128, writeConcurrency: 6, batchKiB: 512, flushIntervalMs: 80, readMiBPerSecond: 75 }, state: "MANUAL", reason: "管理员固定参数", admissionBlocked: true, changedAt: "2026-09-20T08:00:00Z", resources: {}, buffer: { reservedBytes: 33554432, limitBytes: 134217728, oldestPendingMs: 45, scope: "APPLICATION_BATCH_RESERVATIONS" }, writeIo: { stages: { batchWaitMs: { samples: 12, p99Ms: 48.5 } } } } }]));
       }
@@ -58,13 +67,28 @@ try {
     await page.getByText("节点准入", { exact: true }).click();
     await page.getByRole("button", { name: "登记节点", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "登记节点", exact: true });
-    await dialog.getByRole("textbox").nth(0).fill(`performance-${width}`);
+    const nodeId = dialog.getByRole("textbox").nth(0);
+    const recommendationRegion = dialog.getByRole("region", { name: "节点性能推荐", exact: true });
+    await recommendationRegion.getByText("尚未收到匹配节点 ID 的心跳，无法按服务器资源推荐性能值。", { exact: true }).waitFor();
+    assert.equal(await recommendationRegion.getByRole("button", { name: "应用推荐值", exact: true }).isDisabled(), true);
+    await nodeId.fill(recommendedId);
     await dialog.getByRole("textbox").nth(1).fill("http://node.example.test:18081");
-    await dialog.getByText("手动", { exact: true }).click();
-    await dialog.getByRole("spinbutton", { name: "日志缓冲容量", exact: true }).fill("128");
-    await dialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).fill("6");
+    await recommendationRegion.getByText("依据新鲜容器配额与可用内存生成推荐值。", { exact: true }).waitFor();
+    await recommendationRegion.getByText("有效 CPU：6；可用内存：1.0 GiB / 限制 未设置容器上限；来源：容器 cgroup v2", { exact: true }).waitFor();
+    await recommendationRegion.getByText(/依据心跳：2026\/9\/20/, { exact: false }).waitFor();
+    await recommendationRegion.getByRole("button", { name: "应用推荐值", exact: true }).click();
+    assert.equal(await dialog.getByRole("radio", { name: "自动", exact: true }).isChecked(), true);
+    assert.equal(await dialog.getByRole("spinbutton", { name: "日志缓冲容量", exact: true }).inputValue(), "128");
+    assert.equal(await dialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).inputValue(), "6");
+    await dialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).fill("7");
+    await recommendationRegion.getByRole("button", { name: "刷新节点推荐", exact: true }).click();
+    await page.locator('button[aria-label="刷新节点推荐"].is-loading').waitFor({ state: "hidden" });
+    assert.equal(await dialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).inputValue(), "7", "刷新列表不得覆盖已应用后手调的策略草稿");
+    await page.screenshot({ path: `output/playwright/node-performance-recommendation-${width}.png`, fullPage: false });
     // 以可见的编辑状态留存桌面和窄屏证据；正文滚动到底部后仍须保留固定操作区。
     await dialog.locator(".el-dialog__body").evaluate(body => { body.scrollTop = body.scrollHeight; });
+    const saveBox = await dialog.getByRole("button", { name: "保存配置", exact: true }).boundingBox();
+    assert.ok(saveBox && saveBox.y >= 0 && saveBox.y + saveBox.height <= 900, "性能策略滚动到底后保存操作必须仍在视口内");
     const editorGeometry = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));
     assert.ok(editorGeometry.scrollWidth <= editorGeometry.width + 1, JSON.stringify(editorGeometry));
     await page.screenshot({ path: `output/playwright/node-performance-editor-${width}.png`, fullPage: false });
@@ -73,19 +97,19 @@ try {
     await createConfirmation.getByRole("button", { name: "确认", exact: true }).click();
     await createConfirmation.waitFor({ state: "hidden" });
     await dialog.waitFor({ state: "hidden" });
-    assert.deepEqual(writes.at(-1), { method: "POST", body: { id: `performance-${width}`, url: "http://node.example.test:18081", capacity: 10, accepting: true, inputRateLimitMiB: 50, writeLatencyLimitMs: 200, isGeneralNode: true, resourceNetworks: [], performance: { ...defaultPolicy, mode: "MANUAL", bufferMiB: 128, writeConcurrency: 6 } } });
+    assert.deepEqual(writes.at(-1), { method: "POST", body: { id: recommendedId, url: "http://node.example.test:18081", capacity: 10, accepting: true, inputRateLimitMiB: 50, writeLatencyLimitMs: 200, isGeneralNode: true, resourceNetworks: [], performance: { ...recommendation.policy, writeConcurrency: 7 } } });
 
     await page.getByRole("button", { name: "编辑节点配置", exact: true }).click();
     const editDialog = page.getByRole("dialog", { name: "编辑节点配置", exact: true });
-    assert.equal(await editDialog.getByRole("radio", { name: "手动", exact: true }).isChecked(), true);
+    assert.equal(await editDialog.getByRole("radio", { name: "自动", exact: true }).isChecked(), true);
     assert.equal(await editDialog.getByRole("spinbutton", { name: "日志缓冲容量", exact: true }).inputValue(), "128");
-    assert.equal(await editDialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).inputValue(), "6");
-    await editDialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).fill("7");
+    assert.equal(await editDialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).inputValue(), "7");
+    await editDialog.getByRole("spinbutton", { name: "写入并发数", exact: true }).fill("8");
     await editDialog.getByRole("button", { name: "保存配置", exact: true }).click();
     const updateConfirmation = page.getByRole("dialog", { name: "确认保存配置", exact: true });
     await updateConfirmation.getByRole("button", { name: "确认", exact: true }).click();
     await updateConfirmation.waitFor({ state: "hidden" });
-    assert.deepEqual(writes.at(-1), { method: "PATCH", body: { version: 1, capacity: 10, accepting: true, inputRateLimitMiB: 50, writeLatencyLimitMs: 200, isGeneralNode: true, resourceNetworks: [], performance: { ...defaultPolicy, mode: "MANUAL", bufferMiB: 128, writeConcurrency: 7 } } });
+    assert.deepEqual(writes.at(-1), { method: "PATCH", body: { version: 1, capacity: 10, accepting: true, inputRateLimitMiB: 50, writeLatencyLimitMs: 200, isGeneralNode: true, resourceNetworks: [], performance: { ...recommendation.policy, writeConcurrency: 8 } } });
     await page.screenshot({ path: `output/playwright/node-performance-policy-${width}.png`, fullPage: true });
 
     await page.getByRole("tab", { name: "服务节点", exact: true }).click();

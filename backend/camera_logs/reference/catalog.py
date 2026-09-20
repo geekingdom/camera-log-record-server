@@ -4,6 +4,7 @@ from camera_logs.reference.descriptions import describe_operation, describe_para
 from camera_logs.reference.examples import request_example, response_example, schema_example
 
 GUIDES = [
+    {"title": "节点性能推荐与手动调整", "text": "GET /api/v1/admin/nodes的每个节点包含performanceRecommendation：available表示当前能否推荐，reason说明依据或不可用原因，policy为可应用的完整性能策略，resources为有效CPU与可用内存，reportedAt为依据心跳时间。只用新鲜节点遥测计算保守建议，容器配额优先于宿主总资源；不测算磁盘最佳吞吐。获取推荐不会修改已有配置；将policy按需编辑后通过PATCH /api/v1/admin/nodes/{node_id}携带version与performance保存，Worker后续心跳热应用。performance为管理员保存值，performanceStatus.effective为实际受资源约束后的值，三者不等同。"},
     {"title": "渐进式历史检索", "text": "POST /api/v1/log-searches冻结文件范围后返回作业。GET /api/v1/log-searches/{identifier}?includeResults=false用于轻量轮询，resultCount为当前已确认结果数；通过/results分页读取。RUNNING中的结果只是已扫描部分，SUCCEEDED且truncated=false才表示本次冻结范围扫描完成。FAILED/CANCELLED/EXPIRED中的已有结果不能证明其余范围没有匹配。普通状态接口默认仍包含结果以兼容现有调用。"},
     {"title": "历史检索全文候选索引", "text": "小时归档旁自动维护SQLite FTS5候选索引，仅保存分卷边界和检索词候选，不保存日志正文，也不加入下载包。索引只用于跳过不可能命中的分卷，最终仍按原始字节确认；索引缺失、损坏、版本或归档指纹不符时自动回退原文扫描。短关键词和高频关键词可能扫描全部原文，结果上限与时间范围限制不变。"},
     {"title": "节点写入延迟限制", "text": "管理员通过POST /api/v1/admin/nodes登记、PATCH /api/v1/admin/nodes/{node_id}带version编辑writeLatencyLimitMs。单位毫秒，整数1至60000，默认200；每节点独立保存，达到75%预警，超过阈值限制新采集会话。保存后调度使用新配置，Worker下一周期更新心跳和准入，无需重启；旧心跳仍拒绝准入时需要等待新心跳。已有采集不因超限被主动停止。提高阈值只调整准入和健康判断，不提高磁盘吞吐、不改变日志顺序、批量写入或同步策略。"},

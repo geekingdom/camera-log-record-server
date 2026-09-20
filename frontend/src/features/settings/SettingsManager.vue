@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 后台设置页只管理持久化配置；节点在线状态始终来自后端合并的 worker 心跳。
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Database, Edit3, Gauge, Plus, RefreshCw, Save, ServerCog, Settings2, SlidersHorizontal, Trash2 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { ApiError } from "../../shared/api";
@@ -31,6 +31,30 @@ const nodeDialog = ref(false);
 const editingNode = ref<NodeConfig>();
 const nodeForm = ref<NodeRegistration>({ id: "", url: "", capacity: 10, accepting: true, performance: { ...DEFAULT_PERFORMANCE_POLICY } });
 const nodeNetworksText = ref("");
+const nodeDialogGeneration = ref(0);
+const refreshingRecommendation = ref(false);
+// 列表刷新只能更新推荐来源；绝不借此覆盖管理员正在编辑的策略草稿。
+const performanceRecommendation = computed(() => nodes.value.find(node => node.id === nodeForm.value.id.trim())?.performanceRecommendation);
+
+function applyPerformanceRecommendation(policy: PerformancePolicy) {
+  nodeForm.value.performance = { ...policy };
+}
+
+async function refreshPerformanceRecommendation() {
+  const id = nodeForm.value.id.trim();
+  if (!id || refreshingRecommendation.value) return;
+  const generation = nodeDialogGeneration.value;
+  refreshingRecommendation.value = true;
+  try {
+    const response = await settingsApi.nodes();
+    // 请求只更新推荐来源；关闭、重开或改 ID 后的迟到结果不能影响新的表单。
+    if (nodeDialog.value && nodeDialogGeneration.value === generation && nodeForm.value.id.trim() === id) nodes.value = response.items;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "刷新节点性能推荐失败");
+  } finally {
+    if (nodeDialogGeneration.value === generation) refreshingRecommendation.value = false;
+  }
+}
 
 async function load() {
   loading.value = true;
@@ -71,6 +95,7 @@ async function savePlatformSettings() {
 }
 
 function openRegister(node?: NodeConfig) {
+  nodeDialogGeneration.value += 1;
   editingNode.value = undefined;
   nodeForm.value = node
     ? { id: node.id, url: node.reportedUrl ?? node.url, capacity: normalizeCapacity(node.capacity, MAX_NODE_CAPACITY), accepting: node.accepting, inputRateLimitMiB: node.inputRateLimitMiB ?? 0, writeLatencyLimitMs: node.writeLatencyLimitMs ?? DEFAULT_WRITE_LATENCY_LIMIT_MS, isGeneralNode: node.isGeneralNode ?? true, performance: { ...(node.performance ?? DEFAULT_PERFORMANCE_POLICY) } }
@@ -80,6 +105,7 @@ function openRegister(node?: NodeConfig) {
 }
 
 function openEdit(node: NodeConfig) {
+  nodeDialogGeneration.value += 1;
   editingNode.value = node;
   nodeForm.value = { id: node.id, url: node.url, capacity: node.capacity, accepting: node.accepting, writeLatencyLimitMs: node.writeLatencyLimitMs ?? DEFAULT_WRITE_LATENCY_LIMIT_MS, isGeneralNode: node.isGeneralNode ?? true, performance: { ...(node.performance ?? DEFAULT_PERFORMANCE_POLICY) } };
   nodeNetworksText.value = (node.resourceNetworks ?? []).join("\n");
@@ -192,11 +218,11 @@ onMounted(() => void load());
       <section v-show="activeModule === 'monitor'" class="settings-module"><ResourceMonitorSettings :settings="settings" :loading="loading" @saved="settings = $event" /></section>
       <section v-show="activeModule === 'records'" class="settings-module"><RecordRetentionSettings :settings="settings" :loading="loading" @saved="settings = $event" /></section>
     </template>
-    <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" class="node-config-dialog" destroy-on-close>
+    <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" class="node-config-dialog" destroy-on-close @closed="nodeDialogGeneration += 1">
       <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">登记配置是运行时权威；仅未登记节点使用 Worker 的 NODE_CAPACITY 作为默认容量。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>
       <el-form label-position="top"><el-form-item label="通用节点"><el-switch v-model="nodeForm.isGeneralNode" aria-label="通用节点" /></el-form-item><el-form-item v-if="nodeForm.isGeneralNode === false" label="允许接入的设备资源 IP / CIDR（每行一项）" required><el-input v-model="nodeNetworksText" type="textarea" :rows="4" aria-label="允许接入的设备资源地址" placeholder="10.41.203.35&#10;10.18.117.0/24" /></el-form-item></el-form>
       <el-form label-position="top"><el-form-item label="日志输入速率上限（MiB/s，0 为不限制）"><el-input-number v-model="nodeForm.inputRateLimitMiB" :min="0" :max="100000" :precision="0" aria-label="日志输入速率上限" controls-position="right" /></el-form-item><el-form-item label="写入延迟上限（ms）"><el-input-number v-model="nodeForm.writeLatencyLimitMs" :min="MIN_WRITE_LATENCY_LIMIT_MS" :max="MAX_WRITE_LATENCY_LIMIT_MS" :precision="0" aria-label="写入延迟上限" controls-position="right" /><p class="node-help">超过上限时只暂停新任务准入，不会终止正在采集的会话。</p></el-form-item></el-form>
-      <NodePerformancePolicy :policy="nodeForm.performance ?? DEFAULT_PERFORMANCE_POLICY" @update:policy="nodeForm.performance = $event" />
+      <NodePerformancePolicy :policy="nodeForm.performance ?? DEFAULT_PERFORMANCE_POLICY" :recommendation="performanceRecommendation" :refreshing-recommendation="refreshingRecommendation" @update:policy="nodeForm.performance = $event" @apply-recommendation="applyPerformanceRecommendation" @refresh-recommendation="refreshPerformanceRecommendation" />
       <template #footer><el-button @click="nodeDialog = false">取消</el-button><el-button type="primary" :loading="savingNode" :disabled="savingNode" :icon="ServerCog" @click="saveNode">保存配置</el-button></template>
     </el-dialog>
   </section>

@@ -30,6 +30,7 @@ from camera_logs.node.input_admission import (
     input_rate_limit,
 )
 from camera_logs.node.performance import PerformancePolicy
+from camera_logs.node.performance_recommendation import performance_recommendation
 from camera_logs.node.resource_routing import normalize_resource_networks, routing_config
 from camera_logs.node.write_pressure import (
     DEFAULT_WRITE_LATENCY_LIMIT_MS,
@@ -166,7 +167,7 @@ def _is_online(node: dict | None) -> bool:
     return fresh(_reported_at(node), now(), 30)
 
 
-def _public_node_config(config: dict, node: dict | None) -> dict:
+def _public_node_config(config: dict, node: dict | None, current=None) -> dict:
     """合并管理员配置与只读心跳事实，不采用 worker 可覆盖字段作为配置值。"""
     result = {
         "id": config["id"],
@@ -180,6 +181,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
         "performance": PerformancePolicy.model_validate(config.get("performance") or {}).model_dump(),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
+        "performanceRecommendation": performance_recommendation(node, current),
         **routing_config(config),
     }
     if node:
@@ -191,7 +193,7 @@ def _public_node_config(config: dict, node: dict | None) -> dict:
     return result
 
 
-def _public_discovered_node(node: dict) -> dict:
+def _public_discovered_node(node: dict, current=None) -> dict:
     """公开只由 worker 上报的发现项，不生成管理配置或推断人工准入值。"""
     return {
         "id": node["id"],
@@ -206,6 +208,7 @@ def _public_discovered_node(node: dict) -> dict:
         "performance": PerformancePolicy().model_dump(),
         "online": _is_online(node),
         "reportedAt": _reported_at(node),
+        "performanceRecommendation": performance_recommendation(node, current),
         "activeTasks": node.get("activeTasks", 0),
         "diskPercent": node.get("diskPercent"),
         "performanceStatus": node.get("performanceStatus"),
