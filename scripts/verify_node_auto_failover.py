@@ -59,12 +59,12 @@ async def wait_files(database, task_id, node_id):
         raise RuntimeError(f"节点 {node_id} 归档未就绪: {details!r}") from error
 
 
-async def wait_node_accepting(database, node_id):
-    """等待 Worker 将正式管理配置写入本节点心跳，避免使用过期候选快照。"""
+async def wait_node_accepting(database, node_id, accepting=True):
+    """等待 Worker 将指定管理准入值写入心跳，避免首轮调度读取冷启动快照。"""
     async with asyncio.timeout(20):
         while True:
             node = await database.nodes.find_one({"id": node_id})
-            if node and node.get("accepting") is True:
+            if node and node.get("accepting") is accepting:
                 return
             await asyncio.sleep(.2)
 
@@ -113,6 +113,12 @@ async def main(isapi_test_port=80):
                         "id": node_id, "url": f"http://127.0.0.1:{port}", "capacity": 10, "accepting": accepting,
                     })
                     response.raise_for_status()
+                # API 后台调度已关闭，下面只有一次显式 schedule_once。必须先等两个 Worker
+                # 都把刚保存的准入配置写入心跳，才能证明 A 是唯一初始候选而非冷启动空快照。
+                await asyncio.gather(
+                    wait_node_accepting(mongo[database], "failover-a", True),
+                    wait_node_accepting(mongo[database], "failover-b", False),
+                )
                 resource = await client.post("/api/v1/resources", headers={**headers, "Idempotency-Key": "resource-" + uuid4().hex}, json={
                     "name": "自动故障转移回环源", "kind": "HIKVISION_NETWORK", "ip": "127.0.0.1",
                     "username": "collector", "password": password, "authType": "BASIC",
@@ -144,7 +150,7 @@ async def main(isapi_test_port=80):
                     "version": b_config["version"], "accepting": True,
                 })
                 changed.raise_for_status()
-                await wait_node_accepting(mongo[database], "failover-b")
+                await wait_node_accepting(mongo[database], "failover-b", True)
                 # 独立调度周期在 A 仍可访问时看到过期心跳，必须先取得该 Worker 的关闭证明。
                 # 写入紧邻实际调度，不能给 A 的每秒 tick 覆盖旧心跳的窗口。
                 await mongo[database].nodes.update_one({"id": "failover-a"}, {"$set": {"heartbeat": now() - timedelta(minutes=5)}})
