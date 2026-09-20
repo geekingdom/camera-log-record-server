@@ -79,6 +79,23 @@ describe("资源列表即时认证 API", () => {
   });
 });
 
+describe("批量资源 API", () => {
+  it("保留调用方给出的稳定幂等键，并把逐项失败详情暴露给界面", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      message: "存在认证失败设备", details: [{ ip: "10.0.0.2", message: "认证失败" }],
+    }), { status: 422 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(api.createResourcesBatch([{
+      name: "10.0.0.2", kind: "HIKVISION_NETWORK", ip: "10.0.0.2", username: "admin", password: "secret",
+      authType: "DIGEST", enableCoredumpMonitor: false, enableResourceMonitor: false,
+    }], "stable-batch-key")).rejects.toMatchObject({
+      details: [{ ip: "10.0.0.2", message: "认证失败" }],
+    });
+    expect(new Headers(fetch.mock.calls[0][1].headers).get("Idempotency-Key")).toBe("stable-batch-key");
+  });
+});
+
 describe("资源监控历史 API", () => {
   it("编码资源标识并只传递已定义的游标和时间范围", async () => {
     vi.stubGlobal("sessionStorage", { getItem: () => null });

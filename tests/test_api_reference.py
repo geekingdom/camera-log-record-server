@@ -5,6 +5,21 @@ from pydantic import TypeAdapter
 from test_api import client  # noqa: F401
 
 
+def test_resource_batch_contract_and_optional_creation_name_are_documented(client):
+    """批量接口必须展示幂等头、原子语义和可校验的请求示例。"""
+    catalog = client.get("/api/v1/api-reference").json()
+    operation = next(item for item in catalog["operations"] if item["id"] == "POST /api/v1/resources/batch")
+    assert operation["title"] == "批量创建设备资源"
+    assert "Idempotency-Key" in operation["headers"]
+    assert "resources:create" in operation["permission"]
+    assert "原子" in operation["description"]
+    assert operation["requestExample"]["items"][0]["kind"] == "HIKVISION_NETWORK"
+    assert set(operation["responseExample"]) == {"items"}
+    resource = catalog["schemas"]["ResourceInput"]
+    assert "name" not in resource.get("required", [])
+    assert "IP" in resource["properties"]["name"]["description"]
+
+
 def test_credentials_sorting_and_progressive_search_are_documented(client):
     """新凭据权限、全局排序与渐进结果的完整性边界必须在站内目录一致展示。"""
     catalog = client.get("/api/v1/api-reference").json()

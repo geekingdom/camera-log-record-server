@@ -106,6 +106,11 @@ FIELD_DESCRIPTIONS = {
 
 # 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
 OPERATION_DESCRIPTIONS = {
+    ("POST", "/api/v1/resources/batch"): (
+        "批量创建1至256个海康网络设备资源，需要resources:create与Idempotency-Key。"
+        "逐项重新认证，全部成功后原子提交；重复IP、已有资源IP或任一认证失败均不部分创建。"
+        "同一成功请求使用相同幂等键重试返回原批次；密码不通过创建响应回传。"
+    ),
     ("POST", "/api/v1/tasks"): (
         "创建资源所属采集任务。SSH和Telnet设备类型仅允许当前认证成功的海康网络资源；"
         "Telnet串口不受设备HTTP认证状态限制。可用useResourceCredentials在服务端复制资源登录凭据，"

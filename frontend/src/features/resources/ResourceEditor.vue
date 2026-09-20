@@ -7,6 +7,7 @@ import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { usePermissions } from "../../shared/permissions";
 import type { Resource, ResourceAuthentication, ResourceAuthType, ResourceKind } from "../../shared/types";
+import ResourceBatchEditor from "./ResourceBatchEditor.vue";
 
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ resource?: Resource; canEdit?: boolean }>();
@@ -24,13 +25,16 @@ const loading = ref(false);
 const editVersion = ref(1);
 const formRef = ref<FormInstance>();
 const isNetwork = computed(() => form.value.kind === "HIKVISION_NETWORK");
+const createMode = ref<"SINGLE" | "BATCH">("SINGLE");
+const batchSaving = ref(false);
+const showBatch = computed(() => !props.resource && isNetwork.value && createMode.value === "BATCH");
 const healthText = computed(() => ({ ONLINE: "当前连通", AUTH_FAILED: "HTTP 凭据失效", OFFLINE: "设备离线", ERROR: "认证检查异常" }[props.resource?.healthStatus ?? ""] ?? "尚未检查"));
 const fingerprint = computed(() => JSON.stringify([form.value.kind, form.value.ip, form.value.username, form.value.password, form.value.authType]));
 let verifiedFingerprint = "";
 let authenticationGeneration = 0;
 let formGeneration = 0;
 const rules = computed(() => ({
-  name: [{ required: true, whitespace: true, message: "请输入资源名称", trigger: "blur" }],
+  name: props.resource ? [{ required: true, whitespace: true, message: "请输入资源名称", trigger: "blur" }] : [],
   ip: [{ required: true, message: "请输入 IP 地址", trigger: "blur" }],
   username: [{ required: isNetwork.value, message: "请输入 HTTP 用户名", trigger: "blur" }],
   password: [{ required: isNetwork.value && !props.resource, message: "请输入 HTTP 密码", trigger: "blur" }],
@@ -52,6 +56,7 @@ watch(isNetwork, (network) => {
   authenticated.value = undefined;
   verifiedFingerprint = "";
   ++authenticationGeneration;
+  if (!network) createMode.value = "SINGLE";
 });
 watch(() => [open.value, props.resource] as const, async ([visible, resource]) => {
   ++formGeneration;
@@ -59,10 +64,12 @@ watch(() => [open.value, props.resource] as const, async ([visible, resource]) =
     ++authenticationGeneration;
     authenticating.value = false;
     saving.value = false;
+    batchSaving.value = false;
     return;
   }
   if (!canSave.value) { open.value = false; return; }
   form.value = blank();
+  createMode.value = "SINGLE";
   authenticated.value = undefined;
   verifiedFingerprint = "";
   ++authenticationGeneration;
@@ -89,7 +96,8 @@ async function authenticate() {
   if (!canSave.value) return;
   if (authenticating.value || saving.value) return;
   if (!form.value.password) return ElMessage.warning("重新认证请填写 HTTP 密码");
-  if (!(await formRef.value?.validateField(["name", "ip", "username", "password"]).catch(() => false))) return;
+  const fields = props.resource ? ["name", "ip", "username", "password"] : ["ip", "username", "password"];
+  if (!(await formRef.value?.validateField(fields).catch(() => false))) return;
   const current = ++authenticationGeneration;
   authenticating.value = true;
   try {
@@ -116,8 +124,8 @@ async function save() {
   }
   saving.value = true;
   try {
-    const payload = isNetwork.value ? { ...form.value } : {
-      name: form.value.name, kind: form.value.kind, ip: form.value.ip,
+    const payload = isNetwork.value ? { ...form.value, name: form.value.name.trim() || form.value.ip } : {
+      name: form.value.name.trim() || form.value.ip, kind: form.value.kind, ip: form.value.ip,
     };
     if (props.resource) {
       const resourceId = props.resource.id;
@@ -136,12 +144,14 @@ async function save() {
 }
 </script>
 <template>
-  <el-drawer v-model="open" :title="props.resource ? '编辑设备资源' : '新建设备资源'" size="min(720px, 96vw)" destroy-on-close class="resource-editor-drawer">
-    <el-form ref="formRef" :model="form" :rules="rules" :disabled="saving || loading" v-loading="loading" label-position="top" class="editor-form resource-editor-form">
+  <el-drawer v-model="open" :title="props.resource ? '编辑设备资源' : '新建设备资源'" :size="showBatch ? 'min(1180px, 96vw)' : 'min(720px, 96vw)'" destroy-on-close class="resource-editor-drawer">
+    <div v-if="!props.resource && isNetwork" class="resource-create-mode" role="group" aria-label="资源添加模式"><el-button :type="createMode === 'SINGLE' ? 'primary' : 'default'" :disabled="saving || loading || batchSaving" @click="createMode = 'SINGLE'">单台添加</el-button><el-button :type="createMode === 'BATCH' ? 'primary' : 'default'" :disabled="saving || loading || batchSaving" @click="createMode = 'BATCH'">批量添加</el-button></div>
+    <ResourceBatchEditor v-if="showBatch" :disabled="saving || loading" @processing="batchSaving = $event" @saved="emit('saved'); open = false" />
+    <el-form v-else ref="formRef" :model="form" :rules="rules" :disabled="saving || loading" v-loading="loading" label-position="top" class="editor-form resource-editor-form">
       <section class="form-section resource-editor-section">
         <div class="resource-section-heading"><span class="resource-section-icon"><Network v-if="isNetwork" :size="18" /><Server v-else :size="18" /></span><div><h2>资源连接</h2><p>资源类型和地址确定任务归属与存储身份</p></div></div>
         <div class="form-grid">
-          <el-form-item label="资源名称" prop="name"><el-input v-model="form.name" maxlength="128" /></el-form-item>
+          <el-form-item label="资源名称" prop="name"><el-input v-model="form.name" maxlength="128" :placeholder="props.resource ? '' : '留空时使用 IP 地址'" /></el-form-item>
           <el-form-item label="资源类型"><el-select v-model="form.kind" :disabled="Boolean(props.resource)"><el-option label="海康网络设备" value="HIKVISION_NETWORK" /><el-option label="串口服务器" value="SERIAL_SERVER" /></el-select></el-form-item>
           <el-form-item label="IP 地址" prop="ip"><el-input v-model="form.ip" :disabled="Boolean(props.resource)" /></el-form-item>
         </div>
@@ -166,10 +176,11 @@ async function save() {
         <div v-if="authenticated && verifiedFingerprint === fingerprint" class="resource-auth-result" role="status"><div class="resource-auth-title"><ShieldCheck :size="17" /><strong>本次认证结果</strong></div><div><span>设备型号</span><strong>{{ authenticated.model || "未返回" }}</strong></div><div><span>设备序列号</span><strong>{{ authenticated.subSerialNumber || "未返回" }}</strong></div><div><span>软件版本</span><strong>{{ authenticated.softwareVersion || "未返回" }}</strong></div></div>
       </section>
     </el-form>
-    <template #footer><el-button @click="open = false">关闭</el-button><el-button type="primary" :loading="saving" :disabled="loading || (isNetwork && (!authenticated || verifiedFingerprint !== fingerprint))" @click="save">保存资源</el-button></template>
+    <template #footer><el-button @click="open = false">关闭</el-button><el-button v-if="!showBatch" type="primary" :loading="saving" :disabled="loading || (isNetwork && (!authenticated || verifiedFingerprint !== fingerprint))" @click="save">保存资源</el-button></template>
   </el-drawer>
 </template>
 <style scoped>
 .resource-monitor-options { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; align-items: center; }
 .resource-monitor-options small { display: block; margin-top: 4px; color: var(--el-text-color-secondary); }
+.resource-create-mode { display: flex; gap: 8px; margin-bottom: 16px; }
 </style>

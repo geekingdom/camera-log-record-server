@@ -49,6 +49,8 @@ export class ApiError extends Error {
     message: string,
     public requestId?: string,
     public code?: string,
+    /** 保留服务端逐项失败详情，批量操作可映射回原始行而非只显示全局错误。 */
+    public details?: unknown,
   ) {
     super(requestId ? `${message}（请求 ID: ${requestId}）` : message);
   }
@@ -66,6 +68,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     if (response.status === 401 && response.headers.get("x-auth-required") === "true") window.dispatchEvent(new Event("auth-required"));
     let message = response.statusText;
     let code: string | undefined;
+    let details: unknown;
     try {
       const body = await response.json();
       message =
@@ -77,6 +80,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       code = typeof body.code === "string" ? body.code
         : typeof body.detail?.code === "string" ? body.detail.code
           : typeof body.error?.code === "string" ? body.error.code : undefined;
+      details = body.details ?? body.detail?.details ?? body.error?.details;
     } catch {
       /* text response */
     }
@@ -87,6 +91,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       response.headers.get("request-id") ??
         undefined,
       code,
+      details,
     );
   }
   if (response.status === 204) return undefined as T;
@@ -258,6 +263,18 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(resource),
     }),
+  createResourcesBatch: (items: {
+    name: string;
+    kind: "HIKVISION_NETWORK";
+    ip: string;
+    username: string;
+    password: string;
+    authType: ResourceAuthType;
+    enableCoredumpMonitor: boolean;
+    enableResourceMonitor: boolean;
+  }[], key: string) => request<{ items: Resource[] }>("/resources/batch", {
+    method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ items }),
+  }),
   // 列表筛选通过后端分页完成，避免只搜索当前页造成“找不到”错觉。
   tasks: (
     page?: number,

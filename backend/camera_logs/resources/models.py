@@ -11,7 +11,7 @@ from camera_logs.common.models import Model
 class ResourceInput(Model):
     """描述一个可供任务引用的网络设备或串口服务器资源。"""
 
-    name: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, max_length=128, description="可省略；空白时保存为规范 IP")
     kind: Literal["HIKVISION_NETWORK", "SERIAL_SERVER"]
     ip: str
     username: str = Field(default="", max_length=256)
@@ -25,9 +25,7 @@ class ResourceInput(Model):
     @classmethod
     def trim_name(cls, value):
         """名称去除首尾空白，避免视觉相同的空白资源名进入数据库。"""
-        if not value.strip():
-            raise ValueError("名称不能为空")
-        return value.strip()
+        return value.strip() if value is not None else None
 
     @field_validator("ip")
     @classmethod
@@ -38,12 +36,33 @@ class ResourceInput(Model):
     @model_validator(mode="after")
     def validate_kind_credentials(self):
         """网络设备需要完整凭据，串口服务器只允许名称和地址配置。"""
+        # 仅新建资源允许省略或留白名称，使用已规范化 IP 作为稳定的默认展示名。
+        if not self.name:
+            self.name = self.ip
         if self.kind == "HIKVISION_NETWORK" and (not self.username.strip() or not self.password):
             raise ValueError("海康网络设备必须填写用户名和密码")
         if self.kind == "SERIAL_SERVER" and (self.username or self.password):
             raise ValueError("串口服务器不支持用户名或密码")
         if self.kind != "HIKVISION_NETWORK" and (self.enableCoredumpMonitor or self.enableResourceMonitor):
             raise ValueError("设备监控仅支持海康网络设备资源")
+        return self
+
+
+class ResourceBatchInput(Model):
+    """限制批量新建为互异的海康网络设备，避免请求内地址冲突晚于认证才暴露。"""
+
+    items: list[ResourceInput] = Field(
+        min_length=1, max_length=256, description="1 至 256 个仅限 HIKVISION_NETWORK 的新建资源",
+    )
+
+    @model_validator(mode="after")
+    def validate_items(self):
+        """批量探测只适用于具备 HTTP 认证合同的海康网络资源。"""
+        addresses = [item.ip for item in self.items]
+        if any(item.kind != "HIKVISION_NETWORK" for item in self.items):
+            raise ValueError("批量创建仅支持海康网络设备")
+        if len(addresses) != len(set(addresses)):
+            raise ValueError("批量创建不能包含重复 IP")
         return self
 
 

@@ -68,6 +68,10 @@ def request_example(schema, schemas):
     if "anyOf" in schema:
         return request_example(next(item for item in schema["anyOf"] if item.get("type") != "null"), schemas)
     name = schema.get("$ref", "").split("/")[-1]
+    if name == "ResourceBatchInput":
+        return {"items": [{"kind": "HIKVISION_NETWORK", "ip": "192.0.2.10", "username": "admin",
+                           "password": "Example-password-123!", "authType": "DIGEST",
+                           "enableCoredumpMonitor": False, "enableResourceMonitor": False}]}
     if name == "BlockedRestart":
         return {"confirmIsolation": False}
     if name == "SearchCreate":
@@ -93,6 +97,8 @@ def response_example(path, method, status):
     """返回代表性的成功响应字段；空响应和二进制使用明确的协议示例。"""
     if status == 204:
         return None
+    if path == "/api/v1/resources/batch":
+        return {"items": [RESOURCE]}
     if path == "/health":
         return {"status": "ok"}
     if path.endswith("/credential"):

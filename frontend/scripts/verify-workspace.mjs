@@ -19,6 +19,7 @@ const scripts = [
   "browser_ssh_target_editor",
   "browser_resource_manual_authentication",
   "browser_resource_identity_filters",
+  "browser_resource_batch",
 ];
 const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: true } });
 try {

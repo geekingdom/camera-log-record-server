@@ -291,6 +291,93 @@ def test_resource_authenticate_create_list_and_hide_password(resource_client, mo
     assert listed["total"] == 1 and listed["items"][0]["id"] == resource["id"]
 
 
+def test_batch_create_authenticates_all_then_commits_once_and_replays_without_password(resource_client, monkeypatch):
+    """批量创建先完成所有探测，成功后一次落库；同键成功重放不再访问设备或泄露凭据。"""
+    calls = []
+
+    async def verified(**kwargs):
+        calls.append(kwargs["ip"])
+        return {"model": "DS-2CD", "subSerialNumber": "SN-" + kwargs["ip"], "softwareVersion": "V5.7"}
+
+    monkeypatch.setattr("camera_logs.resources.batch_creation.authenticate_network_resource", verified)
+    body = {"items": [
+        {"name": " ", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.71", "username": "admin", "password": "first"},
+        {"kind": "HIKVISION_NETWORK", "ip": "192.0.2.72", "username": "admin", "password": "second"},
+    ]}
+    headers = {"Idempotency-Key": "batch-create-once"}
+
+    created = resource_client.post("/api/v1/resources/batch", json=body, headers=headers)
+    assert created.status_code == 201, created.text
+    items = created.json()["items"]
+    assert [item["name"] for item in items] == ["192.0.2.71", "192.0.2.72"]
+    assert all("password" not in item and "passwordEncrypted" not in item for item in items)
+    assert calls == ["192.0.2.71", "192.0.2.72"]
+    repo = resource_client.app.state.repo
+    assert resource_client.portal.call(repo.db.resources.count_documents, {}) == 2
+    stored = resource_client.portal.call(repo.db.resources.find_one, {"id": items[0]["id"]})
+    assert "passwordEncrypted" in stored and repo.decrypt(stored["passwordEncrypted"]) == "first"
+    assert resource_client.portal.call(repo.db.authentication_records.count_documents, {"source": "CREATE"}) == 2
+    assert resource_client.portal.call(repo.db.audit.count_documents, {"action": "create_resource"}) == 2
+
+    repeated = resource_client.post("/api/v1/resources/batch", json=body, headers=headers)
+    assert repeated.status_code == 201
+    assert [item["id"] for item in repeated.json()["items"]] == [item["id"] for item in items]
+    assert calls == ["192.0.2.71", "192.0.2.72"]
+
+
+def test_batch_create_returns_sanitized_item_failures_without_creating_any_resource(resource_client, monkeypatch):
+    """任意设备认证失败时返回索引、IP和安全类别，既不落库也不回显设备口令。"""
+    async def verified(**kwargs):
+        if kwargs["ip"] == "192.0.2.82":
+            raise PermissionError("设备凭据错误: " + kwargs["password"])
+        return {"model": "DS-2CD", "subSerialNumber": "SN", "softwareVersion": "V5.7"}
+
+    monkeypatch.setattr("camera_logs.resources.batch_creation.authenticate_network_resource", verified)
+    secret = "must-not-appear"
+    response = resource_client.post("/api/v1/resources/batch", headers={"Idempotency-Key": "batch-failure"}, json={"items": [
+        {"kind": "HIKVISION_NETWORK", "ip": "192.0.2.81", "username": "admin", "password": "ok"},
+        {"kind": "HIKVISION_NETWORK", "ip": "192.0.2.82", "username": "admin", "password": secret},
+    ]})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "BATCH_AUTHENTICATION_FAILED"
+    assert response.json()["error"]["details"] == {"items": [{"index": 1, "ip": "192.0.2.82", "code": "AUTH_FAILED"}]}
+    assert secret not in response.text
+    repo = resource_client.app.state.repo
+    assert resource_client.portal.call(repo.db.resources.count_documents, {}) == 0
+    assert resource_client.portal.call(repo.db.audit.count_documents, {"action": "authenticate_resource_credentials_rejected"}) == 1
+
+
+def test_batch_create_limits_authentication_concurrency_and_rejects_conflict_without_new_resources(resource_client, monkeypatch):
+    """认证最多四路并行；任一活动地址冲突时整批资源文档均不得新增。"""
+    active = peak = 0
+
+    async def verified(**kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(.01)
+        active -= 1
+        return {"model": "DS-2CD", "subSerialNumber": kwargs["ip"], "softwareVersion": "V5.7"}
+
+    monkeypatch.setattr("camera_logs.resources.batch_creation.authenticate_network_resource", verified)
+    body = {"items": [{"kind": "HIKVISION_NETWORK", "ip": f"192.0.2.{90 + index}",
+                         "username": "admin", "password": "secret"} for index in range(5)]}
+    response = resource_client.post("/api/v1/resources/batch", json=body, headers={"Idempotency-Key": "batch-concurrency"})
+    assert response.status_code == 201 and peak == 4
+
+    repo = resource_client.app.state.repo
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "existing", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.110", "deletedAt": None,
+    })
+    conflict = resource_client.post("/api/v1/resources/batch", headers={"Idempotency-Key": "batch-conflict"}, json={"items": [
+        {"kind": "HIKVISION_NETWORK", "ip": "192.0.2.111", "username": "admin", "password": "first"},
+        {"kind": "HIKVISION_NETWORK", "ip": "192.0.2.110", "username": "admin", "password": "second"},
+    ]})
+    assert conflict.status_code == 409
+    assert resource_client.portal.call(repo.db.resources.count_documents, {}) == 6
+
+
 def test_resource_credential_reveal_is_owner_only_no_store_and_audited(resource_client):
     """资源列表保持脱敏，只有资源写权限的创建者才可主动读取一次凭据。"""
     from camera_logs.common.security import actor

@@ -23,6 +23,7 @@ from camera_logs.resources.authentication_records import (
     encode_cursor,
     record_authentication,
 )
+from camera_logs.resources.batch_creation import install_batch_creation_route
 from camera_logs.resources.health import apply_manual_result, grant_after_user_authentication
 from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
 from camera_logs.resources.listing import page_resources
@@ -120,6 +121,9 @@ def install_resource_routes(app, repo, listing):
             )
 
         await audited_mutation(repo(), user["id"], action, resource["id"], commit)
+
+    # 静态批量路径必须先于 ``/{identifier}`` 注册，避免被动态资源详情路由解释为 ID。
+    install_batch_creation_route(app, repo)
 
     @app.get("/api/v1/resources")
     async def resources(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
