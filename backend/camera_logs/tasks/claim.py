@@ -9,6 +9,12 @@ from pymongo.write_concern import WriteConcern
 from camera_logs.common.config import DEFAULT_NODE_CAPACITY
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.node.failover import (
+    AUTO_FAILOVER_FENCED,
+    FAILOVER_RETURN_OBSERVATION_GAP_SECONDS,
+    FAILOVER_RETURN_STABLE_SECONDS,
+    failover_origin_return_ready,
+)
 from camera_logs.node.health import resource_pressure
 from camera_logs.node.input_admission import input_rate_blocked
 from camera_logs.node.resource_routing import accepts_resource
@@ -55,8 +61,6 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
     和未到期时间，失效时抛出 ``SchedulerLeaseLost`` 让调度循环停止本周期。
     """
     resuming = task["status"] == "PAUSED" and bool(task.get("runId"))
-    if task.get("failoverExcludedNodeId") == node_id:
-        return None
     run_id = task["runId"] if resuming else new_id()
     cutoff = timedelta(seconds=15)
 
@@ -104,7 +108,6 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             "desiredState": "RUNNING",
             "resourceDeleted": {"$ne": True},
             "status": task["status"],
-            "failoverExcludedNodeId": {"$ne": node_id},
         }
         if resuming:
             task_query.update({
@@ -118,6 +121,34 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
         current = await db.tasks.find_one(task_query, session=session)
         if current is None:
             return None
+        if current.get("failoverExcludedNodeId") == node_id:
+            if not failover_origin_return_ready(current, node, current_time):
+                return None
+            receipt = current["closedReceipt"]
+            released_at = current["failoverReleasedAt"]
+            # BSON 日期精度为毫秒；用同一毫秒窗口绑定平台释放时刻，避免驱动返回的
+            # 微秒尾数造成等值 CAS 假阴性，同时不接受下一次释放写入。
+            released_floor = released_at.replace(microsecond=released_at.microsecond // 1000 * 1000)
+            # 最终 CAS 必须同时保留稳定窗口，不能让旧调度快照绕过回退条件。
+            task_query.update({
+                "failoverExcludedNodeId": node_id,
+                "failoverOriginalHealthySince": {
+                    "$lte": current_time - timedelta(seconds=FAILOVER_RETURN_STABLE_SECONDS),
+                },
+                "failoverOriginalHealthyObservedAt": {
+                    "$gte": current_time - timedelta(seconds=FAILOVER_RETURN_OBSERVATION_GAP_SECONDS),
+                },
+                "failoverReleasedAt": {
+                    "$gte": released_floor,
+                    "$lt": released_floor + timedelta(milliseconds=1),
+                },
+                "runId": current["runId"], "generation": current.get("generation"),
+                "sessionId": current.get("sessionId"), "closedReceipt.reason": AUTO_FAILOVER_FENCED,
+                "closedReceipt.nodeId": node_id, "closedReceipt.instanceId": receipt["instanceId"],
+                "closedReceipt.closedAt": receipt["closedAt"],
+            })
+        else:
+            task_query["failoverExcludedNodeId"] = {"$ne": node_id}
         resource_ip = current.get("ip")
         # 旧迁移夹具和历史任务可能尚无资源绑定；正式创建路径始终具备 resourceId。
         if current.get("resourceId"):
@@ -171,6 +202,8 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             claim_update.setdefault("$unset", {}).update({
                 "failoverExcludedNodeId": "", "failoverFromNodeId": "", "failoverReason": "",
                 "failoverFenceRetryAt": "", "failoverConsumeRetryAt": "",
+                "failoverOriginalHealthySince": "", "failoverOriginalHealthyObservedAt": "",
+                "failoverReleasedAt": "",
             })
         if resuming:
             claim_update.setdefault("$unset", {}).update({"resumeClaimToken": "", "resumeClaimExpires": ""})

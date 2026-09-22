@@ -30,6 +30,7 @@ async def mark_unavailable_for_shutdown(worker):
         {"nodeId": worker.repo.settings.node_id, "desiredState": "RUNNING",
          "status": {"$in": ["PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]}},
         {"$set": {"plannedRestart": True, "plannedRestartNodeId": worker.repo.settings.node_id,
+                   "plannedRestartToken": worker.instance_id,
                    "updatedAt": now()}},
     )
 

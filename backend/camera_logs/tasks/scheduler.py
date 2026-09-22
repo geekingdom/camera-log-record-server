@@ -5,13 +5,20 @@
 """
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
-from camera_logs.node.failover import consume_confirmed_failovers, request_reachable_worker_fencing
+from camera_logs.node.failover import (
+    FAILOVER_RETURN_OBSERVATION_GAP_SECONDS,
+    consume_confirmed_failovers,
+    failover_origin_healthy,
+    failover_origin_return_ready,
+    has_retained_failover_receipt,
+    request_reachable_worker_fencing,
+)
 from camera_logs.node.health import rank_nodes
 from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.resource_routing import routing_config
@@ -62,8 +69,8 @@ async def schedule_once(repo, lease=None):
     await request_reachable_worker_fencing(repo, stale_nodes)
     await consume_confirmed_failovers(repo)
     for node in stale_nodes:
-        await db.tasks.update_many({"nodeId": node["id"], "plannedRestart": {"$ne": True},
-                                    "status": {"$nin": ["STOPPED", "BLOCKED"]}},
+        # 计划重启标记只说明曾请求受控退出；没有精确关闭收据时仍可能是强制终止的旧会话。
+        await db.tasks.update_many({"nodeId": node["id"], "status": {"$nin": ["STOPPED", "BLOCKED"]}},
             {"$set": {"status": "BLOCKED", "error": "节点失联，必须确认旧实例停止或隔离后才能接管"}})
     await reconcile_stopped_tasks(db)
     # 调度租约内只有本调度者新增归属，节点收尾只会释放归属。一次投影扫描统计
@@ -85,7 +92,6 @@ async def schedule_once(repo, lease=None):
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},
                                                 "diskPercent": {"$lt": 90}, "accepting": True, "deletedAt": None})]
-        nodes = [node for node in nodes if node["id"] != task.get("failoverExcludedNodeId")]
         # 候选排序直接采用已保存容量，关闭准入也不等待下一次Worker心跳才排除。
         nodes = [node | routing_config(node_configs.get(node["id"], {}))
                  | {"capacity": node_configs.get(node["id"], {}).get("capacity", node.get("capacity", repo.settings.node_capacity)),
@@ -96,7 +102,71 @@ async def schedule_once(repo, lease=None):
         resource = await db.resources.find_one({"id": task.get("resourceId")}) if task.get("resourceId") else None
         routing_task = task | {"resourceIp": resource["ip"] if resource else task.get("ip"),
                                "requiresNfs": requires_coredump_nfs(task, resource)}
-        candidates = rank_nodes(nodes, occupancy, routing_task)
+        excluded_node_id = task.get("failoverExcludedNodeId")
+        if excluded_node_id:
+            # 旧版本已释放的任务没有平台释放时间。首次确认精确收据后由 Mongo 写入
+            # 观测起点，绝不能以旧 Worker 的墙上 closedAt 推断心跳先后。
+            if not task.get("failoverReleasedAt") and has_retained_failover_receipt(task):
+                receipt = task["closedReceipt"]
+                task = await db.tasks.find_one_and_update(
+                    {
+                        "id": task["id"], "nodeId": None, "desiredState": "RUNNING",
+                        "failoverExcludedNodeId": excluded_node_id,
+                        "$or": [
+                            {"failoverReleasedAt": {"$exists": False}},
+                            {"failoverReleasedAt": None},
+                        ],
+                        "runId": task["runId"], "generation": task.get("generation"),
+                        "sessionId": task.get("sessionId"), "closedReceipt.reason": "AUTO_FAILOVER_FENCED",
+                        "closedReceipt.nodeId": excluded_node_id,
+                        "closedReceipt.instanceId": receipt["instanceId"],
+                        "closedReceipt.closedAt": receipt["closedAt"],
+                    },
+                    {"$currentDate": {"failoverReleasedAt": True}},
+                    return_document=ReturnDocument.AFTER,
+                ) or task
+            origin = next((node for node in nodes if node["id"] == excluded_node_id), None)
+            origin_candidates = rank_nodes([origin], occupancy, routing_task) if origin else []
+            if origin_candidates and failover_origin_healthy(task, origin):
+                observed_at = now()
+                previous_observation = task.get("failoverOriginalHealthyObservedAt")
+                if isinstance(previous_observation, datetime) and previous_observation.tzinfo is None:
+                    previous_observation = previous_observation.replace(tzinfo=UTC)
+                if (
+                    not task.get("failoverOriginalHealthySince")
+                    or not previous_observation
+                    or previous_observation < observed_at - timedelta(seconds=FAILOVER_RETURN_OBSERVATION_GAP_SECONDS)
+                ):
+                    changed = await db.tasks.update_one(
+                        {"id": task["id"], "nodeId": None, "desiredState": "RUNNING",
+                         "failoverExcludedNodeId": excluded_node_id},
+                        {"$set": {"failoverOriginalHealthySince": observed_at,
+                                  "failoverOriginalHealthyObservedAt": observed_at}},
+                    )
+                    if changed.matched_count:
+                        task = task | {"failoverOriginalHealthySince": observed_at,
+                                       "failoverOriginalHealthyObservedAt": observed_at}
+                else:
+                    await db.tasks.update_one(
+                        {"id": task["id"], "nodeId": None, "desiredState": "RUNNING",
+                         "failoverExcludedNodeId": excluded_node_id},
+                        {"$set": {"failoverOriginalHealthyObservedAt": observed_at}},
+                    )
+                    task = task | {"failoverOriginalHealthyObservedAt": observed_at}
+            elif task.get("failoverOriginalHealthySince") or task.get("failoverOriginalHealthyObservedAt"):
+                await db.tasks.update_one(
+                    {"id": task["id"], "nodeId": None, "desiredState": "RUNNING",
+                     "failoverExcludedNodeId": excluded_node_id},
+                    {"$unset": {"failoverOriginalHealthySince": "", "failoverOriginalHealthyObservedAt": ""}},
+                )
+                task = task | {"failoverOriginalHealthySince": None, "failoverOriginalHealthyObservedAt": None}
+            alternatives = [node for node in nodes if node["id"] != excluded_node_id]
+            candidates = rank_nodes(alternatives, occupancy, routing_task)
+            # 其它合格节点优先；只有它们为空且原节点完成稳定恢复时才允许回退。
+            if not candidates and origin_candidates and failover_origin_return_ready(task, origin):
+                candidates = origin_candidates
+        else:
+            candidates = rank_nodes(nodes, occupancy, routing_task)
         if not candidates:
             if task["status"] != "PAUSED":
                 # 候选查询期间用户可能已暂停或停止；旧快照只能回写同一排队意图。

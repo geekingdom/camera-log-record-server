@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -13,7 +14,7 @@ import tarfile
 import threading
 import time
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import BinaryIO
 
@@ -83,6 +84,23 @@ class LimitedReader:
         return data
 
 
+@contextmanager
+def gzip_tar_writer(destination: BinaryIO, *, compresslevel: int = 1):
+    """写入不含临时路径 FNAME 的 gzip tar，避免下载工具将随机临时名当作解压文件名。"""
+    with gzip.GzipFile(filename="", mode="wb", fileobj=destination, compresslevel=compresslevel) as compressed, \
+            tarfile.open(fileobj=compressed, mode="w") as archive:
+        yield archive
+
+
+def gzip_header_has_filename(path: Path) -> bool:
+    """只读取 gzip 固定头判断是否携带 FNAME，避免旧临时名透传给下载客户端。"""
+    with path.open("rb") as source:
+        header = source.read(4)
+    if len(header) < 4 or header[:3] != b"\x1f\x8b\x08":
+        raise tarfile.ReadError(f"not a gzip archive: {path}")
+    return bool(header[3] & 0x08)
+
+
 def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None = None, file_id: str | None = None, archive_member: str | None = None, include_index: bool = False, *, max_output_bytes: int | None = None) -> Path:
     """复制冻结正文前缀和索引，附带摘要清单；不允许把缺失尾部当成完整快照。"""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -102,7 +120,9 @@ def snapshot(path: Path, target: Path, raw_bytes: int, index_path: Path | None =
         size, raw_hash, index_hash = max(0, raw_bytes), hashlib.sha256(), hashlib.sha256()
         if source.size < raw_bytes:
             raise OSError("日志字节数小于冻结水位，无法生成完整快照")
-        with target.open("wb") as destination, tarfile.open(fileobj=LimitedWriter(destination, max_output_bytes), mode="w:gz", compresslevel=1) as output:
+        with target.open("wb") as destination, gzip_tar_writer(
+            LimitedWriter(destination, max_output_bytes)
+        ) as output:
             raw_info = tarfile.TarInfo(source.name); raw_info.size = size
             output.addfile(raw_info, LimitedReader(source.stream, size, raw_hash))
             if index and index_name:

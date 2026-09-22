@@ -14,43 +14,97 @@ from camera_logs.tasks.control import _guard_resources
 
 
 async def recover_planned_restart_tasks(repo, node_id: str) -> int:
-    """消费同节点计划重启窗口产生的 BLOCKED 任务并重新交给调度器。
+    """原子消费同一关闭 token 下、已证明关闭的计划重启任务。
 
     deploy-all 重启 Worker 时，旧心跳可能在进程退出与新进程启动之间过期，
     调度器会先把运行任务标为 BLOCKED。只有节点自身已经持久化
     ``shuttingDownAt``、``shutdownCompletedAt``和实例 token、节点仍未重新准入时，才允许把本节点
     的任务视为旧实例已随计划重启结束；未知失联节点仍必须走原有隔离收据流程。
-    每个任务独立清理运行锁和结束旧 run，保留 desiredState=RUNNING，下一轮调度
-    会在可用节点上创建新运行。
+    任务也必须保存同一个 ``plannedRestartToken``。未建连的 PENDING 任务可以直接
+    回收；其它状态必须持有与当前 run、代次、节点和会话一致的关闭收据。每项回收
+    在独立事务内完成，不能先释放旧锁再发现任务控制意图已经变化。
     """
     node = await repo.db.nodes.find_one({"id": node_id})
     if not node or node.get("accepting") or not node.get("shuttingDownAt") \
             or not node.get("shutdownCompletedAt") or not node.get("shutdownToken"):
         return 0
+    token = node["shutdownToken"]
     recovered = 0
     async for task in repo.db.tasks.find({
         "nodeId": node_id, "plannedRestart": True, "desiredState": "RUNNING",
+        "plannedRestartToken": token,
         "status": {"$in": ["BLOCKED", "PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]},
         "resourceDeleted": {"$ne": True},
     }):
-        timestamp = now()
-        run_id = task.get("runId")
-        if run_id:
-            await repo.db.endpoint_locks.delete_one({"taskId": task["id"], "runId": run_id})
-            await repo.db.runs.update_one({"id": run_id, "taskId": task["id"], "endedAt": None},
-                                          {"$set": {"endedAt": timestamp, "endReason": "PLANNED_NODE_RESTART"}})
+        if await _recover_planned_restart_task(repo, task, node_id, token):
+            recovered += 1
+    return recovered
+
+
+async def _recover_planned_restart_task(repo, task, node_id: str, token: str) -> bool:
+    """在精确 owner、关闭 token 和关闭证据仍有效时收尾一个旧运行。"""
+    statuses = ["BLOCKED", "PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]
+
+    async def commit(session):
+        # 新 Worker 已开始心跳或后续退出覆盖 token 时，旧窗口不能再消费任务。
+        node = await repo.db.nodes.find_one_and_update({
+            "id": node_id, "accepting": False, "shutdownToken": token,
+            "shuttingDownAt": {"$exists": True}, "shutdownCompletedAt": {"$exists": True},
+        }, {"$inc": {"plannedRestartRecoveryVersion": 1}}, session=session,
+        return_document=ReturnDocument.AFTER)
+        if node is None:
+            return False
+        current = await repo.db.tasks.find_one(
+            owner_filter(task) | {"plannedRestart": True, "plannedRestartToken": token,
+                                  "desiredState": "RUNNING", "resourceDeleted": {"$ne": True},
+                                  "status": {"$in": statuses}},
+            session=session,
+        )
+        if current is None:
+            return False
+        # PENDING 只有尚未写入会话时才证明尚未建连；其它状态须有精确关闭收据。
+        if (current["status"] == "PENDING" and current.get("sessionId") is not None) or (
+                current["status"] != "PENDING" and not matching_closed_receipt(current)):
+            return False
+        run_id, timestamp = current.get("runId"), now()
+        if not run_id or current.get("generation") is None:
+            return False
+        foreign = await repo.db.endpoint_locks.find_one(
+            {"taskId": current["id"], "runId": {"$ne": run_id}}, session=session,
+        )
+        if foreign is not None:
+            return False
+        if current.get("protocol") == "SSH":
+            from camera_logs.collection.ssh_admission import release_task_slots
+            await release_task_slots(repo, current, session=session)
+        await repo.db.endpoint_locks.delete_one(
+            {"taskId": current["id"], "runId": run_id}, session=session,
+        )
+        await repo.db.runs.update_one(
+            {"id": run_id, "taskId": current["id"], "endedAt": None},
+            {"$set": {"endedAt": timestamp, "endReason": "PLANNED_NODE_RESTART"}}, session=session,
+        )
+        for old, new in (("SENDING", "UNKNOWN"), ("QUEUED", "CANCELLED")):
+            await repo.db.commands.update_many(
+                {"taskId": current["id"], "runId": run_id, "status": old},
+                {"$set": {"status": new, "completedAt": timestamp}}, session=session,
+            )
         changed = await repo.db.tasks.update_one(
-            {"id": task["id"], "nodeId": node_id, "plannedRestart": True,
-             "status": {"$in": ["BLOCKED", "PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]},
-             "desiredState": "RUNNING"},
+            owner_filter(current) | {"plannedRestart": True, "plannedRestartToken": token,
+                                     "desiredState": "RUNNING", "status": current["status"]},
             {"$set": {"nodeId": None, "status": "STOPPED", "error": None,
                       "restartRequested": False, "updatedAt": timestamp,
                       "recoveryReason": "PLANNED_NODE_RESTART"},
-             "$unset": {"closedReceipt": "", "failoverFenceRetryAt": "", "failoverConsumeRetryAt": ""}},
+             "$unset": {"plannedRestart": "", "plannedRestartNodeId": "", "plannedRestartToken": "",
+                        "closedReceipt": "", "failoverFenceRetryAt": "", "failoverConsumeRetryAt": ""}},
+            session=session,
         )
-        if changed.matched_count:
-            recovered += 1
-    return recovered
+        if not changed.matched_count:
+            # 同一事务中任何控制 CAS 未命中都不能提交已经执行的收尾写入。
+            raise RuntimeError("计划重启回收任务归属在事务中变化")
+        return True
+
+    return await audited_mutations.mutation_transaction(repo, commit)
 
 
 async def record_closed_receipt(repo, task, instance_id: str, session_id: str | None, *, reason: str | None = None) -> None:

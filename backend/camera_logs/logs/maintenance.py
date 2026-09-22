@@ -175,10 +175,15 @@ async def _ready_group_matches(repo: Any, path: Path) -> bool:
 
 
 async def recover_orphan_archives(repo: Any) -> int:
-    """节点重启后根据已发布归档清单补回目录，不改写未封存的日志正文。"""
+    """节点重启后续交 pending 归档并补回已发布归档的目录记录。"""
     root = _root(repo)
     registered = 0
-    for path in root.rglob("*.tar.gz"):
+    # 提交清单先于 tar 原子替换落盘。仅扫描已有 tar 会遗漏此后断电时留下的
+    # ``.tar.gz.pending.json``，因此将两类路径归一为同一个归档目标并去重处理。
+    paths = set(root.rglob("*.tar.gz"))
+    for pending in root.rglob("*.tar.gz.pending.json"):
+        paths.add(Path(str(pending).removesuffix(".pending.json")))
+    for path in sorted(paths):
         if "exports" in path.parts:
             continue
         try:

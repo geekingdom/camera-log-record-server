@@ -77,8 +77,14 @@ async def test_planned_worker_restart_requeues_blocked_tasks(tmp_path):
                                     "shutdownCompletedAt": stale, "shutdownToken": "old-instance"})
     for index in range(3):
         await repo.db.tasks.insert_one({"id": f"task-{index}", "nodeId": "collector-01",
-                                        "runId": f"run-{index}", "status": "BLOCKED",
+                                        "runId": f"run-{index}", "generation": 1, "status": "BLOCKED",
                                         "desiredState": "RUNNING", "plannedRestart": True,
+                                        "plannedRestartToken": "old-instance",
+                                        "sessionId": f"session-{index}",
+                                        "closedReceipt": {"taskId": f"task-{index}", "runId": f"run-{index}",
+                                                          "generation": 1, "nodeId": "collector-01",
+                                                          "sessionId": f"session-{index}", "instanceId": "old-instance",
+                                                          "closedAt": stale},
                                         "resourceDeleted": False})
         await repo.db.runs.insert_one({"id": f"run-{index}", "taskId": f"task-{index}", "endedAt": None})
         await repo.db.endpoint_locks.insert_one({"taskId": f"task-{index}", "runId": f"run-{index}"})
@@ -89,6 +95,51 @@ async def test_planned_worker_restart_requeues_blocked_tasks(tmp_path):
                and item["desiredState"] == "RUNNING" for item in tasks)
     assert await repo.db.endpoint_locks.count_documents({}) == 0
     assert await repo.db.runs.count_documents({"endedAt": None}) == 0
+
+
+async def test_planned_restart_does_not_consume_old_token_or_unclosed_connection(tmp_path):
+    """旧窗口和未附精确关闭收据的连接任务必须保留旧运行。"""
+    repo = isolated_repository(tmp_path, "collector-01")
+    stale = now() - timedelta(minutes=2)
+    await repo.db.nodes.insert_one({"id": "collector-01", "heartbeat": stale,
+                                    "accepting": False, "shuttingDownAt": stale,
+                                    "shutdownCompletedAt": stale, "shutdownToken": "current-instance"})
+    old_token = {"id": "old-token", "nodeId": "collector-01", "runId": "old-run", "generation": 1,
+                 "status": "PENDING", "desiredState": "RUNNING", "plannedRestart": True,
+                 "plannedRestartToken": "previous-instance", "resourceDeleted": False}
+    unclosed = {"id": "unclosed", "nodeId": "collector-01", "runId": "live-run", "generation": 1,
+                "status": "COLLECTING", "desiredState": "RUNNING", "plannedRestart": True,
+                "plannedRestartToken": "current-instance", "sessionId": "live-session", "resourceDeleted": False}
+    await repo.db.tasks.insert_many([old_token, unclosed])
+    await repo.db.runs.insert_many([{"id": "old-run", "taskId": "old-token"},
+                                    {"id": "live-run", "taskId": "unclosed"}])
+    await repo.db.endpoint_locks.insert_many([{"taskId": "old-token", "runId": "old-run"},
+                                             {"taskId": "unclosed", "runId": "live-run"}])
+
+    assert await recover_planned_restart_tasks(repo, "collector-01") == 0
+    assert await repo.db.endpoint_locks.count_documents({}) == 2
+    assert await repo.db.runs.count_documents({"endedAt": None}) == 2
+
+
+async def test_planned_restart_requeues_unconnected_pending_task(tmp_path):
+    """已领取但尚未建立会话的 PENDING 任务可由完成关闭窗口安全回收。"""
+    repo = isolated_repository(tmp_path, "collector-01")
+    stale = now() - timedelta(minutes=2)
+    await repo.db.nodes.insert_one({"id": "collector-01", "heartbeat": stale,
+                                    "accepting": False, "shuttingDownAt": stale,
+                                    "shutdownCompletedAt": stale, "shutdownToken": "old-instance"})
+    await repo.db.tasks.insert_one({"id": "pending", "nodeId": "collector-01", "runId": "run",
+                                    "generation": 1, "status": "PENDING", "desiredState": "RUNNING",
+                                    "plannedRestart": True, "plannedRestartToken": "old-instance",
+                                    "resourceDeleted": False})
+    await repo.db.runs.insert_one({"id": "run", "taskId": "pending", "endedAt": None})
+    await repo.db.endpoint_locks.insert_one({"taskId": "pending", "runId": "run"})
+
+    assert await recover_planned_restart_tasks(repo, "collector-01") == 1
+    task = await repo.db.tasks.find_one({"id": "pending"})
+    assert task["nodeId"] is None and task["status"] == "STOPPED"
+    assert "plannedRestartToken" not in task
+    assert await repo.db.endpoint_locks.count_documents({}) == 0
 
 
 async def test_unplanned_stale_node_does_not_requeue_blocked_tasks(tmp_path):

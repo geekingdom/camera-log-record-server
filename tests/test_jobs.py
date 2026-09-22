@@ -13,10 +13,23 @@ import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
 from camera_logs.logs import hour_download, jobs
-from camera_logs.logs.archive_access import snapshot
+from camera_logs.logs.archive_access import gzip_tar_writer, snapshot
 from camera_logs.logs.jobs import run_job
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+
+
+def _gzip_header_filename(path: Path) -> str | None:
+    """读取 gzip 固定头中的可选 FNAME，不依赖解压工具对临时名的解释。"""
+    data = path.read_bytes()
+    assert data[:3] == b"\x1f\x8b\x08"
+    flags, offset = data[3], 10
+    if flags & 0x04:
+        offset += 2 + int.from_bytes(data[offset:offset + 2], "little")
+    if flags & 0x08:
+        end = data.index(b"\0", offset)
+        return data[offset:end].decode("latin-1")
+    return None
 
 
 def test_snapshot_enforces_compressed_byte_limit_before_write(tmp_path):
@@ -190,6 +203,111 @@ def test_single_archive_download_rebuilds_user_hour_filename(tmp_path):
     result = asyncio.run(scenario())
     assert result["filename"] == "task-unknown-ip-20260908080000-20260908090000.tar.gz"
     assert Path(result["resultPath"]).name == result["filename"]
+
+
+def test_legacy_archive_filename_is_downloaded_as_one_flat_hour_tar(tmp_path):
+    """归档文件名带恢复临时后缀时，用户包仍只需解压一次即可取得日志片段。"""
+    async def scenario():
+        settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
+        repo = Repository(AsyncMongoMockClient().db, settings)
+        archive = tmp_path / "camera.tar.gz.4d31.partial"
+        with tarfile.open(archive, "w:gz") as bundle:
+            info = tarfile.TarInfo("part-000001.log")
+            info.size = 7
+            bundle.addfile(info, io.BytesIO(b"archive"))
+        hour = "2026-09-08T00:00:00+00:00"
+        await repo.db.files.insert_one({
+            "id": "f1", "path": str(archive), "status": "READY", "bytes": 7,
+            "nodeId": "node", "hour": hour, "archiveGroupId": "group", "archiveMember": "part-000001.log",
+        })
+        async def audit(*_args, **_kwargs):
+            return None
+
+        repo.audit = audit
+        job = {"id": "download", "kind": "DOWNLOAD", "status": "RUNNING", "files": [
+            {"id": "f1", "nodeId": "node", "status": "READY", "bytes": 7, "hour": hour},
+        ]}
+        await repo.db.jobs.insert_one(job)
+        return await run_job(repo, job)
+
+    result = asyncio.run(scenario())
+    assert result["filename"] == "task-unknown-ip-20260908080000-20260908090000.tar.gz"
+    assert _gzip_header_filename(Path(result["resultPath"])) is None
+    with tarfile.open(result["resultPath"], "r:gz") as bundle:
+        assert bundle.getnames() == ["part-000001.log"]
+        assert bundle.extractfile("part-000001.log").read() == b"archive"
+
+
+def test_header_safe_complete_hour_reuses_compressed_archive_bytes(tmp_path, monkeypatch):
+    """新格式完整小时包无 FNAME 时直接复用，避免大下载重复解压和压缩。"""
+    async def scenario():
+        settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
+        repo = Repository(AsyncMongoMockClient().db, settings)
+        archive = tmp_path / "shared-hour.tar.gz"
+        with archive.open("wb") as destination, gzip_tar_writer(destination) as bundle:
+            info = tarfile.TarInfo("part-000001.log")
+            info.size = 7
+            bundle.addfile(info, io.BytesIO(b"archive"))
+        hour = "2026-09-08T00:00:00+00:00"
+        document = {"id": "f1", "path": str(archive), "status": "READY", "bytes": 7,
+                    "nodeId": "node", "hour": hour, "archiveGroupId": "group",
+                    "archiveMember": "part-000001.log"}
+        await repo.db.files.insert_one(document)
+
+        async def audit(*_args, **_kwargs):
+            return None
+
+        def rebuilding_is_forbidden(*_args, **_kwargs):
+            raise AssertionError("header-safe complete hour must be reused")
+
+        repo.audit = audit
+        monkeypatch.setattr(jobs, "write_hour_archive", rebuilding_is_forbidden)
+        job = {"id": "download", "kind": "DOWNLOAD", "status": "RUNNING", "files": [
+            {key: document[key] for key in ("id", "nodeId", "status", "bytes", "hour")},
+        ]}
+        await repo.db.jobs.insert_one(job)
+        result = await run_job(repo, job)
+        return result, archive.read_bytes()
+
+    result, archive_bytes = asyncio.run(scenario())
+    assert Path(result["resultPath"]).read_bytes() == archive_bytes
+    assert _gzip_header_filename(Path(result["resultPath"])) is None
+
+
+def test_multi_hour_download_hides_archive_recovery_suffixes(tmp_path):
+    """多小时 ZIP 只公开正式小时包名，成员中的日志片段保持平铺。"""
+    async def scenario():
+        settings = Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path, node_id="node")
+        repo = Repository(AsyncMongoMockClient().db, settings)
+        files = []
+        for number, hour in enumerate(("2026-09-08T00:00:00+00:00", "2026-09-08T01:00:00+00:00"), 1):
+            archive = tmp_path / f"camera-{number}.tar.gz.random.partial"
+            with tarfile.open(archive, "w:gz") as bundle:
+                info = tarfile.TarInfo("part-000001.log")
+                info.size = 1
+                bundle.addfile(info, io.BytesIO(str(number).encode()))
+            document = {"id": f"f{number}", "path": str(archive), "status": "READY", "bytes": 1,
+                        "nodeId": "node", "hour": hour, "archiveGroupId": f"group-{number}",
+                        "archiveMember": "part-000001.log"}
+            await repo.db.files.insert_one(document)
+            files.append({key: document[key] for key in ("id", "nodeId", "status", "bytes", "hour")})
+        async def audit(*_args, **_kwargs):
+            return None
+
+        repo.audit = audit
+        job = {"id": "download", "kind": "DOWNLOAD", "status": "RUNNING", "files": files}
+        await repo.db.jobs.insert_one(job)
+        return await run_job(repo, job)
+
+    result = asyncio.run(scenario())
+    with zipfile.ZipFile(result["resultPath"]) as bundle:
+        assert bundle.namelist() == [
+            "task-unknown-ip-20260908080000-20260908090000.tar.gz",
+            "task-unknown-ip-20260908090000-20260908100000.tar.gz",
+        ]
+        for name in bundle.namelist():
+            with tarfile.open(fileobj=io.BytesIO(bundle.read(name)), mode="r:gz") as hour:
+                assert hour.getnames() == ["part-000001.log"]
 
 
 def test_zip_export_keeps_readable_names_and_disambiguates_duplicates(tmp_path):

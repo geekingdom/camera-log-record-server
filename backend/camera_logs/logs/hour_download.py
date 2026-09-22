@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from zoneinfo import ZoneInfo
 
-from camera_logs.logs.archive_access import LimitedReader, LimitedWriter, snapshot
+from camera_logs.logs.archive_access import LimitedReader, LimitedWriter, gzip_tar_writer, snapshot
 from camera_logs.logs.naming import safe_filename_component
 from camera_logs.logs.order import ordered_files
 
@@ -97,9 +97,8 @@ def write_hour_archive(destination: Path, sources: list[Source], *, max_output_b
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     number = 1
-    with destination.open("wb") as target, tarfile.open(
-        fileobj=LimitedWriter(target, max_output_bytes, "export output exceeds size limit"),
-        mode="w:gz", compresslevel=1,
+    with destination.open("wb") as target, gzip_tar_writer(
+        LimitedWriter(target, max_output_bytes, "export output exceeds size limit")
     ) as output:
         for document in ordered:
             frozen, file, path, _temporary = by_id[document["id"]]

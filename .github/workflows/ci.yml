@@ -47,6 +47,10 @@ jobs:
       - name: 验证双Worker精确围栏后的自动故障转移
         # 使用回环高端口，不需要特权；脚本自行创建并回收随机Mongo数据库和临时日志根。
         run: python scripts/verify_node_auto_failover.py --isapi-test-port 18089
+      - name: 验证唯一Worker精确围栏后的原节点自动恢复
+        run: python scripts/verify_node_auto_failover.py --isapi-test-port 18089 --single-node-fallback
+      - name: 验证计划重启关闭凭据与原子回收
+        run: python scripts/verify_planned_restart_recovery.py
       - name: 验证节点时差不影响接收心跳与任务准入
         run: python scripts/verify_node_heartbeat_clock.py
       - name: 验证Coredump发现幂等及资源存在筛选索引

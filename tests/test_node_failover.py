@@ -1,6 +1,7 @@
 """验证节点故障转移只消费已确认物理关闭的精确运行收据。"""
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ from camera_logs.node import failover
 from camera_logs.node.failover import (
     AUTO_FAILOVER_FENCED,
     consume_confirmed_failovers,
+    failover_origin_healthy,
     install_failover_routes,
     persist_self_fenced_receipts,
     request_reachable_worker_fencing,
@@ -20,6 +22,7 @@ from camera_logs.node.worker import Worker
 from camera_logs.tasks.claim import claim_task
 from camera_logs.tasks.scheduler import schedule_once
 from fastapi import FastAPI
+from pymongo.errors import ConnectionFailure
 from test_scheduler_batch import _repository
 
 
@@ -38,13 +41,25 @@ def _receipt(task, **changes):
     } | changes
 
 
+def test_original_node_health_uses_platform_release_time_not_worker_receipt_clock():
+    """Worker 墙上时间快八小时也不能阻断已释放任务的原节点稳定恢复。"""
+    task = _task() | {
+        "nodeId": None,
+        "failoverExcludedNodeId": "old-node",
+        "failoverReleasedAt": now() - timedelta(seconds=1),
+    }
+    task["closedReceipt"] = _receipt(task | {"nodeId": "old-node"}, closedAt=now() + timedelta(hours=8))
+    node = {"id": "old-node", "heartbeat": now()}
+    assert failover_origin_healthy(task, node)
+
+
 @pytest.mark.usefixtures("mock_claim_transaction")
 async def test_confirmed_failover_receipt_releases_old_owner_and_excludes_old_node(tmp_path):
     """自动迁移仅在完整收据后释放旧运行，下一次领取不可回到旧节点。"""
     repo = await _repository(tmp_path)
     task = _task()
     await repo.db.resources.insert_one({"id": "resource", "ip": "127.0.0.1", "deletedAt": None, "healthStatus": "ONLINE"})
-    await repo.db.tasks.insert_one(task | {"closedReceipt": _receipt(task)})
+    await repo.db.tasks.insert_one(task | {"closedReceipt": _receipt(task, closedAt=now() - timedelta(seconds=1))})
     await repo.db.runs.insert_one({"id": task["runId"], "taskId": task["id"]})
     await repo.db.endpoint_locks.insert_one({"taskId": task["id"], "runId": task["runId"]})
 
@@ -73,6 +88,101 @@ async def test_confirmed_failover_receipt_releases_old_owner_and_excludes_old_no
 
 
 @pytest.mark.usefixtures("mock_claim_transaction")
+async def test_self_fenced_task_returns_to_original_node_only_after_stable_health_without_alternatives(tmp_path):
+    """原节点重启后须持续健康；其它节点可领取时仍不回退到原节点。"""
+    repo = await _repository(tmp_path)
+    task = _task()
+    await repo.db.resources.insert_one({"id": "resource", "ip": "127.0.0.1", "deletedAt": None, "healthStatus": "ONLINE"})
+    await repo.db.tasks.insert_one(task | {"closedReceipt": _receipt(task, closedAt=now() - timedelta(seconds=1))})
+    await repo.db.runs.insert_one({"id": task["runId"], "taskId": task["id"]})
+    await repo.db.endpoint_locks.insert_one({"taskId": task["id"], "runId": task["runId"]})
+    assert await consume_confirmed_failovers(repo) == 1
+
+    await asyncio.sleep(.01)
+    old = {"id": "old-node", "heartbeat": now(), "diskPercent": 1, "accepting": True, "capacity": 10}
+    await repo.db.nodes.insert_one(old)
+    await schedule_once(repo)
+    waiting = await repo.db.tasks.find_one({"id": task["id"]})
+    assert waiting["nodeId"] is None
+    assert waiting.get("failoverOriginalHealthySince") is not None
+    assert await claim_task(repo, waiting, "old-node") is None
+
+    await repo.db.tasks.update_one(
+        {"id": task["id"]}, {"$set": {"failoverOriginalHealthySince": now() - timedelta(seconds=31),
+                                           "failoverOriginalHealthyObservedAt": now() - timedelta(seconds=16)}},
+    )
+    stale_observation = await repo.db.tasks.find_one({"id": task["id"]})
+    assert await claim_task(repo, stale_observation, "old-node") is None
+
+    await repo.db.tasks.update_one(
+        {"id": task["id"]}, {"$set": {"failoverOriginalHealthySince": now() - timedelta(seconds=31),
+                                           "failoverOriginalHealthyObservedAt": now()}},
+    )
+    await repo.db.nodes.insert_one({"id": "new-node", "heartbeat": now(), "diskPercent": 1, "accepting": True, "capacity": 10})
+    await schedule_once(repo)
+    assert (await repo.db.tasks.find_one({"id": task["id"]}))["nodeId"] == "new-node"
+
+
+@pytest.mark.usefixtures("mock_claim_transaction")
+async def test_self_fenced_task_can_return_to_stably_recovered_original_node_when_no_alternative_exists(tmp_path):
+    """没有其它完整候选时，精确收据和持续健康允许原节点恢复采集。"""
+    repo = await _repository(tmp_path)
+    task = _task()
+    await repo.db.resources.insert_one({"id": "resource", "ip": "127.0.0.1", "deletedAt": None, "healthStatus": "ONLINE"})
+    await repo.db.tasks.insert_one(task | {"closedReceipt": _receipt(task, closedAt=now() - timedelta(seconds=1))})
+    await repo.db.runs.insert_one({"id": task["runId"], "taskId": task["id"]})
+    await repo.db.endpoint_locks.insert_one({"taskId": task["id"], "runId": task["runId"]})
+    assert await consume_confirmed_failovers(repo) == 1
+
+    await asyncio.sleep(.01)
+    await repo.db.nodes.insert_one({"id": "old-node", "heartbeat": now(), "diskPercent": 1, "accepting": True, "capacity": 10})
+    await schedule_once(repo)
+    await repo.db.tasks.update_one(
+        {"id": task["id"]}, {"$set": {"failoverOriginalHealthySince": now() - timedelta(seconds=31),
+                                           "failoverOriginalHealthyObservedAt": now()}},
+    )
+    await schedule_once(repo)
+    returned = await repo.db.tasks.find_one({"id": task["id"]})
+    assert returned["nodeId"] == "old-node" and returned["runId"] != task["runId"]
+    assert "failoverExcludedNodeId" not in returned
+
+
+@pytest.mark.usefixtures("mock_claim_transaction")
+async def test_legacy_released_task_uses_platform_observation_start_despite_fast_worker_clock(tmp_path):
+    """旧记录补写 Mongo 释放时间，Worker 快八小时也需从新心跳开始稳定观察。"""
+    repo = await _repository(tmp_path)
+    task = _task() | {"nodeId": None, "status": "STOPPED"}
+    task["closedReceipt"] = _receipt(task | {"nodeId": "old-node"}, closedAt=now() + timedelta(hours=8))
+    task["failoverExcludedNodeId"] = "old-node"
+    await repo.db.resources.insert_one({"id": "resource", "ip": "127.0.0.1", "deletedAt": None, "healthStatus": "ONLINE"})
+    await repo.db.tasks.insert_one(task)
+    await repo.db.nodes.insert_one({"id": "old-node", "heartbeat": now() - timedelta(seconds=1),
+                                    "diskPercent": 1, "accepting": True, "capacity": 10})
+
+    await schedule_once(repo)
+    seeded = await repo.db.tasks.find_one({"id": task["id"]})
+    assert seeded.get("failoverReleasedAt") is not None
+    assert seeded.get("failoverOriginalHealthySince") is None
+
+    # MongoDB 日期按毫秒保存，显式跨过补写释放时刻以模拟下一次心跳。
+    await repo.db.nodes.update_one(
+        {"id": "old-node"}, {"$set": {"heartbeat": now() + timedelta(seconds=1)}},
+    )
+    await schedule_once(repo)
+    observed = await repo.db.tasks.find_one({"id": task["id"]})
+    assert observed.get("failoverOriginalHealthySince") is not None
+    assert observed["nodeId"] is None
+
+    await repo.db.tasks.update_one(
+        {"id": task["id"]}, {"$set": {"failoverOriginalHealthySince": now() - timedelta(seconds=31),
+                                        "failoverOriginalHealthyObservedAt": now()}},
+    )
+    await schedule_once(repo)
+    returned = await repo.db.tasks.find_one({"id": task["id"]})
+    assert returned["nodeId"] == "old-node" and returned["runId"] != task["runId"]
+
+
+@pytest.mark.usefixtures("mock_claim_transaction")
 async def test_missing_or_untrusted_receipt_keeps_old_owner_blocked(tmp_path):
     """失联、普通收据或错误来源均不能作为自动迁移的关闭证明。"""
     repo = await _repository(tmp_path)
@@ -86,6 +196,56 @@ async def test_missing_or_untrusted_receipt_keeps_old_owner_blocked(tmp_path):
     assert retained["nodeId"] == "old-node" and retained["status"] == "BLOCKED"
     assert retained["closedReceipt"]["reason"] == receipt["reason"]
     assert await repo.db.endpoint_locks.find_one({"taskId": task["id"], "runId": task["runId"]}) is not None
+
+
+@pytest.mark.usefixtures("mock_claim_transaction")
+async def test_stale_planned_restart_without_closed_receipt_still_blocks_the_old_owner(tmp_path):
+    """计划重启标记不等于物理关闭证明，强制终止的旧锁必须进入隔离流程。"""
+    repo = await _repository(tmp_path)
+    task = _task() | {"status": "COLLECTING", "plannedRestart": True}
+    await repo.db.tasks.insert_one(task)
+    await repo.db.endpoint_locks.insert_one({"taskId": task["id"], "runId": task["runId"]})
+    await repo.db.nodes.insert_one({
+        "id": "old-node", "heartbeat": now() - timedelta(minutes=1), "diskPercent": 1, "accepting": False,
+    })
+
+    await schedule_once(repo)
+
+    retained = await repo.db.tasks.find_one({"id": task["id"]})
+    assert retained["status"] == "BLOCKED"
+    assert await repo.db.endpoint_locks.find_one({"taskId": task["id"], "runId": task["runId"]}) is not None
+
+
+@pytest.mark.usefixtures("mock_claim_transaction")
+async def test_failed_failover_transaction_does_not_block_normal_task_scheduling(tmp_path, monkeypatch):
+    """单条故障转移事务断库时保留旧锁并退避，健康任务仍可在本轮领取。"""
+    repo = await _repository(tmp_path)
+    failed = _task("failed")
+    normal = _task("normal") | {"nodeId": None, "status": "STOPPED", "runId": "normal-old"}
+    await repo.db.resources.insert_one({"id": "resource", "ip": "127.0.0.1", "deletedAt": None, "healthStatus": "ONLINE"})
+    await repo.db.tasks.insert_one(failed | {"closedReceipt": _receipt(failed)})
+    await repo.db.tasks.insert_one(normal)
+    await repo.db.runs.insert_one({"id": failed["runId"], "taskId": failed["id"]})
+    await repo.db.endpoint_locks.insert_one({"taskId": failed["id"], "runId": failed["runId"]})
+    await repo.db.nodes.insert_one({"id": "healthy-node", "heartbeat": now(), "diskPercent": 1,
+                                    "accepting": True, "capacity": 10})
+
+    from camera_logs.common import audited_mutations
+    original = audited_mutations.mutation_transaction
+
+    async def fail_consumption(_repo, _callback):
+        raise ConnectionFailure("simulated failover transaction outage")
+
+    monkeypatch.setattr(audited_mutations, "mutation_transaction", fail_consumption)
+    await schedule_once(repo)
+    monkeypatch.setattr(audited_mutations, "mutation_transaction", original)
+
+    retained = await repo.db.tasks.find_one({"id": failed["id"]})
+    claimed = await repo.db.tasks.find_one({"id": normal["id"]})
+    assert retained["nodeId"] == "old-node" and retained["status"] == "BLOCKED"
+    assert retained.get("failoverConsumeRetryAt") is not None
+    assert await repo.db.endpoint_locks.find_one({"taskId": failed["id"], "runId": failed["runId"]}) is not None
+    assert claimed["nodeId"] == "healthy-node" and claimed["runId"] != normal["runId"]
 
 
 async def test_self_fenced_runtime_writes_receipt_only_after_database_recovery(tmp_path):

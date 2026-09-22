@@ -144,6 +144,34 @@ async def test_recovery_completes_inactive_pending_archive_before_catalog_regist
     assert not Path(str(path) + ".pending.json").exists()
 
 
+async def test_recovery_discovers_pending_journal_before_tar_publication(tmp_path, monkeypatch):
+    """pending 已持久化但 tar 尚未替换时，重启仍应继续提交并登记归档。"""
+    repo = repository(tmp_path)
+    path, member = archive_at(tmp_path)
+    published, metadata = path.read_bytes(), Path(str(path) + ".metadata.json").read_text()
+    raw = path.parent / member["logName"]
+    raw.write_bytes(b"ordered device output\n")
+    path.unlink()
+    Path(str(path) + ".metadata.json").unlink()
+    pending_member = member | {"logPath": str(raw)}
+    Path(str(path) + ".pending.json").write_text(json.dumps({"formatVersion": 1, "segments": [pending_member]}))
+    calls = []
+
+    async def complete(segments, target):
+        calls.append((segments, target))
+        target.write_bytes(published)
+        Path(str(target) + ".metadata.json").write_text(metadata)
+        Path(str(target) + ".pending.json").unlink()
+        raw.unlink()
+        return target
+
+    monkeypatch.setattr("camera_logs.logs.maintenance.compress_hour", complete)
+    assert await recover_orphan_archives(repo) == 1
+    assert calls == [([], path)]
+    assert path.is_file() and not Path(str(path) + ".pending.json").exists()
+    assert await repo.db.files.count_documents({"path": str(path), "status": "READY"}) == 1
+
+
 async def test_recovery_repairs_open_record_after_archive_publication(tmp_path):
     repo = repository(tmp_path)
     path, manifest = archive_at(tmp_path)

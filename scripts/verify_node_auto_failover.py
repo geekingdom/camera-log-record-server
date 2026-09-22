@@ -69,6 +69,135 @@ async def wait_node_accepting(database, node_id, accepting=True):
             await asyncio.sleep(.2)
 
 
+async def wait_single_node_fallback(repo, database, task_id, node_id, old_run_id):
+    """真实调度循环等待原节点连续健康后回退；不伪造稳定窗口或直接修改任务归属。"""
+    try:
+        async with asyncio.timeout(50):
+            while True:
+                await schedule_once(repo)
+                task = await database.tasks.find_one({"id": task_id})
+                if task and task.get("status") == "COLLECTING" and task.get("nodeId") == node_id \
+                        and task.get("runId") != old_run_id:
+                    return task
+                await asyncio.sleep(1)
+    except TimeoutError as error:
+        task = await database.tasks.find_one({"id": task_id})
+        raise RuntimeError(f"原节点未在稳定窗口后重新领取: {task!r}") from error
+
+
+async def single_node_fallback(isapi_test_port=80):
+    """验证自围栏后没有其它节点可选时，原节点只能稳定恢复后以新运行回退。"""
+    configured = Settings()
+    if not local_mongo_uri(configured.mongo_uri):
+        raise RuntimeError("本验证仅允许本机回环 MongoDB")
+    database = f"node_auto_fallback_{uuid4().hex}"
+    token, key, password = secrets.token_urlsafe(32), Fernet.generate_key().decode(), secrets.token_urlsafe(24)
+    api_port, a_port = free_port(), free_port()
+    processes, logs, failed = [], [], True
+    source, device = SshSource(password), DeviceInfoSource(password, isapi_test_port)
+    mongo = AsyncMongoClient(configured.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True, w="majority", journal=True)
+    with tempfile.TemporaryDirectory(prefix="camera-node-auto-fallback-") as temporary:
+        base = Path(temporary)
+        try:
+            await device.start()
+            await source.start()
+            a_log = (base / "failover-a.log").open("w")
+            logs.append(a_log)
+            processes.append(await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "camera_logs.worker", cwd=ROOT,
+                env=environment(database, configured.mongo_uri, base / "failover-a", "failover-a", a_port, token, key, password),
+                stdout=a_log, stderr=a_log,
+            ))
+            api_log = (base / "api.log").open("w")
+            logs.append(api_log)
+            api_env = environment(database, configured.mongo_uri, base / "api", "failover-api", api_port, token, key, password,
+                                  start_background=False)
+            if isapi_test_port != 80:
+                api_env["ISAPI_TEST_PORT"] = str(isapi_test_port)
+            processes.append(await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "scripts.cross_worker_ssh_resume_api", cwd=ROOT, env=api_env,
+                stdout=api_log, stderr=api_log,
+            ))
+            await asyncio.gather(*(wait_ready(f"http://127.0.0.1:{port}/health", processes) for port in (api_port, a_port)))
+            headers = {"Authorization": "Bearer " + token}
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{api_port}", headers=headers, timeout=15) as client:
+                response = await client.post("/api/v1/admin/nodes", json={
+                    "id": "failover-a", "url": f"http://127.0.0.1:{a_port}", "capacity": 10, "accepting": True,
+                })
+                response.raise_for_status()
+                await wait_node_accepting(mongo[database], "failover-a", True)
+                resource = await client.post("/api/v1/resources", headers={**headers, "Idempotency-Key": "resource-" + uuid4().hex}, json={
+                    "name": "单节点回退回环源", "kind": "HIKVISION_NETWORK", "ip": "127.0.0.1",
+                    "username": "collector", "password": password, "authType": "BASIC",
+                })
+                resource.raise_for_status()
+                created = await client.post("/api/v1/tasks", headers={**headers, "Idempotency-Key": "task-" + uuid4().hex}, json={
+                    "name": "单节点自围栏回退 SSH", "description": "", "sharedWith": [], "sharedWithAll": False,
+                    "protocol": "SSH", "ip": "127.0.0.1", "port": source.port, "username": "collector",
+                    "password": password, "resourceId": resource.json()["id"], "autoStart": True,
+                    "initialCommands": [{"command": item} for item in INITIAL_COMMANDS],
+                })
+                created.raise_for_status()
+                task_id = created.json()["id"]
+                verifier_settings = Settings(
+                    _env_file=None, mongo_uri=configured.mongo_uri, database_name=database, internal_token=token,
+                    node_id="failover-verifier", node_url="http://127.0.0.1:1", log_root=base / "verifier",
+                    encryption_key=key, start_background=False,
+                )
+                repo = Repository(mongo[database], verifier_settings)
+                await schedule_once(repo)
+                first = await wait_task(client, task_id, lambda task: task.get("status") == "COLLECTING" and task.get("nodeId") == "failover-a", "A 未开始采集")
+                await source.wait_commands(1, expect_probe=False)
+                await source.suspend_after(1)
+                await mongo[database].nodes.update_one({"id": "failover-a"}, {"$set": {"heartbeat": now() - timedelta(minutes=5)}})
+                stale_a = await mongo[database].nodes.find_one({"id": "failover-a"})
+                async with NodeHttpPool() as pool:
+                    repo.node_http = pool
+                    if await request_reachable_worker_fencing(repo, [stale_a]) != 1:
+                        raise RuntimeError("旧 Worker 未返回精确自围栏关闭收据")
+                    if await consume_confirmed_failovers(repo) != 1:
+                        raise RuntimeError("精确自围栏收据未释放旧运行")
+                    second = await wait_single_node_fallback(repo, mongo[database], task_id, "failover-a", first["runId"])
+                if source.active != 1 or source.connection_count != 2 or source.peak_active > 1:
+                    raise RuntimeError("单节点回退未保持唯一连接或未建立新会话")
+                await source.wait_commands(2, expect_probe=False)
+                old = await mongo[database].runs.find_one({"id": first["runId"], "taskId": task_id})
+                if not old or not old.get("endedAt") or await mongo[database].endpoint_locks.find_one({"taskId": task_id, "runId": first["runId"]}):
+                    raise RuntimeError("旧运行或端点锁未收尾")
+                old_files = [item for item in await wait_files(mongo[database], task_id, "failover-a") if item["runId"] == first["runId"]]
+                source.resume_emitting()
+                await source.suspend_after(2)
+                stopped = await client.post(f"/api/v1/tasks/{task_id}/stop")
+                stopped.raise_for_status()
+                await operation(client, stopped.json()["id"])
+                await asyncio.wait_for(source.closed.wait(), 15)
+                files = await wait_files(mongo[database], task_id, "failover-a")
+                new_files = [item for item in files if item["runId"] == second["runId"]]
+                if not old_files or not new_files or any(not Path(item["path"]).is_relative_to(base / "failover-a") for item in files):
+                    raise RuntimeError("单节点回退归档未按新旧运行完整发布到 A 根目录")
+                print(json.dumps({"passed": True, "mode": "single-node-fallback", "oldRunId": first["runId"],
+                                  "newRunId": second["runId"], "peakActiveConnections": source.peak_active,
+                                  "connections": source.connection_count, "oldArchives": [item["path"] for item in old_files],
+                                  "newArchives": [item["path"] for item in new_files]}, ensure_ascii=False))
+                failed = False
+        finally:
+            results = await asyncio.gather(*(stop(process) for process in reversed(processes)), return_exceptions=True)
+            for log in logs:
+                if failed:
+                    log.flush()
+                    tail = Path(log.name).read_text(errors="replace")[-3000:]
+                    if tail:
+                        print(f"{Path(log.name).stem} tail:\n{tail}")
+                log.close()
+            await source.close()
+            await device.close()
+            await mongo.drop_database(database)
+            await mongo.close()
+            if any(isinstance(result, BaseException) for result in results):
+                raise RuntimeError("隔离子进程未能结束")
+    print(json.dumps({"temporaryDatabaseDropped": True, "temporaryLogRootsDropped": 2, "failed": failed}, ensure_ascii=False))
+
+
 async def main(isapi_test_port=80):
     """执行 A 自动围栏、B 新运行领取及两次归档的真实本机验证。"""
     configured = Settings()
@@ -211,7 +340,8 @@ async def main(isapi_test_port=80):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--isapi-test-port", type=int, default=80)
+    parser.add_argument("--single-node-fallback", action="store_true", help="验证无替代节点时原节点稳定恢复后的自动回退")
     arguments = parser.parse_args()
     if not 1 <= arguments.isapi_test_port <= 65535:
         raise ValueError("--isapi-test-port 必须在1至65535")
-    asyncio.run(main(arguments.isapi_test_port))
+    asyncio.run(single_node_fallback(arguments.isapi_test_port) if arguments.single_node_fallback else main(arguments.isapi_test_port))

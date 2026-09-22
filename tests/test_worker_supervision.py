@@ -68,6 +68,43 @@ async def test_tick_retries_completed_self_fence_before_regular_runtime_reconcil
     assert "task" in worker.self_fenced
 
 
+async def test_slow_manual_lookup_does_not_block_control_snapshot(tmp_path, monkeypatch):
+    """命令查询挂起时监督仍核对归属并刷新存活，同任务不重复排队。"""
+    worker, _repo, runtime = await setup_worker(tmp_path, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_query(*_args):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr("camera_logs.node.worker.next_manual_command", slow_query)
+    worker.last_database_ok = time.monotonic() - 60
+    try:
+        await asyncio.wait_for(worker.tick(), 1)
+        await asyncio.wait_for(entered.wait(), 1)
+        first = worker.manual_jobs["task"]
+        assert time.monotonic() - worker.last_database_ok < 1
+        await asyncio.wait_for(worker.tick(), 1)
+        assert worker.manual_jobs["task"] is first
+        runtime.stop.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.gather(*worker.manual_jobs.values())
+        await worker.telemetry.close()
+
+
+async def test_manual_lookup_failure_does_not_close_runtime(tmp_path, monkeypatch):
+    """单路查询异常被取回并允许后续重试，不关闭采集连接。"""
+    worker, _repo, runtime = await setup_worker(tmp_path, monkeypatch)
+    monkeypatch.setattr("camera_logs.node.worker.next_manual_command", AsyncMock(side_effect=TimeoutError))
+    await worker.dispatch_manual(runtime)
+    runtime.stop.assert_not_awaited()
+    runtime.manual = AsyncMock()
+    monkeypatch.setattr("camera_logs.node.worker.next_manual_command", AsyncMock(return_value={"id": "command"}))
+    await worker.dispatch_manual(runtime)
+    runtime.manual.assert_awaited_once_with({"id": "command"})
+
+
 @pytest.mark.parametrize("change", ["missing", "node", "generation", "run", "blocked", "isolated"])
 async def test_tick_closes_disowned_or_blocked_runtime_without_releasing_lock(tmp_path, monkeypatch, change):
     """隔离只证明本机连接关闭，不擅自放行任务锁或修改后继领取状态。"""
@@ -200,9 +237,11 @@ async def test_failed_task_snapshot_does_not_mean_ownership_disappeared(tmp_path
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(collection_type, "find", fail_task_query)
+    last_success = worker.last_database_ok = time.monotonic() - 60
     with pytest.raises(OSError, match="synthetic task query failure"):
         await worker.tick()
 
+    assert worker.last_database_ok == last_success
     runtime.stop.assert_not_awaited()
     assert worker.active["task"] is runtime and not worker.releases
 

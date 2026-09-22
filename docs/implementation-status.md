@@ -1,5 +1,15 @@
 # 当前状态总表
 
+| 当前故障与稳定性审查（2026-09-22，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 手动命令慢查询拖住监督周期，被误判控制面失联并全节点停采 | `node/worker.py` | 慢查询挂起时tick继续完成；任务快照失败不刷新存活；查询失败后可重试；最终后端全量1704项通过，独立复审无阻断 | 已改为完整归属快照成功刷新存活、每任务独立命令作业、最多8路查询且每次查询限时3秒；公司现场升级后观察 |
+| 自围栏后唯一健康节点永久被排除，任务停在等待调度 | `node/failover.py`、`tasks/scheduler.py`、`tasks/claim.py` | 现场任务确有精确`AUTO_FAILOVER_FENCED`收据及唯一节点排除；真实Mongo/回环SSH单节点恢复、双节点迁移均峰值1连接，新旧run不同且归档READY；旧记录缺少释放时间及Worker时差回归通过 | 其它合格节点优先；无其它时原节点连续健康30秒可回退，超过15秒观察间隔重新计时；旧记录由Mongo补记观察起点。公司物理环境尚未验证 |
+| 单个故障转移收据事务异常中断整轮普通调度 | `node/failover.py` | 注入`ConnectionFailure`，失败者保留旧归属和锁并退避，普通任务同轮领取；相关83项通过 | 已隔离逐候选消费、围栏预留及退避清理异常；普通领取提交未知时仍结束周期并重新核对容量 |
+| 上轮计划重启恢复缺少任务级实例绑定和原子收尾 | `node/recovery.py`、`node/shutdown.py`、`logs/maintenance.py`、`scripts/verify_planned_restart_recovery.py` | 真实Mongo副本集验证完整收据成功、旧token与无收据拒绝、最终CAS失败全部回滚；仅有`.pending.json`而尚无tar的中断窗口可恢复；临时库及日志已清理 | 已移除`plannedRestart`永久豁免隔离；未知旧连接仍不能自动释放。任意缺少待处理清单的原始日志不属于本轮恢复证明 |
+| 小时下载解压暴露随机`.partial`名、未归档小时目录多余 | `logs/archive_access.py`、`compression.py`、`hour_download.py`、`jobs.py`、`export_output.py` | gzip头无FNAME、小时包仅平铺日志、旧临时路径兼容、新格式完整小时免重压回归；真实API/Worker/WebSocket浏览器小时下载通过，控制台异常0 | 新下载修正旧包临时名；已下载本地文件不改变。新格式完整小时仍直接复用；旧格式按下载重建，有额外读取与压缩成本 |
+
+现场任务响应已确认唯一节点排除导致无法重新调度；10秒监督超时前的Mongo变慢原因仍需公司环境观测，不能认定为唯一触发源。节点0写入样本/0积压不等于采集成功。本轮不提高缓冲、写延迟阈值或放宽未知旧连接隔离要求。前端183项、类型检查/构建及全仓Ruff通过；真实事务和单节点恢复验证已接入CI，新增提交CI按新SHA核验。具体证据及限制见[本轮验证记录](history/2026-09-22-collection-recovery-downloads.md)。
+
 | 当前需求（2026-09-20） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 单节点重新部署时运行任务不再长期停留等待隔离；优先转移到其他可用节点，无其他节点时等待原节点恢复后自动重新采集；任务页支持批量重新启动等待隔离任务 | `node/shutdown.py`、`node/recovery.py`、`node/app.py`、`tasks/scheduler.py`、`frontend/src/features/tasks/TaskList.vue`、`taskActions.ts` | 计划重启恢复与普通失联不误恢复专项29项通过；前端生命周期10项通过，前端构建通过；恢复后任务保留`desiredState=RUNNING`并清理旧锁/run，调度器按可用节点排序；只有旧Worker写入`shutdownCompletedAt`后才允许批量恢复 | 需要在实际 deploy-all 单节点/双节点环境执行一次重部署验收；未知失联、旧Worker未完成收尾仍要求隔离证明，不自动接管 |

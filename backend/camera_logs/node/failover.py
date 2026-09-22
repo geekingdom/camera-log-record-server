@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import secrets
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
+from pymongo.errors import PyMongoError
 
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
@@ -21,6 +22,9 @@ FENCE_CONCURRENCY = 8
 FENCE_CYCLE_SECONDS = 1
 FENCE_RETRY_SECONDS = 15
 FAILOVER_CONSUME_MAX = 100
+FAILOVER_RETURN_STABLE_SECONDS = 30
+# 调度一轮最多八秒；与节点心跳新鲜窗口统一为十五秒，避免正常大批量调度重置恢复期。
+FAILOVER_RETURN_OBSERVATION_GAP_SECONDS = 15
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +40,49 @@ class FailoverFenceRequest(BaseModel):
 def is_confirmed_failover_receipt(task):
     """自动迁移只接受 self-fencing 或内部关闭接口写入的精确关闭收据。"""
     return matching_closed_receipt(task) and (task.get("closedReceipt") or {}).get("reason") == AUTO_FAILOVER_FENCED
+
+
+def has_retained_failover_receipt(task):
+    """旧归属已释放后仍按原节点字段核对收据，不能再使用当前 ``nodeId=None`` 比较。"""
+    receipt = task.get("closedReceipt") or {}
+    return receipt.get("reason") == AUTO_FAILOVER_FENCED and receipt.get("taskId") == task.get("id") and all(
+        task.get(key) is not None and receipt.get(key) == task.get(key)
+        for key in ("runId", "generation", "sessionId")
+    ) and receipt.get("nodeId") == task.get("failoverExcludedNodeId") and bool(receipt.get("instanceId")) \
+        and isinstance(receipt.get("closedAt"), datetime)
+
+
+def failover_origin_healthy(task, node, current=None):
+    """仅原节点在平台释放旧运行后重新上报心跳时，才开始计算回退稳定期。"""
+    if not node or task.get("failoverExcludedNodeId") != node.get("id") or not has_retained_failover_receipt(task):
+        return False
+    released_at = task.get("failoverReleasedAt")
+    heartbeat = node.get("heartbeat")
+    if not isinstance(released_at, datetime) or not isinstance(heartbeat, datetime):
+        return False
+    current = current or now()
+    released_at = released_at.replace(tzinfo=UTC) if released_at.tzinfo is None else released_at
+    heartbeat = heartbeat.replace(tzinfo=UTC) if heartbeat.tzinfo is None else heartbeat
+    return heartbeat > released_at and heartbeat >= current - timedelta(seconds=15)
+
+
+def failover_origin_return_ready(task, node, current=None):
+    """回退还要求原节点连续健康一个窗口，单次重启心跳不能立即重新领取旧任务。"""
+    current = current or now()
+    stable_since = task.get("failoverOriginalHealthySince")
+    observed_at = task.get("failoverOriginalHealthyObservedAt")
+    if (
+        not isinstance(stable_since, datetime)
+        or not isinstance(observed_at, datetime)
+        or not failover_origin_healthy(task, node, current)
+    ):
+        return False
+    stable_since = stable_since.replace(tzinfo=UTC) if stable_since.tzinfo is None else stable_since
+    observed_at = observed_at.replace(tzinfo=UTC) if observed_at.tzinfo is None else observed_at
+    return (
+        stable_since <= current - timedelta(seconds=FAILOVER_RETURN_STABLE_SECONDS)
+        and observed_at >= current - timedelta(seconds=FAILOVER_RETURN_OBSERVATION_GAP_SECONDS)
+    )
 
 
 def is_exact_fence_response(task, payload):
@@ -77,15 +124,20 @@ async def request_reachable_worker_fencing(repo, stale_nodes):
     reserved = []
     retry_at = now() + timedelta(seconds=FENCE_RETRY_SECONDS)
     for node, config, task in candidates:
-        claimed = await repo.db.tasks.update_one(
-            owner_filter(task) | {
-                "$or": [
-                    {"failoverFenceRetryAt": {"$exists": False}},
-                    {"failoverFenceRetryAt": {"$lte": now()}},
-                ]
-            },
-            {"$set": {"failoverFenceRetryAt": retry_at}},
-        )
+        try:
+            claimed = await repo.db.tasks.update_one(
+                owner_filter(task) | {
+                    "$or": [
+                        {"failoverFenceRetryAt": {"$exists": False}},
+                        {"failoverFenceRetryAt": {"$lte": now()}},
+                    ]
+                },
+                {"$set": {"failoverFenceRetryAt": retry_at}},
+            )
+        except PyMongoError:
+            # 单个旧归属的预留失败不能取消其它候选的关闭请求；下轮重新读取其 owner。
+            logger.exception("故障转移围栏预留失败 node=%s task=%s", node["id"], task["id"])
+            continue
         if claimed.matched_count:
             reserved.append((node, config, task))
 
@@ -104,7 +156,11 @@ async def request_reachable_worker_fencing(repo, stale_nodes):
             except (httpx.HTTPError, RuntimeError, TimeoutError, ValueError) as error:
                 logger.info("失联节点未取得关闭证明 node=%s task=%s error_type=%s", node["id"], task["id"], type(error).__name__)
                 return False
-            await repo.db.tasks.update_one(owner_filter(task), {"$unset": {"failoverFenceRetryAt": ""}})
+            try:
+                await repo.db.tasks.update_one(owner_filter(task), {"$unset": {"failoverFenceRetryAt": ""}})
+            except PyMongoError:
+                # 已取得精确收据时保留退避只会延后重复探测，不能让单条清理失败拖垮本轮。
+                logger.exception("故障转移围栏退避清理失败 node=%s task=%s", node["id"], task["id"])
             return True
 
     try:
@@ -121,6 +177,16 @@ async def consume_confirmed_failovers(repo):
         "status": "BLOCKED", "desiredState": "RUNNING", "closedReceipt.reason": AUTO_FAILOVER_FENCED, **retryable,
     }).sort([("updatedAt", 1), ("id", 1)]).limit(FAILOVER_CONSUME_MAX)]
     consumed = 0
+
+    async def defer_candidate(candidate):
+        """仅为同一精确旧归属写入消费退避；数据库再失败时记录并交给下一周期。"""
+        try:
+            await repo.db.tasks.update_one(owner_filter(candidate), {"$set": {
+                "failoverConsumeRetryAt": now() + timedelta(seconds=FENCE_RETRY_SECONDS),
+            }})
+        except PyMongoError:
+            logger.exception("故障转移消费退避写入失败 task=%s", candidate["id"])
+
     for candidate in candidates:
         async def commit(session, task_id=candidate["id"]):
             task = await repo.db.tasks.find_one_and_update(
@@ -135,7 +201,8 @@ async def consume_confirmed_failovers(repo):
             changed = await repo.db.tasks.update_one(
                 {"id": task["id"], "nodeId": None, "status": "STOPPED", "desiredState": "RUNNING"},
                 {"$set": {"failoverExcludedNodeId": old_node_id, "failoverFromNodeId": old_node_id,
-                          "failoverReason": AUTO_FAILOVER_FENCED, "updatedAt": now()}}, session=session,
+                          "failoverReason": AUTO_FAILOVER_FENCED, "updatedAt": now()},
+                 "$currentDate": {"failoverReleasedAt": True}}, session=session,
             )
             if not changed.matched_count:
                 raise HTTPException(409, "故障转移归属已变化")
@@ -145,14 +212,14 @@ async def consume_confirmed_failovers(repo):
             if await audited_mutations.mutation_transaction(repo, commit):
                 consumed += 1
             else:
-                await repo.db.tasks.update_one(owner_filter(candidate), {"$set": {
-                    "failoverConsumeRetryAt": now() + timedelta(seconds=FENCE_RETRY_SECONDS),
-                }})
+                await defer_candidate(candidate)
         except HTTPException as error:
             logger.info("故障转移收据暂不可消费 task=%s status=%s", candidate["id"], error.status_code)
-            await repo.db.tasks.update_one(owner_filter(candidate), {"$set": {
-                "failoverConsumeRetryAt": now() + timedelta(seconds=FENCE_RETRY_SECONDS),
-            }})
+            await defer_candidate(candidate)
+        except PyMongoError:
+            # 不猜测提交结果或额外释放锁；精确 owner 退避后由后续调度重读持久状态。
+            logger.exception("故障转移收据消费失败 task=%s", candidate["id"])
+            await defer_candidate(candidate)
     return consumed
 
 

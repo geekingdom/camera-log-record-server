@@ -32,6 +32,7 @@ class Worker:
         self.repo = repo
         self.active = {}
         self.manual_jobs = {}
+        self.manual_query_slots = asyncio.Semaphore(8)
         self.jobs = set()
         self.last_database_ok = time.monotonic()
         from camera_logs.node.input_admission import InputRateMeter
@@ -264,7 +265,7 @@ class Worker:
                 {"$set": {"status": "FAILED", "completedAt": now()}})
         await self.repo.db.tasks.update_one(owner_filter(task), {
             "$set": update,
-            "$unset": {"plannedRestart": "", "plannedRestartNodeId": ""},
+            "$unset": {"plannedRestart": "", "plannedRestartNodeId": "", "plannedRestartToken": ""},
         })
         await self.repo.db.tasks.find_one_and_update(
             {**owner_filter(task), "nodeId": None, "status": update["status"], "restartRequested": True},
@@ -394,6 +395,9 @@ class Worker:
         # 让普通 isolate/release 看见该运行并改写其关闭语义。
         await retry_self_fence_pending(self)
         tasks = [t async for t in self.repo.db.tasks.find({"nodeId": self.repo.settings.node_id})]
+        # 心跳写入和完整归属读取均成功才刷新控制面存活；命令/导出慢查询
+        # 不应把已成功核对归属的节点误判成数据库长期失联。
+        self.last_database_ok = time.monotonic()
         assigned = {task["id"]: task for task in tasks}
         # 仅成功取得数据库快照后核对归属；读取失败不能被解释成任务已经消失。
         await self.stop_unresponsive_health_failed_runtimes(assigned, time.monotonic())
@@ -466,9 +470,7 @@ class Worker:
             if runtime and not runtime.stopping and task["status"] == "COLLECTING":
                 manual = self.manual_jobs.get(task["id"])
                 if manual is None or manual.done():
-                    command = await next_manual_command(self.repo, runtime)
-                    if command:
-                        self.manual_jobs[task["id"]] = asyncio.create_task(runtime.manual(command))
+                    self.manual_jobs[task["id"]] = asyncio.create_task(self.dispatch_manual(runtime))
         self.jobs = {job for job in self.jobs if not job.done()}
         if len(self.jobs) < 2:
             from camera_logs.logs.job_lease import claim_job
@@ -488,7 +490,22 @@ class Worker:
             self.last_maintenance = time.monotonic()
             if self.maintenance_task is None or self.maintenance_task.done():
                 self.maintenance_task = asyncio.create_task(self._maintain())
-        self.last_database_ok = time.monotonic()
+
+    async def dispatch_manual(self, runtime):
+        """单任务查询与发送共用一个作业；慢查询不阻塞监督、停止或其它任务。"""
+        try:
+            async with self.manual_query_slots:
+                async with asyncio.timeout(3):
+                    command = await next_manual_command(self.repo, runtime)
+            if command and self.active.get(runtime.task["id"]) is runtime \
+                    and not runtime.stopping and not getattr(runtime, "retired", False):
+                await runtime.manual(command)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.warning("手动命令查询超时，下轮重试 task=%s", runtime.task["id"])
+        except Exception:
+            logger.exception("手动命令查询或执行失败 task=%s", runtime.task["id"])
 
     async def _maintain(self):
         """执行低频清理；无 NFS 功能节点保留既有快照且跳过其专属回收。"""
@@ -516,8 +533,12 @@ class Worker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("节点周期失败")
-                if time.monotonic()-self.last_database_ok > 15:
+                control_age = time.monotonic() - self.last_database_ok
+                logger.exception("节点周期失败 node=%s control_snapshot_age_seconds=%.3f active_tasks=%d",
+                                 self.repo.settings.node_id, control_age, len(self.active))
+                if control_age > 15:
+                    logger.error("控制面归属超过15秒未确认，主动关闭本节点采集连接 node=%s active_tasks=%d",
+                                 self.repo.settings.node_id, len(self.active))
                     await self.isolate_active_sessions()
             await asyncio.sleep(1)
 

@@ -19,7 +19,13 @@ from typing import Any
 
 import httpx
 
-from camera_logs.logs.archive_access import LimitedReader, copy_limited, read_limiter, snapshot
+from camera_logs.logs.archive_access import (
+    LimitedReader,
+    copy_limited,
+    gzip_header_has_filename,
+    read_limiter,
+    snapshot,
+)
 from camera_logs.logs.export_locks import ExportLock
 from camera_logs.logs.export_output import write_zip
 from camera_logs.logs.export_writer import (  # noqa: F401 - 保留既有 writer helper 导入路径。
@@ -176,7 +182,7 @@ async def _archive(
                 await _remote_archive(repo, file, frozen, target)
             return target, True
         path = _file_path(repo, file)
-        if frozen.get("status") == "READY" and path.suffixes[-2:] == [".tar", ".gz"] and not include_index:
+        if frozen.get("status") == "READY" and await job_thread(tarfile.is_tarfile, path) and not include_index:
             return path, False
         index = _contained(repo, file["indexPath"]) if file.get("indexPath") else None
         await job_thread(snapshot, path, target, int(frozen.get("bytes", file.get("bytes", 0))), index, file["id"], file.get("archiveMember"), include_index, max_output_bytes=max_output_bytes)
@@ -304,36 +310,33 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
         by_hour: dict[str, list[Source]] = {}
         for source in sources:
             by_hour.setdefault(str(source[0].get("hour") or source[1].get("hour") or "unknown-hour"), []).append(source)
-        hourly: list[Path] = []
+        hourly: list[tuple[Path, str]] = []
         hourly_bytes = 0
         for hour, members in sorted(by_hour.items()):
             if await _cancelled(repo, job["id"]):
                 raise asyncio.CancelledError()
+            filename = hour_export_name(job, hour)
             reusable = await job_thread(reusable_hour_archive, members)
-            if reusable is not None:
+            if reusable is not None and not await job_thread(gzip_header_has_filename, reusable):
                 hourly_bytes += reusable.stat().st_size
                 if hourly_bytes > OUTPUT_LIMIT:
                     raise ValueError("export output exceeds 20GB limit")
-                hourly.append(reusable)
+                hourly.append((reusable, filename))
                 continue
-            hourly_path = scratch / hour_export_name(job, hour)
+            hourly_path = scratch / filename
             await job_thread(write_hour_archive, hourly_path, members, max_output_bytes=OUTPUT_LIMIT - hourly_bytes)
             hourly_bytes += hourly_path.stat().st_size
-            hourly.append(hourly_path)
+            hourly.append((hourly_path, filename))
         await job_thread(output.mkdir, parents=True, exist_ok=True)
         result_path: Path
         if len(hourly) == 1:
-            filename = hourly[0].name
-            if hourly[0] in {path for _frozen, _file, path, _temporary in sources}:
-                result_path = output / filename
-                try:
-                    await job_thread(os.link, hourly[0], result_path)
-                    size = result_path.stat().st_size
-                except OSError:
-                    size = await job_thread(copy_limited, hourly[0], result_path, max_output_bytes=OUTPUT_LIMIT)
-            else:
-                size = await job_thread(copy_limited, hourly[0], output / filename, max_output_bytes=OUTPUT_LIMIT)
-                result_path = output / filename
+            source, filename = hourly[0]
+            result_path = output / filename
+            try:
+                await job_thread(os.link, source, result_path)
+                size = result_path.stat().st_size
+            except OSError:
+                size = await job_thread(copy_limited, source, result_path, max_output_bytes=OUTPUT_LIMIT)
         else:
             task_component = safe_filename_component(str(job.get("taskName") or job.get("taskId") or job["id"]), fallback=job["id"])
             filename = f"{task_component}-hours.zip"

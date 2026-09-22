@@ -193,7 +193,7 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
                          create_index: bool = True) -> Path:
     """合并小时包；正文、索引与 pending 清单全部核验后才删除原始正文。"""
     target = Path(target)
-    from camera_logs.logs.archive_access import LimitedReader, ReadLimiter
+    from camera_logs.logs.archive_access import LimitedReader, ReadLimiter, gzip_tar_writer
     limiter = ReadLimiter(background_rate) if background_rate else None
 
     class ArchiveReader(LimitedReader):
@@ -233,7 +233,7 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
     partial = Path(name)
     try:
         existing_names: set[str] = set()
-        with tarfile.open(partial, "w:gz", compresslevel=1) as bundle:
+        with partial.open("wb") as target_file, gzip_tar_writer(target_file) as bundle:
             if target.exists():
                 with tarfile.open(target, "r:gz") as previous:
                     for member in previous.getmembers():
