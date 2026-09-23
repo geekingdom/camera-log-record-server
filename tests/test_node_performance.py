@@ -269,6 +269,34 @@ def test_unknown_telemetry_never_counts_as_stable_recovery():
                                   limits=limits(), disk_percent=20, clock=lambda: START + timedelta(minutes=5))
     assert unknown["state"] == "THROTTLED"
     assert unknown["effective"]["readMiBPerSecond"] == 4
+    assert unknown["pressureActive"] is False
+    assert unknown["budgetReduced"] is True
+    assert unknown["baseline"]["readMiBPerSecond"] == 8
+
+
+def test_performance_status_exposes_current_pressure_and_stable_recovery_seconds():
+    """页面需要区分当前仍有压力与历史降级后的稳定恢复窗口。"""
+    controller = PerformanceController()
+    policy = PerformancePolicy(readMiBPerSecond=50)
+    for second in (0, 1, 2):
+        pressured = controller.evaluate(
+            policy, telemetry(cpuPercent=95), {"writeLatencyMs": 1, "limitMs": 200}, limits=limits(),
+            disk_percent=20, clock=lambda second=second: START + timedelta(seconds=second),
+        )
+    assert pressured["pressureActive"] is True
+    assert pressured["budgetReduced"] is True
+    recovered = controller.evaluate(
+        policy, telemetry(cpuPercent=20, memoryPercent=20), {"writeLatencyMs": 1, "limitMs": 200}, limits=limits(),
+        disk_percent=20, clock=lambda: START + timedelta(seconds=12),
+    )
+    assert recovered["pressureActive"] is False
+    assert recovered["recoveryStableSeconds"] == 10
+    stable = controller.evaluate(
+        policy, telemetry(cpuPercent=20, memoryPercent=20), {"writeLatencyMs": 1, "limitMs": 200}, limits=limits(),
+        disk_percent=20, clock=lambda: START + timedelta(seconds=42),
+    )
+    assert stable["pressureActive"] is False
+    assert stable["recoveryStableSeconds"] >= 30
 
 
 def test_policy_or_resource_change_refreshes_manual_and_normal_effective_budget():

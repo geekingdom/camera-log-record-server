@@ -33,6 +33,7 @@ import {
 } from "./nodeDashboard";
 import { archiveDiagnostics } from "./nodeArchiveDiagnostics";
 import { writeIoDiagnostics } from "./nodeWriteIoDiagnostics";
+import { nodePerformanceDisplay, performanceBudgetDelta } from "./nodePerformanceState";
 
 const props = defineProps<{ items: Node[]; loading: boolean }>();
 const now = ref(Date.now());
@@ -99,14 +100,11 @@ function memoryText(node: Node) {
   if (telemetry?.memoryUsedBytes === undefined || telemetry.memoryTotalBytes === undefined) return metricText(telemetry?.memoryPercent);
   return `${formatBytes(telemetry.memoryUsedBytes)} / ${formatBytes(telemetry.memoryTotalBytes)}`;
 }
-function performanceState(node: Node) { return node.performanceStatus?.state || "UNKNOWN"; }
-function performanceStateLabel(node: Node) {
-  return ({ NORMAL: "正常", THROTTLED: "限流中", RECOVERING: "恢复中", MANUAL: "手动参数", UNKNOWN: "未上报" }[performanceState(node)] ?? performanceState(node));
-}
+function performanceStateLabel(node: Node) { return nodePerformanceDisplay(node.performanceStatus).label; }
 function performanceTone(node: Node) {
-  const state = performanceState(node);
-  return state === "THROTTLED" ? "warning" : state === "MANUAL" || state === "NORMAL" ? "success" : "info";
+  return nodePerformanceDisplay(node.performanceStatus).tone;
 }
+function performanceStateDetail(node: Node) { return nodePerformanceDisplay(node.performanceStatus).detail; }
 function performanceEffective(node: Node) {
   const effective = node.performanceStatus?.effective;
   if (!effective) return "暂无有效参数";
@@ -169,7 +167,9 @@ function actualWriteStatus(node: Node) { return writeIoDiagnostics(node.performa
 
         <section v-if="node.performanceStatus" class="node-performance" aria-label="节点采集性能状态">
           <div class="node-performance-head"><span>采集性能</span><span class="node-performance-state" :class="performanceTone(node)">{{ performanceStateLabel(node) }}</span></div>
+          <span class="node-performance-detail">{{ performanceStateDetail(node) }}</span>
           <strong>{{ performanceEffective(node) }}</strong>
+          <span v-if="performanceBudgetDelta(node.performanceStatus)" class="node-performance-budget">{{ performanceBudgetDelta(node.performanceStatus) }}</span>
           <span class="node-performance-backlog">缓冲积压：{{ performanceBacklog(node) }}</span>
           <span v-if="node.performanceStatus.reason" class="node-performance-reason">{{ node.performanceStatus.reason }}</span>
           <span v-if="performanceAdmission(node)" class="node-performance-admission">{{ performanceAdmission(node) }}</span>
@@ -227,7 +227,7 @@ function actualWriteStatus(node: Node) { return writeIoDiagnostics(node.performa
 .node-facts span { color: #819093; font-size: 11px; }
 .node-facts strong { color: #344447; font-size: 12px; overflow-wrap: anywhere; }
 .node-facts strong.admitted { color: #168267; }.node-facts strong.blocked { color: #a66820; }
-.node-performance { display: grid; gap: 6px; padding: 11px 12px; border: 1px solid #e4ecea; background: #f8fbfa; font-size: 12px; }.node-performance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #637477; font-weight: 600; }.node-performance-state { flex: 0 0 auto; padding: 2px 7px; border: 1px solid #cfdcda; border-radius: 4px; color: #637477; background: #fff; font-size: 11px; line-height: 18px; }.node-performance-state.success { border-color: #a8d8c9; color: #16745d; background: #f1fbf6; }.node-performance-state.warning { border-color: #ead0a6; color: #98621e; background: #fff8e9; }.node-performance > strong { min-width: 0; color: #334649; font-weight: 600; overflow-wrap: anywhere; }.node-performance-backlog, .node-performance-reason, .node-performance-admission, .node-performance-write-io, .node-performance-actual-write, .node-performance-archives { color: #718084; overflow-wrap: anywhere; }.node-performance-reason, .node-performance-admission { color: #9b5d1e; }.node-performance-actual-write, .node-performance-archives { font-variant-numeric: tabular-nums; }
+.node-performance { display: grid; gap: 6px; padding: 11px 12px; border: 1px solid #e4ecea; background: #f8fbfa; font-size: 12px; }.node-performance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #637477; font-weight: 600; }.node-performance-state { flex: 0 0 auto; padding: 2px 7px; border: 1px solid #cfdcda; border-radius: 4px; color: #637477; background: #fff; font-size: 11px; line-height: 18px; }.node-performance-state.success { border-color: #a8d8c9; color: #16745d; background: #f1fbf6; }.node-performance-state.warning { border-color: #ead0a6; color: #98621e; background: #fff8e9; }.node-performance-state.info { border-color: #bfd4df; color: #2b667f; background: #f1f8fb; }.node-performance > strong { min-width: 0; color: #334649; font-weight: 600; overflow-wrap: anywhere; }.node-performance-detail, .node-performance-budget, .node-performance-backlog, .node-performance-reason, .node-performance-admission, .node-performance-write-io, .node-performance-actual-write, .node-performance-archives { color: #718084; overflow-wrap: anywhere; }.node-performance-detail { color: #53686c; }.node-performance-budget { color: #8b671f; font-variant-numeric: tabular-nums; }.node-performance-reason, .node-performance-admission { color: #9b5d1e; }.node-performance-actual-write, .node-performance-archives { font-variant-numeric: tabular-nums; }
 .node-gauges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
 .node-gauge { display: grid; gap: 7px; min-width: 0; }
 .gauge-label { display: flex; justify-content: space-between; gap: 8px; color: #748488; font-size: 11px; }.gauge-label span { display: flex; align-items: center; gap: 5px; }.gauge-label strong { color: #354649; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }

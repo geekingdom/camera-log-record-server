@@ -44,6 +44,7 @@ class PerformanceController:
         self.last_adjusted: float | None = None
         self.mode: str | None = None
         self.baseline: dict[str, int] | None = None
+        self.pressure_active = False
 
     def evaluate(
         self,
@@ -58,6 +59,8 @@ class PerformanceController:
         moment, tick = _moment(clock)
         resource_limits = _limits(limits)
         baseline, safety_reason, admission_blocked = _safe_budget(policy, resource_limits)
+        pressure_reason = _pressure_reason(telemetry, write_latency)
+        self.pressure_active = pressure_reason is not None
         changed_baseline = self.baseline != baseline
         if self.effective is None or self.mode != policy.mode:
             self.effective = baseline
@@ -76,7 +79,7 @@ class PerformanceController:
             if changed_baseline:
                 self.changed_at = moment
             self.baseline = baseline
-            return self._result(resource_limits, admission_blocked)
+            return self._result(resource_limits, admission_blocked, tick)
         if changed_baseline:
             self.effective = baseline if self.state == "NORMAL" else _bounded(self.effective, baseline)
             self.reason = safety_reason or "策略或资源预算已更新"
@@ -88,7 +91,6 @@ class PerformanceController:
             self.state, self.reason, self.changed_at = "NORMAL", safety_reason or "当前预算已满足", moment
         elif safety_reason and self.state == "NORMAL" and self.reason != safety_reason:
             self.reason, self.changed_at = safety_reason, moment
-        pressure_reason = _pressure_reason(telemetry, write_latency)
         if pressure_reason:
             self.pressure_samples += 1
             self.stable_since = None
@@ -96,7 +98,7 @@ class PerformanceController:
                 if self.state != "THROTTLED" or self.reason != pressure_reason:
                     self.state, self.reason, self.changed_at = "THROTTLED", pressure_reason, moment
                 if not self._adjustable(tick):
-                    return self._result(resource_limits, admission_blocked)
+                    return self._result(resource_limits, admission_blocked, tick)
                 lowered = dict(self.effective)
                 lowered["readMiBPerSecond"] = max(1, lowered["readMiBPerSecond"] // 2)
                 if _compute_pressure(telemetry):
@@ -106,11 +108,11 @@ class PerformanceController:
                     self.changed_at, self.last_adjusted = moment, tick
                     # 从最后一个高压样本开始计稳定窗口；后续任何高压样本会在入口清空它。
                     self.stable_since = tick
-            return self._result(resource_limits, admission_blocked)
+            return self._result(resource_limits, admission_blocked, tick)
         self.pressure_samples = 0
         if not _telemetry_known(telemetry):
             self.stable_since = None
-            return self._result(resource_limits, admission_blocked)
+            return self._result(resource_limits, admission_blocked, tick)
         self.stable_since = self.stable_since or tick
         if (self.state in {"THROTTLED", "RECOVERING"} and self._adjustable(tick)
                 and self.stable_since is not None and tick - self.stable_since >= RECOVERY_SECONDS):
@@ -124,17 +126,24 @@ class PerformanceController:
                 self.changed_at, self.last_adjusted, self.stable_since = moment, tick, tick
                 if raised == baseline:
                     self.state, self.reason = "NORMAL", "已恢复至当前预算"
-        return self._result(resource_limits, admission_blocked)
+        return self._result(resource_limits, admission_blocked, tick)
 
     def _adjustable(self, tick: float) -> bool:
         """每次自动调整至少间隔 30 秒，防止高频遥测产生来回震荡。"""
         return self.last_adjusted is None or tick - self.last_adjusted >= COOLDOWN_SECONDS
 
-    def _result(self, limits: ResourceLimits, admission_blocked: bool) -> dict[str, object]:
+    def _result(self, limits: ResourceLimits, admission_blocked: bool, tick: float) -> dict[str, object]:
         """输出保持 API 可序列化的扁平结构，effective 不包含仅管理层需要的 mode。"""
+        stable_seconds = 0
+        if not self.pressure_active and self.stable_since is not None:
+            stable_seconds = max(0, int(tick - self.stable_since))
         return {
             "effective": dict(self.effective or {}), "state": self.state, "reason": self.reason,
             "changedAt": self.changed_at, "resources": limits.public(), "admissionBlocked": admission_blocked,
+            "baseline": dict(self.baseline or {}),
+            "budgetReduced": bool(self.baseline and self.effective != self.baseline),
+            "pressureActive": self.pressure_active,
+            "recoveryStableSeconds": stable_seconds,
         }
 
 
