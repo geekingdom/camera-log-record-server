@@ -2,7 +2,7 @@
 
 本轮源码提交`2df6017`的[CI35729933565](https://github.com/geekingdom/camera-log-record-server/actions/runs/35729933565)八项全部通过，含新增单节点恢复和真实Mongo回收验证。以下本轮新增CI核验已完成；公司物理服务器升级观察仍待现场进行。
 
-节点性能可读性优化提交`0c1179c`之后又补齐了连续压力采样和最低后台预算边界：节点看板区分“压力采样中”“当前压力”“等待恢复”“恢复中”“已恢复”“预算已达下限”和“手动参数”，并显示当前有效后台读取预算相对基准的比例；后端心跳新增`pressureActive`、`pressureSamples`、`budgetReduced`、`baseline`和`recoveryStableSeconds`，不改变原有准入阈值和自动降速策略。当前补丁的前端189项、后端性能专项22项及生产构建已通过，待提交新的CI验收。
+节点性能可读性优化提交`cadc80a`已补齐连续压力采样和最低后台预算边界：节点看板区分“压力采样中”“当前压力”“等待恢复”“恢复中”“已恢复”“预算已达下限”和“手动参数”，并显示当前有效后台读取预算相对基准的比例；后端心跳新增`pressureActive`、`pressureSamples`、`budgetReduced`、`baseline`和`recoveryStableSeconds`，不改变原有准入阈值和自动降速策略。前端189项、后端性能专项22项、生产构建及[CI35807642046](https://github.com/geekingdom/camera-log-record-server/actions/runs/35807642046)八项全部通过。
 
 | 当前故障与稳定性审查（2026-09-22，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
