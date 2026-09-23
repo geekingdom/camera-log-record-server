@@ -212,7 +212,7 @@ def test_auto_throttle_reason_identifies_the_pressure_source(sample, latency, re
 def test_auto_updates_pressure_reason_after_read_budget_reaches_its_minimum():
     """读预算已到下限时仍显示当前压力类别，避免状态页保留过期原因。"""
     controller = PerformanceController()
-    policy = PerformancePolicy(readMiBPerSecond=1)
+    policy = PerformancePolicy(readMiBPerSecond=1, writeConcurrency=1)
     for second in (0, 1, 2):
         result = controller.evaluate(policy, telemetry(), {"writeLatencyMs": 201, "limitMs": 200},
                                      limits=limits(), disk_percent=20,
@@ -284,6 +284,7 @@ def test_performance_status_exposes_current_pressure_and_stable_recovery_seconds
             disk_percent=20, clock=lambda second=second: START + timedelta(seconds=second),
         )
     assert pressured["pressureActive"] is True
+    assert pressured["pressureSamples"] == 3
     assert pressured["budgetReduced"] is True
     recovered = controller.evaluate(
         policy, telemetry(cpuPercent=20, memoryPercent=20), {"writeLatencyMs": 1, "limitMs": 200}, limits=limits(),
@@ -297,6 +298,20 @@ def test_performance_status_exposes_current_pressure_and_stable_recovery_seconds
     )
     assert stable["pressureActive"] is False
     assert stable["recoveryStableSeconds"] >= 30
+
+
+def test_minimum_read_budget_still_records_recovery_and_returns_to_normal():
+    """后台读取已经是1MiB/s时无法再减半，也不能永久显示限流。"""
+    controller = PerformanceController()
+    policy = PerformancePolicy(readMiBPerSecond=1, writeConcurrency=1)
+    for second in (0, 1, 2):
+        limited = controller.evaluate(policy, telemetry(cpuPercent=95), {"limitMs": 200}, limits=limits(),
+                                      disk_percent=20, clock=lambda second=second: START + timedelta(seconds=second))
+    assert limited["state"] == "THROTTLED"
+    assert limited["budgetReduced"] is False
+    recovered = controller.evaluate(policy, telemetry(), {"limitMs": 200}, limits=limits(),
+                                    disk_percent=20, clock=lambda: START + timedelta(seconds=63))
+    assert recovered["state"] == "NORMAL"
 
 
 def test_policy_or_resource_change_refreshes_manual_and_normal_effective_budget():

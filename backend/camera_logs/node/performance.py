@@ -106,8 +106,9 @@ class PerformanceController:
                 if lowered != self.effective:
                     self.effective = lowered
                     self.changed_at, self.last_adjusted = moment, tick
-                    # 从最后一个高压样本开始计稳定窗口；后续任何高压样本会在入口清空它。
-                    self.stable_since = tick
+                # 即使预算已经达到最小值，也必须记录稳定窗口，避免永久停留在
+                # THROTTLED；后续健康采样仍需经过完整恢复窗口再结束状态。
+                self.stable_since = tick
             return self._result(resource_limits, admission_blocked, tick)
         self.pressure_samples = 0
         if not _telemetry_known(telemetry):
@@ -126,6 +127,8 @@ class PerformanceController:
                 self.changed_at, self.last_adjusted, self.stable_since = moment, tick, tick
                 if raised == baseline:
                     self.state, self.reason = "NORMAL", "已恢复至当前预算"
+            elif self.effective == baseline and self.state == "THROTTLED":
+                self.state, self.reason, self.changed_at = "NORMAL", "已恢复至当前预算", moment
         return self._result(resource_limits, admission_blocked, tick)
 
     def _adjustable(self, tick: float) -> bool:
@@ -143,6 +146,7 @@ class PerformanceController:
             "baseline": dict(self.baseline or {}),
             "budgetReduced": bool(self.baseline and self.effective != self.baseline),
             "pressureActive": self.pressure_active,
+            "pressureSamples": self.pressure_samples,
             "recoveryStableSeconds": stable_seconds,
         }
 

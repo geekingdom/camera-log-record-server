@@ -18,6 +18,19 @@ describe("节点采集性能可读状态", () => {
       .toBe("当前压力");
   });
 
+  it("尚未达到连续压力阈值时明确显示正在累计", () => {
+    expect(nodePerformanceDisplay({ state: "NORMAL", pressureActive: true, pressureSamples: 2, reason: "持续写入延迟压力" }))
+      .toMatchObject({ label: "压力采样中" });
+  });
+
+  it("恢复状态保留恢复中的文案", () => {
+    expect(nodePerformanceDisplay({ state: "RECOVERING", pressureActive: false, budgetReduced: true }).label).toBe("恢复中");
+  });
+
+  it("最低预算无法继续下调时明确显示预算下限", () => {
+    expect(nodePerformanceDisplay({ state: "THROTTLED", pressureActive: false, budgetReduced: false }).label).toBe("预算已达下限");
+  });
+
   it("正常预算显示为已恢复而不是限流中", () => {
     expect(nodePerformanceDisplay({ state: "NORMAL", pressureActive: false, budgetReduced: false }).label).toBe("已恢复");
   });

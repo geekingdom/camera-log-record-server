@@ -197,6 +197,8 @@ export interface NodePerformanceStatus {
   state?: string;
   /** 当前采样是否仍满足CPU、内存或写入延迟压力条件。 */
   pressureActive?: boolean;
+  /** 当前连续压力采样次数；达到后端阈值前不代表已经自动降速。 */
+  pressureSamples?: number;
   /** 当前有效预算相对资源和管理员上限是否已被自动收紧。 */
   budgetReduced?: boolean;
   /** AUTO模式下用于比较的当前安全基准预算。 */
