@@ -310,6 +310,7 @@ export const api = {
     }),
   operationStatus: (id: string) => request<{ status?: string; phase?: string }>(`/operations/${id}`),
   logHours: (id: string, date?: string, page = 1) => request<Page<LogHour>>(`/tasks/${id}/log-hours${query(page, 24, { date })}`),
+  logDays: (id: string, month: string) => request<{ days: string[] }>(`/tasks/${id}/log-days?month=${encodeURIComponent(month)}`),
   // 缺口阅读器关闭或切换任务时取消读取，避免失效查询继续占用连接。
   fileContent: (id: string, offset = 0, limit = 65536, signal?: AbortSignal) => request<{ fileId: string; sessionId?: string; data: string; nextOffset: number }>(`/log-files/${id}/content?offset=${offset}&limit=${limit}`, { signal }),
   // 未知实时 gap 仅用前后可靠锚点查询已保存目录；正文仍按每个 fileId 的权限边界读取。

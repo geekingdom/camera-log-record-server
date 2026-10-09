@@ -7,6 +7,7 @@ import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
+import ArchiveDatePicker from "./ArchiveDatePicker.vue";
 import LogFileViewer from "./LogFileViewer.vue";
 import { shanghaiDateTimeRange, shanghaiDateTimeToUtc, shanghaiToday } from "./archiveDate";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
@@ -265,7 +266,7 @@ onBeforeUnmount(() => {
       <h2>小时归档</h2>
       <el-button :icon="RefreshCw" aria-label="刷新小时归档" @click="load" />
     </div>
-    <div class="archive-date"><el-date-picker v-model="date" type="date" value-format="YYYY-MM-DD" placeholder="归档日期" aria-label="归档日期（上海时区）" :clearable="false" /></div>
+    <div class="archive-date"><ArchiveDatePicker v-model="date" :task-id="taskId" /></div>
     <div class="archive-table">
       <el-table
         scrollbar-always-on

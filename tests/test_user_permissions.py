@@ -85,6 +85,7 @@ def test_ordinary_user_reads_all_task_derived_data_but_cannot_manage_accounts(cl
         "/api/v1/tasks/denied-task", "/api/v1/tasks/mixed-task",
         "/api/v1/operations/denied-operation", "/api/v1/commands/denied-command",
         "/api/v1/tasks/denied-task/command-executions", "/api/v1/tasks/denied-task/log-hours",
+        "/api/v1/tasks/denied-task/log-days?month=2026-09",
         "/api/v1/downloads/denied-download",
         "/api/v1/log-searches/denied-search", "/api/v1/log-searches/denied-search/results",
     ):

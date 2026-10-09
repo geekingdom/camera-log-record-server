@@ -28,6 +28,7 @@ from camera_logs.logs.job_submission import cancel_job, submit_job
 from camera_logs.users.sessions import COOKIE, check_origin, session_identity
 
 logger = logging.getLogger(__name__)
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 async def node_request(repo, node_id, path, params=None, *, client, downstream=None):
@@ -127,6 +128,29 @@ def install_log_routes(app):
                              "$lt": (start+timedelta(days=1)).astimezone(now().tzinfo).isoformat()}
         values = summarize_hours([file async for file in repo().db.files.find(query)])
         return {"items": values[(page-1)*pageSize:page*pageSize], "total": len(values), "page": page, "pageSize": pageSize}
+
+    @app.get("/api/v1/tasks/{task_id}/log-days")
+    async def days(task_id: str, user: User,
+                   month: Annotated[str, Query(pattern=r"^\d{4}-\d{2}$", description="上海时区月份，格式 YYYY-MM")]):
+        """返回指定上海月份内存在有效非空日志的自然日，不读取日志正文或片段元数据。"""
+        authorize(user, "logs:read", task_id)
+        await repo().get("tasks", task_id)
+        try:
+            start = datetime.strptime(month, "%Y-%m").replace(tzinfo=SHANGHAI)
+            end = start.replace(year=start.year + (start.month == 12),
+                                month=1 if start.month == 12 else start.month + 1)
+            lower, upper = start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()
+        except (OverflowError, ValueError) as exc:
+            raise HTTPException(422, "month必须是有效的 YYYY-MM 月份") from exc
+        query = {
+            "taskId": task_id,
+            "hour": {"$gte": lower, "$lt": upper},
+            "status": {"$in": ["OPEN", "READY"]},
+            "bytes": {"$gt": 0},
+        }
+        hours = await repo().db.files.distinct("hour", query)
+        return {"days": sorted({datetime.fromisoformat(str(hour)).astimezone(SHANGHAI).date().isoformat()
+                                for hour in hours})}
 
     @app.get("/api/v1/log-files/{identifier}/content")
     async def content(identifier: str, request: Request, response: Response, user: User, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):

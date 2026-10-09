@@ -74,3 +74,39 @@ def test_hour_date_filter_uses_shanghai_day_and_keeps_pagination(client):
     assert result.json()["total"] == 2
     assert result.json()["items"][0]["hour"] == "2026-09-07T16:00:00+00:00"
     assert client.get(path, params={"date": "bad"}).status_code == 422
+
+
+def test_log_days_month_uses_shanghai_boundaries_and_only_effective_files(client):
+    """按月目录只返回上海自然日，排除删除和没有任何字节的片段。"""
+    task = client.post("/api/v1/tasks", headers={"Idempotency-Key": "log-days"}, json={
+        "name": "log days", "protocol": "TELNET_SERIAL", "ip": "127.0.0.1", "port": 9090,
+        "resourceId": "fixture-device"}).json()
+    files = [
+        ("last-january", "2026-01-31T15:00:00+00:00", "OPEN", 1),
+        ("first-february", "2026-01-31T16:00:00+00:00", "READY", 2),
+        ("last-february", "2026-02-28T15:00:00+00:00", "READY", 3),
+        ("first-march", "2026-02-28T16:00:00+00:00", "OPEN", 4),
+        ("deleted", "2026-02-01T00:00:00+00:00", "DELETED", 5),
+        ("deleting", "2026-02-01T00:00:00+00:00", "DELETING", 5),
+        ("unavailable", "2026-02-01T00:00:00+00:00", "UNAVAILABLE", 5),
+        ("empty-open", "2026-02-01T01:00:00+00:00", "OPEN", 0),
+        ("empty-ready", "2026-02-01T02:00:00+00:00", "READY", 0),
+        ("same-day", "2026-02-01T03:00:00+00:00", "OPEN", 1),
+    ]
+    for identifier, hour, status, size in files:
+        client.portal.call(client.app.state.repo.db.files.insert_one, {
+            "id": identifier, "taskId": task["id"], "hour": hour, "status": status, "bytes": size,
+            "path": "/must-not-be-returned"})
+    client.portal.call(client.app.state.repo.db.files.insert_one, {
+        "id": "other-task", "taskId": "other-task", "hour": "2026-02-02T00:00:00+00:00",
+        "status": "READY", "bytes": 5})
+
+    path = f'/api/v1/tasks/{task["id"]}/log-days'
+    assert client.get(path, params={"month": "2026-01"}).json() == {"days": ["2026-01-31"]}
+    assert client.get(path, params={"month": "2026-02"}).json() == {"days": ["2026-02-01", "2026-02-28"]}
+    assert client.get(path, params={"month": "2026-13"}).status_code == 422
+    assert client.get(path, params={"month": "0000-01"}).status_code == 422
+    assert client.get(path, params={"month": "0001-01"}).status_code == 422
+    assert client.get(path, params={"month": "9999-12"}).status_code == 422
+    assert client.get(path).status_code == 422
+    assert client.get("/api/v1/tasks/missing/log-days", params={"month": "2026-02"}).status_code == 404

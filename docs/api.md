@@ -277,6 +277,14 @@ GET /api/v1/tasks/{taskId}/log-hours?page=1&pageSize=100
 
 可选 `date=YYYY-MM-DD` 按 `Asia/Shanghai` 自然日筛选。一个小时可包含重连或回拨形成的多个片段；响应的 `fragmentCount`、`readyCount`、`openCount` 与 `unavailableCount` 给出覆盖状态，`files` 按运行、会话和首块序号排序。每个片段含逻辑文件 `id`、状态、字节数、归档名、可用的 `sha256` 与序号范围；内部路径、密码和令牌不会返回。
 
+按月获取可选日志日期（需要 `logs:read`）：
+
+```http
+GET /api/v1/tasks/{taskId}/log-days?month=YYYY-MM
+```
+
+`month` 必填，按 `Asia/Shanghai` 自然月计算边界，响应格式为 `{"days":["YYYY-MM-DD"]}`，按日期升序且不重复。仅 `OPEN` 或 `READY` 且登记 `bytes` 大于零的片段参与；删除中、已删除、不可用或空文件不会显示。接口只查询小时目录，不返回片段元数据或读取设备日志正文。
+
 小时 `status` 为 `READY`、`OPEN` 或 `UNAVAILABLE`。`integrity` 为 `VERIFIED`（所有 READY 片段有摘要）、`UNVERIFIED`（已封存但缺少摘要）、`OPEN`（仍在写入）或 `UNAVAILABLE`（存在删除中或不可用片段）。它描述目录中的片段状态，不替代下载作业的最终清单校验。
 
 按文件 ID 查询安全元数据（需要 `logs:read`）：

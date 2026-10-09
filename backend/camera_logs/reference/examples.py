@@ -149,6 +149,8 @@ def response_example(path, method, status):
     if path.endswith("/log-hours"):
         return page({"hourId": STAMP, "hour": STAMP, "status": "READY", "integrity": "VERIFIED",
                      "files": [{"id": "file-example", "bytes": 1024}], "bytes": 1024, "archiveBytes": 512})
+    if path.endswith("/log-days"):
+        return {"days": ["2026-09-10", "2026-09-11"]}
     if path.endswith("/log-gap-catalog"):
         return {"items": [{"fileId": "file-example", "sessionId": "session-example", "start": 1024, "end": 65536}],
                 "nextCursor": None, "unrecoverable": []}

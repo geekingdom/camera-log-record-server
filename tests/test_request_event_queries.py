@@ -10,11 +10,11 @@ def test_request_event_filters_and_presentation(client):
     repo = client.app.state.repo
     client.portal.call(repo.db.tasks.insert_one, {"id": "event-task", "name": "排障任务", "ip": "192.0.2.8"})
     client.portal.call(repo.db.request_events.insert_many, [
-        {"createdAt": datetime(2026, 9, 9, tzinfo=UTC), "requestId": "failed-request", "actor": "bootstrap",
+        {"createdAt": datetime.now(UTC), "requestId": "failed-request", "actor": "bootstrap",
          "clientIp": "198.51.100.9", "method": "POST", "route": "/api/v1/tasks/{task_id}/start",
          "httpStatus": 503, "level": "ERROR", "outcome": "FAILED", "taskId": "event-task",
          "reason": "password=must-not-leak", "authorization": "Bearer must-not-leak"},
-        {"createdAt": datetime(2026, 9, 9, tzinfo=UTC), "requestId": "other-request", "method": "POST",
+        {"createdAt": datetime.now(UTC), "requestId": "other-request", "method": "POST",
          "route": "/api/v1/tasks", "httpStatus": 202, "level": "INFO", "outcome": "SUCCEEDED"},
     ])
     response = client.get("/api/v1/request-events", params={"requestId": "failed-request", "level": "ERROR"})
@@ -34,14 +34,14 @@ def test_derived_filters_use_the_same_values_as_chinese_presentation(client):
     })
     client.portal.call(repo.db.audit.insert_one, {
         "actor": "builtin-admin", "action": "create_resource", "targetId": "resource-event",
-        "createdAt": datetime(2026, 9, 9, tzinfo=UTC),
+        "createdAt": datetime.now(UTC),
     })
     client.portal.call(repo.db.request_events.insert_one, {
-        "createdAt": datetime(2026, 9, 9, tzinfo=UTC), "method": "POST",
+        "createdAt": datetime.now(UTC), "method": "POST",
         "route": "/api/v1/tasks", "httpStatus": 202, "responseComplete": True,
     })
     client.portal.call(repo.db.request_events.insert_one, {
-        "createdAt": datetime(2026, 9, 9, tzinfo=UTC), "requestId": "unfinished-response",
+        "createdAt": datetime.now(UTC), "requestId": "unfinished-response",
         "method": "POST", "route": "/api/v1/tasks", "httpStatus": 200, "responseComplete": False,
     })
 
@@ -68,7 +68,7 @@ def test_derived_filter_paginates_in_database_before_name_enrichment(client, mon
     ])
     client.portal.call(repo.db.events.insert_many, [
         {"taskId": f"bulk-task-{index}", "type": "CONNECTION_GAP",
-         "createdAt": datetime(2026, 9, 9, tzinfo=UTC), "sequence": index}
+         "createdAt": datetime.now(UTC), "sequence": index}
         for index in range(1000)
     ])
     calls = []
@@ -92,7 +92,7 @@ def test_derived_filter_paginates_in_database_before_name_enrichment(client, mon
 def test_derived_level_and_outcome_precedence_and_validation(client):
     """派生级别读取前一阶段结果，显式字段优先，空调试错误不能被误判为失败。"""
     repo = client.app.state.repo
-    stamp = datetime(2026, 9, 9, tzinfo=UTC)
+    stamp = datetime.now(UTC)
     client.portal.call(repo.db.events.insert_many, [
         {"id": "gap", "type": "CONNECTION_GAP", "createdAt": stamp},
         {"id": "debug-empty", "type": "DEBUG_MODE", "debugError": "", "createdAt": stamp},

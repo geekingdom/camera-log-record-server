@@ -30,7 +30,7 @@ GUIDES = [
     {"title": "幂等、版本与错误", "text": "创建资源、任务、模板、下载、检索和发送命令必须传Idempotency-Key，长度1至128。同键同请求重放，不同请求冲突409。编辑及节点删除需当前version。错误统一包含error.code/message/requestId；422还包含details。401为认证失效，403为权限不足，503为暂不可确认。"},
     {"title": "按时间查询日志", "text": "POST /api/v1/log-searches提交taskId、start、end，可省略keyword。时间为带时区ISO8601，最多24小时，省略时默认最近一小时。空keyword按采集块接收时间的[start,end)返回字节片段，每片不超过4096字节，data为Base64，按fileId与offset无损拼接；text仅供预览。无完整时间索引则失败，不能猜测日志时间。非空keyword为字面检索。"},
     {"title": "查询结果与完整日志", "text": "检索返回作业id；查询作业状态后，通过/log-searches/{id}/results分页获取结果。非空关键词按完整匹配行返回text，同一行多个命中只返回一项，不包含相邻行和行尾换行符；fileId/offset为首个范围内命中的原始字节位置，lineStartFileId/lineStartOffset为逻辑行起点，可跨连续分卷。单行最多256KiB，命中超长行明确失败；结果最多1000项且正文总计最多8MiB，truncated=true表示需缩短区间或读取原文件。GET /api/v1/log-files/{id}读取安全元数据，再按文件/content?offset=0&limit=65536续读，limit最大262144。空关键词仍返回按接收时间筛选的Base64字节片段。搜索上限和页面着色不影响原始日志保存。"},
-    {"title": "小时下载与断点续传", "text": "先用/tasks/{task_id}/log-hours取得hourId，可传date按北京时间筛选日期，再POST /downloads提交taskId和hourIds。单次最多168小时、预计20GB。轮询成功后GET /downloads/{id}/content，携带Bearer及可选Range。单小时下载仅含日志的tar.gz，多小时ZIP STORE。缺片默认失败；allowPartial=true才允许部分导出。"},
+    {"title": "小时下载与断点续传", "text": "先用/tasks/{task_id}/log-days?month=YYYY-MM取得上海自然日目录，再按选中日期调用/tasks/{task_id}/log-hours取得hourId并POST /downloads提交taskId和hourIds。月目录只返回有OPEN或READY且登记字节数大于零的日期，不读取日志正文。单次最多168小时、预计20GB。轮询成功后GET /downloads/{id}/content，携带Bearer及可选Range。单小时下载仅含日志的tar.gz，多小时ZIP STORE。缺片默认失败；allowPartial=true才允许部分导出。"},
     {"title": "实时日志", "text": "HTTP部署使用ws://<host>/api/v1/tasks/{task_id}/logs；HTTPS部署使用wss://<host>/api/v1/tasks/{task_id}/logs。连接后10秒内发送JSON首帧token及可选cursor，不能把Token放URL。服务端每次推送重验权限；data为Base64原始字节，fileId/offset用于消除重叠后再解码。gap表示实时缓冲缺口，按文件或小时归档补读。重连提交最后cursor，不保证断线期间设备输出可追回。"},
     {"title": "实时日志显示配置", "text": "GET /api/v1/display-settings 供已登录平台用户和有效第三方服务账号读取实时日志浏览器内存上限 liveLogBufferMiB。该接口只返回整数1至100的MiB上限，默认10；不返回日志保留期、节点容量、资源监控规则或其他管理员后台配置。前端应定期刷新该值并只限制本地展示缓存，不能据此删除Worker原始日志、改变采集顺序或中断下载。"},
     {"title": "手动命令", "text": "POST /tasks/{task_id}/commands提交command及可选newline/delaySeconds/prompt/timeoutSeconds，使用同一采集连接。初始化未完成或断线拒绝；通过/commands/{id}或/task的command-executions查询。最多发送次数不代表设备业务成功，UNKNOWN不自动重发。"},
@@ -48,7 +48,7 @@ SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网�
            "credential": "查看设备资源登录凭据",
            "authenticate": "认证设备资源", "login": "账号登录", "logout": "退出登录", "password": "修改本人密码",
            "me": "查询当前登录用户", "reset-password": "重置子账户密码", "confirm-isolation": "确认旧节点已隔离",
-           "browser-session": "签发浏览器下载授权", "results": "分页查询检索结果", "log-hours": "查询任务小时日志",
+           "browser-session": "签发浏览器下载授权", "results": "分页查询检索结果", "log-hours": "查询任务小时日志", "log-days": "查询任务日志日期",
            "command-executions": "查询任务命令记录", "permissions": "查询可配置权限", "share-targets": "查询模板共享对象", "display-settings": "查询实时日志显示配置", "content": "读取日志内容"}
 
 
