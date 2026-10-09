@@ -29,3 +29,5 @@ Docker启动后的真实验证：创建专用`camera-calendar-verify-mongo` Mong
 ## CI移动视口时序修复
 
 提交99b7619的CI37874536056仅frontend失败，其余七项通过。失败发生在打开日期面板时视口从1440缩小到390后立即读取scrollWidth。Element Plus Popper resize重定位异步执行，本机与CI读布局时序不同。将即时断言改成最多1.5秒逐帧等待无横向溢出，持续溢出仍失败；没有隐藏溢出或改动产品CSS。独立审查确认此时序路径；修复后生产预览专项复验，修复提交CI单独跟踪。
+
+最终修复提交`43d6583`的[CI37875796250](https://github.com/geekingdom/camera-log-record-server/actions/runs/37875796250)八项全部成功，含此前失败的frontend完整生产UI套件。另以真实Chromium验证同一断言函数：250ms后消失的临时溢出等待后通过，持续溢出在有界等待后仍失败。临时预览及测试截图已回收。
