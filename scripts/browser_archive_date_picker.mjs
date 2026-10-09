@@ -65,8 +65,18 @@ async function openCalendar(ui) {
 }
 
 async function assertNoPageOverflow(ui, screenshotName) {
-  assert.equal(await ui.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true,
-    `${screenshotName} 不得出现页面横向溢出`);
+  // 视口改变后 Element Plus 的 Popper 会异步重排；等待布局稳定，避免在旧宽度仍挂在文档上时误报。
+  const overflow = await ui.evaluate(async () => {
+    const deadline = performance.now() + 1500;
+    let width = document.documentElement.scrollWidth;
+    while (performance.now() < deadline) {
+      if (width <= innerWidth + 1) return false;
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      width = document.documentElement.scrollWidth;
+    }
+    return width > innerWidth + 1;
+  });
+  assert.equal(overflow, false, `${screenshotName} 不得出现页面横向溢出`);
   await ui.screenshot({ path: resolve("output/playwright", screenshotName), fullPage: true, animations: "disabled" });
 }
 

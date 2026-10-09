@@ -2,7 +2,7 @@
 
 | 当前需求（2026-10-09，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 小时归档日期选择器提示当前任务哪些日期有有效日志 | `logs/api.py`、`ArchiveDatePicker.vue`、共享API | 后端1707项、前端189项及生产构建通过；1440/390日历标记、翻月、切任务和失败重试专项通过；真实API/Worker/WebSocket/下载验收通过；Mongo Explain命中任务/小时索引 | 有日志日期右上角圆点，查询失败明确提示；切任务与翻月隔离迟到响应。Docker启动后的真实隔离采集验收已通过；生产UI套件全部23个脚本分段复验通过；新提交CI待核，记录见`docs/history/2026-10-09-archive-calendar.md` |
+| 小时归档日期选择器提示当前任务哪些日期有有效日志 | `logs/api.py`、`ArchiveDatePicker.vue`、共享API | 后端1707项、前端189项及生产构建通过；1440/390日历标记、翻月、切任务和失败重试专项通过；真实API/Worker/WebSocket/下载验收通过；Mongo Explain命中任务/小时索引 | 有日志日期右上角圆点，查询失败明确提示；切任务与翻月隔离迟到响应。Docker启动后的真实隔离采集验收已通过；生产UI套件全部23个脚本分段复验通过；提交99b7619的CI仅frontend移动日历即时溢出断言失败，其余七项通过；已改为有界等待弹层重定位，修复提交CI待核，记录见`docs/history/2026-10-09-archive-calendar.md` |
 
 本轮源码提交`2df6017`的[CI35729933565](https://github.com/geekingdom/camera-log-record-server/actions/runs/35729933565)八项全部通过，含新增单节点恢复和真实Mongo回收验证。以下本轮新增CI核验已完成；公司物理服务器升级观察仍待现场进行。
 
