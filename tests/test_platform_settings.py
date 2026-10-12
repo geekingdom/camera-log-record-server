@@ -13,6 +13,7 @@ def test_platform_settings_have_default_version_and_detect_conflict(client):  # 
     assert initial.json()["retentionDays"] == 7
     assert initial.json()["clusterCapacity"] == 500
     assert initial.json()["liveLogBufferMiB"] == 10
+    assert initial.json()["serviceLogRetentionDays"] == 7
     assert initial.json()["version"] == 1
 
     updated = client.patch("/api/v1/platform-settings", json={"retentionDays": 14, "version": 1})
@@ -23,6 +24,33 @@ def test_platform_settings_have_default_version_and_detect_conflict(client):  # 
     assert client.patch("/api/v1/platform-settings", json={"retentionDays": 30, "version": 1}).status_code == 409
     assert client.portal.call(client.app.state.repo.db.audit.count_documents,
                               {"action": "update_platform_settings", "targetId": "platform"}) == 1
+
+
+def test_service_log_retention_is_versioned_validated_and_applies_to_api_process(client, monkeypatch):  # noqa: F811
+    """运行日志保留期独立于设备日志，保存后立即通知当前 API 进程的日志处理器。"""
+    from camera_logs.administration import settings as settings_module
+    applied = []
+    async def apply(retention_days):
+        applied.append(retention_days)
+    monkeypatch.setattr(settings_module, "apply_service_log_retention_days", apply)
+    initial = client.get("/api/v1/platform-settings").json()
+    changed = client.patch("/api/v1/platform-settings", json={
+        "retentionDays": initial["retentionDays"], "serviceLogRetentionDays": 21,
+        "version": initial["version"],
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["serviceLogRetentionDays"] == 21
+    assert applied == [21]
+    preserved = client.patch("/api/v1/platform-settings", json={
+        "retentionDays": 8, "version": changed.json()["version"],
+    })
+    assert preserved.json()["serviceLogRetentionDays"] == 21
+    for invalid in (0, 3651, True, 1.5):
+        response = client.patch("/api/v1/platform-settings", json={
+            "retentionDays": 8, "serviceLogRetentionDays": invalid,
+            "version": preserved.json()["version"],
+        })
+        assert response.status_code == 422
 
 
 def test_live_log_buffer_setting_is_versioned_and_display_api_is_minimal(client):  # noqa: F811

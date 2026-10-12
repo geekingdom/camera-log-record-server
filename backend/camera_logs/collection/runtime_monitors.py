@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from camera_logs.collection.coredump_lease import bound_coredump_cleanup_guard, release_coredump_lease
+from camera_logs.common.resource_monitoring import supports_resource_monitoring
 from camera_logs.resource_metrics.runtime import monitor_loop, release_resource_monitor_lease
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,8 @@ def _active(runtime, collector):
 
 async def attach_coredump_monitor(runtime, collector, *, retry_seconds=5):
     """等待本地NFS或已登记来源；数据库失败仅重试装配，不访问新设备连接。"""
+    if not supports_resource_monitoring(runtime.task):
+        return
     missing_reported = False
     while _active(runtime, collector):
         try:
@@ -48,6 +51,8 @@ async def attach_coredump_monitor(runtime, collector, *, retry_seconds=5):
 
 async def monitor_session(runtime, collector):
     """并行装配两种监控；取消上层会话时等待所有子协程结束，禁止遗留后台工作。"""
+    if not supports_resource_monitoring(runtime.task):
+        return
     children = [asyncio.create_task(attach_coredump_monitor(runtime, collector)),
                 asyncio.create_task(monitor_loop(runtime, collector))]
     try:

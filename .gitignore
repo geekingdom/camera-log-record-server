@@ -22,3 +22,6 @@ dist/
 *.log
 .DS_Store
 .codegraph/
+# 受控部署中断后的主机恢复凭据属于本机运行状态，不提交仓库。
+.worker-deployment-recovery-*.json
+.worker-deployment-recovery-*.tmp

@@ -10,6 +10,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.common.ownership import owner_filter
+from camera_logs.common.resource_monitoring import supports_resource_monitoring
 
 
 async def record_coredump_status(repo, task, collector, status, error, logger):
@@ -56,7 +57,7 @@ async def guard_coredump_monitor(repo, task, *, session_active, report_status, m
     ``None`` 表示同资源已有负责人，调用者仅等待重试而不新建 SSH/Telnet 连接。
     租约附带设备侧 NFS 来源，旧会话的收尾据此拒绝卸载后来迁移的不同来源。
     """
-    if not session_active():
+    if not supports_resource_monitoring(task) or not session_active():
         return False
     current_task = await repo.db.tasks.find_one({**owner_filter(task), **_eligible_coredump_task_query(task.get("resourceId"))}, {"id": 1})
     if not current_task:
@@ -98,7 +99,7 @@ async def guard_coredump_monitor(repo, task, *, session_active, report_status, m
 
 async def guard_coredump_cleanup(repo, task, *, session_active, mount_target=None):
     """只在资源已关闭且无接管者时授权卸载，避免退出负责人拆掉共享挂载。"""
-    if not session_active():
+    if not supports_resource_monitoring(task) or not session_active():
         return False
     current_task = await repo.db.tasks.find_one(owner_filter(task), {"id": 1})
     if not current_task or not task.get("resourceId"):

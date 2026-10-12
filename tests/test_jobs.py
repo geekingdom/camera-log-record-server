@@ -1,5 +1,6 @@
 """后台作业回归：冻结水位、字面搜索、结果上限、严格缺片与取消状态竞争。"""
 import asyncio
+import hashlib
 import io
 import json
 import tarfile
@@ -248,10 +249,15 @@ def test_header_safe_complete_hour_reuses_compressed_archive_bytes(tmp_path, mon
             info = tarfile.TarInfo("part-000001.log")
             info.size = 7
             bundle.addfile(info, io.BytesIO(b"archive"))
+        Path(str(archive) + ".metadata.json").write_text(json.dumps({"formatVersion": 2, "members": [{
+            "logName": "part-000001.log", "rawSize": 7,
+            "sha256": hashlib.sha256(b"archive").hexdigest(),
+        }]}), encoding="utf-8")
         hour = "2026-09-08T00:00:00+00:00"
         document = {"id": "f1", "path": str(archive), "status": "READY", "bytes": 7,
                     "nodeId": "node", "hour": hour, "archiveGroupId": "group",
-                    "archiveMember": "part-000001.log"}
+                    "archiveMember": "part-000001.log", "sha256": hashlib.sha256(b"archive").hexdigest(),
+                    "archiveBytes": archive.stat().st_size}
         await repo.db.files.insert_one(document)
 
         async def audit(*_args, **_kwargs):
@@ -356,12 +362,18 @@ def test_download_reuses_complete_shared_hour_archive_without_member_leakage(tmp
             for name, data in (("part-000001.log", b"first"), ("part-000002.log", b"second")):
                 info = tarfile.TarInfo(name); info.size = len(data)
                 bundle.addfile(info, io.BytesIO(data))
+        values = {"part-000001.log": b"first", "part-000002.log": b"second"}
+        Path(str(archive) + ".metadata.json").write_text(json.dumps({"formatVersion": 2, "members": [
+            {"logName": name, "rawSize": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            for name, data in values.items()
+        ]}), encoding="utf-8")
         hour = "2026-09-08T00:00:00+00:00"
         for identifier, member, size, sequence in (("f1", "part-000001.log", 5, 1), ("f2", "part-000002.log", 6, 2)):
             await repo.db.files.insert_one({
                 "id": identifier, "path": str(archive), "status": "READY", "bytes": size,
                 "nodeId": "node", "hour": hour, "archiveGroupId": "group", "archiveMember": member,
-                "firstSequence": sequence,
+                "firstSequence": sequence, "sha256": hashlib.sha256(values[member]).hexdigest(),
+                "archiveBytes": archive.stat().st_size,
             })
         async def audit(*_, **_kwargs):
             return None

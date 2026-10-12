@@ -5,21 +5,39 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import multiprocessing
 import os
 import tarfile
 import tempfile
+import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
 
+from camera_logs.logs.archive_spool import load as load_archive_spool
+from camera_logs.logs.archive_spool import pending_path as _spool_pending_path
+from camera_logs.logs.archive_spool import write_json_atomic as _write_json_atomic
+from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.search_index import build_index
+
+logger = logging.getLogger(__name__)
 
 _pool: ProcessPoolExecutor | None = None
 _dispatcher: asyncio.Task | None = None
 _dispatcher_loop = None
+MAX_SCHEDULED_ARCHIVES = 8
+ARCHIVE_RETRY_BASE_SECONDS = 30
+ARCHIVE_RETRY_MAX_SECONDS = 300
+ARCHIVE_RETRY_MAX_EXPONENT = 4
+MAX_ARCHIVE_RETRY_ENTRIES = 1024
+_scheduled_targets: set[Path] = set()
+_scheduled_futures: dict[Path, asyncio.Future] = {}
+_retry_not_before: dict[Path, float] = {}
+_retry_attempts: dict[Path, int] = {}
 
 
 @dataclass(slots=True)
@@ -30,6 +48,7 @@ class _Job:
     arguments: tuple
     result: asyncio.Future
     token: object | None = None
+    callback: Callable[[BaseException | None], None] | None = None
 
 
 _archive_jobs: deque[_Job] = deque()
@@ -46,8 +65,23 @@ def _pool_for_current_process() -> ProcessPoolExecutor:
 
 async def _run_in_pool(function, *arguments):
     """提交已获父进程槽位的工作；子进程队列此时最多只有当前一项。"""
-    future = asyncio.get_running_loop().run_in_executor(_pool_for_current_process(), function, *arguments)
-    return await _wait_future(future)
+    pool = _pool_for_current_process()
+    try:
+        future = asyncio.get_running_loop().run_in_executor(pool, function, *arguments)
+        return await _wait_future(future)
+    except BrokenProcessPool:
+        # 当前作业的 tar 发布状态不可判定，不能整批重试；只废弃已损坏的执行器，
+        # 让后续仍由 spool/pending 保证可恢复的作业在新进程中重新提交。
+        await _discard_broken_pool(pool)
+        raise
+
+
+async def _discard_broken_pool(pool: ProcessPoolExecutor) -> None:
+    """同步回收异常退出的进程池，避免全局引用让后续作业持续提交失败。"""
+    global _pool
+    await job_thread(pool.shutdown, wait=True, cancel_futures=True)
+    if _pool is pool:
+        _pool = None
 
 
 def _start_dispatcher() -> None:
@@ -62,12 +96,12 @@ def _start_dispatcher() -> None:
     _dispatcher = loop.create_task(_dispatch_jobs())
 
 
-def _enqueue(kind: str, *arguments, token: object | None = None) -> asyncio.Future:
+def _enqueue(kind: str, *arguments, token: object | None = None, callback=None) -> asyncio.Future:
     """登记工作而不立即提交进程池，避免索引先入 FIFO 后阻塞待归档小时。"""
     loop = asyncio.get_running_loop()
     result = loop.create_future()
-    job = _Job(kind, arguments, result, token)
-    (_archive_jobs if kind == "archive" else _index_jobs).append(job)
+    job = _Job(kind, arguments, result, token=token, callback=callback)
+    (_archive_jobs if kind in {"archive", "spool"} else _index_jobs).append(job)
     _start_dispatcher()
     return result
 
@@ -79,7 +113,7 @@ async def _dispatch_jobs() -> None:
         while _archive_jobs or _index_jobs:
             job = _archive_jobs.popleft() if _archive_jobs else _index_jobs.popleft()
             try:
-                if job.kind == "archive":
+                if job.kind in {"archive", "spool"}:
                     from camera_logs.node import performance_runtime
 
                     rate, allow_index = performance_runtime.background_settings()
@@ -89,19 +123,26 @@ async def _dispatch_jobs() -> None:
                     running = getattr(performance_runtime, "archive_running", None)
                     if running is not None:
                         running(job.token)
-                    value = await _run_in_pool(publish_hour_archive, *job.arguments, background_rate, create_index)
+                    publisher = publish_spooled_archive if job.kind == "spool" else publish_hour_archive
+                    value = await _run_in_pool(publisher, *job.arguments, background_rate, create_index)
                 else:
                     value = await _run_in_pool(build_index, *job.arguments)
             except asyncio.CancelledError:
                 if not job.result.done():
                     job.result.cancel()
+                if job.callback is not None:
+                    job.callback(asyncio.CancelledError())
                 raise
             except Exception as error:  # noqa: BLE001 - 子进程故障只结算当前作业，后续归档仍可执行。
                 if not job.result.done():
                     job.result.set_exception(error)
+                if job.callback is not None:
+                    job.callback(error)
             else:
                 if not job.result.done():
                     job.result.set_result(value)
+                if job.callback is not None:
+                    job.callback(None)
     finally:
         if _dispatcher is asyncio.current_task():
             _dispatcher = None
@@ -166,27 +207,7 @@ def _metadata_path(target: Path) -> Path:
 
 def _pending_path(target: Path) -> Path:
     """归档提交记录在 tar 与正式元数据之间提供崩溃恢复依据。"""
-    return Path(str(target) + ".pending.json")
-
-
-def _write_json_atomic(path: Path, value: dict) -> None:
-    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".partial", dir=path.parent)
-    temporary = Path(name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        # 恢复清单的目录项必须先于小时包替换持久化，断电后才能继续提交。
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    return _spool_pending_path(target)
 
 
 def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate: int | None = None,
@@ -296,6 +317,15 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
         raise
 
 
+def publish_spooled_archive(spool: Path, background_rate: int | None = None, create_index: bool = True) -> Path:
+    """消费一个不可变封存 spool；成功发布后才删除该 spool。"""
+    spool = Path(spool)
+    target, segments = load_archive_spool(spool)
+    result = publish_hour_archive(segments, target, background_rate, create_index)
+    spool.unlink(missing_ok=True)
+    return result
+
+
 def publish_archive(log: Path, index: Path, manifest: dict) -> Path:
     """兼容旧调用者的单分卷发布入口。"""
     target = log.with_suffix(".tar.gz")
@@ -326,21 +356,113 @@ async def compress_hour(segments: list[dict], target: Path) -> Path:
         archive_finished(token)
 
 
+def _schedule_archive(kind: str, identity: Path, *arguments: object) -> asyncio.Future | None:
+    """将一个可恢复归档公平登记为有限候选，失败项退避后才允许下轮重试。"""
+    identity = Path(identity)
+    exists = identity.exists() if kind == "spool" else (identity.exists() or _pending_path(identity).exists())
+    if not exists:
+        _retry_not_before.pop(identity, None)
+        _retry_attempts.pop(identity, None)
+        return None
+    if identity in _scheduled_targets:
+        return _scheduled_futures[identity]
+    if time.monotonic() < _retry_not_before.get(identity, 0):
+        return None
+    if len(_scheduled_targets) >= MAX_SCHEDULED_ARCHIVES:
+        return None
+    from camera_logs.node.performance_runtime import archive_finished, archive_started
+
+    token = object()
+    archive_started(token, persisted=kind in {"spool", "archive"})
+    _scheduled_targets.add(identity)
+
+    def complete(error: BaseException | None):
+        _scheduled_targets.discard(identity)
+        _scheduled_futures.pop(identity, None)
+        if error is None:
+            _retry_not_before.pop(identity, None)
+            _retry_attempts.pop(identity, None)
+        else:
+            attempts = min(_retry_attempts.get(identity, 0) + 1, ARCHIVE_RETRY_MAX_EXPONENT + 1)
+            _retry_attempts[identity] = attempts
+            delay = min(ARCHIVE_RETRY_BASE_SECONDS * 2 ** min(attempts - 1, ARCHIVE_RETRY_MAX_EXPONENT),
+                        ARCHIVE_RETRY_MAX_SECONDS)
+            if identity not in _retry_not_before and len(_retry_not_before) >= MAX_ARCHIVE_RETRY_ENTRIES:
+                oldest = next(iter(_retry_not_before))
+                _retry_not_before.pop(oldest, None)
+                _retry_attempts.pop(oldest, None)
+            _retry_not_before[identity] = time.monotonic() + delay
+            logger.warning("后台归档失败 target=%s errorType=%s retryAfterSeconds=%s",
+                           identity, type(error).__name__, delay)
+        archive_finished(token)
+
+    future = _enqueue(kind, *arguments, token=token, callback=complete)
+    _scheduled_futures[identity] = future
+    # 调度调用方不等待结果；回调已读取异常，避免未观察的 Future 告警。
+    future.add_done_callback(lambda value: value.exception() if not value.cancelled() else None)
+    return future
+
+
+def schedule_pending_archive(target: Path) -> asyncio.Future | None:
+    """将独立 spool 放入有限调度队列；队满时由维护器从磁盘恢复。"""
+    spool = Path(target)
+    return _schedule_archive("spool", spool, spool)
+
+
+def schedule_recovery_archive(target: Path) -> asyncio.Future | None:
+    """登记旧共享 pending 清单的恢复，不在节点启动路径等待压缩完成。"""
+    archive = Path(target)
+    return _schedule_archive("archive", archive, [], archive)
+
+
+async def compress_spool(spool: Path) -> Path:
+    """同步等待单个已落盘 spool，供显式关闭和启动恢复保持既有完成合同。"""
+    from camera_logs.node.performance_runtime import archive_finished, archive_started
+
+    token = object()
+    archive_started(token, persisted=True)
+    try:
+        return await _wait_for_job(_enqueue("spool", Path(spool), token=token))
+    finally:
+        archive_finished(token)
+
+
 async def build_search_index(target: Path) -> bool:
     """低优先级补建旧小时包索引；有待归档小时时先让归档解除积压。"""
     return await _wait_for_job(_enqueue("index", Path(target)))
 
 
-async def shutdown_compression() -> None:
-    """在节点收尾后等待压缩进程退出。"""
+def _terminate_pool(pool: ProcessPoolExecutor) -> None:
+    """超时关闭时终止唯一压缩子进程，不能留下它继续改写新 Worker 的小时包。"""
+    for process in tuple(getattr(pool, "_processes", {}).values()):
+        if process.is_alive():
+            process.terminate()
+    pool.shutdown(wait=True, cancel_futures=True)
+
+
+async def shutdown_compression(*, timeout_seconds: float | None = None) -> None:
+    """收尾压缩器；超时后终止独立子进程，原始日志与恢复清单留待下次启动。"""
     global _pool
     cancelled = False
     try:
+        if timeout_seconds is None:
+            await _drain_dispatcher()
+        else:
+            await asyncio.wait_for(asyncio.shield(_drain_dispatcher()), timeout_seconds)
+    except TimeoutError:
+        # dispatcher 的等待层刻意忽略取消直到不可取消进程工作结束；先杀掉
+        # 唯一子进程，再等待该 future 结算，避免旧进程在新 Worker 运行时写 tar。
+        if _dispatcher is not None:
+            _dispatcher.cancel()
+        if _pool is not None:
+            pool = _pool
+            await job_thread(_terminate_pool, pool)
+            if _pool is pool:
+                _pool = None
         await _drain_dispatcher()
     except asyncio.CancelledError:
         cancelled = True
     if _pool is not None:
-        from camera_logs.logs.job_threads import job_thread
         pool = _pool
         try:
             await job_thread(pool.shutdown, wait=True)

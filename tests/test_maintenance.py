@@ -1,10 +1,12 @@
 """维护回归：默认保留期、下载保护及归档发布后目录登记中断的恢复。"""
 
+import asyncio
 import hashlib
 import io
 import json
 import os
 import tarfile
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +14,7 @@ from unittest.mock import AsyncMock
 
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
+from camera_logs.logs import maintenance
 from camera_logs.logs.maintenance import (
     _archive_id,
     apply_retention,
@@ -123,7 +126,7 @@ async def test_retention_preserves_archive_while_compression_pending_journal_exi
 
 
 async def test_recovery_completes_inactive_pending_archive_before_catalog_registration(tmp_path, monkeypatch):
-    """节点重启后应完成旧会话的 pending 事务，即使同小时没有新的采集。"""
+    """节点启动只登记旧 pending 事务，不能等待积压归档后才继续。"""
     repo = repository(tmp_path)
     path, member = archive_at(tmp_path)
     raw = path.parent / member["logName"]
@@ -132,23 +135,17 @@ async def test_recovery_completes_inactive_pending_archive_before_catalog_regist
     Path(str(path) + ".pending.json").write_text(json.dumps({"formatVersion": 1, "segments": [pending_member]}))
     calls = []
 
-    async def complete(segments, target):
-        calls.append((segments, target))
-        Path(str(target) + ".pending.json").unlink()
-        raw.unlink()
-        return target
-
-    monkeypatch.setattr("camera_logs.logs.maintenance.compress_hour", complete)
-    assert await recover_orphan_archives(repo) == 1
-    assert calls == [([], path)]
-    assert not Path(str(path) + ".pending.json").exists()
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive", lambda target: calls.append(target))
+    assert await recover_orphan_archives(repo) == 0
+    assert calls == [path]
+    assert Path(str(path) + ".pending.json").exists()
+    assert raw.exists()
 
 
 async def test_recovery_discovers_pending_journal_before_tar_publication(tmp_path, monkeypatch):
-    """pending 已持久化但 tar 尚未替换时，重启仍应继续提交并登记归档。"""
+    """tar 尚未替换的旧 pending 也只能有界登记，不能阻塞节点启动。"""
     repo = repository(tmp_path)
     path, member = archive_at(tmp_path)
-    published, metadata = path.read_bytes(), Path(str(path) + ".metadata.json").read_text()
     raw = path.parent / member["logName"]
     raw.write_bytes(b"ordered device output\n")
     path.unlink()
@@ -157,19 +154,114 @@ async def test_recovery_discovers_pending_journal_before_tar_publication(tmp_pat
     Path(str(path) + ".pending.json").write_text(json.dumps({"formatVersion": 1, "segments": [pending_member]}))
     calls = []
 
-    async def complete(segments, target):
-        calls.append((segments, target))
-        target.write_bytes(published)
-        Path(str(target) + ".metadata.json").write_text(metadata)
-        Path(str(target) + ".pending.json").unlink()
-        raw.unlink()
-        return target
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive", lambda target: calls.append(target))
+    assert await recover_orphan_archives(repo) == 0
+    assert calls == [path]
+    assert not path.exists() and Path(str(path) + ".pending.json").exists()
+    assert raw.exists()
 
-    monkeypatch.setattr("camera_logs.logs.maintenance.compress_hour", complete)
-    assert await recover_orphan_archives(repo) == 1
-    assert calls == [([], path)]
-    assert path.is_file() and not Path(str(path) + ".pending.json").exists()
-    assert await repo.db.files.count_documents({"path": str(path), "status": "READY"}) == 1
+
+async def test_recovery_queues_immutable_spool_without_waiting_for_publication(tmp_path, monkeypatch):
+    """重启只把未发布 spool 交给有界调度器，不能在启动时同步压缩积压小时包。"""
+    from camera_logs.logs.archive_spool import persist
+
+    repo = repository(tmp_path)
+    target = tmp_path / "device" / "hour.tar.gz"
+    raw = target.parent / "part.log"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"queued\n")
+    spool = persist(target, [{"taskId": "task", "runId": "run", "sessionId": "session",
+                              "hourStart": now().isoformat(), "rawSize": 7,
+                              "sha256": hashlib.sha256(b"queued\n").hexdigest(), "firstSequence": 1,
+                              "lastSequence": 1, "logPath": str(raw), "logName": raw.name,
+                              "indexName": "part.index.jsonl", "indexSha256": "x", "indexBytes": 0}])
+    queued = []
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda path: queued.append(path))
+
+    assert await recover_orphan_archives(repo) == 0
+    assert queued == [spool]
+    assert spool.exists()
+
+
+async def test_recovery_scan_reports_unique_disk_pending_archive_targets(tmp_path, monkeypatch):
+    """维护以归档目标计数，同目标 spool 与旧 pending 不在看板重复成两个作业。"""
+    from camera_logs.logs.archive_spool import persist
+
+    repo = repository(tmp_path)
+    target = tmp_path / "device" / "hour.tar.gz"
+    target.parent.mkdir(parents=True)
+    segment = {"taskId": "task", "runId": "run", "sessionId": "session"}
+    persist(target, [segment])
+    persist(target.parent / "later.tar.gz", [segment])
+    Path(f"{target}.pending.json").write_text(json.dumps({"formatVersion": 1, "segments": [segment]}))
+    reported = []
+    monkeypatch.setattr("camera_logs.node.performance_runtime.archive_spool_snapshot",
+                        lambda pending, oldest: reported.append((pending, oldest)))
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda _spool: None)
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive", lambda _target: None)
+
+    assert await recover_orphan_archives(repo) == 0
+    assert reported and reported[-1][0] == 2
+    assert reported[-1][1] >= 0
+
+
+async def test_recovery_rebuilds_only_proven_raw_index_spool(tmp_path, monkeypatch):
+    """旧内存 pending 丢失时，完整停机证明和连续索引才能重建可恢复 spool。"""
+    repo = repository(tmp_path)
+    raw = tmp_path / "device" / "camera-task" / "2026-10-12" / "08" / "camera-192.0.2.1-20261012080000-20261012090000-part-000001.log"
+    raw.parent.mkdir(parents=True)
+    body = b"first\nsecond\n"
+    raw.write_bytes(body)
+    raw.with_suffix(".index.jsonl").write_text(
+        '{"sequence":31,"offset":0,"length":6,"receivedAt":"2026-10-12T00:00:00+00:00"}\n'
+        '{"sequence":32,"offset":6,"length":7,"receivedAt":"2026-10-12T00:00:01+00:00"}\n')
+    proof = {"token": "pre-stop-token", "nodeId": "node", "taskId": "task", "runId": "run",
+             "generation": 4, "sessionId": "session", "confirmedAt": now().isoformat()}
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task", "nodeId": "node", "generation": 4,
+                                   "sessionId": "session", "deploymentClosedProof": proof})
+    await repo.db.files.insert_one({"id": "raw", "path": str(raw), "taskId": "task", "runId": "run",
+                                    "sessionId": "session", "nodeId": "node", "status": "OPEN",
+                                    "deploymentClosedProof": proof | {"fileId": "raw", "path": str(raw),
+                                                                      "watermark": len(body)}})
+    queued = []
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda spool: queued.append(spool))
+
+    assert await recover_orphan_archives(repo) == 0
+    assert len(queued) == 1
+    spool = queued[0]
+    from camera_logs.logs.archive_spool import load
+    target, segments = load(spool)
+    assert target.name.endswith(".tar.gz")
+    assert segments[0]["sha256"] == hashlib.sha256(body).hexdigest()
+    assert segments[0]["firstSequence"] == 31 and segments[0]["lastSequence"] == 32
+    assert raw.exists() and raw.with_suffix(".index.jsonl").exists()
+    recovered_file = await repo.db.files.find_one({"id": "raw"})
+    assert recovered_file["deploymentClosedProof"]["archiveRecoveredAt"]
+
+
+async def test_recovery_preserves_raw_when_proof_or_index_is_incomplete(tmp_path, monkeypatch):
+    """缺少精确证明或索引不连续时保留原始文件，绝不按目录猜测归档。"""
+    repo = repository(tmp_path)
+    raw = tmp_path / "device" / "camera-task" / "2026-10-12" / "08" / "camera-part-000001.log"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"recoverable\n")
+    raw.with_suffix(".index.jsonl").write_text(
+        '{"sequence":1,"offset":1,"length":12,"receivedAt":"2026-10-12T00:00:00+00:00"}\n')
+    proof = {"token": "pre-stop-token", "nodeId": "node", "taskId": "task", "runId": "run",
+             "generation": 4, "sessionId": "session", "confirmedAt": now().isoformat()}
+    await repo.db.runs.insert_one({"id": "run", "taskId": "task", "nodeId": "node", "generation": 4,
+                                   "sessionId": "session", "deploymentClosedProof": proof})
+    await repo.db.files.insert_one({"id": "raw", "path": str(raw), "taskId": "task", "runId": "run",
+                                    "sessionId": "session", "nodeId": "node", "status": "OPEN"})
+    queued = []
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda spool: queued.append(spool))
+
+    assert await recover_orphan_archives(repo) == 0
+    assert queued == []
+    assert raw.exists() and raw.with_suffix(".index.jsonl").exists()
+    assert not list(tmp_path.rglob("*.pending.*.json"))
+    incomplete_run = await repo.db.runs.find_one({"id": "run"})
+    assert "archiveRecoveredAt" not in incomplete_run["deploymentClosedProof"]
 
 
 async def test_recovery_repairs_open_record_after_archive_publication(tmp_path):
@@ -186,6 +278,30 @@ async def test_recovery_repairs_open_record_after_archive_publication(tmp_path):
     assert Path(record["path"]) == path
     assert record["archiveBytes"] == path.stat().st_size
     assert await recover_orphan_archives(repo) == 0
+
+
+async def test_recovery_scans_archive_tree_in_job_thread(tmp_path, monkeypatch):
+    """大日志目录的枚举必须离开 Worker 事件循环，恢复后的目录登记保持可用。"""
+    repo = repository(tmp_path)
+    path, manifest = archive_at(tmp_path)
+    main_thread = threading.get_ident()
+    scan_threads = []
+    original_scan = maintenance._scanned_orphan_archives
+
+    def scanned(root):
+        scan_threads.append(threading.get_ident())
+        return original_scan(root)
+
+    async def threaded(function, *args, **kwargs):
+        return await asyncio.to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance, "_scanned_orphan_archives", scanned)
+    monkeypatch.setattr(maintenance, "job_thread", threaded)
+
+    assert await recover_orphan_archives(repo) == 1
+    assert scan_threads and all(identifier != main_thread for identifier in scan_threads)
+    record = await repo.db.files.find_one({"id": _archive_id(tmp_path, path.parent / manifest["logName"])})
+    assert record is not None and record["status"] == "READY"
 
 
 async def test_recovery_registers_each_shared_archive_member_with_stable_log_identity(tmp_path):

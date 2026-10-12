@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
+import logging
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,12 +18,15 @@ from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from camera_logs.logs.compression import compress_hour
+from camera_logs.logs.archive_spool import persist as persist_archive_spool
+from camera_logs.logs.compression import compress_spool, schedule_pending_archive
 from camera_logs.logs.naming import safe_device_address, safe_filename_component
 from camera_logs.logs.write_io import record_stage, write_thread
 
-MAX_PENDING_ARCHIVES = 2
 MAX_LOG_BYTES = 10 * 1024 * 1024
+MAX_PENDING_ARCHIVE_NOTIFICATIONS = 8
+ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS = 5
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +81,8 @@ class HourlyWriter:
 
     def __init__(self, task_id: str, run_id: str, session_id: str, root: Path, *, storage_identity: str,
                  task_name: str | None = None, device_ip: str | None = None,
-                 timezone: str = "Asia/Shanghai", now: Callable[[], datetime] | None = None) -> None:
+                 timezone: str = "Asia/Shanghai", now: Callable[[], datetime] | None = None,
+                 on_archive: Callable[[HourArchive], object] | None = None) -> None:
         self.task_id, self.run_id, self.session_id = task_id, run_id, session_id
         self.task_name = safe_filename_component(task_name or task_id)
         # 完整任务 ID 是同名任务的物理隔离键；目录组件保留其全部安全文本，
@@ -94,9 +101,11 @@ class HourlyWriter:
         self._last_received_at: datetime | None = None
         self._pending: list[_Segment] = []
         self._sealed: list[HourArchive] = []
-        self._archive_tasks: set[asyncio.Task[list[HourArchive]]] = set()
-        self._archive_slots = asyncio.Semaphore(MAX_PENDING_ARCHIVES)
+        self._archive_tasks: set[asyncio.Future[Path]] = set()
+        self._archive_notifications: deque[HourArchive] = deque()
+        self._archive_notification_task: asyncio.Task[None] | None = None
         self._archive_errors: list[Exception] = []
+        self._on_archive = on_archive
         self._last_sync, self._close_error = time.monotonic(), None
 
     @property
@@ -409,40 +418,96 @@ class HourlyWriter:
     async def _publish_pending_locked(self, *, background: bool) -> list[HourArchive] | None:
         if not self._pending:
             return []
-        await self._archive_slots.acquire()
         segments, self._pending = self._pending, []
-        task = asyncio.create_task(self._archive(segments))
-        if background:
-            self._archive_tasks.add(task)
-            task.add_done_callback(self._archive_done)
-            return None
-        try:
-            result = await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # 线程准备不能随调用方取消；转为受跟踪后台任务，由后续收尾等待并发布结果。
-            self._archive_tasks.add(task)
-            task.add_done_callback(self._archive_done)
-            raise
-        except Exception:
-            self._archive_slots.release()
-            raise
-        self._archive_slots.release()
-        return result
-
-    async def _archive(self, segments: list[_Segment]) -> list[HourArchive]:
-        target, manifests = await asyncio.to_thread(self._prepare_archive, segments)
-        await compress_hour(manifests, target)
-        return [HourArchive(self.task_id, self.run_id, self.session_id, segment.hour.astimezone(UTC), target,
+        persistence = asyncio.create_task(self._persist_pending(segments))
+        cancelled = False
+        while not persistence.done():
+            try:
+                await asyncio.shield(persistence)
+            except asyncio.CancelledError:
+                cancelled = True
+        target, _manifests, spool, inner_cancelled = persistence.result()
+        cancelled = cancelled or inner_cancelled
+        archives = [HourArchive(self.task_id, self.run_id, self.session_id, segment.hour.astimezone(UTC), target,
             segment.size, segment.digest, segment.first, segment.last, segment.log, segment.log.name, segment.index)
             for segment in segments]
+        if not background:
+            await compress_spool(spool)
+            if cancelled:
+                raise asyncio.CancelledError
+            return archives
+        future = schedule_pending_archive(spool)
+        if future is not None:
+            self._archive_tasks.add(future)
+            future.add_done_callback(lambda completed: self._scheduled_archive_done(completed, archives))
+        if cancelled:
+            raise asyncio.CancelledError
+        # 队满时仅由磁盘清单表示待处理项，维护器会在后续周期重新提交。
+        return None
 
-    def _archive_done(self, task: asyncio.Task[list[HourArchive]]) -> None:
-        self._archive_tasks.discard(task)
-        self._archive_slots.release()
+    async def _persist_pending(self, segments: list[_Segment]) -> tuple[Path, list[dict], Path, bool]:
+        """取消也等待索引摘要和清单 fsync，不能让封存分卷失去恢复入口。"""
+        preparation = asyncio.create_task(asyncio.to_thread(self._prepare_archive, segments))
+        cancelled = False
+        while not preparation.done():
+            try:
+                await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                cancelled = True
+        target, manifests = preparation.result()
+        persisted = asyncio.create_task(asyncio.to_thread(persist_archive_spool, target, manifests))
+        while not persisted.done():
+            try:
+                await asyncio.shield(persisted)
+            except asyncio.CancelledError:
+                cancelled = True
+        persisted.result()
+        return target, manifests, Path(persisted.result() or ""), cancelled
+
+    def _scheduled_archive_done(self, future: asyncio.Future[Path], archives: list[HourArchive]) -> None:
+        self._archive_tasks.discard(future)
         try:
-            self._sealed.extend(task.result())
+            future.result()
+            if self._on_archive is None:
+                self._sealed.extend(archives)
+            else:
+                self._queue_archive_notifications(archives)
+        except asyncio.CancelledError:
+            return
         except Exception as error:  # noqa: BLE001 - 后台压缩错误在下次采集循环统一发布。
             self._archive_errors.append(error)
+
+    def _queue_archive_notifications(self, archives: list[HourArchive]) -> None:
+        """每个 Writer 最多保留有限目录通知；队满后由已发布 metadata 的维护扫描补偿。"""
+        for archive in archives:
+            if len(self._archive_notifications) >= MAX_PENDING_ARCHIVE_NOTIFICATIONS:
+                logger.warning("后台归档目录通知队列已满 task=%s run=%s archive=%s",
+                               archive.task_id, archive.run_id, archive.path)
+                continue
+            self._archive_notifications.append(archive)
+        if self._archive_notifications and (self._archive_notification_task is None
+                                            or self._archive_notification_task.done()):
+            self._archive_notification_task = asyncio.create_task(self._notify_archives())
+
+    async def _notify_archives(self) -> None:
+        """串行且有时限地登记已发布归档，失败后保留 tar/metadata 给维护扫描补偿。"""
+        assert self._on_archive is not None
+        try:
+            while self._archive_notifications:
+                archive = self._archive_notifications.popleft()
+                try:
+                    outcome = self._on_archive(archive)
+                    if inspect.isawaitable(outcome):
+                        await asyncio.wait_for(outcome, ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    logger.warning("后台归档目录登记超时 task=%s run=%s archive=%s timeoutSeconds=%s",
+                                   archive.task_id, archive.run_id, archive.path,
+                                   ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS)
+                except Exception as error:  # noqa: BLE001 - 归档已原子发布，目录异常交由既有维护恢复。
+                    logger.warning("后台归档目录登记失败 task=%s run=%s archive=%s errorType=%s",
+                                   archive.task_id, archive.run_id, archive.path, type(error).__name__)
+        finally:
+            self._archive_notification_task = None
 
     async def _await_archives_locked(self) -> None:
         if self._archive_tasks:
@@ -458,11 +523,13 @@ class HourlyWriter:
                 self._sealed.extend(archives[1:])
             return archives[0] if archives else None
 
-    async def close(self) -> HourArchive | None:
+    async def close(self, *, defer: bool = False) -> HourArchive | None:
+        """封存当前分卷；采集断连可延后归档，显式调用保留原有完成语义。"""
         async with self._lock:
             await self._seal_locked()
-            archives = await self._publish_pending_locked(background=False)
-            await self._await_archives_locked()
+            archives = await self._publish_pending_locked(background=defer)
+            if not defer:
+                await self._await_archives_locked()
             if archives and len(archives) > 1:
                 self._sealed.extend(archives[1:])
             return archives[0] if archives else None

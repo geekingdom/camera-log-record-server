@@ -42,6 +42,7 @@ class Worker:
         self.releases = {}
         # 仅记录本实例亲自关闭过、但持久化收尾失败的运行；不能把任意 BLOCKED 当成可自动释放。
         self.failed_cleanups = {}
+        self.cleanup_backoff = {}
         self.self_fenced = {}
         # 数据库失联时自围栏的关闭失败必须由同一流程续做，不能落入普通 release。
         self.self_fence_pending = {}
@@ -60,6 +61,7 @@ class Worker:
             self.active.pop(task_id)
         if self.failed_cleanups.get(task_id, (None,))[0] is runtime:
             self.failed_cleanups.pop(task_id, None)
+        self.cleanup_backoff.pop(id(runtime), None)
 
     def track_background(self, task, label):
         """记录后台扫描/导出异常，已完成任务必须取回异常而不能静默丢失。"""
@@ -97,6 +99,9 @@ class Worker:
             else:
                 await self.release(runtime, already_stopped=already_stopped)
         except Exception:
+            failures = self.cleanup_backoff.get(id(runtime), (0, 0))[0] + 1
+            # 每个故障运行独立退避，持续失败最多一分钟一次，不让单路异常刷屏拖累全节点。
+            self.cleanup_backoff[id(runtime)] = (failures, time.monotonic() + min(60, 2 ** min(failures, 6)))
             if action != "isolate":
                 changed = await self.repo.db.tasks.update_one(ownership, {"$set": {
                     "status": "BLOCKED", "error": "连接或日志关闭未完成，禁止重新连接",
@@ -132,6 +137,8 @@ class Worker:
         task_id = runtime.task["id"]
         pending = self.failed_cleanups.get(task_id)
         if pending is None or pending[0] is not runtime:
+            return False
+        if time.monotonic() < self.cleanup_backoff.get(id(runtime), (0, 0))[1]:
             return False
         current = await self.repo.db.tasks.find_one(owner_filter(runtime.task))
         if current is None or current.get("status") != "BLOCKED":
@@ -428,6 +435,9 @@ class Worker:
             ):
                 runtime.retired = True
                 runtime.stopping = True
+                if time.monotonic() < self.cleanup_backoff.get(id(runtime), (0, 0))[1]:
+                    # 已失去归属仍要隔离，但关闭失败的旧连接不能每周期重新刷异常。
+                    continue
                 self.releases[task_id] = asyncio.create_task(self.finish_runtime(runtime, "isolate"))
         for task in tasks:
             if task["id"] in self.releases:
@@ -487,9 +497,23 @@ class Worker:
                 from camera_logs.coredumps.jobs import run_export
                 self.track_background(asyncio.create_task(run_export(self.repo, export)), "coredump 导出")
         if time.monotonic() - self.last_maintenance >= 60:
+            self.start_maintenance()
+
+    def start_maintenance(self):
+        """启动与周期共用唯一维护作业；历史恢复再慢也不阻塞心跳或服务就绪。"""
+        if self.maintenance_task is None or self.maintenance_task.done():
             self.last_maintenance = time.monotonic()
-            if self.maintenance_task is None or self.maintenance_task.done():
-                self.maintenance_task = asyncio.create_task(self._maintain())
+            self.maintenance_task = asyncio.create_task(self._maintain_guarded())
+        return self.maintenance_task
+
+    async def _maintain_guarded(self):
+        """取回维护异常并允许下周期重试，取消仍由节点生命周期负责。"""
+        try:
+            await self._maintain()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("节点归档恢复或后台维护失败，下轮继续 node=%s", self.repo.settings.node_id)
 
     async def dispatch_manual(self, runtime):
         """单任务查询与发送共用一个作业；慢查询不阻塞监督、停止或其它任务。"""

@@ -36,6 +36,10 @@ class WriteLatency:
         self._samples += 1
         self._pending = None
 
+    def abort(self) -> None:
+        """物理操作已失败结束，不伪造成功样本，也不留下永久在途计时。"""
+        self._pending = None
+
     def snapshot(self) -> dict[str, float | int]:
         """返回最近至多 61 个秒桶的保守 P99，未完成写入另报等待年龄。"""
         instant = self._clock()

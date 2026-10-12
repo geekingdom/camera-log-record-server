@@ -1,5 +1,6 @@
 """节点低频维护在无 NFS 功能时的隔离回归。"""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -54,3 +55,36 @@ async def test_nfs_node_keeps_snapshot_reconcile_failure_observable(tmp_path, mo
     maintain.assert_awaited_once_with(repo)
     cleanup.assert_awaited_once_with(repo)
     reconcile.assert_awaited_once_with(repo)
+
+
+async def test_blocked_archive_recovery_is_single_flight_and_does_not_block_tick(tmp_path, monkeypatch, caplog):
+    """模拟历史恢复挂起时监督继续心跳，失败被记录且后续可重新恢复。"""
+    worker, repo = await make_worker(tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_maintenance():
+        entered.set()
+        await release.wait()
+        raise OSError("synthetic old archive failure")
+
+    monkeypatch.setattr(worker, "_maintain", blocked_maintenance)
+    first = worker.start_maintenance()
+    await entered.wait()
+    try:
+        worker.last_maintenance = 0
+        await asyncio.wait_for(worker.tick(), timeout=1)
+        assert worker.start_maintenance() is first
+        assert (await repo.db.nodes.find_one({"id": repo.settings.node_id})) is not None
+        assert not first.done()
+        release.set()
+        await first
+        assert "节点归档恢复或后台维护失败" in caplog.text
+        completed = AsyncMock()
+        monkeypatch.setattr(worker, "_maintain", completed)
+        second = worker.start_maintenance()
+        assert second is not first
+        await second
+        completed.assert_awaited_once()
+    finally:
+        release.set()
+        await worker.close()

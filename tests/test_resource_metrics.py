@@ -369,7 +369,7 @@ async def test_sample_runtime_disabled_guard_never_writes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resource_monitor_guard_rejects_ssh_slave_but_keeps_legacy_host(monkeypatch):
+async def test_resource_monitor_guard_rejects_ineligible_connections_but_keeps_legacy_host(monkeypatch):
     """资源级采样只可复用主机 SSH；HTTP 健康异常不撤销既有连接的采样资格。"""
     from camera_logs.resource_metrics import runtime
 
@@ -379,7 +379,10 @@ async def test_resource_monitor_guard_rejects_ssh_slave_but_keeps_legacy_host(mo
     rt.collector = collector
     rt.task["sshTarget"] = "SLAVE_2"
     assert await runtime._guard(rt, collector) is None
+    rt.task["protocol"] = "TELNET_SERIAL"
     rt.task.pop("sshTarget")
+    assert await runtime._guard(rt, collector) is None
+    rt.task["protocol"] = "SSH"
     await database.tasks.insert_one({"id": "t", "runId": "r", "resourceId": "x", "protocol": "SSH",
                                     "desiredState": "RUNNING", "status": "COLLECTING"})
     await database.resources.insert_one({"id": "x", "deletedAt": None, "healthStatus": "ERROR",

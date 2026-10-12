@@ -7,6 +7,7 @@ from camera_logs.collection import buffering
 _effective = {"readMiBPerSecond": 50}
 _pressured = False
 _archives = {}
+_disk_archives = {"pendingJobs": 0, "oldestSeconds": 0, "sampledAt": 0}
 
 
 def background_settings():
@@ -14,9 +15,9 @@ def background_settings():
     return _effective["readMiBPerSecond"] * 1024 * 1024, not _pressured
 
 
-def archive_started(token):
+def archive_started(token, *, persisted: bool = False):
     """只保留活动归档的开始时刻，完成后删除，不增加数据库历史集合。"""
-    _archives[token] = {"queuedAt": time.monotonic(), "runningAt": None}
+    _archives[token] = {"queuedAt": time.monotonic(), "runningAt": None, "persisted": persisted}
 
 
 def archive_running(token):
@@ -30,18 +31,38 @@ def archive_finished(token):
     _archives.pop(token, None)
 
 
+def archive_spool_snapshot(pending_jobs: int, oldest_seconds: float) -> None:
+    """维护扫描更新磁盘 spool 快照，心跳直接复用以免重复递归日志目录。"""
+    global _disk_archives
+    _disk_archives = {"pendingJobs": max(0, pending_jobs), "oldestSeconds": max(0, oldest_seconds),
+                      "sampledAt": time.monotonic()}
+
+
 def archive_snapshot():
     """分别报告排队和执行时间；总耗时保留以兼容旧节点看板的告警合同。"""
     tick = time.monotonic()
-    waiting = [item["queuedAt"] for item in _archives.values() if item["runningAt"] is None]
     running = [item["runningAt"] for item in _archives.values() if item["runningAt"] is not None]
+    persisted = sum(1 for item in _archives.values() if item["persisted"])
+    persisted_running = sum(1 for item in _archives.values() if item["persisted"] and item["runningAt"] is not None)
+    transient = len(_archives) - persisted
+    transient_waiting = sum(1 for item in _archives.values() if not item["persisted"] and item["runningAt"] is None)
 
     def oldest(values):
         return max(0, tick - min(values)) if values else 0
 
-    return {"pendingJobs": len(_archives), "waitingJobs": len(waiting), "runningJobs": len(running),
-            "oldestSeconds": oldest([item["queuedAt"] for item in _archives.values()]),
-            "oldestWaitingSeconds": oldest(waiting), "oldestRunningSeconds": oldest(running)}
+    disk_pending = max(_disk_archives["pendingJobs"], persisted)
+    disk_waiting = max(0, disk_pending - persisted_running)
+    # 没有磁盘积压时不能把进程单调时钟的年龄冒充归档等待，引发空闲节点告警。
+    disk_oldest = (_disk_archives["oldestSeconds"] + max(0, tick - _disk_archives["sampledAt"])) \
+        if _disk_archives["pendingJobs"] else 0
+    return {"pendingJobs": disk_pending + transient,
+            "waitingJobs": disk_waiting + transient_waiting, "runningJobs": len(running),
+            "diskPendingJobs": _disk_archives["pendingJobs"],
+            "oldestSeconds": max(oldest([item["queuedAt"] for item in _archives.values()]), disk_oldest),
+            "oldestWaitingSeconds": max(oldest([item["queuedAt"] for item in _archives.values()
+                                                  if not item["persisted"] and item["runningAt"] is None]),
+                                       disk_oldest if disk_waiting else 0),
+            "oldestRunningSeconds": oldest(running)}
 
 
 async def update_performance(worker, config, write_latency, disk_percent):

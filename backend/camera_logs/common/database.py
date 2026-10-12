@@ -111,6 +111,11 @@ class Repository:
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
         # 旧归档全文索引按节点/READY/稳定ID游标补建，避免每轮扫全部历史目录。
         await self.db.files.create_index([("nodeId", 1), ("status", 1), ("id", 1)])
+        await self.db.files.create_index(
+            [("deploymentClosedProof.nodeId", 1), ("status", 1), ("deploymentClosedProof.archiveRecoveredAt", 1)],
+            name="files_deployment_closed_proof_recovery",
+            partialFilterExpression={"deploymentClosedProof.token": {"$exists": True}},
+        )
         await self.db.log_gap_snapshots.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.coredump_files.create_index([("resourceId", 1), ("receivedAt", -1), ("id", 1)])
         await self.db.coredump_files.create_index([("nodeId", 1), ("status", 1), ("updatedAt", -1)])
@@ -131,6 +136,12 @@ class Repository:
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1), ("status", 1)])
         await self.db.runs.create_index([("nodeId", 1), ("endedAt", 1)])
         await self.db.runs.create_index([("endedAt", 1), ("id", 1)])
+        # 部署 prepare/complete 与旧原始日志恢复只扫描带证明的极少数 run，不能扩大普通运行写入索引。
+        await self.db.runs.create_index(
+            [("deploymentRecovery.token", 1), ("deploymentRecovery.nodeId", 1)],
+            name="runs_deployment_recovery_token_node",
+            partialFilterExpression={"deploymentRecovery.token": {"$exists": True}},
+        )
         await self.db.run_archives.create_index("runId", unique=True)
         await self.db.audit_archive_chunks.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.audit_archive_chunks.create_index([("day", 1), ("part", 1)], unique=True)

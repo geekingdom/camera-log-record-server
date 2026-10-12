@@ -267,6 +267,9 @@ async def test_worker_retries_its_own_blocked_release_after_connection_closed(tm
     assert await repo.db.endpoint_locks.count_documents({"taskId": "task"}) == 1
     assert (await repo.db.operations.find_one({"id": "system-stop"}))["status"] == "FAILED"
 
+    assert not await worker.retry_blocked_cleanup(runtime)
+    assert runtime.attempts == 1
+    worker.cleanup_backoff[id(runtime)] = (1, 0)
     worker.last_coredump_scan = time.monotonic()
     worker.last_maintenance = time.monotonic()
     await worker.tick()
@@ -395,6 +398,31 @@ async def test_blocked_stop_without_runtime_marks_isolation_required_without_rel
     assert await repo.db.endpoint_locks.count_documents({"taskId": "task", "runId": "run"}) == 1
     assert (await repo.db.runs.find_one({"id": "run"})).get("endedAt") is None
     assert (await repo.db.operations.find_one({"id": "stop"}))["phase"] == "ISOLATION_REQUIRED"
+
+
+async def test_failed_isolation_retries_with_backoff_without_forgetting_connection(tmp_path):
+    """隔离失败退避期间保留旧连接与锁，期限之后仅重试该运行的关闭。"""
+    repo = isolated_repository(tmp_path)
+    task = {"id": "task", "runId": "old", "nodeId": "node", "generation": 1}
+    runtime = SimpleNamespace(task=task, stop=AsyncMock(side_effect=RuntimeError("uncertain")),
+                              input_bytes=0, background_failure=lambda: None)
+    worker = Worker(repo)
+    worker.active["task"] = runtime
+    worker.last_coredump_scan = worker.last_maintenance = time.monotonic()
+    await worker.tick()
+    with pytest.raises(RuntimeError, match="uncertain"):
+        await worker.releases["task"]
+    worker.releases.clear()
+    await worker.tick()
+    assert runtime.stop.await_count == 1
+    assert worker.active["task"] is runtime
+    assert "task" not in worker.releases
+    worker.cleanup_backoff[id(runtime)] = (1, 0)
+    runtime.stop.side_effect = None
+    await worker.tick()
+    await worker.releases["task"]
+    assert runtime.stop.await_count == 2
+    assert "task" not in worker.active
 
 
 async def test_blocked_stop_without_runtime_consumes_exact_closed_receipt(tmp_path):

@@ -135,6 +135,21 @@ async def apply_runtime_state(runtime: Any, state: str, details: dict[str, Any])
             return
         await _record_clock_rollback(runtime, details)
         return
+    if state == "SCHEDULED_COMMAND_UNSENT":
+        if not await _current_owner(runtime):
+            return
+        await record_runtime_event(runtime, {
+            "type": state, "taskId": runtime.task["id"], "runId": runtime.task["runId"],
+            "sessionId": details.get("sessionId"), "nodeId": runtime.repo.settings.node_id,
+            "commandId": details.get("commandId"), "execution": details.get("execution"),
+            "message": details.get("reason", "定时命令未发送"), "level": "WARNING",
+            "outcome": details.get("outcome", "FAILED"), "createdAt": now(),
+        })
+        logger.warning("定时命令未发送", extra={"context": {
+            "taskId": runtime.task["id"], "runId": runtime.task["runId"],
+            "sessionId": details.get("sessionId"), "commandId": details.get("commandId"),
+        }})
+        return
     original_state = state
     if state in _RECONNECT_MESSAGES:
         state = "RECONNECTING"

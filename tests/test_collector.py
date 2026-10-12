@@ -263,6 +263,9 @@ def test_stop_waits_for_reader_final_flush_and_archive(tmp_path):
         await connection._received.put(b"must-persist")
         await asyncio.sleep(0)
         await collector.stop()
+        from camera_logs.logs.compression import shutdown_compression
+        await shutdown_compression()
+        await asyncio.sleep(0)
         return archives
 
     archives = asyncio.run(scenario())
@@ -337,7 +340,7 @@ def test_storage_failure_is_not_retried_during_stop(tmp_path):
 
         collector._flush = fail_once
         await collector.start()
-        await connection._received.put(b"x" * (256 * 1024))
+        await connection._received.put(b"x" * 4096)
         await asyncio.wait_for(collector.wait_closed(), .5)
         with pytest.raises(OSError, match="storage failed"):
             await collector.stop()

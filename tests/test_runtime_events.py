@@ -91,6 +91,24 @@ async def test_event_write_timeout_does_not_prevent_reconnect_status(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_unsent_scheduled_command_records_event_without_overwriting_collection_state():
+    """已确认未写入设备的定时命令失败只留事件，不伪造任务状态转换。"""
+    runtime = await _runtime()
+
+    await runtime.on_state("SCHEDULED_COMMAND_UNSENT", {
+        "sessionId": "session", "commandId": "periodic", "execution": 3,
+        "outcome": "FAILED", "reason": "命令通道未确认，本次未发送",
+    })
+
+    event = await runtime.repo.db.events.find_one({"taskId": "task", "type": "SCHEDULED_COMMAND_UNSENT"})
+    assert event["commandId"] == "periodic"
+    assert event["execution"] == 3
+    assert event["message"] == "命令通道未确认，本次未发送"
+    assert (event["level"], event["outcome"]) == ("WARNING", "FAILED")
+    assert (await runtime.repo.get("tasks", "task"))["status"] == "COLLECTING"
+
+
+@pytest.mark.asyncio
 async def test_late_session_callback_cannot_overwrite_current_session_or_write_event():
     """新 Collector 已创建后，旧会话读取异常不应改变新会话的采集状态。"""
     runtime = await _runtime()

@@ -59,6 +59,29 @@ async def test_run_with_recovery_reference_is_never_archived(repository, guard):
     assert await repository.db.runs.find_one({"id": "old"})
 
 
+async def test_deployment_proof_blocks_run_archive_until_raw_recovery_is_persisted(repository):
+    """部署关闭证明尚未交给持久归档队列时，不能删除唯一会话恢复依据。"""
+    ended = await _run(repository)
+    await repository.db.files.insert_one({
+        "id": "raw", "taskId": "task", "runId": "old", "status": "OPEN",
+        "deploymentClosedProof": {"token": "a" * 32},
+    })
+    reference = ended + timedelta(days=31)
+
+    blocked = await record_archive.maintain_growth_records(repository, {"runDays": 30}, reference=reference)
+
+    assert blocked["archivedRuns"] == 0 and blocked["protected"] == 1
+    assert await repository.db.runs.find_one({"id": "old"})
+
+    await repository.db.files.update_one(
+        {"id": "raw"}, {"$set": {"deploymentClosedProof.archiveRecoveredAt": datetime.now(UTC)}},
+    )
+    released = await record_archive.maintain_growth_records(repository, {"runDays": 30}, reference=reference)
+
+    assert released["archivedRuns"] == 1
+    assert await repository.db.runs.find_one({"id": "old"}) is None
+
+
 async def test_event_and_audit_cleanup_are_limited_and_active_event_is_preserved(repository):
     """审计和事件按固定批量清理，关联活动任务的运行事件不能因到期删除。"""
     reference = datetime(2026, 3, 1, tzinfo=UTC)

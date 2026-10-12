@@ -17,6 +17,13 @@ async def archive_chunk(db, run, timestamp, session, *, dry_run=False):
     task_id, run_id = run.get("taskId"), run.get("id")
     if not task_id or not run_id or not run.get("endedAt"):
         return False, "运行未完整结束"
+    pending_proof = await db.files.find_one({
+        "taskId": task_id, "runId": run_id, "deploymentClosedProof.token": {"$exists": True},
+        "deploymentClosedProof.archiveRecoveredAt": {"$exists": False},
+    }, session=session)
+    if pending_proof:
+        # 受控关闭证明仍是 Worker 重启后原始日志恢复的唯一身份依据，不能先删 run 再猜测会话。
+        return False, "部署关闭证明等待原始日志恢复"
     task = await db.tasks.find_one_and_update({"id": task_id}, {"$inc": {"recordArchiveRevision": 1}},
         return_document=ReturnDocument.AFTER, session=session)
     if task and task.get("runId") == run_id:

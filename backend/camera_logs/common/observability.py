@@ -12,9 +12,11 @@ import sys
 import time
 import traceback
 import uuid
+import weakref
+from collections import deque
 from collections.abc import Mapping
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -29,7 +31,10 @@ from camera_logs.common.request_targets import request_target
 from camera_logs.common.websocket_logging import track_websocket
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
-LOG_BACKUP_COUNT = 14
+MAX_EXCEPTION_TEXT_BYTES = 32 * 1024
+MAX_EXCEPTION_FRAGMENT_BYTES = 4096
+DEFAULT_SERVICE_LOG_RETENTION_DAYS = 7
+MAX_SERVICE_LOG_RETENTION_DAYS = 3650
 LOG_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _SECRET_KEYS = {
     "password", "token", "authorization", "passwordencrypted", "currentpassword", "newpassword",
@@ -44,6 +49,10 @@ _SECRET_TEXT = re.compile(
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
 )
 _BEARER_TEXT = re.compile(r"(?i)(\bbearer\s+)[^\s,}\]\"']+")
+_CURRENT_LOG_NAME = "camera-logs.jsonl"
+_MANAGED_SHARD_NAME = re.compile(r"^camera-logs\.\d{4}-\d{2}-\d{2}\.\d{3,}\.jsonl$")
+_LEGACY_SHARD_NAME = re.compile(r"^camera-logs\.jsonl\.\d+$")
+_SERVICE_LOG_HANDLERS: weakref.WeakSet[DailySizeRotatingFileHandler] = weakref.WeakSet()
 
 
 def _secret_key(key: object) -> bool:
@@ -81,6 +90,55 @@ def redact_text(value: str) -> str:
     return _SECRET_TEXT.sub(replace_secret, value)
 
 
+def _take_utf8(value: str, limit: int) -> tuple[str, str]:
+    """从字符串前端取不超过给定字节数的完整 UTF-8 字符，并返回剩余文本。"""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value, ""
+    prefix = encoded[:limit].decode("utf-8", errors="ignore")
+    return prefix, value[len(prefix):]
+
+
+def _bounded_exception_text(exc_info) -> str:
+    """流式保留异常栈首尾，避免先拼接多 MiB 追踪再截断或阻塞日志监听器。"""
+    marker = "\n[异常追踪已截断，保留首尾]\n"
+    head_limit = MAX_EXCEPTION_TEXT_BYTES // 2
+    tail_limit = MAX_EXCEPTION_TEXT_BYTES - head_limit - len(marker.encode("utf-8"))
+    head, tail = [], deque()
+    head_bytes = tail_bytes = 0
+    truncated = False
+    trace = traceback.TracebackException(*exc_info)
+    for fragment in trace.format(chain=True):
+        encoded = fragment.encode("utf-8")
+        if len(encoded) > MAX_EXCEPTION_FRAGMENT_BYTES:
+            # 异常参数可能直接包含设备正文或凭据，超长片段不保留任意原文。
+            fragment = "[异常文本片段超过 4096 字节，已省略]\n"
+            truncated = True
+        else:
+            fragment = redact_text(fragment)
+        while fragment:
+            if head_bytes < head_limit:
+                prefix, fragment = _take_utf8(fragment, head_limit - head_bytes)
+                head.append(prefix)
+                head_bytes += len(prefix.encode("utf-8"))
+                if fragment:
+                    truncated = True
+                    # 剩余一两个字节可能容不下一个中文字符；切入尾部预算，不能原地循环。
+                    head_bytes = head_limit
+                continue
+            truncated = True
+            prefix, fragment = _take_utf8(fragment, MAX_EXCEPTION_FRAGMENT_BYTES)
+            size = len(prefix.encode("utf-8"))
+            tail.append((prefix, size))
+            tail_bytes += size
+            while tail_bytes > tail_limit:
+                _, removed = tail.popleft()
+                tail_bytes -= removed
+    if not truncated:
+        return "".join(head)
+    return "".join(head) + marker + "".join(item for item, _ in tail)
+
+
 class JsonLineFormatter(logging.Formatter):
     """按事件发生时刻输出带上海时区偏移的单行脱敏JSON，不依赖容器TZ。"""
 
@@ -101,7 +159,7 @@ class JsonLineFormatter(logging.Formatter):
         if extras:
             payload["extra"] = redact(extras)
         if record.exc_info:
-            payload["exception"] = redact_text("".join(traceback.format_exception(*record.exc_info)))
+            payload["exception"] = _bounded_exception_text(record.exc_info)
         return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
@@ -112,19 +170,135 @@ class ExceptionPreservingQueueHandler(logging.handlers.QueueHandler):
         return copy(record)
 
 
-def setup_logging(log_dir: Path) -> logging.handlers.QueueListener:
-    """配置 stdout 与 20 MiB/14 备份 JSONL 文件，并返回需在生命周期结束时 stop 的监听器。"""
+def _validated_service_log_retention_days(value: object) -> int:
+    """限制运行日志保留期，配置缺失或损坏时始终回退到七天。"""
+    return value if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_SERVICE_LOG_RETENTION_DAYS else DEFAULT_SERVICE_LOG_RETENTION_DAYS
+
+
+class DailySizeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
+    """按上海自然日及大小切分服务 JSONL，并只清理本处理器创建或继承的轮转文件。"""
+
+    def __init__(self, directory: Path, *, max_bytes: int, retention_days: int):
+        self.directory = directory
+        self.max_bytes = max_bytes
+        self.retention_days = _validated_service_log_retention_days(retention_days)
+        self._cleanup_requested = False
+        super().__init__(directory / _CURRENT_LOG_NAME, "a", encoding="utf-8", delay=False)
+        # BaseRotatingHandler 在初始化期间才设置 baseFilename 并打开活动文件。
+        self._current_day = self._existing_file_day() or self._local_now().date()
+        self.cleanup_expired()
+
+    @staticmethod
+    def _local_now() -> datetime:
+        """统一以服务器上海时区判断每日边界，避免容器时区改变轮转结果。"""
+        return datetime.now(LOG_TIMEZONE)
+
+    def _existing_file_day(self):
+        """重启后根据活动文件最后写入日恢复边界，首条新日志即可跨日切分。"""
+        try:
+            return datetime.fromtimestamp(Path(self.baseFilename).stat().st_mtime, LOG_TIMEZONE).date()
+        except FileNotFoundError:
+            return None
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        """下一条记录跨日或超过大小上限时，先归档现有活动分片。"""
+        if self._local_now().date() != self._current_day:
+            return True
+        if self.max_bytes <= 0:
+            return False
+        message = f"{self.format(record)}{self.terminator}"
+        self.stream.seek(0, 2)
+        return self.stream.tell() + len(message.encode(self.encoding or "utf-8")) >= self.max_bytes
+
+    def _next_shard(self, day) -> Path:
+        """同一天按递增序号命名，绝不覆盖已有运行日志。"""
+        prefix = f"camera-logs.{day.isoformat()}."
+        index = 1
+        while True:
+            candidate = self.directory / f"{prefix}{index:03d}.jsonl"
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+    def doRollover(self) -> None:
+        """原子移动活动文件后重开新片，归档失败时保留原文件并让日志框架处理错误。"""
+        self.stream.close()
+        source = Path(self.baseFilename)
+        if source.exists() and source.stat().st_size:
+            source.replace(self._next_shard(self._current_day))
+        self._current_day = self._local_now().date()
+        self.stream = self._open()
+        self.cleanup_expired()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """在监听器线程执行文件维护，避免管理员请求在 ASGI 事件循环中进行目录扫描或删除。"""
+        if self._cleanup_requested:
+            self._cleanup_requested = False
+            self.cleanup_expired()
+        super().emit(record)
+
+    def cleanup_expired(self, *, reference: datetime | None = None) -> None:
+        """仅清理当前服务目录中已过期的受管分片；活动文件、设备正文和其它文件永不匹配。"""
+        cutoff = (reference or self._local_now()).timestamp() - timedelta(days=self.retention_days).total_seconds()
+        for candidate in self.directory.iterdir():
+            if not (_MANAGED_SHARD_NAME.fullmatch(candidate.name) or _LEGACY_SHARD_NAME.fullmatch(candidate.name)):
+                continue
+            try:
+                if candidate.is_file() and candidate.stat().st_mtime < cutoff:
+                    candidate.unlink()
+            except FileNotFoundError:
+                continue
+
+    def set_retention_days(self, retention_days: int) -> None:
+        """热更新保留期，下一条队列日志在后台监听器中复核旧分片。"""
+        self.acquire()
+        try:
+            self.retention_days = _validated_service_log_retention_days(retention_days)
+            self._cleanup_requested = True
+        finally:
+            self.release()
+
+
+def set_service_log_retention_days(retention_days: int) -> None:
+    """将管理员保存的服务日志保留期立即应用到当前进程的全部 API/Worker 处理器。"""
+    for handler in list(_SERVICE_LOG_HANDLERS):
+        handler.set_retention_days(retention_days)
+
+
+async def apply_service_log_retention_days(retention_days: int) -> None:
+    """在线程池更新处理器状态，管理员请求路径不等待任何文件锁或目录维护。"""
+    await asyncio.to_thread(set_service_log_retention_days, retention_days)
+
+
+async def refresh_service_log_retention(repo) -> int:
+    """从共享平台配置读取保留期并应用；供 API 与每个 Worker 的生命周期轮询调用。"""
+    document = await repo.db.platform_settings.find_one({"id": "platform"}) or {}
+    retention_days = _validated_service_log_retention_days(document.get("serviceLogRetentionDays"))
+    await apply_service_log_retention_days(retention_days)
+    return retention_days
+
+
+async def service_log_retention_loop(repo, *, interval_seconds: float = 60) -> None:
+    """低频同步跨进程设置，读取失败不停止服务，下一轮继续尝试。"""
+    while True:
+        try:
+            await refresh_service_log_retention(repo)
+        except Exception:
+            logging.getLogger(__name__).exception("服务运行日志保留期刷新失败")
+        await asyncio.sleep(interval_seconds)
+
+
+def setup_logging(log_dir: Path, *, retention_days: int = DEFAULT_SERVICE_LOG_RETENTION_DAYS) -> logging.handlers.QueueListener:
+    """配置 stdout 与按日/20 MiB 分片的 JSONL 文件，并返回关闭时需 stop 的监听器。"""
     log_dir.mkdir(parents=True, exist_ok=True)
     formatter = JsonLineFormatter()
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(formatter)
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "camera-logs.jsonl",
-        maxBytes=MAX_LOG_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8",
+    file_handler = DailySizeRotatingFileHandler(
+        log_dir, max_bytes=MAX_LOG_BYTES, retention_days=retention_days,
     )
     file_handler.setFormatter(formatter)
+    _SERVICE_LOG_HANDLERS.add(file_handler)
     log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
     queue_handler = ExceptionPreservingQueueHandler(log_queue)
     root = logging.getLogger()

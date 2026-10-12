@@ -375,6 +375,10 @@ async def execute(args: argparse.Namespace) -> dict[str, object]:
         await asyncio.gather(*(source.close() for source in sources))
         await asyncio.gather(*(collector.wait_closed() for collector in collectors))
         await asyncio.gather(*(collector.stop() for collector in collectors))
+        from camera_logs.logs.compression import shutdown_compression
+        await shutdown_compression()
+        for route, collector in enumerate(collectors):
+            archives[route].extend(collector._writer.drain_archives())
         archive_digests = {}
         for route, route_archives in enumerate(archives):
             if not route_archives:

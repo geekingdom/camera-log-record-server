@@ -248,6 +248,8 @@ export interface NodePerformanceStatus {
   /** 归档压缩工作状态；旧 Worker 仅上报 pendingJobs 和 oldestSeconds。 */
   archives?: {
     pendingJobs?: number;
+    /** 维护扫描发现的唯一持久归档目标数，可能包含尚未进入内存候选的 spool。 */
+    diskPendingJobs?: number;
     waitingJobs?: number;
     runningJobs?: number;
     oldestSeconds?: number;

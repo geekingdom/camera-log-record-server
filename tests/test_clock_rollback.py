@@ -41,48 +41,22 @@ async def test_rollback_seals_a_new_fragment_without_reordering(tmp_path, rollba
 
 
 async def test_repeated_rollbacks_bound_pending_archives_and_preserve_sequence(tmp_path, monkeypatch):
-    """反复回拨最多保留两个后台压缩，第三次封存等待已有槽位释放。"""
-    releases = [asyncio.Event() for _ in range(4)]
-    two_started, third_started = asyncio.Event(), asyncio.Event()
-    active = maximum = calls = 0
-    original = storage.compress_hour
-
-    async def slow(segments, target):
-        nonlocal active, maximum, calls
-        call = calls
-        calls += 1
-        active += 1
-        maximum = max(maximum, active)
-        if active == 2:
-            two_started.set()
-        if call == 2:
-            third_started.set()
-        try:
-            await releases[call].wait()
-            return await original(segments, target)
-        finally:
-            active -= 1
-
-    monkeypatch.setattr(storage, "compress_hour", slow)
+    """反复回拨在队满时留下独立 spool，不阻塞后续采集写入。"""
+    scheduled = []
+    monkeypatch.setattr(storage, "schedule_pending_archive", lambda spool: scheduled.append(spool))
     first = datetime(2026, 9, 8, 2, 30, tzinfo=UTC)
     chunks = [(f"chunk-{number}\n".encode(), first - timedelta(seconds=number)) for number in range(4)]
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")
-    writing = asyncio.create_task(writer.write_many(chunks))
-    await asyncio.wait_for(two_started.wait(), 1)
-    assert not writing.done() and maximum == 2
-    releases[0].set()
-    await asyncio.wait_for(third_started.wait(), 1)
-    positions = await asyncio.wait_for(writing, 2)
-    closing = asyncio.create_task(writer.close())
-    assert not closing.done() and maximum == 2
-    releases[1].set()
-    await asyncio.sleep(0)
-    releases[2].set()
-    releases[3].set()
-    await asyncio.wait_for(closing, 5)
-    assert maximum <= 2
+    positions = await asyncio.wait_for(writer.write_many(chunks), 1)
+    await writer.close(defer=True)
     assert [item.sequence for item in positions] == [1, 2, 3, 4]
-    assert b"".join(data for _, data in sorted(_fragments(tmp_path))) == b"".join(data for data, _ in chunks)
+    assert len(scheduled) == 4
+    assert all(path.exists() for path in scheduled)
+    from camera_logs.logs.compression import publish_spooled_archive
+    for spool in scheduled:
+        await asyncio.to_thread(publish_spooled_archive, spool, None, False)
+    stored = b"".join(data for _, data in sorted(_fragments(tmp_path)))
+    assert stored == b"".join(data for data, _stamp in chunks)
 
 
 async def test_collector_publishes_rollback_with_original_session_and_file(tmp_path):

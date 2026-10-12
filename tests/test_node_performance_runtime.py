@@ -16,6 +16,7 @@ def test_archive_snapshot_distinguishes_queue_and_processing(monkeypatch):
     tick = [10.0]
     monkeypatch.setattr(performance_runtime.time, "monotonic", lambda: tick[0])
     monkeypatch.setattr(performance_runtime, "_archives", {})
+    monkeypatch.setattr(performance_runtime, "_disk_archives", {"pendingJobs": 0, "oldestSeconds": 0, "sampledAt": 10})
     first, second = object(), object()
     performance_runtime.archive_started(first)
     tick[0] = 20
@@ -24,11 +25,32 @@ def test_archive_snapshot_distinguishes_queue_and_processing(monkeypatch):
     tick[0] = 320
     assert performance_runtime.archive_snapshot() == {
         "pendingJobs": 2, "waitingJobs": 1, "runningJobs": 1,
+        "diskPendingJobs": 0,
         "oldestSeconds": 310, "oldestWaitingSeconds": 300, "oldestRunningSeconds": 300,
     }
     performance_runtime.archive_finished(first)
     performance_runtime.archive_finished(second)
     assert performance_runtime.archive_snapshot()["pendingJobs"] == 0
+
+
+def test_archive_snapshot_exposes_disk_waiting_age_to_existing_ui_fields(monkeypatch):
+    """看板使用的 waiting 字段包含磁盘积压并扣除已知正在发布的 spool。"""
+    tick = [1000.0]
+    monkeypatch.setattr(performance_runtime.time, "monotonic", lambda: tick[0])
+    monkeypatch.setattr(performance_runtime, "_archives", {})
+    performance_runtime.archive_spool_snapshot(108, 600)
+    persisted = object()
+    performance_runtime.archive_started(persisted, persisted=True)
+    performance_runtime.archive_running(persisted)
+    performance_runtime.archive_started(object())
+    tick[0] = 1050
+
+    snapshot = performance_runtime.archive_snapshot()
+    assert snapshot["pendingJobs"] == 109
+    assert snapshot["waitingJobs"] == 108
+    assert snapshot["diskPendingJobs"] == 108
+    assert snapshot["oldestSeconds"] == 650
+    assert snapshot["oldestWaitingSeconds"] == 650
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +60,7 @@ def restore_runtime_globals():
     write_limit, write_closed = write_io._limit, write_io._closed
     rate, next_at = read_limiter.rate, read_limiter.next_at
     effective, pressured, archives = dict(performance_runtime._effective), performance_runtime._pressured, dict(performance_runtime._archives)
+    disk_archives = dict(performance_runtime._disk_archives)
     yield
     buffering.configure(configuration)
     write_io.configure(write_limit)
@@ -46,6 +69,7 @@ def restore_runtime_globals():
     performance_runtime._effective = effective
     performance_runtime._pressured = pressured
     performance_runtime._archives.clear(); performance_runtime._archives.update(archives)
+    performance_runtime._disk_archives = disk_archives
 
 
 def worker(telemetry, age=0):
@@ -124,3 +148,15 @@ async def test_batch_wait_does_not_throttle_background_when_actual_write_is_fast
             subject, {"writeLatencyLimitMs": 100}, {"writeLatencyMs": 150, "writeIoLatencyMs": 5}, 20)
     assert status["state"] == "NORMAL"
     assert status["effective"]["readMiBPerSecond"] == 50
+
+
+def test_idle_archive_snapshot_does_not_age_into_false_pressure(monkeypatch):
+    """空闲节点启动后即使已过几小时，也不能产生不存在的五分钟归档告警。"""
+    monkeypatch.setattr(performance_runtime, "_archives", {})
+    monkeypatch.setattr(performance_runtime, "_disk_archives", {
+        "pendingJobs": 0, "oldestSeconds": 0, "sampledAt": 0,
+    })
+    monkeypatch.setattr(performance_runtime.time, "monotonic", lambda: 50_000)
+    snapshot = performance_runtime.archive_snapshot()
+    assert snapshot["pendingJobs"] == snapshot["waitingJobs"] == 0
+    assert snapshot["oldestSeconds"] == snapshot["oldestWaitingSeconds"] == 0

@@ -40,9 +40,13 @@ def test_parallel_streams_archive_each_route_without_cross_contamination(tmp_pat
         await streams[1].values.put(b"b-1\nb-2\n")
         await asyncio.gather(*(stream.close() for stream in streams))
         await asyncio.gather(*(collector.wait_closed() for collector in collectors))
+        from camera_logs.logs.compression import shutdown_compression
+        await shutdown_compression()
+        await asyncio.sleep(0)
         return archives
 
     archives = asyncio.run(scenario())
+    assert all(len(route) == 1 for route in archives)
     contents = []
     for route in archives:
         with tarfile.open(route[0].path, "r:gz") as bundle:

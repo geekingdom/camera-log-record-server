@@ -213,6 +213,15 @@ def test_deploy_script_uses_sudo_to_revoke_existing_project_nfs_export():
     assert 'sudo python3 "$root/scripts/configure_nfs_export.py" --env-file "$env_file"' in script
 
 
+def test_complete_deploy_uses_the_worker_proof_protocol_when_an_old_container_exists():
+    """deploy-all 不能绕开 worker 组件的 prepare/inspect/complete 编排。"""
+    script = (root / "deploy.sh").read_text(encoding="utf-8")
+    assert 'ps -q worker' in script
+    assert 'python3 "$root/scripts/deploy_component.py" --component worker' in script
+    assert 'build\n' in script and '--no-build' in script
+    assert script.index('ps -q worker') < script.index('up --no-build --detach --remove-orphans')
+
+
 def _deployment_copy(tmp_path):
     """复制部署入口及其最小依赖，以真实 Bash 进程配合假 Docker 验证编排。"""
     app = tmp_path / "app"
@@ -244,16 +253,39 @@ if [ "$1" = compose ]; then
   for value in "$@"; do [ "$value" = version ] && exit "$MOCK_COMPOSE"; done
   for value in "$@"; do
     if [ "$value" = config ]; then
-      printf '%s\\n' '{"services":{"api":{"environment":{"DATABASE_NAME":"quoted-db"}},"worker":{"environment":{"NODE_ID":"config-worker"}},"frontend":{"ports":[{"target":80,"published":"15173"}]}}}'
+      printf '%s\\n' '{"services":{"api":{"environment":{"DATABASE_NAME":"quoted-db"}},"worker":{"environment":{"NODE_ID":"config-worker","NODE_URL":"http://worker:18081","NODE_PORT":"18081","MONGO_URI":"mongodb://test","ENCRYPTION_KEY":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=","BOOTSTRAP_TOKEN":"bootstrap","INTERNAL_TOKEN":"internal"}},"frontend":{"ports":[{"target":80,"published":"15173"}]}}}'
       exit 0
     fi
   done
-  for value in "$@"; do [ "$value" = up ] && exit 0; done
-  for value in "$@"; do [ "$value" = ps ] && { echo fake-container; exit 0; }; done
+  phase=""
+  for value in "$@"; do
+    [ "$value" = prepare ] && phase=prepare
+    [ "$value" = complete ] && phase=complete
+  done
+  if [ -n "$phase" ]; then
+    if [ "$phase" = prepare ]; then echo '{"token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","prepared":1}'; else echo '{"proved":1,"released":1}'; fi
+    exit 0
+  fi
+  for value in "$@"; do
+    if [ "$value" = stop ]; then printf 'stopped' > "$MOCK_LOG.worker-state"; exit 0; fi
+  done
+  for value in "$@"; do
+    if [ "$value" = up ]; then printf 'running' > "$MOCK_LOG.worker-state"; exit 0; fi
+  done
+  last=""
+  for value in "$@"; do last="$value"; done
+  for value in "$@"; do
+    if [ "$value" = ps ]; then
+      if [ "$last" = worker ] && [ ! -f "$MOCK_LOG.worker-state" ]; then exit 0; fi
+      echo fake-container; exit 0
+    fi
+  done
   for value in "$@"; do [ "$value" = exec ] && exit 0; done
 fi
 if [ "$1" = inspect ]; then
-  case "$3" in *Health*) [ "$MOCK_HEALTH" = 1 ] && echo healthy || echo unhealthy ;; *) echo running ;; esac
+  case "$3" in *Health*) [ "$MOCK_HEALTH" = 1 ] && echo healthy || echo unhealthy ;; *)
+    if [ -f "$MOCK_LOG.worker-state" ] && [ "$(cat "$MOCK_LOG.worker-state")" = stopped ]; then echo false; else echo running; fi ;;
+  esac
   exit 0
 fi
 exit 0

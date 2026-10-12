@@ -39,6 +39,7 @@ from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
 from camera_logs.common.ownership import OwnershipLost, owner_filter
+from camera_logs.common.resource_monitoring import supports_resource_monitoring
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,7 @@ class SessionRuntime:
     async def on_archive(self, archive):
         """仅在压缩校验和原子发布成功后把目录记录设为可下载。"""
         path = archive.path
+        archive_bytes = path.stat().st_size
         log_path = getattr(archive, "log_path", None) or path
         file_id = self.file_id(log_path)
         member_name = getattr(archive, "member_name", None)
@@ -215,11 +217,16 @@ class SessionRuntime:
             self.catalog_dirty[file_id] = {"id": file_id, "taskId": archive.task_id, "runId": archive.run_id,
                 "sessionId": archive.session_id, "nodeId": self.repo.settings.node_id,
                 "hour": archive.hour_start.astimezone(UTC).isoformat(), "path": str(path),
-                "archiveName": path.name, "bytes": archive.raw_size, "archiveBytes": path.stat().st_size,
+                "archiveName": path.name, "bytes": archive.raw_size, "archiveBytes": archive_bytes,
                 "sha256": archive.sha256, "firstSequence": archive.first_sequence,
                 "lastSequence": archive.last_sequence, "status": "READY", **member_fields,
                 "runStartedAt": self.task.get("runStartedAt", self.started_at),
                 "sessionStartedAt": self.started_at}
+        # 同一小时包原子替换后会包含此前 session 的成员；刷新既有 READY 记录的
+        # 目录统计，避免成员仍指向同一 tar 却报告发布前的旧压缩大小。
+        await self.repo.db.files.update_many(
+            {"path": str(path), "status": "READY"}, {"$set": {"archiveBytes": archive_bytes}},
+        )
         # READY 也由统一发布器落库。失败时条目保留，下一周期不会遗漏已删原始正文。
         await self._publish_catalog()
 
@@ -392,7 +399,7 @@ class SessionRuntime:
                 session_commands = {"taskId": self.task["id"], "runId": self.task["runId"],
                                     "sessionId": self.collector.session_id}
                 await self.collector.start()
-                if config.get("protocol") in {"SSH", "TELNET_DEVICE"} and config.get("sshTarget", "HOST") == "HOST":
+                if supports_resource_monitoring(config):
                     self.resource_monitor_task = asyncio.create_task(monitor_session(self, self.collector))
                 delay = 1
                 await self.collector.wait_closed()
@@ -406,7 +413,9 @@ class SessionRuntime:
                 self.error = str(exc)
                 break
             except SshSlotUncertain as exc:
-                self.connection_uncertain = exc
+                # 只保存不带栈的身份快照；反复抛同一异常会累加历史帧并耗尽日志轮转。
+                logger.exception("SSH名额结果未知，保持隔离 task=%s", self.task["id"])
+                self.connection_uncertain = SshSlotUncertain(exc.address, exc.token)
                 self.error = str(exc)
                 break
             except SshCapacityError as exc:
@@ -481,7 +490,8 @@ class SessionRuntime:
             raise failure
         if getattr(self, "connection_uncertain", None):
             # 工厂可能尚未返回连接对象，不能用空collector连接伪造关闭收据。
-            raise self.connection_uncertain
+            uncertainty = self.connection_uncertain
+            raise SshSlotUncertain(uncertainty.address, uncertainty.token) from None
 
     async def _stop_collector(self):
         """握手失败在连接和文件已关闭后作为运行错误返回，不误标为隔离失败。"""

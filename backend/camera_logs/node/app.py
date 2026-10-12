@@ -9,7 +9,11 @@ from pymongo import AsyncMongoClient
 
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
-from camera_logs.common.observability import setup_logging
+from camera_logs.common.observability import (
+    refresh_service_log_retention,
+    service_log_retention_loop,
+    setup_logging,
+)
 from camera_logs.node.worker import Worker
 
 
@@ -20,13 +24,15 @@ def create_worker_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
         listener = client = None
-        worker_task = reads = worker = None
+        worker_task = retention_task = reads = worker = None
         try:
             listener = setup_logging(settings.log_root.parent / "service-logs" / settings.node_id)
             client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True,
                                       w="majority", journal=True)
             repo = Repository(client[settings.database_name], settings)
             await repo.initialize()
+            # 每个独立节点直接读取共享配置，避免 API 进程内热更新无法传到其它主机。
+            await refresh_service_log_retention(repo)
             # deploy-all 的计划重启可能与调度器的心跳扫描交错；新 Worker 先消费
             # 同节点计划窗口产生的 BLOCKED 任务，再开始新一轮调度。
             from camera_logs.node.recovery import recover_planned_restart_tasks
@@ -39,17 +45,21 @@ def create_worker_app(settings=None):
                 {"coordinatorNodeId": settings.node_id, "status": "RUNNING", "leaseUntil": {"$lt": now()}},
                 {"$set": {"status": "FAILED", "error": "WORKER_RESTART", "updatedAt": now()}},
             )
-            from camera_logs.logs.maintenance import recover_orphan_archives
-            await recover_orphan_archives(repo)
             app.state.repo, app.state.worker = repo, worker
             from camera_logs.node.files import install_node_routes
             reads = install_node_routes(app, repo, worker)
             from camera_logs.node.search_index_routes import install_search_index_routes
             install_search_index_routes(app, repo)
+            # 历史归档校验可耗时较长，复用周期维护槽在后台恢复，避免拖住所有新采集。
+            worker.start_maintenance()
             worker_task = asyncio.create_task(worker.run())
+            retention_task = asyncio.create_task(service_log_retention_loop(repo))
             yield
         finally:
             try:
+                if retention_task is not None:
+                    retention_task.cancel()
+                    await asyncio.gather(retention_task, return_exceptions=True)
                 if worker_task is not None:
                     worker_task.cancel()
                     await asyncio.gather(worker_task, return_exceptions=True)
@@ -62,7 +72,7 @@ def create_worker_app(settings=None):
                 finally:
                     try:
                         from camera_logs.logs.compression import shutdown_compression
-                        await shutdown_compression()
+                        await shutdown_compression(timeout_seconds=5)
                     finally:
                         try:
                             from camera_logs.logs.write_io import shutdown as shutdown_write_io

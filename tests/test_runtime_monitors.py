@@ -12,12 +12,32 @@ def monitor_runtime():
     """只创建监控装配所需状态，不建立真实协议连接或访问设备。"""
     collector = SimpleNamespace(_closed=asyncio.Event(), start_coredump_monitor=Mock())
     runtime = SimpleNamespace(
-        collector=collector, stopping=False, retired=False, task={"id": "task", "resourceId": "resource"},
+        collector=collector, stopping=False, retired=False,
+        task={"id": "task", "resourceId": "resource", "protocol": "SSH", "sshTarget": "HOST"},
         repo=SimpleNamespace(settings=SimpleNamespace(nfs_server_ip="", nfs_root="/exports"),
                              db=SimpleNamespace(resources=SimpleNamespace(find_one=AsyncMock(return_value=None)))),
         coredump_target=AsyncMock(), coredump_guard=AsyncMock(), on_coredump=AsyncMock(),
     )
     return runtime, collector
+
+
+@pytest.mark.parametrize("task_updates", [
+    {"protocol": "SSH", "sshTarget": "SLAVE_1"},
+    {"protocol": "SSH", "sshTarget": "SLAVE_2"},
+    {"protocol": "SSH", "sshTarget": "SLAVE_3"},
+    {"protocol": "TELNET_SERIAL"},
+])
+async def test_ineligible_connection_never_attaches_coredump_monitor(task_updates):
+    """从机 SSH 和串口连接不得查询来源或向设备下发 Coredump 配置。"""
+    runtime, collector = monitor_runtime()
+    runtime.task.update(task_updates)
+    runtime.repo.settings.nfs_server_ip = "10.0.0.1"
+
+    await runtime_monitors.attach_coredump_monitor(runtime, collector, retry_seconds=0)
+
+    runtime.coredump_target.assert_not_awaited()
+    runtime.on_coredump.assert_not_awaited()
+    collector.start_coredump_monitor.assert_not_called()
 
 
 async def test_source_query_failure_retries_without_closing_collector():
@@ -73,3 +93,24 @@ async def test_supervisor_cancellation_closes_both_optional_tasks(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await supervisor
     assert all(event.is_set() for event in exits)
+
+
+@pytest.mark.parametrize("task_updates", [
+    {"protocol": "SSH", "sshTarget": "SLAVE_1"},
+    {"protocol": "TELNET_SERIAL"},
+])
+async def test_ineligible_connection_does_not_start_optional_monitor_tasks(monkeypatch, task_updates):
+    """不合格会话不保留 Coredump 或资源指标后台协程。"""
+    runtime, collector = monitor_runtime()
+    runtime.task.update(task_updates)
+    started = []
+
+    async def child(name):
+        started.append(name)
+
+    monkeypatch.setattr(runtime_monitors, "attach_coredump_monitor", lambda *_: child("coredump"))
+    monkeypatch.setattr(runtime_monitors, "monitor_loop", lambda *_: child("resource"))
+
+    await runtime_monitors.monitor_session(runtime, collector)
+
+    assert started == []

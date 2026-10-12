@@ -21,6 +21,11 @@ from camera_logs.common.config import (
     MAX_NODE_CAPACITY,
 )
 from camera_logs.common.database import now
+from camera_logs.common.observability import (
+    DEFAULT_SERVICE_LOG_RETENTION_DAYS,
+    MAX_SERVICE_LOG_RETENTION_DAYS,
+    apply_service_log_retention_days,
+)
 from camera_logs.common.retention_config import RecordRetentionConfig, retention_config
 from camera_logs.common.security import actor, authorize
 from camera_logs.node.health import fresh
@@ -65,6 +70,8 @@ class PlatformSettingsPatch(SettingsModel):
     liveLogBufferMiB: int | None = Field(default=None, ge=MIN_LIVE_LOG_BUFFER_MIB,
                                           le=MAX_LIVE_LOG_BUFFER_MIB, strict=True,
                                           description="实时日志页面允许保留在浏览器内存中的最大数据量，单位MiB")
+    serviceLogRetentionDays: int | None = Field(default=None, ge=1, le=MAX_SERVICE_LOG_RETENTION_DAYS,
+                                                 strict=True, description="API 和 Worker 服务运行 JSONL 的保留天数")
     resourceMonitor: ResourceMonitorConfig | None = None
     recordRetention: RecordRetentionConfig | None = None
     version: int = Field(ge=1, strict=True)
@@ -230,6 +237,7 @@ async def _platform_settings(repo, *, session=None) -> dict:
         {"$setOnInsert": {"id": PLATFORM_SETTINGS_ID, "retentionDays": retention_days,
                            "clusterCapacity": cluster_capacity,
                            "liveLogBufferMiB": DEFAULT_LIVE_LOG_BUFFER_MIB,
+                           "serviceLogRetentionDays": DEFAULT_SERVICE_LOG_RETENTION_DAYS,
                            "resourceMonitor": default_monitor_config(),
                            "recordRetention": retention_config(),
                            "version": 1, "createdAt": timestamp, "updatedAt": timestamp}},
@@ -248,11 +256,12 @@ def install_settings_routes(app):
         """返回版本化平台设置；首次读取建立可审计的默认配置记录。"""
         authorize(user, "admin")
         document = await _platform_settings(request.app.state.repo)
-        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "liveLogBufferMiB", "resourceMonitor", "version", "updatedAt")}
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "liveLogBufferMiB", "serviceLogRetentionDays", "resourceMonitor", "version", "updatedAt")}
         result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
         result["recordRetention"] = retention_config(document.get("recordRetention"))
         result["clusterCapacity"] = result["clusterCapacity"] or request.app.state.repo.settings.cluster_capacity
         result["liveLogBufferMiB"] = result["liveLogBufferMiB"] or DEFAULT_LIVE_LOG_BUFFER_MIB
+        result["serviceLogRetentionDays"] = result["serviceLogRetentionDays"] or DEFAULT_SERVICE_LOG_RETENTION_DAYS
         return result
 
     @app.get("/api/v1/display-settings")
@@ -277,6 +286,8 @@ def install_settings_routes(app):
                            **({"clusterCapacity": body.clusterCapacity} if body.clusterCapacity is not None else {}),
                            **({"liveLogBufferMiB": body.liveLogBufferMiB}
                               if body.liveLogBufferMiB is not None else {}),
+                           **({"serviceLogRetentionDays": body.serviceLogRetentionDays}
+                              if body.serviceLogRetentionDays is not None else {}),
                            **({"recordRetention": body.recordRetention.model_dump()}
                               if body.recordRetention is not None else {}),
                            **({"resourceMonitor": parse_monitor_config(body.resourceMonitor.model_dump())}
@@ -292,11 +303,14 @@ def install_settings_routes(app):
         document = await audited_mutation(
             repo, user["id"], "update_platform_settings", PLATFORM_SETTINGS_ID, commit
         )
-        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "liveLogBufferMiB", "resourceMonitor", "version", "updatedAt")}
+        # 管理请求所在的 API 进程在事务提交后立即执行新保留期；其它 Worker 由生命周期刷新协程同步。
+        await apply_service_log_retention_days(document.get("serviceLogRetentionDays", DEFAULT_SERVICE_LOG_RETENTION_DAYS))
+        result = {key: document.get(key) for key in ("retentionDays", "clusterCapacity", "liveLogBufferMiB", "serviceLogRetentionDays", "resourceMonitor", "version", "updatedAt")}
         result["resourceMonitor"] = parse_monitor_config(result.get("resourceMonitor"))
         result["recordRetention"] = retention_config(document.get("recordRetention"))
         result["clusterCapacity"] = result["clusterCapacity"] or repo.settings.cluster_capacity
         result["liveLogBufferMiB"] = result["liveLogBufferMiB"] or DEFAULT_LIVE_LOG_BUFFER_MIB
+        result["serviceLogRetentionDays"] = result["serviceLogRetentionDays"] or DEFAULT_SERVICE_LOG_RETENTION_DAYS
         return result
 
     @app.get("/api/v1/admin/nodes")

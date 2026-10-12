@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import tarfile
 from collections.abc import Iterator
@@ -19,6 +20,7 @@ from camera_logs.logs.naming import safe_filename_component
 from camera_logs.logs.order import ordered_files
 
 MAX_MEMBER_BYTES = 10 * 1024 * 1024
+MAX_METADATA_BYTES = 1024 * 1024
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 Source = tuple[dict[str, Any], dict[str, Any], Path, bool]
 
@@ -123,7 +125,7 @@ def write_hour_archive(destination: Path, sources: list[Source], *, max_output_b
 
 
 def reusable_hour_archive(sources: list[Source]) -> Path | None:
-    """确认完整选中同一共享包的全部日志成员后，返回可直接下载的原始包。"""
+    """以已发布旁路清单确认完整选择的固定 READY 包，避免为 ZIP STORE 再解压全部正文。"""
     if not sources or any(temporary for _frozen, _file, _path, temporary in sources):
         return None
     paths = {path for _frozen, _file, path, _temporary in sources}
@@ -134,16 +136,50 @@ def reusable_hour_archive(sources: list[Source]) -> Path | None:
     if any(frozen.get("status") != "READY" or not file.get("archiveMember") for frozen, file, _path, _temporary in sources):
         return None
     try:
-        with tarfile.open(path, "r:gz") as archive:
-            all_members = archive.getmembers()
-            members = [item for item in all_members if item.isfile()]
-            if not members or len(members) != len(all_members) or any(not item.name.endswith(".log") or item.size > MAX_MEMBER_BYTES for item in members):
+        canonical_values = {str(file.get("path") or "") for _frozen, file, _path, _temporary in sources}
+        if len(canonical_values) != 1 or not next(iter(canonical_values)):
+            return None
+        canonical_path = Path(next(iter(canonical_values)))
+        canonical_before = canonical_path.stat()
+        pinned_before = path.stat()
+        identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        # job 固定的 hard link 必须仍指向发布目录的同一版本；原子替换后宁可重组，
+        # 绝不能把旧 tar 与新 metadata 混用。旧成员 archiveBytes 可在后续合并后陈旧，
+        # 不能用它否定完整 metadata 和冻结摘要。
+        if identity(canonical_before) != identity(pinned_before):
+            return None
+        metadata_path = canonical_path.with_name(canonical_path.name + ".metadata.json")
+        metadata_before = metadata_path.stat()
+        # 发布顺序固定为先原子替换 tar、再原子替换旁路清单。因此 tar 比清单更新
+        # 说明正处于两者之间的窗口，不能用上一版成员清单确认新版 tar。
+        if metadata_before.st_size > MAX_METADATA_BYTES or metadata_before.st_mtime_ns < canonical_before.st_mtime_ns:
+            return None
+        with metadata_path.open(encoding="utf-8") as source:
+            metadata = json.load(source)
+        # 原子发布的旁路清单若在读取时被替换，宁可回退重建，也不把两个版本混用。
+        metadata_after = metadata_path.stat()
+        if (metadata_before.st_ino, metadata_before.st_size, metadata_before.st_mtime_ns) != (
+            metadata_after.st_ino, metadata_after.st_size, metadata_after.st_mtime_ns,
+        ):
+            return None
+        if identity(canonical_path.stat()) != identity(canonical_before):
+            return None
+        members = metadata.get("members") if isinstance(metadata, dict) and metadata.get("formatVersion") == 2 else None
+        if not isinstance(members, list) or not members:
+            return None
+        by_name = {member.get("logName"): member for member in members if isinstance(member, dict)}
+        selected = {str(file.get("archiveMember") or "") for _frozen, file, _path, _temporary in sources}
+        if len(by_name) != len(members) or len(selected) != len(sources) or selected != set(by_name):
+            return None
+        for frozen, file, _path, _temporary in sources:
+            member = by_name.get(file.get("archiveMember"))
+            expected_bytes = int(frozen.get("bytes", -1))
+            expected_hash = file.get("sha256") or frozen.get("sha256")
+            if (not isinstance(member, dict) or not str(member.get("logName", "")).endswith(".log")
+                    or not isinstance(member.get("rawSize"), int) or member["rawSize"] != expected_bytes
+                    or member["rawSize"] > MAX_MEMBER_BYTES or not expected_hash
+                    or member.get("sha256") != expected_hash):
                 return None
-            selected = {str(file["archiveMember"]) for _frozen, file, _path, _temporary in sources}
-            names = [item.name for item in members]
-            if len(set(names)) != len(names) or len(selected) != len(sources) or selected != set(names):
-                return None
-            sizes = {item.name: item.size for item in members}
-            return path if all(int(frozen.get("bytes", -1)) == sizes[file["archiveMember"]] for frozen, file, _path, _temporary in sources) else None
-    except (OSError, tarfile.TarError):
+        return path
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None

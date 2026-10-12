@@ -37,3 +37,24 @@ async def test_unknown_factory_reservation_never_produces_closed_receipt(tmp_pat
     assert saved["status"] == "BLOCKED" and saved["nodeId"] == "node-a"
     assert not saved.get("closedReceipt")
     assert runtime.catalog_task.done()
+
+
+@pytest.mark.asyncio
+async def test_repeated_unknown_stop_does_not_grow_stored_traceback(tmp_path):
+    """未知连接不得假冒关闭；反复停止也不能把历史异常栈无限留在内存和日志。"""
+    runtime = object.__new__(SessionRuntime)
+    runtime.collector = None
+    runtime.catalog_dirty = {}
+    runtime.catalog_task = asyncio.create_task(asyncio.sleep(0))
+    runtime.background = asyncio.create_task(asyncio.sleep(0))
+    runtime.task = {"id": "uncertain"}
+    runtime.connection_uncertain = SshSlotUncertain("192.0.2.1", "token")
+    await asyncio.gather(runtime.catalog_task, runtime.background)
+    lengths = []
+    for _ in range(100):
+        with pytest.raises(SshSlotUncertain) as info:
+            await runtime.stop()
+        import traceback
+        lengths.append(len(traceback.extract_tb(info.value.__traceback__)))
+    assert len(set(lengths)) == 1
+    assert runtime.connection_uncertain.__traceback__ is None

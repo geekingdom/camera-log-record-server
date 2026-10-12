@@ -4,8 +4,10 @@ import logging
 from datetime import UTC, timedelta
 from types import SimpleNamespace
 
+import pytest
 from camera_logs.collection.coredump_lease import (
     guard_coredump_cleanup,
+    guard_coredump_monitor,
     record_coredump_status,
     release_coredump_lease,
 )
@@ -13,6 +15,26 @@ from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+
+
+@pytest.mark.parametrize("task", [
+    {"id": "task", "runId": "run", "protocol": "SSH", "sshTarget": "SLAVE_1"},
+    {"id": "task", "runId": "run", "protocol": "SSH", "sshTarget": "SLAVE_2"},
+    {"id": "task", "runId": "run", "protocol": "SSH", "sshTarget": "SLAVE_3"},
+    {"id": "task", "runId": "run", "protocol": "TELNET_SERIAL"},
+])
+async def test_ineligible_owner_cannot_claim_or_unmount_coredump(task):
+    """非法连接在领取和停止卸载两条路径均不得查询或更新资源租约。"""
+    class UnexpectedDatabaseAccess:
+        def __getattr__(self, _name):
+            raise AssertionError("不合格 owner 不应访问 Coredump 租约")
+
+    repo = SimpleNamespace(db=UnexpectedDatabaseAccess())
+
+    assert await guard_coredump_monitor(
+        repo, task, session_active=lambda: True, report_status=lambda *_: None,
+    ) is False
+    assert await guard_coredump_cleanup(repo, task, session_active=lambda: True) is False
 
 
 async def test_release_coredump_lease_keeps_successor_lease_and_releases_matching_owner(tmp_path):

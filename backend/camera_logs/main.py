@@ -33,9 +33,14 @@ def create_app(settings=None, db=None):
                                           w="majority", journal=True)
                 database = client[settings.database_name]
             repo = Repository(database, settings)
-            from camera_logs.common.observability import setup_logging
+            from camera_logs.common.observability import (
+                refresh_service_log_retention,
+                service_log_retention_loop,
+                setup_logging,
+            )
             listener = setup_logging(settings.log_root.parent / "service-logs" / "api")
             await repo.initialize()
+            await refresh_service_log_retention(repo)
             from camera_logs.users.sessions import initialize_admin
             await initialize_admin(repo)
             app.state.repo = repo
@@ -49,7 +54,8 @@ def create_app(settings=None, db=None):
                     from camera_logs.resources.health import health_loop
                     from camera_logs.tasks.scheduler import scheduler_loop
                     background = [asyncio.create_task(scheduler_loop(repo)), asyncio.create_task(health_loop(repo)),
-                                  asyncio.create_task(recovery_loop(repo)), asyncio.create_task(record_maintenance_loop(repo))]
+                                  asyncio.create_task(recovery_loop(repo)), asyncio.create_task(record_maintenance_loop(repo)),
+                                  asyncio.create_task(service_log_retention_loop(repo))]
                 try:
                     yield
                 finally:
@@ -69,7 +75,12 @@ def create_app(settings=None, db=None):
     app = FastAPI(title="设备日志记录服务", version="0.1.0", lifespan=lifespan)
     @app.middleware("http")
     async def client_network_policy(request, call_next):
-        """平台来源白名单在登录前生效；健康检查与独立采集节点不受此策略影响。"""
+        """启动窗口先返回稳定 503，再在 API 请求前执行来源白名单。"""
+        if not hasattr(app.state, "repo"):
+            request.state.safe_error = "服务正在初始化，请稍后重试"
+            return JSONResponse(status_code=503, content={"error": {
+                "code": "SERVICE_NOT_READY", "message": request.state.safe_error,
+                "requestId": getattr(request.state, "request_id", None)}})
         if request.url.path.startswith("/api/v1/"):
             from camera_logs.access_policy.policy import enforce_ip
             try:

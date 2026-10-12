@@ -63,12 +63,13 @@ class Collector:
             task_name=str(self.task.get("name") or self.task_id),
             device_ip=str(self.task.get("ip") or "unknown"),
             storage_identity=self.task["storageIdentity"],
+            on_archive=self._on_archive,
         )
         self.write_latency = WriteLatency()
-        # 总延迟保留批处理等待，用于新会话准入；实际写盘延迟只包围 write_many，
-        # 供 AUTO 判断后台 I/O 是否确有争用，避免正常批等待触发归档降速。
+        # 总延迟保留批处理与文件锁等待；实际I/O只统计write_thread文件操作，
+        # 防止归档排队被误当成磁盘压力，触发进一步降速。
         self.write_io_latency = WriteLatency()
-        self._buffer_reserved = 0
+        self._buffer_reservation = buffering.BufferReservation(f"{self.task_id}/{self.session_id}")
         self._sender: asyncio.Task[None] | None = None
         self._reader: asyncio.Task[None] | None = None
         self._scheduled: list[asyncio.Task[None]] = []
@@ -258,11 +259,19 @@ class Collector:
                 return
             detail = {"taskId": self.task_id, "runId": self.run_id, "sessionId": self.session_id,
                       "execution": execution + 1}
+            before_send_entered = reservation_attempted = send_authorized = False
             try:
-                before_send = (
-                    (lambda command_id=command_id, detail=detail: _call(self._reserve, command_id, detail))
-                    if self._reserve is not None else None
-                )
+                async def before_send(current_detail: dict[str, Any] = detail) -> bool:
+                    """记录业务字节授权边界；无预算回调时也必须经此处确认才能写 socket。"""
+                    nonlocal before_send_entered, reservation_attempted, send_authorized
+                    before_send_entered = True
+                    if self._reserve is None:
+                        send_authorized = True
+                        return True
+                    reservation_attempted = True
+                    send_authorized = bool(await _call(self._reserve, command_id, current_detail))
+                    return send_authorized
+
                 await self._enqueue(
                     str(item["command"]),
                     str(item.get("newline", "\n")),
@@ -277,16 +286,16 @@ class Collector:
                 return
             except CommandChannelBlocked:
                 # 未进入业务发送阶段，不消耗次数；等待完整间隔后重新确认通道。
+                await _call(self._on_state, "SCHEDULED_COMMAND_UNSENT", detail | {
+                    "commandId": command_id, "outcome": "FAILED",
+                    "reason": "命令通道未确认，本次未发送",
+                })
                 continue
             except PshSwitchError as error:
+                # PSH 切换是派发器在写入目标业务命令前的握手；即使预算已预留，仍可
+                # 明确记为本次失败并让后续周期重新握手，不能关闭完整采集会话。
                 execution += 1
-                await _call(
-                    self._update,
-                    command_id,
-                    "FAILED",
-                    detail | {"error": str(error)},
-                )
-                # debug 失败只影响当前执行；下一次定时 debug 可先安全恢复后重新握手。
+                await _call(self._update, command_id, "FAILED", detail | {"error": str(error)})
                 continue
             except (ConnectionError, OSError, TimeoutError) as error:
                 await _call(
@@ -295,7 +304,22 @@ class Collector:
                     "UNKNOWN",
                     detail | {"error": str(error)},
                 )
-                return
+                # socket 或预留提交结果未知时必须由监督器关闭本会话；不能复用可能已污染的通道。
+                raise
+            except Exception as error:
+                if not before_send_entered:
+                    execution += 1
+                    await _call(self._update, command_id, "FAILED", detail | {"error": str(error)})
+                    # 尚未预留时没有执行记录可更新，另记事件保证入队故障可查询。
+                    await _call(self._on_state, "SCHEDULED_COMMAND_UNSENT", detail | {
+                        "commandId": command_id, "outcome": "FAILED",
+                        "reason": "定时命令入队失败，本次未发送", "errorType": type(error).__name__,
+                    })
+                    continue
+                # reservation_attempted 即使尚未返回也可能已持久化；send_authorized 后更可能已写 socket。
+                boundary = "预算预留结果未知" if reservation_attempted and not send_authorized else "发送授权后结果未知"
+                await _call(self._update, command_id, "UNKNOWN", detail | {"error": str(error), "boundary": boundary})
+                raise
 
     async def _reader_loop(self) -> None:
         pending: list[tuple[bytes, object]] = []
@@ -363,8 +387,7 @@ class Collector:
                 received_at = datetime.now(UTC)
                 self.write_latency.begin()
                 prefixed = self._prefixer.prefix(data, received_at)
-                buffering.budget().release(buffering.RESERVATION_BYTES - len(prefixed))
-                self._buffer_reserved += len(prefixed) - buffering.RESERVATION_BYTES
+                self._buffer_reservation.settle_read(len(prefixed))
                 buffering.budget().pending.setdefault(id(self), received_monotonic)
                 pending.append((prefixed, received_at))
                 pending_bytes += len(prefixed)
@@ -393,7 +416,7 @@ class Collector:
                     await self._flush(to_flush)
                 self.liveness_storage_busy = True
                 try:
-                    archive = await self._writer.close()
+                    archive = await self._writer.close(defer=True)
                 finally:
                     self.liveness_storage_busy = False
                 if archive:
@@ -407,8 +430,7 @@ class Collector:
                     {"taskId": self.task_id, "sessionId": self.session_id, "error": str(error)},
                 )
             finally:
-                buffering.budget().release(self._buffer_reserved)
-                self._buffer_reserved = 0
+                self._buffer_reservation.release_all()
                 buffering.budget().pending.pop(id(self), None)
                 for task in self._scheduled:
                     task.cancel()
@@ -428,10 +450,9 @@ class Collector:
         waited = not buffering.budget().available()
         self.liveness_storage_busy = True
         try:
-            await buffering.budget().acquire()
+            await self._buffer_reservation.acquire_read()
         finally:
             self.liveness_storage_busy = False
-        self._buffer_reserved += buffering.RESERVATION_BYTES
         try:
             if waited:
                 await self._reset_liveness_observation()
@@ -439,11 +460,9 @@ class Collector:
             if data:
                 return data
         except BaseException:
-            buffering.budget().release(buffering.RESERVATION_BYTES)
-            self._buffer_reserved -= buffering.RESERVATION_BYTES
+            self._buffer_reservation.settle_read(0)
             raise
-        buffering.budget().release(buffering.RESERVATION_BYTES)
-        self._buffer_reserved -= buffering.RESERVATION_BYTES
+        self._buffer_reservation.settle_read(0)
         return data
 
     async def _flush(self, pending: list[tuple[bytes, object]]) -> None:
@@ -452,18 +471,16 @@ class Collector:
         self.liveness_storage_busy = True
         try:
             self.write_latency.begin()
-            self.write_io_latency.begin()
-            from camera_logs.logs.write_io import record_stage
+            from camera_logs.logs.write_io import measure_io, record_stage
             started = buffering.budget().pending.get(id(self))
             if started is not None:
                 record_stage("batchWaitMs", max(0, time.monotonic() - started) * 1000)
-            positions = await self._writer.write_many(pending)
-            self.write_io_latency.finish()
+            with measure_io(self.write_io_latency):
+                positions = await self._writer.write_many(pending)
             self.write_latency.finish()
         finally:
             self.liveness_storage_busy = False
-            buffering.budget().release(self._buffer_reserved)
-            self._buffer_reserved = 0
+            self._buffer_reservation.release_all()
             buffering.budget().pending.pop(id(self), None)
         await self._reset_liveness_observation()
         for position in positions:

@@ -134,7 +134,101 @@ def frontend_backend_ready(config):
         return False
 
 
-def deploy(component, project, compose_file, env_file, timeout):
+def _recovery_result(prefix, phase, deadline, *, token=None):
+    """用新 Worker 镜像执行一次性恢复阶段，并只接受模块输出的单行 JSON。"""
+    command = [*prefix, "run", "--rm", "--no-deps", "worker", "python", "-m",
+               "camera_logs.node.deployment_recovery", phase]
+    if token is not None:
+        command.extend(["--token", token])
+    result = _run(command, deadline)
+    if result.returncode:
+        raise RuntimeError(f"Worker 部署恢复{phase}阶段失败")
+    for line in reversed(result.stdout.splitlines()):
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise RuntimeError(f"Worker 部署恢复{phase}阶段未返回有效证明")
+
+
+def _stopped_container(container, deadline):
+    """轮询 Docker inspect 的真实运行标志，不能用 Compose 心跳代替旧容器已停止证明。"""
+    while time.monotonic() < deadline:
+        result = _run(["docker", "inspect", "--format", "{{.State.Running}}", container], deadline)
+        if result.returncode:
+            raise RuntimeError("无法确认旧 Worker 容器状态")
+        if result.stdout.strip() == "false":
+            return
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise RuntimeError("旧 Worker 容器停止确认超时，未释放任何任务锁")
+
+
+def _recovery_journal(path, payload=None):
+    """原子保存主机侧停机事实，重试不能从数据库标记猜测容器是否已经停止。"""
+    if payload is None:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True))
+    temporary.replace(path)
+    return payload
+
+
+def deploy_worker_with_recovery(prefix, timeout, *, build=True, journal=None):
+    """按准备、停止确认、完成的固定顺序替换 Worker，未知容器状态绝不完成恢复。"""
+    deadline = time.monotonic() + timeout
+    if build:
+        built = _run([*prefix, "build", "worker"], deadline)
+        if built.returncode:
+            raise RuntimeError("Worker 新镜像构建失败")
+    current = _run([*prefix, "ps", "-q", "worker"], deadline)
+    if current.returncode:
+        raise RuntimeError("无法读取现有 Worker 容器，未开始部署恢复")
+    old = current.stdout.strip()
+    if not old:
+        pending = _recovery_journal(journal) if journal else None
+        if pending:
+            if pending.get("compose") != prefix:
+                raise RuntimeError("Worker 部署恢复记录不属于当前 Compose 项目或环境")
+            _stopped_container(pending["container"], deadline)
+            completed = _recovery_result(prefix, "complete", deadline, token=pending["token"])
+            journal.unlink()
+            started = _run([*prefix, "up", "--detach", "worker"], deadline)
+            if started.returncode:
+                raise RuntimeError("Worker 恢复完成后启动失败")
+            return completed
+        # 首次部署没有本次脚本可停止的旧容器，不能把遗留 BLOCKED 任务当成关闭证据。
+        started = _run([*prefix, "up", "--detach", "worker"], deadline)
+        if started.returncode:
+            raise RuntimeError("Worker 首次启动失败")
+        return {"prepared": 0, "proved": 0, "released": 0, "reason": "NO_RUNNING_OLD_WORKER"}
+    prepared = _recovery_result(prefix, "prepare", deadline)
+    token = prepared.get("token")
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise RuntimeError("Worker 部署恢复准备阶段未返回合法令牌")
+    unsafe = ("incompleteOwner", "missingRun", "runSessionConflict", "ownerChanged")
+    if any(prepared.get(reason, 0) for reason in unsafe):
+        raise RuntimeError("Worker 部署恢复准备阶段存在无法证明的旧运行，未停止容器")
+    if journal:
+        _recovery_journal(journal, {"token": token, "container": old, "compose": prefix})
+    stopped = _run([*prefix, "stop", "worker"], deadline)
+    if stopped.returncode:
+        raise RuntimeError("旧 Worker 容器停止失败")
+    _stopped_container(old, deadline)
+    completed = _recovery_result(prefix, "complete", deadline, token=token)
+    if journal:
+        journal.unlink(missing_ok=True)
+    started = _run([*prefix, "up", "--detach", "worker"], deadline)
+    if started.returncode:
+        raise RuntimeError("Worker 新容器启动失败；已写入的关闭证明保留供后续恢复")
+    return completed
+
+
+def deploy(component, project, compose_file, env_file, timeout, *, build=True):
     """配置错误在启动前退出；只启动选定组件，等待依赖可用且不移除其它组件。"""
     prefix = _compose(project, compose_file, env_file)
     result = _run([*prefix, "config", "--format", "json"], time.monotonic() + 30)
@@ -142,8 +236,16 @@ def deploy(component, project, compose_file, env_file, timeout):
         raise ValueError("Compose 配置无效或缺少必填项；请对照 deploy/config 中的中文示例检查")
     config = json.loads(result.stdout)
     values = validate(component, config)
-    subprocess.run([*prefix, "up", "--build", "--detach"], check=True)
     deadline = time.monotonic() + timeout
+    if component == "worker":
+        journal = Path(env_file).resolve().parent / f".worker-deployment-recovery-{project}.json"
+        recovery = deploy_worker_with_recovery(prefix, timeout, build=build, journal=journal)
+        print(f"Worker 部署恢复结果：{json.dumps(recovery, ensure_ascii=False, sort_keys=True)}")
+    else:
+        command = [*prefix, "up", "--detach"]
+        if build:
+            command.insert(-1, "--build")
+        subprocess.run(command, check=True)
     while time.monotonic() < deadline:
         if component == "database":
             ready = all(_service_ready(project, compose_file, env_file, f"mongo{n}", True, deadline) for n in (1, 2, 3))
@@ -172,9 +274,10 @@ if __name__ == "__main__":
     parser.add_argument("--compose-file", type=Path, required=True)
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=float(os.getenv("DEPLOY_HEALTH_TIMEOUT", "240")))
+    parser.add_argument("--no-build", action="store_true", help="镜像已由完整部署阶段构建，不重复构建")
     args = parser.parse_args()
     try:
-        deploy(args.component, args.project, args.compose_file, args.env_file, args.timeout)
+        deploy(args.component, args.project, args.compose_file, args.env_file, args.timeout, build=not args.no_build)
     except (ValueError, RuntimeError, subprocess.CalledProcessError) as error:
         # CalledProcessError 的命令不含凭据；不输出 Compose 原始配置或数据库连接字符串。
         import sys

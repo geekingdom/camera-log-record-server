@@ -151,11 +151,57 @@ async def test_successful_archive_deletes_only_raw_log_and_preserves_index(tmp_p
     assert archive.path.with_name(archive.path.name + ".metadata.json").exists()
 
 
+async def test_deferred_archive_notifies_catalog_callback_without_a_later_write(tmp_path, monkeypatch):
+    """收尾延后归档成功后立即通知目录，不能等待下一次采集或维护扫描。"""
+    published, completed = [], asyncio.get_running_loop().create_future()
+
+    def schedule(_spool):
+        return completed
+
+    async def on_archive(archive):
+        published.append(archive)
+
+    monkeypatch.setattr("camera_logs.logs.storage.schedule_pending_archive", schedule)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device",
+                          on_archive=on_archive)
+    await writer.write(b"deferred\n")
+    assert await writer.close(defer=True) is None
+
+    completed.set_result(tmp_path / "published.tar.gz")
+    for _ in range(10):
+        if published:
+            break
+        await asyncio.sleep(0)
+
+    assert len(published) == 1
+    assert published[0].task_id == "task" and published[0].raw_size == len(b"deferred\n")
+
+
+async def test_deferred_archive_catalog_callback_times_out_without_retaining_notification_task(tmp_path, monkeypatch):
+    """目录数据库无响应不能长期保留已关闭会话，已发布归档仍由维护扫描补偿。"""
+    completed, started, release = (asyncio.get_running_loop().create_future(), asyncio.Event(), asyncio.Event())
+
+    async def on_archive(_archive):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr("camera_logs.logs.storage.schedule_pending_archive", lambda _spool: completed)
+    monkeypatch.setattr("camera_logs.logs.storage.ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS", .01)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device", on_archive=on_archive)
+    await writer.write(b"timeout\n")
+    await writer.close(defer=True)
+    completed.set_result(tmp_path / "published.tar.gz")
+    await started.wait()
+    await asyncio.sleep(.03)
+
+    assert writer._archive_notification_task is None
+
+
 def test_failed_archive_keeps_raw_log_and_index(tmp_path, monkeypatch):
-    async def fail(_segments, _target):
+    async def fail(_spool):
         raise OSError("injected archive failure")
 
-    monkeypatch.setattr("camera_logs.logs.storage.compress_hour", fail)
+    monkeypatch.setattr("camera_logs.logs.storage.compress_spool", fail)
     async def scenario():
         writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
         await writer.write(b"preserve on failure\n")

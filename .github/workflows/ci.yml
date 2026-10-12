@@ -51,6 +51,8 @@ jobs:
         run: python scripts/verify_node_auto_failover.py --isapi-test-port 18089 --single-node-fallback
       - name: 验证计划重启关闭凭据与原子回收
         run: python scripts/verify_planned_restart_recovery.py
+      - name: 验证受控部署文件证明与原子回收
+        run: python scripts/verify_deployment_recovery.py
       - name: 验证节点时差不影响接收心跳与任务准入
         run: python scripts/verify_node_heartbeat_clock.py
       - name: 验证Coredump发现幂等及资源存在筛选索引

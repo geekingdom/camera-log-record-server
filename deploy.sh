@@ -188,7 +188,19 @@ configure_nfs() {
 
 if [[ "$component" == all ]]; then
   configure_nfs
-  docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" up --build --detach --remove-orphans
+  # 先完整构建，再替换旧 Worker；后续 up 使用同一镜像，避免刚完成证明的新 Worker 被二次重启。
+  docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" build
+  # 已运行 Worker 必须先由新镜像建立关闭证明，再停止旧容器；首次完整安装没有旧容器，
+  # 仍走下方常规 Compose 启动，不能凭“未发现容器”释放历史 BLOCKED 任务。
+  if ! old_worker="$(docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" ps -q worker)"; then
+    echo "无法读取现有 Worker 容器，未开始完整部署" >&2
+    exit 1
+  fi
+  journal="$(dirname "$env_file")/.worker-deployment-recovery-${project}.json"
+  if [[ -n "$old_worker" || -f "$journal" ]]; then
+    python3 "$root/scripts/deploy_component.py" --component worker --project "$project" --compose-file "$compose_file" --env-file "$env_file" --no-build
+  fi
+  docker compose --env-file "$env_file" --project-name "$project" --file "$compose_file" up --no-build --detach --remove-orphans
   python3 "$root/scripts/deploy_health.py" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
 else
   # 独立部署不使用 --remove-orphans，避免误删同项目已运行的其它服务。

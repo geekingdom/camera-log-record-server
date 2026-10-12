@@ -112,3 +112,33 @@ def test_rate_update_preserves_existing_read_debt():
 def test_batch_size_and_interval_are_hot_configurable():
     buffering.configure({"bufferMiB": 16, "batchKiB": 512, "flushIntervalMs": 25})
     assert buffering.batch_parameters() == (512 * 1024, .025)
+
+
+async def test_invalid_budget_release_never_mutates_balance(caplog):
+    """负数/超额释放先拒绝，不能先减成负数再依赖可剥离断言。"""
+    state = buffering.budget()
+    await state.acquire()
+    for size in (-1, state.used + 1, True):
+        with pytest.raises(RuntimeError, match="session-test"):
+            state.release(size, owner="session-test")
+        assert state.used == buffering.RESERVATION_BYTES
+    assert "session-test" in caplog.text
+    state.release(state.used)
+
+
+async def test_owned_reservations_settle_once_and_cleanup_is_idempotent():
+    """一个会话不能通过重复结算释放另一会话余额，批次与读异常共享净结算。"""
+    first = buffering.BufferReservation("first")
+    second = buffering.BufferReservation("second")
+    await first.acquire_read()
+    await second.acquire_read()
+    first.settle_read(13)
+    with pytest.raises(RuntimeError):
+        first.settle_read(0)
+    assert buffering.budget().used == buffering.RESERVATION_BYTES + 13
+    first.release_all()
+    first.release_all()
+    assert buffering.budget().used == buffering.RESERVATION_BYTES
+    second.settle_read(0)
+    second.release_all()
+    assert buffering.budget().used == 0

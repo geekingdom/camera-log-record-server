@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import tarfile
@@ -21,8 +22,11 @@ from typing import Any
 from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
-from camera_logs.logs.compression import _hash_stream, compress_hour
+from camera_logs.logs.archive_spool import load as load_archive_spool
+from camera_logs.logs.archive_spool import persist as persist_archive_spool
+from camera_logs.logs.compression import _hash_stream, schedule_pending_archive, schedule_recovery_archive
 from camera_logs.logs.export_locks import ExportLock
+from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.search_index import index_path
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,129 @@ async def _pending_is_active(repo: Any, segments: list[dict[str, Any]]) -> bool:
         if current is not None:
             return True
     return False
+
+
+def _proof_identity(run: dict[str, Any]) -> dict[str, Any] | None:
+    """只接受部署事务已提交的完整停机证明，拒绝心跳或普通收尾记录替代。"""
+    proof = run.get("deploymentClosedProof")
+    keys = ("token", "nodeId", "taskId", "runId", "generation", "sessionId", "confirmedAt")
+    if not isinstance(proof, dict) or any(proof.get(key) in (None, "") for key in keys):
+        return None
+    if not isinstance(proof["token"], str) or not isinstance(proof["nodeId"], str):
+        return None
+    if proof["taskId"] != run.get("taskId") or proof["runId"] != run.get("id"):
+        return None
+    # run 文档是部署 complete CAS 固化的旧 owner 快照；缺少任何一项时不得
+    # 由当前 task 的新归属反推，以免在迁移后的新会话旁路归档。
+    if any(proof[key] != run.get(key) for key in ("nodeId", "generation", "sessionId")):
+        return None
+    try:
+        datetime.fromisoformat(str(proof["confirmedAt"]))
+    except ValueError:
+        return None
+    return {
+        key: proof[key]
+        for key in ("token", "taskId", "runId", "sessionId", "nodeId", "generation")
+    }
+
+
+def _raw_recovery_target(log: Path) -> Path:
+    """按旧分卷文件名恢复所属小时包名，仍优先复用目录内已经存在的共享包。"""
+    existing = sorted(log.parent.glob("*.tar.gz"))
+    if existing:
+        return existing[0]
+    match = re.fullmatch(r"(.+)-part-\d+\.log", log.name)
+    if match is None:
+        raise ValueError("raw log filename has no part number")
+    return log.parent / f"{match.group(1)}.tar.gz"
+
+
+def _raw_hour(log: Path) -> datetime:
+    """从 Writer 的上海日期/小时目录取得归档小时，拒绝不符合固定目录的文件。"""
+    date, hour = log.parent.parent.name, log.parent.name
+    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", date)
+    if match is None or not re.fullmatch(r"\d{2}", hour):
+        raise ValueError("raw log path has no writer hour")
+    from zoneinfo import ZoneInfo
+    return datetime(*(int(value) for value in match.groups()), int(hour), tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC)
+
+
+def _raw_segment(log: Path, identity: dict[str, Any]) -> dict[str, Any]:
+    """逐行验证旧索引与正文边界后重建一个可由现有发布器消费的 manifest。"""
+    index = log.with_suffix(".index.jsonl")
+    if not index.is_file() or log.stat().st_size <= 0:
+        raise ValueError("raw log or index is missing")
+    offset = previous_sequence = None
+    first_sequence = last_sequence = None
+    with index.open(encoding="utf-8") as source:
+        for line in source:
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise TypeError("index row is not an object")
+            sequence, row_offset, length, received_at = (record.get(key) for key in
+                ("sequence", "offset", "length", "receivedAt"))
+            if (not isinstance(sequence, int) or isinstance(sequence, bool) or not isinstance(row_offset, int)
+                    or isinstance(row_offset, bool) or not isinstance(length, int) or isinstance(length, bool)
+                    or length <= 0 or row_offset < 0):
+                raise ValueError("index row has invalid position")
+            datetime.fromisoformat(str(received_at))
+            if offset is None and row_offset != 0:
+                raise ValueError("index does not start at raw log head")
+            if offset is not None and row_offset != offset:
+                raise ValueError("index offset is not continuous")
+            if previous_sequence is not None and sequence != previous_sequence + 1:
+                raise ValueError("index sequence is not continuous")
+            offset, previous_sequence = row_offset + length, sequence
+            first_sequence = sequence if first_sequence is None else first_sequence
+            last_sequence = sequence
+    raw_size = log.stat().st_size
+    if offset != raw_size or first_sequence is None or last_sequence is None:
+        raise ValueError("index does not cover raw log exactly")
+    with log.open("rb") as source:
+        digest, verified_size = _hash_stream(source)
+    with index.open("rb") as source:
+        index_digest, index_size = _hash_stream(source)
+    if verified_size != raw_size:
+        raise ValueError("raw log size changed during recovery")
+    return {"taskId": identity["taskId"], "runId": identity["runId"], "sessionId": identity["sessionId"],
+            "hourStart": _raw_hour(log).isoformat(), "rawSize": raw_size, "sha256": digest,
+            "firstSequence": first_sequence, "lastSequence": last_sequence, "logPath": str(log),
+            "logName": log.name, "indexName": index.name, "indexSha256": index_digest, "indexBytes": index_size}
+
+
+async def _recover_proven_raw_segments(repo: Any, spooled_logs: set[Path]) -> None:
+    """只按已验证部署停机证明定位旧 raw/index，持久化后交给有界调度器。"""
+    cursor = repo.db.files.find({"deploymentClosedProof.nodeId": repo.settings.node_id,
+                                 "deploymentClosedProof.token": {"$exists": True}, "status": "OPEN"})
+    async for file in cursor:
+        proof = file.get("deploymentClosedProof") or {}
+        required = ("token", "nodeId", "taskId", "runId", "generation", "sessionId", "fileId", "path")
+        if any(proof.get(key) in (None, "") for key in required) or any(
+            proof.get(key) != file.get({"fileId": "id"}.get(key, key))
+            for key in ("fileId", "nodeId", "taskId", "runId", "sessionId", "path")
+        ):
+            logger.warning("归档原始分卷未恢复 reason=invalid_deployment_file_proof file=%s", file.get("id"))
+            continue
+        identity = {key: proof[key] for key in ("taskId", "runId", "sessionId", "nodeId", "generation")}
+        log = Path(proof["path"])
+        try:
+            resolved = log.resolve()
+            if _root(repo) not in resolved.parents or resolved in spooled_logs:
+                continue
+            segment = await asyncio.to_thread(_raw_segment, resolved, identity)
+            if await _pending_is_active(repo, [segment]):
+                continue
+            target = _raw_recovery_target(resolved)
+            if not _pending_path(target).exists():
+                spool = await asyncio.to_thread(persist_archive_spool, target, [segment])
+                spooled_logs.add(resolved)
+                schedule_pending_archive(spool)
+            await repo.db.files.update_one(
+                {"id": file["id"], "deploymentClosedProof.token": proof["token"]},
+                {"$set": {"deploymentClosedProof.archiveRecoveredAt": now()}},
+            )
+        except Exception as error:  # noqa: BLE001 - 单卷证据异常不得阻塞其它旧运行恢复。
+            logger.warning("归档原始分卷未恢复 reason=invalid_raw_index file=%s error=%s", file.get("id"), type(error).__name__)
 
 
 def _member_path(archive: Path, name: Any, suffix: str) -> Path:
@@ -164,24 +291,101 @@ def _sidecar_member_names(path: Path) -> set[str] | None:
     return names if len(names) == len(members) and all(isinstance(name, str) for name in names) else None
 
 
+def _ready_group_metadata(path: Path) -> tuple[set[str], int] | None:
+    """在线程中配对读取旁路成员名和归档大小，避免维护协程触发磁盘 stat。"""
+    names = _sidecar_member_names(path)
+    return (names, path.stat().st_size) if names is not None else None
+
+
 async def _ready_group_matches(repo: Any, path: Path) -> bool:
     """大小和成员数均未变化的完整 READY 组无需每次维护重新读取全部 tar 正文。"""
-    names = await asyncio.to_thread(_sidecar_member_names, path)
-    if names is None:
+    metadata = await job_thread(_ready_group_metadata, path)
+    if metadata is None:
         return False
+    names, archive_bytes = metadata
     records = [record async for record in repo.db.files.find({"path": str(path), "status": "READY"})]
     return (len(records) == len(names) and {record.get("archiveMember") for record in records} == names
-            and all(record.get("archiveBytes") == path.stat().st_size for record in records))
+            and all(record.get("archiveBytes") == archive_bytes for record in records))
+
+
+def _scanned_orphan_archives(root: Path) -> tuple[list[Path], list[Path], list[Path], dict[Path, float]]:
+    """在线程中一次遍历日志树，返回排序后的归档恢复候选及 pending 文件时间。"""
+    spools: list[Path] = []
+    pending_journals: list[Path] = []
+    archives: list[Path] = []
+    modified: dict[Path, float] = {}
+    for directory, names, files in os.walk(root):
+        # 导出目录由下载作业生命周期管理，恢复扫描既不登记也不继续深入其中。
+        names[:] = [name for name in names if name != "exports"]
+        parent = Path(directory)
+        for name in files:
+            path = parent / name
+            is_pending = False
+            if name.endswith(".tar.gz.pending.json"):
+                pending_journals.append(path)
+                is_pending = True
+            elif ".tar.gz.pending." in name and name.endswith(".json"):
+                spools.append(path)
+                is_pending = True
+            elif name.endswith(".tar.gz"):
+                archives.append(path)
+            else:
+                continue
+            if is_pending:
+                try:
+                    modified[path] = path.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+    return sorted(spools), sorted(pending_journals), sorted(archives), modified
+
+
+def _members_and_archive_bytes(path: Path) -> tuple[list[dict[str, Any]], int]:
+    """在同一工作线程完成重建校验后的归档大小读取。"""
+    return _members(path), path.stat().st_size
 
 
 async def recover_orphan_archives(repo: Any) -> int:
     """节点重启后续交 pending 归档并补回已发布归档的目录记录。"""
     root = _root(repo)
     registered = 0
+    # 新封存组各有不可变 spool；恢复阶段只放入与实时相同的有界调度器，不能让
+    # 节点启动等待积压小时包。发布后的 metadata 仍在后续维护周期回写目录记录。
+    spooled_logs: set[Path] = set()
+    spools, pending_journals, archives, pending_modified = await job_thread(_scanned_orphan_archives, root)
+    from camera_logs.node.performance_runtime import archive_spool_snapshot
+    pending_targets: dict[Path, float] = {}
+
+    def record_pending(target: Path, source: Path) -> None:
+        """以归档目标为恢复队列单位，同目标的 spool 与 journal 不重复计数。"""
+        modified = pending_modified.get(source)
+        if modified is None:
+            return
+        key = target.resolve()
+        pending_targets[key] = min(pending_targets.get(key, modified), modified)
+
+    for spool in spools:
+        try:
+            target, segments = await asyncio.to_thread(load_archive_spool, spool)
+            record_pending(target, spool)
+            spooled_logs.update(Path(segment["logPath"]).resolve() for segment in segments
+                                if isinstance(segment.get("logPath"), str))
+            # spool 是已封存的不可变分卷；即便同一会话仍在采集，也可以交给
+            # 按目标串行的调度器发布，不能因活动任务让队满漏项永久遗留。
+            schedule_pending_archive(spool)
+        except Exception:
+            # 格式损坏的 spool 不能丢弃，也以自身路径作为一个待人工/后续恢复的作业。
+            record_pending(spool, spool)
+            logger.exception("归档 spool 恢复登记失败 path=%s", spool)
+    for pending in pending_journals:
+        record_pending(Path(str(pending).removesuffix(".pending.json")), pending)
+    current = now().timestamp()
+    oldest_seconds = max(0, current - min(pending_targets.values())) if pending_targets else 0
+    archive_spool_snapshot(len(pending_targets), oldest_seconds)
+    await _recover_proven_raw_segments(repo, spooled_logs)
     # 提交清单先于 tar 原子替换落盘。仅扫描已有 tar 会遗漏此后断电时留下的
     # ``.tar.gz.pending.json``，因此将两类路径归一为同一个归档目标并去重处理。
-    paths = set(root.rglob("*.tar.gz"))
-    for pending in root.rglob("*.tar.gz.pending.json"):
+    paths = set(archives)
+    for pending in pending_journals:
         paths.add(Path(str(pending).removesuffix(".pending.json")))
     for path in sorted(paths):
         if "exports" in path.parts:
@@ -189,12 +393,13 @@ async def recover_orphan_archives(repo: Any) -> int:
         try:
             pending = await asyncio.to_thread(_pending_segments, path)
             if pending is not None:
-                if await _pending_is_active(repo, pending):
-                    continue
-                await compress_hour([], path)
+                schedule_recovery_archive(path)
+                # 旧提交清单可能还没有 tar；启动阶段只登记恢复作业，下一维护
+                # 周期再从 metadata 回写目录，不能因历史积压同步等待。
+                continue
             if await _ready_group_matches(repo, path):
                 continue
-            members = await asyncio.to_thread(_members, path)
+            members, archive_bytes = await job_thread(_members_and_archive_bytes, path)
             group_id = hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()
             for member in members:
                 log_path = _member_path(path, member["logName"], ".log")
@@ -212,7 +417,7 @@ async def recover_orphan_archives(repo: Any) -> int:
                     "hour": datetime.fromisoformat(member["hourStart"]).astimezone(UTC).isoformat(),
                     "path": str(path), "archiveName": path.name, "archiveMember": log_path.name,
                     "archiveGroupId": group_id, "rawFileName": log_path.name,
-                    "bytes": member["rawSize"], "archiveBytes": path.stat().st_size, "sha256": member["sha256"],
+                    "bytes": member["rawSize"], "archiveBytes": archive_bytes, "sha256": member["sha256"],
                     "firstSequence": member["firstSequence"], "lastSequence": member["lastSequence"],
                     "segmentNumber": int(match.group(1)) if not member.get("_legacy") and (
                         match := re.search(r"-part-(\d+)\.log$", log_path.name)) else 0,

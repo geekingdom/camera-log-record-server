@@ -34,6 +34,11 @@ class FakeCollection:
         self.calls.append((query, update))
         return SimpleNamespace(matched_count=1)
 
+    async def update_many(self, query, update, **_kwargs):
+        """记录批量目录统计刷新，保持替身与 files 集合接口一致。"""
+        self.calls.append((query, update))
+        return SimpleNamespace(matched_count=1)
+
     async def find_one(self, *_args, **_kwargs):
         return {"id": "task-a"}
 
@@ -287,7 +292,8 @@ def test_coredump_cleanup_guard_keeps_current_owner_during_stopping(tmp_path):
         repo = Repository(database, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
                                              log_root=tmp_path, node_id="node-a"))
         task = {"id": "task-a", "runId": "run-a", "nodeId": "node-a", "generation": 3,
-                "resourceId": "resource-a", "desiredState": "PAUSED", "status": "PAUSING"}
+                "resourceId": "resource-a", "protocol": "SSH",
+                "desiredState": "PAUSED", "status": "PAUSING"}
         collector = SimpleNamespace(session_id="session-a", _closed=SimpleNamespace(is_set=lambda: False))
         await database.tasks.insert_one(task)
         await database.resources.insert_one({
@@ -509,7 +515,9 @@ def test_archive_clears_dirty_open_snapshot_before_ready(tmp_path):
         await runtime.on_log(LogChunk("task-a", "run-a", "session", 2, b"late", 4, str(path)))
         await runtime._publish_catalog()
     asyncio.run(scenario())
-    assert [call[1]["$set"]["status"] for call in runtime.repo.db.files.calls] == ["READY"]
+    statuses = [call[1]["$set"]["status"] for call in runtime.repo.db.files.calls
+                if "status" in call[1].get("$set", {})]
+    assert statuses == ["READY"]
 
 
 def test_catalog_publish_keeps_newer_dirty_watermark_created_during_database_await(tmp_path):

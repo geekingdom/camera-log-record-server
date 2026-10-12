@@ -13,6 +13,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
 from camera_logs.common.ownership import owner_filter
+from camera_logs.common.resource_monitoring import supports_resource_monitoring
 from camera_logs.resource_metrics.models import parse_monitor_config
 from camera_logs.resource_metrics.store import ResourceMetricStore
 
@@ -39,10 +40,7 @@ async def _guard(runtime: Any, collector: Any) -> dict[str, Any] | None:
     ):
         return None
     task = runtime.task
-    if task.get("protocol") not in {"SSH", "TELNET_DEVICE"}:
-        return None
-    # 历史 SSH 任务缺省即主机；从机连接只能采集其任务日志，不能发送资源级监控命令。
-    if task.get("protocol") == "SSH" and task.get("sshTarget", "HOST") != "HOST":
+    if not supports_resource_monitoring(task):
         return None
     current = await runtime.repo.db.tasks.find_one(
         {**owner_filter(task), "desiredState": "RUNNING", "status": "COLLECTING"}, {"id": 1}

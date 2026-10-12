@@ -26,6 +26,7 @@ const activeModule = ref("platform");
 const retentionDays = ref(7);
 const clusterCapacity = ref(500);
 const liveLogBufferMiB = ref(10);
+const serviceLogRetentionDays = ref(7);
 const nodes = ref<NodeConfig[]>([]);
 const nodeDialog = ref(false);
 const editingNode = ref<NodeConfig>();
@@ -65,6 +66,7 @@ async function load() {
     retentionDays.value = platform.retentionDays;
     clusterCapacity.value = normalizeCapacity(platform.clusterCapacity ?? 500, MAX_CLUSTER_CAPACITY);
     liveLogBufferMiB.value = platform.liveLogBufferMiB ?? 10;
+    serviceLogRetentionDays.value = platform.serviceLogRetentionDays ?? 7;
     nodes.value = nodeList.items;
   } catch (error) {
     if (error instanceof ApiError && error.status === 403) forbidden.value = true;
@@ -76,13 +78,14 @@ async function load() {
 
 async function savePlatformSettings() {
   if (savingRetention.value || !settings.value) return;
-  if (!await confirmAction(`确认保存日志保留 ${retentionDays.value} 天、集群总并发上限 ${clusterCapacity.value} 个任务、实时日志内存上限 ${liveLogBufferMiB.value} MiB 吗？`, "确认保存配置")) return;
+  if (!await confirmAction(`确认保存设备日志保留 ${retentionDays.value} 天、服务运行日志保留 ${serviceLogRetentionDays.value} 天、集群总并发上限 ${clusterCapacity.value} 个任务、实时日志内存上限 ${liveLogBufferMiB.value} MiB 吗？`, "确认保存配置")) return;
   savingRetention.value = true;
   try {
-    settings.value = await settingsApi.updatePlatform({ retentionDays: retentionDays.value, clusterCapacity: clusterCapacity.value, liveLogBufferMiB: liveLogBufferMiB.value, version: settings.value.version });
+    settings.value = await settingsApi.updatePlatform({ retentionDays: retentionDays.value, clusterCapacity: clusterCapacity.value, liveLogBufferMiB: liveLogBufferMiB.value, serviceLogRetentionDays: serviceLogRetentionDays.value, version: settings.value.version });
     retentionDays.value = settings.value.retentionDays;
     clusterCapacity.value = normalizeCapacity(settings.value.clusterCapacity ?? clusterCapacity.value, MAX_CLUSTER_CAPACITY);
     liveLogBufferMiB.value = settings.value.liveLogBufferMiB;
+    serviceLogRetentionDays.value = settings.value.serviceLogRetentionDays;
     ElMessage.success("平台配置已保存");
   } catch (error) {
     if (error instanceof ApiError && error.status === 409) {
@@ -187,6 +190,10 @@ onMounted(() => void load());
         <section class="settings-band">
           <div><h4>日志保存天数</h4><p>已发布且未被下载任务保护的归档会由节点维护任务按此天数清理。</p></div>
           <div class="retention-control"><el-input-number v-model="retentionDays" :min="1" :max="3650" controls-position="right" aria-label="日志保存天数" /><span>天</span></div>
+        </section>
+        <section class="settings-band">
+          <div><h4>服务运行日志保留</h4><p>API 与 Worker 的 JSONL 运行日志按上海日期和 20 MiB 分片，达到保留期后仅清理本服务分片。</p></div>
+          <div class="retention-control"><el-input-number v-model="serviceLogRetentionDays" :min="1" :max="3650" controls-position="right" aria-label="服务运行日志保留天数" /><span>天</span></div>
         </section>
         <section class="settings-band">
           <div><h4>集群总并发上限</h4><p>所有节点同时运行的采集任务总数上限；节点容量仍会分别限制单节点并发。</p></div>

@@ -154,3 +154,35 @@ async def test_write_executor_isolated_from_a_blocked_default_executor(tmp_path)
         loop.set_default_executor(replacement_executor)
         default_executor.shutdown(wait=True)
         await write_io.shutdown()
+
+
+async def test_io_tracker_starts_only_after_real_io_slot_and_ends_on_failure():
+    """真实磁盘指标不受门控排队影响，物理失败结束后不能遗留永久pending。"""
+    from camera_logs.common.write_metrics import WriteLatency
+    await write_io.shutdown()
+    write_io.configure(1)
+    entered, release = threading.Event(), threading.Event()
+    def blocked():
+        entered.set()
+        release.wait(3)
+    first = asyncio.create_task(write_io.write_thread(blocked))
+    assert await asyncio.to_thread(entered.wait, 1)
+    tracker = WriteLatency()
+    def failure():
+        raise OSError("synthetic write failure")
+    async def measured():
+        with write_io.measure_io(tracker):
+            await write_io.write_thread(failure)
+    second = asyncio.create_task(measured())
+    try:
+        await asyncio.sleep(.02)
+        assert tracker.snapshot()["pendingMs"] == 0
+        assert not second.done()
+    finally:
+        release.set()
+    await first
+    with pytest.raises(OSError):
+        await second
+    assert tracker.snapshot()["samples"] == 0
+    assert tracker.snapshot()["pendingMs"] == 0
+    await write_io.shutdown()

@@ -8,6 +8,8 @@ import threading
 import time
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import partial
 from typing import Any
 
@@ -24,6 +26,17 @@ _execution_samples: deque[float] = deque(maxlen=1024)
 _stage_samples: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=1024))
 _metrics_lock = threading.Lock()
 logger = logging.getLogger(__name__)
+_latency = ContextVar("physical_write_latency", default=None)
+
+
+@contextmanager
+def measure_io(tracker):
+    """仅把实际文件操作交给调用会话计时，归档排队和文件锁等待不算磁盘I/O。"""
+    token = _latency.set(tracker)
+    try:
+        yield
+    finally:
+        _latency.reset(token)
 
 
 def configure(writeConcurrency: int = DEFAULT_CONCURRENCY) -> None:
@@ -88,6 +101,10 @@ async def write_thread(function, *args, **kwargs):
     global _executor
     submitted = time.monotonic()
     await _acquire()
+    future = None
+    tracker = _latency.get()
+    if tracker is not None:
+        tracker.begin()
     try:
         if _executor is None:
             _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="log-write")
@@ -110,6 +127,11 @@ async def write_thread(function, *args, **kwargs):
                     logger.exception("采集写盘取消期间线程失败")
             raise
     finally:
+        if tracker is not None:
+            if future is not None and future.done() and not future.cancelled() and future.exception() is None:
+                tracker.finish()
+            else:
+                tracker.abort()
         _release()
 
 

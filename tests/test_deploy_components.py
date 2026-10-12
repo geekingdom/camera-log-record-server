@@ -137,6 +137,83 @@ def test_database_health_requires_all_one_shot_jobs_to_exit_successfully(monkeyp
     assert not any(command[:2] == ["docker", "inspect"] for command in calls)
 
 
+def test_worker_deploy_proves_old_container_stop_before_completing_recovery(monkeypatch):
+    """受控替换顺序固定：新镜像准备、停止并 inspect，再写 token 关闭证明并启动新容器。"""
+    calls = []
+
+    def fake_run(command, _deadline):
+        calls.append(command)
+        if command[-3:] == ["ps", "-q", "worker"]:
+            return subprocess.CompletedProcess(command, 0, "old-worker\n", "")
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, "false\n", "")
+        if "camera_logs.node.deployment_recovery" in command:
+            phase = command[command.index("camera_logs.node.deployment_recovery") + 1]
+            token = "a" * 32
+            payload = {"token": token, "prepared": 1} if phase == "prepare" else {"token": token, "proved": 1}
+            return subprocess.CompletedProcess(command, 0, json.dumps(payload) + "\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(component, "_run", fake_run)
+    result = component.deploy_worker_with_recovery(["docker", "compose"], 10)
+
+    prepare = next(index for index, command in enumerate(calls) if command[-1] == "prepare")
+    stop = next(index for index, command in enumerate(calls) if command[-2:] == ["stop", "worker"])
+    inspect = next(index for index, command in enumerate(calls) if command[:2] == ["docker", "inspect"])
+    complete = next(index for index, command in enumerate(calls) if command[-3] == "complete")
+    start = next(index for index, command in enumerate(calls) if command[-3:] == ["up", "--detach", "worker"])
+    assert prepare < stop < inspect < complete < start
+    assert result["proved"] == 1
+
+
+def test_worker_deploy_without_running_container_does_not_create_a_closure_proof(monkeypatch):
+    """首次安装没有本次部署停止的旧容器，不能据此解除任何旧任务的隔离。"""
+    calls = []
+
+    def fake_run(command, _deadline):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(component, "_run", fake_run)
+    result = component.deploy_worker_with_recovery(["docker", "compose"], 10)
+
+    assert result == {"prepared": 0, "proved": 0, "released": 0, "reason": "NO_RUNNING_OLD_WORKER"}
+    assert not any("camera_logs.node.deployment_recovery" in command for command in calls)
+
+
+def test_worker_deploy_replays_journal_only_after_inspect_confirms_stopped(monkeypatch, tmp_path):
+    """停止后 complete 暂失败，下一次只能凭同项目 journal 和 Docker 停止事实重放。"""
+    journal = tmp_path / ".worker-deployment-recovery.json"
+    journal.write_text(json.dumps({"token": "a" * 32, "container": "old", "compose": ["docker", "compose"]}))
+    calls = []
+
+    def fake_run(command, _deadline):
+        calls.append(command)
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, "false\n", "")
+        if "camera_logs.node.deployment_recovery" in command:
+            return subprocess.CompletedProcess(command, 0, json.dumps({"token": "a" * 32, "proved": 1}) + "\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(component, "_run", fake_run)
+    assert component.deploy_worker_with_recovery(["docker", "compose"], 10, journal=journal)["proved"] == 1
+    assert not journal.exists() and any(command[-3] == "complete" for command in calls)
+
+
+def test_worker_deploy_rejects_foreign_or_unconfirmed_journal(monkeypatch, tmp_path):
+    """错误项目记录或 inspect 失败均不能绕过尚未完成的关闭证明启动新 Worker。"""
+    journal = tmp_path / ".worker-deployment-recovery.json"
+    journal.write_text(json.dumps({"token": "a" * 32, "container": "old", "compose": ["other"]}))
+    monkeypatch.setattr(component, "_run", lambda command, deadline: subprocess.CompletedProcess(command, 0, "", ""))
+    with pytest.raises(RuntimeError, match="不属于"):
+        component.deploy_worker_with_recovery(["docker", "compose"], 10, journal=journal)
+    journal.write_text(json.dumps({"token": "a" * 32, "container": "old", "compose": ["docker", "compose"]}))
+    monkeypatch.setattr(component, "_run", lambda command, deadline: subprocess.CompletedProcess(
+        command, 1 if command[:2] == ["docker", "inspect"] else 0, "", ""))
+    with pytest.raises(RuntimeError, match="无法确认"):
+        component.deploy_worker_with_recovery(["docker", "compose"], 10, build=False, journal=journal)
+
+
 def test_backend_and_worker_require_the_same_shared_credentials():
     """独立 Worker 不生成自身密钥，测试配置显式复用后端的数据库和三项认证材料。"""
     shared = _runtime_values()

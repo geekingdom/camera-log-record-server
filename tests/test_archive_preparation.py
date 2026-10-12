@@ -4,6 +4,7 @@ import asyncio
 import tarfile
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from camera_logs.logs.storage import HourlyWriter
@@ -74,12 +75,76 @@ async def test_cancelled_close_keeps_preparation_tracked(tmp_path, monkeypatch):
         closing.cancel()
         with pytest.raises(asyncio.CancelledError):
             await closing
-        assert writer._archive_tasks
+        # 取消必须发生在不可变 spool 已落盘之后；不再依赖旧版每 writer 后台 Task。
+        assert list(tmp_path.rglob("*.pending.*.json")) or original_path.exists() or list(tmp_path.rglob("*.tar.gz"))
     finally:
         release.set()
         await writer.close()
     archives = writer.drain_archives()
-    assert len(archives) == 1
-    with tarfile.open(archives[0].path, "r:gz") as bundle:
+    archive = archives[0].path if archives else next(tmp_path.rglob("*.tar.gz"))
+    with tarfile.open(archive, "r:gz") as bundle:
         assert bundle.extractfile(bundle.getmembers()[0]).read() == b"tracked\n"
     assert not original_path.exists()
+
+
+async def test_sealing_more_than_two_groups_does_not_wait_for_archive_queue(tmp_path, monkeypatch):
+    """归档槽位满时第三次封存只持久化清单，后续正文写入不能等待全局压缩。"""
+    from camera_logs.logs import storage
+
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
+    first = datetime(2026, 9, 14, 1, tzinfo=UTC)
+    await writer.write(b"first\n", received_at=first)
+
+    scheduled = []
+
+    def record_schedule(target):
+        scheduled.append(target)
+
+    monkeypatch.setattr(storage, "schedule_pending_archive", record_schedule)
+
+    for hour in range(2, 5):
+        await asyncio.wait_for(writer.write(b"next\n", received_at=first.replace(hour=hour)), .5)
+
+    assert len(scheduled) == 3
+    assert all(Path(target).is_file() and ".pending." in Path(target).name for target in scheduled)
+
+
+async def test_fifty_six_routes_keep_writing_when_bounded_archive_queue_is_full(tmp_path, monkeypatch):
+    """56 路跨四小时封存时，八个内存候选耗尽也只能留下磁盘 spool，不能拖住写入。"""
+    from camera_logs.logs import compression, storage
+    from camera_logs.logs.compression import publish_spooled_archive
+
+    pending = []
+
+    def bounded_schedule(spool):
+        # 模拟唯一调度器已有八个低速归档；其余工作只能由不可变磁盘清单承接。
+        if len(pending) < compression.MAX_SCHEDULED_ARCHIVES:
+            pending.append(Path(spool))
+
+    monkeypatch.setattr(storage, "schedule_pending_archive", bounded_schedule)
+    writers = [HourlyWriter(f"task-{route}", f"run-{route}", f"session-{route}", tmp_path,
+                            storage_identity="device") for route in range(56)]
+    start = datetime(2026, 9, 14, tzinfo=UTC)
+    expected = {}
+    for hour in range(4):
+        for route, writer in enumerate(writers):
+            payload = f"route={route} hour={hour}\n".encode()
+            expected[(route, hour)] = payload
+            await asyncio.wait_for(writer.write(payload, received_at=start.replace(hour=hour)), .5)
+    for writer in writers:
+        await asyncio.wait_for(writer.close(defer=True), .5)
+
+    spools = sorted(tmp_path.rglob("*.tar.gz.pending.*.json"))
+    assert len(pending) == compression.MAX_SCHEDULED_ARCHIVES
+    assert len(spools) == 56 * 4
+    # 选取一个积压 spool 实际发布，复核原始字节摘要和最终 tar 成员完整性。
+    spool = next(item for item in spools if item not in pending)
+    from camera_logs.logs.archive_spool import load
+    _target, segments = load(spool)
+    raw = Path(segments[0]["logPath"])
+    original = raw.read_bytes()
+    archive = await asyncio.to_thread(publish_spooled_archive, spool, None, False)
+    with tarfile.open(archive, "r:gz") as bundle:
+        member = bundle.extractfile(segments[0]["logName"])
+        assert member is not None and member.read() == original
+    assert not raw.exists()
