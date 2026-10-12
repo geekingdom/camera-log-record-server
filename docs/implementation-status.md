@@ -2,12 +2,12 @@
 
 | 当前需求（2026-10-12，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 公司 Worker 写等待/归档积压、单故障扩大及重部署恢复 | `collection/buffering.py`、`runtime.py`、`logs/write_io.py`、`archive_spool.py`、`compression.py`、`maintenance.py`、`node/deployment_recovery.py`及部署入口 | API与Worker现场日志均已分析；实际文件I/O独立计量，持久封存不等待压缩槽，压缩进程损坏可重建、毒化归档退避，目录通知有界且5秒超时；真实Mongo单节点回退峰值1连接、新旧run不同且归档READY；部署证明/最终CAS回滚/暂停预算与partial索引Explain验证通过 | 部署迁移/暂停竞争回归已通过；提交后等待最新SHA的全部GitHub CI，公司现场升级效果未验证 |
+| 公司 Worker 写等待/归档积压、单故障扩大及重部署恢复 | `collection/buffering.py`、`runtime.py`、`logs/write_io.py`、`archive_spool.py`、`compression.py`、`maintenance.py`、`node/deployment_recovery.py`及部署入口 | API与Worker现场日志均已分析；实际文件I/O独立计量，持久封存不等待压缩槽，压缩进程损坏可重建、毒化归档退避，目录通知有界且5秒超时；真实Mongo单节点回退峰值1连接、新旧run不同且归档READY；部署证明/最终CAS回滚/暂停预算与partial索引Explain验证通过 | 部署迁移/暂停竞争回归通过，源码修正提交1c64a6a的八项CI全部成功；公司现场升级效果仍需观察 |
 | API/Worker运行日志按时间保留，默认7天，按日20MiB分片并后台热配置 | `common/observability.py`、管理设置及生命周期、`SettingsManager.vue` | 前端190项和构建通过；1440/390设置截图检查通过；中文异常截断子进程超时回归、Python优化模式预算校验通过 | 管理员在“平台与容量”保存，Worker最长约60秒同步；历史被覆盖日志无法补回 |
 | 24小时已压缩归档批量下载准备耗时 | `logs/hour_download.py`、`runtime.py`、`verify_archive_download_fastpath.py` | 504MiB合成原文/21.65MiB压缩：旧确认加复制0.536秒，新路径0.424秒；确认阶段约0.116→0.003秒，逐成员SHA一致；固定inode和发布竞争回归通过 | 保留真实压力下后台预算，432MiB在1MiB/s下仅复制就需约7.2分钟；不宣称公司下载耗时已解决 |
 | 海康资源监控仅SSH主机与Telnet设备生效，排除从机及Telnet串口 | `common/resource_monitoring.py`、`collection/runtime_monitors.py`、`coredump_lease.py`、`resource_metrics/runtime.py` | 资格统一到运行、装配、租约与采样入口；独立审核及相关113项通过 | 既有SSH缺省target按HOST兼容；公司真实设备验证仍需升级后观察 |
 
-最新后端全量 **1766项通过**，前端 **190项通过**，生产构建及全仓Ruff通过。真实隔离API/Worker/WebSocket/小时下载、双Worker缺口读取、唯一节点恢复、计划重启事务与受控部署事务验证通过；归档预算八路合成校验8.126→1.283秒、逐字节一致。详细现场证据、下载对照及限制见[本轮记录](history/2026-10-12-worker-stall.md)。全量后新增部署迁移/优雅暂停及发送前未知异常3项回归通过（相关12项通过）；真实部署事务复验通过。源码提交`210c96b`的[CI38271748138](https://github.com/geekingdom/camera-log-record-server/actions/runs/38271748138)七项通过，仅container-smoke定时预算事务验收沿用旧的吞异常预期而失败。已改为明确验证ReservationUncertain传播及无设备发送/唯一UNKNOWN/预算不退款，真实Mongo复验通过；修正提交仍须等待全部CI成功。
+最新后端全量 **1766项通过**，前端 **190项通过**，生产构建及全仓Ruff通过。真实隔离API/Worker/WebSocket/小时下载、双Worker缺口读取、唯一节点恢复、计划重启事务与受控部署事务验证通过；归档预算八路合成校验8.126→1.283秒、逐字节一致。详细现场证据、下载对照及限制见[本轮记录](history/2026-10-12-worker-stall.md)。全量后新增部署迁移/优雅暂停及发送前未知异常3项回归通过（相关12项通过）；真实部署事务复验通过。源码提交`210c96b`的[CI38271748138](https://github.com/geekingdom/camera-log-record-server/actions/runs/38271748138)七项通过，仅container-smoke定时预算事务验收沿用旧的吞异常预期而失败。已改为明确验证ReservationUncertain传播及无设备发送/唯一UNKNOWN/预算不退款，真实Mongo复验通过；修正提交`1c64a6a`的[CI38273257602](https://github.com/geekingdom/camera-log-record-server/actions/runs/38273257602)已完整结束，cross-worker-read、backend、frontend、container-smoke、component-smoke、native-smoke、nfs-smoke及commit-messages八项全部成功（2026-10-13核验）。
 
 | 当前需求（2026-10-09，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
