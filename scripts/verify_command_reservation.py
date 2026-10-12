@@ -137,9 +137,16 @@ async def verify_unknown_commit(db):
         sender = asyncio.create_task(collector._sender_loop())
         reservation.reservation_transaction = lose_response
         try:
-            await asyncio.wait_for(collector._scheduled_loop(0, {
-                "id": "periodic", "command": "probe", "intervalSeconds": .001, "totalExecutions": 1,
-            }), 5)
+            try:
+                await asyncio.wait_for(collector._scheduled_loop(0, {
+                    "id": "periodic", "command": "probe", "intervalSeconds": .001, "totalExecutions": 1,
+                }), 5)
+            except reservation.ReservationUncertain:
+                # 生产监督器必须收到预留结果未知以结束当前会话；本验证直接调用循环，
+                # 因而显式确认该信号，再核对未发送、预算不退款及唯一 UNKNOWN 记录。
+                pass
+            else:
+                raise AssertionError("提交未知没有交给会话监督器处理")
         finally:
             reservation.reservation_transaction = original
             sender.cancel()

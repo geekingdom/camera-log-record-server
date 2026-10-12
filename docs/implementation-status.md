@@ -7,7 +7,7 @@
 | 24小时已压缩归档批量下载准备耗时 | `logs/hour_download.py`、`runtime.py`、`verify_archive_download_fastpath.py` | 504MiB合成原文/21.65MiB压缩：旧确认加复制0.536秒，新路径0.424秒；确认阶段约0.116→0.003秒，逐成员SHA一致；固定inode和发布竞争回归通过 | 保留真实压力下后台预算，432MiB在1MiB/s下仅复制就需约7.2分钟；不宣称公司下载耗时已解决 |
 | 海康资源监控仅SSH主机与Telnet设备生效，排除从机及Telnet串口 | `common/resource_monitoring.py`、`collection/runtime_monitors.py`、`coredump_lease.py`、`resource_metrics/runtime.py` | 资格统一到运行、装配、租约与采样入口；独立审核及相关113项通过 | 既有SSH缺省target按HOST兼容；公司真实设备验证仍需升级后观察 |
 
-最新后端全量 **1762项通过**，前端 **190项通过**，生产构建及全仓Ruff通过。真实隔离API/Worker/WebSocket/小时下载、双Worker缺口读取、唯一节点恢复、计划重启事务与受控部署事务验证通过；归档预算八路合成校验8.126→1.283秒、逐字节一致。详细现场证据、下载对照及限制见[本轮记录](history/2026-10-12-worker-stall.md)。全量后新增部署迁移/优雅暂停及发送前未知异常3项回归通过（相关12项通过）；真实部署事务复验通过。本轮代码提交后等待完整CI，不以历史绿色状态代替本次验收。
+最新后端全量 **1766项通过**，前端 **190项通过**，生产构建及全仓Ruff通过。真实隔离API/Worker/WebSocket/小时下载、双Worker缺口读取、唯一节点恢复、计划重启事务与受控部署事务验证通过；归档预算八路合成校验8.126→1.283秒、逐字节一致。详细现场证据、下载对照及限制见[本轮记录](history/2026-10-12-worker-stall.md)。全量后新增部署迁移/优雅暂停及发送前未知异常3项回归通过（相关12项通过）；真实部署事务复验通过。源码提交`210c96b`的[CI38271748138](https://github.com/geekingdom/camera-log-record-server/actions/runs/38271748138)七项通过，仅container-smoke定时预算事务验收沿用旧的吞异常预期而失败。已改为明确验证ReservationUncertain传播及无设备发送/唯一UNKNOWN/预算不退款，真实Mongo复验通过；修正提交仍须等待全部CI成功。
 
 | 当前需求（2026-10-09，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
