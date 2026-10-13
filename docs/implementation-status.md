@@ -1,12 +1,12 @@
 # 当前状态总表
 
-| 当前需求（2026-10-13，从机debug与公司npm构建，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
+| 当前需求（2026-10-13，从机debug与公司npm构建，完整CI通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 公司前端Docker构建使用内网npm源 | `deploy/frontend.Dockerfile`、两种前端Compose、环境样例及CI | npm ci之前配置公司registry及strict-ssl=false，现有.env无需修改；可选两参数透传、CI覆盖公网源；部署61项及Compose展开通过 | 本机Docker Hub元数据拉取超时，完整构建待CI；公司镜像源需现场验证 |
-| 从机三种debug入口自动解密、仅使用debug切换 | `collection/collector.py`、`command_dispatcher.py`、`psh_dialogue.py` | 标准PSH路径原已共用；复现缓存ASH跳过initial/scheduled调试，改以当前从机响应确认；最多10秒确认交接横幅后开放命令，失败进入重连；删除旧备用命令 | 从机1至3三入口/陈旧模式/延迟横幅等72项通过，后端全量1811项、前端190项及构建/Ruff通过，完整CI待核验；无公司实机，不能断言现场唯一根因 |
+| 公司前端Docker构建使用内网npm源 | `deploy/frontend.Dockerfile`、两种前端Compose、环境样例及CI | npm ci之前配置公司registry及strict-ssl=false，现有.env无需修改；可选两参数透传、CI覆盖公网源；部署61项及Compose展开通过 | 公网Docker完整/分组件构建CI通过；公司镜像源仍需现场验证 |
+| 从机三种debug入口自动解密、仅使用debug切换 | `collection/collector.py`、`command_dispatcher.py`、`psh_dialogue.py` | 标准PSH路径原已共用；复现缓存ASH跳过initial/scheduled调试，改以当前从机响应确认；最多10秒确认交接横幅后开放命令，失败进入重连；删除旧备用命令 | 从机1至3三入口/陈旧模式/延迟横幅等72项通过，后端全量1811项、前端190项及构建/Ruff通过，源码f89c1bd八项CI全部成功；无公司实机，不能断言现场唯一根因 |
 
 
-详细验证与边界见[从机debug与npm构建记录](history/2026-10-13-slave-debug-npm.md)。
+源码提交`f89c1bd`的[CI38380387722](https://github.com/geekingdom/camera-log-record-server/actions/runs/38380387722)八项全部成功，包含两种Docker部署及cross-worker-read。完整公司.env副本在仓库外生成，保留原env.txt全部内容，仅追加两个可选npm构建参数。详细验证与边界见[从机debug与npm构建记录](history/2026-10-13-slave-debug-npm.md)。
 
 | 当前需求（2026-10-13，源码与完整CI验证通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
