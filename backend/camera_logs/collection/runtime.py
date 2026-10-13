@@ -41,6 +41,7 @@ from camera_logs.commands.reservation import ReservationUncertain, reserve_sched
 from camera_logs.common.database import now
 from camera_logs.common.ownership import OwnershipLost, owner_filter
 from camera_logs.common.resource_monitoring import supports_resource_monitoring
+from camera_logs.logs.catalog_identity import file_identity
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,7 @@ class SessionRuntime:
 
     def file_id(self, path):
         """以不可变原始分卷路径生成逻辑 ID，多个成员可共享一个小时归档。"""
-        relative = str(Path(path).relative_to(self.repo.settings.log_root))
-        return hashlib.sha256(relative.removesuffix(".tar.gz").removesuffix(".log").encode()).hexdigest()[:32]
+        return file_identity(self.repo.settings.log_root, Path(path), self.repo.settings.node_id)
 
     async def on_log(self, chunk):
         """发布带字节范围的实时帧并周期更新目录，慢浏览器不阻塞原始存储。"""

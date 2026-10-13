@@ -377,7 +377,7 @@ async def test_recovery_scans_archive_tree_in_job_thread(tmp_path, monkeypatch):
 
     assert await recover_orphan_archives(repo) == 1
     assert scan_threads and all(identifier != main_thread for identifier in scan_threads)
-    record = await repo.db.files.find_one({"id": _archive_id(tmp_path, path.parent / manifest["logName"])})
+    record = await repo.db.files.find_one({"id": _archive_id(tmp_path, path.parent / manifest["logName"], "node")})
     assert record is not None and record["status"] == "READY"
 
 
@@ -406,7 +406,7 @@ async def test_recovery_registers_each_shared_archive_member_with_stable_log_ide
     assert {record["segmentNumber"] for record in records} == {1, 2}
     assert all(record["firstReceivedAt"] == hour for record in records)
     assert {record["id"] for record in records} == {
-        _archive_id(tmp_path, path.parent / member["logName"]) for member in members
+        _archive_id(tmp_path, path.parent / member["logName"], "node") for member in members
     }
     assert {(record["taskId"], record["runId"], record["sessionId"], record["archiveMember"]) for record in records} == {
         (member["taskId"], member["runId"], member["sessionId"], member["logName"]) for member in members

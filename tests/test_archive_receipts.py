@@ -172,3 +172,24 @@ async def test_slow_partial_catalog_batch_resumes_without_rewriting_completed_me
     assert await repo.db.files.count_documents({'status': 'READY'}) == 3
     assert len(writes) == len(set(writes)) == 3
     assert not receipt_path(target).exists()
+
+
+async def test_same_relative_archive_on_two_nodes_keeps_both_catalogs(tmp_path):
+    """双节点恢复相同任务路径时，旧节点目录及新节点归档必须同时可读。"""
+    target, member = published(tmp_path)
+    repo = repository(tmp_path)
+    await repo.db.files.create_index('id', unique=True)
+    legacy_id = maintenance._archive_id(tmp_path, target.parent / member['logName'])
+    old = {'id': legacy_id, 'nodeId': 'old-node', 'taskId': 'one', 'runId': 'run',
+           'sessionId': 'old-session', 'status': 'READY', 'sha256': 'old-digest'}
+    await repo.db.files.insert_one(old.copy())
+    await maintenance.pump_pending_archives(repo)
+    records = {row['nodeId']: row async for row in repo.db.files.find({})}
+    assert len(records) == 2
+    assert records['old-node']['sha256'] == 'old-digest'
+    assert records['node']['sha256'] == member['sha256']
+    runtime = object.__new__(SessionRuntime)
+    runtime.repo = repo
+    assert records['node']['id'] == runtime.file_id(target.parent / member['logName'])
+    await maintenance.recover_orphan_archives(repo)
+    assert await repo.db.files.count_documents({}) == 2

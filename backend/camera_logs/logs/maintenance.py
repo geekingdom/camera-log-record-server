@@ -24,6 +24,7 @@ from pymongo import ReturnDocument
 from camera_logs.common.database import now
 from camera_logs.logs.archive_spool import load as load_archive_spool
 from camera_logs.logs.archive_spool import persist as persist_archive_spool
+from camera_logs.logs.catalog_identity import file_identity
 from camera_logs.logs.compression import _hash_stream, schedule_pending_archive, schedule_recovery_archive
 from camera_logs.logs.export_locks import ExportLock
 from camera_logs.logs.job_threads import job_thread
@@ -45,10 +46,9 @@ def _contained(repo: Any, path: str | Path) -> Path:
     return value
 
 
-def _archive_id(root: Path, path: Path) -> str:
+def _archive_id(root: Path, path: Path, node_id: str | None = None) -> str:
     """根据原始日志相对路径生成稳定目录 ID，与运行时登记规则一致。"""
-    relative = str(path.relative_to(root)).removesuffix(".log")
-    return hashlib.sha256(relative.encode()).hexdigest()[:32]
+    return file_identity(root, path, node_id)
 
 
 def _metadata_path(path: Path) -> Path:
@@ -456,13 +456,19 @@ async def _register_archive_members(repo: Any, path: Path, members: list[dict], 
     _contained(repo, path)
     registered = 0
     group_id = hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()
-    identifiers = [_archive_id(root, _member_path(path, member["logName"], ".log")) for member in members]
+    identifiers = [_archive_id(root, _member_path(path, member["logName"], ".log"), node)
+                   for member in members for node in (None, repo.settings.node_id)]
     existing_records = {record["id"]: record async for record in repo.db.files.find({"id": {"$in": identifiers}})}
     for member in members:
         log_path = _member_path(path, member["logName"], ".log")
         index_path = None if member.get("_legacy") else _member_path(path, member["indexName"], ".index.jsonl")
-        identifier = _archive_id(root, log_path)
+        identifier = _archive_id(root, log_path, repo.settings.node_id)
         existing = existing_records.get(identifier)
+        legacy_id = _archive_id(root, log_path)
+        legacy = existing_records.get(legacy_id)
+        # 旧URL保持稳定；外节点同名路径绝不能被接管或覆盖。缺身份的旧删除标记保守保留。
+        if existing is None and legacy and legacy.get("nodeId") in (None, repo.settings.node_id):
+            identifier, existing = legacy_id, legacy
         if existing and existing.get("status") not in {"OPEN", "READY"}:
             continue
         identity = {key: member[key] for key in ("taskId", "runId", "sessionId")}

@@ -6,6 +6,8 @@
 | 从机连接失败固定10秒重试；认证恢复成功立即唤醒仍RUNNING的SSH主从任务 | `collection/runtime.py`、`resources/health.py` | 运行/资源61项通过，停/暂停/采集中及旧owner不误唤醒 | 公司服务器部署后复核认证变化唤醒 |
 | 晚间旧小时仍显示写入、节点无归档队列；重启历史补偿及完整校验优化 | `logs/archive_receipts.py`、`archive_catalog_recovery.py`、`maintenance.py`、`compression.py`及runtime目录CAS | 归档119项、目录9项通过；持久待办5秒泵、迟到OPEN及保留期保护；480MiB合成0.940→0.710秒、完整SHA一致 | 目标服务器升级后观察积压补偿；现场日志只覆盖至13:34，晚间根因不能仅据前端状态断言 |
 
+CI追加修复：`f6eb8d5`的cross-worker-read复现双节点相同相对路径目录ID冲突；新分卷ID加入节点命名空间，历史归档补偿兼容本节点旧ID，保护其它节点记录。真实Mongo/SSH双Worker暂停恢复复验通过，逐行正文、同run及累计命令预算均一致；新增双节点归档回归通过。后端全量1841项通过、1项被本轮临时Mongo占用端口影响；清理后部署专项13项全部通过，目录专项10项通过，Ruff通过。最新修正提交仍须等待全部八项CI通过。
+
 本轮工作记录见[协议初始化与实机证据](history/2026-10-13-protocol-ash-identity.md)和[晚间归档补偿与测量](history/2026-10-13-evening-archive.md)。前端190项及构建、全仓Ruff通过。本次提交要求GitHub八项CI全部成功后交付，实际运行结果以该提交的GitHub检查及交付消息为准；公司现场积压消化与PSH仍需部署观察。
 
 | 当前需求（2026-10-13，从机debug与公司npm构建，完整CI通过） | 实现位置 | 验证证据 | 未完成与下一步 |
