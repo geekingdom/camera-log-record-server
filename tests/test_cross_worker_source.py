@@ -51,3 +51,20 @@ async def test_archive_wait_does_not_accept_previous_run(tmp_path, monkeypatch):
     finally:
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
+
+
+async def test_silent_device_does_not_emit_banner_after_reconnect(monkeypatch):
+    """完全静默场景下，新连接不能以登录横幅伪造持续输出。"""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'scripts'))
+    source = importlib.import_module('cross_worker_ssh_resume_source').SshSource('local-test-only')
+    source.silence_device()
+    await source.start()
+    try:
+        async with asyncssh.connect('127.0.0.1', source.port, username='collector',
+                                    password=source.password, known_hosts=None) as connection:
+            await connection.create_process(encoding=None)
+            await asyncio.sleep(.25)
+            assert not source.sent
+    finally:
+        source.resume_emitting()
+        await source.close()

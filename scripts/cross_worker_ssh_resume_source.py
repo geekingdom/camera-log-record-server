@@ -81,6 +81,7 @@ class SshSource:
         self.commands: list[bytearray] = []
         self.sent: list[bytes] = []
         self.active = self.connection_count = self.peak_active = 0
+        self.login_banner_enabled = True
         self.emitting = asyncio.Event()
         self.emitting.set()
 
@@ -121,7 +122,7 @@ class SshSource:
                 sequence = 0
                 while not reader.done():
                     # 登录横幅属于协议握手，业务日志暂停不能阻止新会话初始化。
-                    if sequence:
+                    if sequence or not source.login_banner_enabled:
                         await source.emitting.wait()
                     # 首行同时模拟真实ASH登录横幅，仍纳入源端逐字节完整性校验。
                     payload_text = "BusyBox built-in shell (ash)" if sequence == 0 else "live"
@@ -177,6 +178,11 @@ class SshSource:
                 return lines
             await asyncio.sleep(0.05)
         raise TimeoutError("未获得足够的有限源端日志样本")
+
+    def silence_device(self) -> None:
+        """模拟设备完全无输出，重连后也不能用登录横幅刷新存活证据。"""
+        self.login_banner_enabled = False
+        self.emitting.clear()
 
     def resume_emitting(self) -> None:
         """恢复下一会话的连续源输出。"""

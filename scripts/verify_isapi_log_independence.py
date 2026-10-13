@@ -122,7 +122,7 @@ async def main(isapi_port=80):
                 # 将下次HTTP检查置于一天之后，证明无输出停止不依赖下一次认证。
                 await repo.db.resources.update_one({"id": resource_id},
                                                    {"$set": {"nextHealthCheckAt": now() + timedelta(days=1)}})
-                source.emitting.clear()
+                source.silence_device()
                 stopped = await wait_task(client, task_id,
                                           lambda task: task["desiredState"] == "STOPPED" and task["status"] == "STOPPED",
                                           "HTTP异常且持续无输出未停止")
