@@ -116,8 +116,13 @@ class Collector:
         # 必须先启动接收协程：初始化命令发送后设备可能立即返回提示符。
         self._reader = asyncio.create_task(self._reader_loop())
         try:
-            if any(str(item["command"]).strip() == "debug" for item in self.task.get("initialCommands", [])):
-                await self._commands.observe_initial_mode()
+            slave = self.task.get("protocol") == "SSH" and self.task.get("sshTarget") in {
+                "SLAVE_1", "SLAVE_2", "SLAVE_3",
+            }
+            # 从机工厂交接的登录横幅须先交给唯一reader观察，避免首条手动/定时debug
+            # 把尚未消费的旧横幅当成自己的切换响应；无初始化debug也遵循同一顺序。
+            if slave or any(str(item["command"]).strip() == "debug" for item in self.task.get("initialCommands", [])):
+                await self._commands.observe_initial_mode(required=slave)
             for item in self.task.get("initialCommands", []):
                 await self._send_initial(item)
             self._initializing = False

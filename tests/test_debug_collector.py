@@ -593,3 +593,34 @@ def test_only_trimmed_exact_debug_command_is_intercepted(tmp_path):
     calls, sent = asyncio.run(scenario())
     assert calls == 0
     assert sent == [b"echo debug\n"]
+
+
+def test_unsupported_debug_never_uses_legacy_switch_command(tmp_path):
+    """设备不支持debug时明确失败并恢复通道，禁止尝试已取消的旧切换命令。"""
+    async def scenario():
+        connection = FakeConnection()
+        connection.received.put_nowait(b'Protect Shell (psh)\n# ')
+        events = []
+
+        async def write(data):
+            if data == b'debug\n':
+                connection.received.put_nowait(b'unsupported command\n# ')
+            elif data == b'\x03':
+                connection.received.put_nowait(b'\n# ')
+            elif data == b'ls\n':
+                connection.received.put_nowait(PSH_LS)
+            else:
+                pytest.fail('不应发送额外切换命令或口令')
+
+        connection.on_write = write
+        collector = Collector({'id': 'unsupported', 'runId': 'run', 'initialCommands': [{'command': 'debug'}]},
+                              tmp_path, connection_factory=lambda _: connection,
+                              on_debug=lambda event, details: events.append((event, details)))
+        try:
+            await collector.start()
+            assert connection.sent == [b'debug\n', b'\x03', b'ls\n']
+            assert any(event == 'FAILED' and details['debugDiagnostic']['stage'] == 'DEBUG_UNSUPPORTED'
+                       for event, details in events)
+        finally:
+            await collector.stop()
+    asyncio.run(scenario())

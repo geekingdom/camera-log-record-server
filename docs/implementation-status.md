@@ -1,5 +1,13 @@
 # 当前状态总表
 
+| 当前需求（2026-10-13，从机debug与公司npm构建，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 公司前端Docker构建使用内网npm源 | `deploy/frontend.Dockerfile`、两种前端Compose、环境样例及CI | npm ci之前配置公司registry及strict-ssl=false，现有.env无需修改；可选两参数透传、CI覆盖公网源；部署61项及Compose展开通过 | 本机Docker Hub元数据拉取超时，完整构建待CI；公司镜像源需现场验证 |
+| 从机三种debug入口自动解密、仅使用debug切换 | `collection/collector.py`、`command_dispatcher.py`、`psh_dialogue.py` | 标准PSH路径原已共用；复现缓存ASH跳过initial/scheduled调试，改以当前从机响应确认；最多10秒确认交接横幅后开放命令，失败进入重连；删除旧备用命令 | 从机1至3三入口/陈旧模式/延迟横幅等72项通过，后端全量1811项、前端190项及构建/Ruff通过，完整CI待核验；无公司实机，不能断言现场唯一根因 |
+
+
+详细验证与边界见[从机debug与npm构建记录](history/2026-10-13-slave-debug-npm.md)。
+
 | 当前需求（2026-10-13，源码与完整CI验证通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 重部署停止旧Worker/prepare失败 | `scripts/deploy_component.py`、`deploy_health.py` | 修复10秒单命令预算与120秒停止宽限冲突；停止150秒、各阶段独立预算、脱敏诊断；61项部署测试、真实Mongo受控部署与计划重启事务通过 | 公司服务器使用原.env和持久数据目录重新部署验证；未知旧连接仍需关闭证明 |

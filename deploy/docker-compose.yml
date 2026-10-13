@@ -190,6 +190,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/frontend.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-http://af.hikvision.com.cn/artifactory/api/npm/npm-hiktest/}
+        NPM_STRICT_SSL: ${NPM_STRICT_SSL:-false}
     restart: unless-stopped
     environment:
       BACKEND_UPSTREAM: http://api:${API_PORT:-18080}

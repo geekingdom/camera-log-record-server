@@ -1,7 +1,12 @@
 # 单独前端；不会隐式创建 API、节点或数据库。BACKEND_UPSTREAM 必须可从容器访问。
 services:
   frontend:
-    build: {context: .., dockerfile: deploy/frontend.Dockerfile}
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-http://af.hikvision.com.cn/artifactory/api/npm/npm-hiktest/}
+        NPM_STRICT_SSL: ${NPM_STRICT_SSL:-false}
     restart: unless-stopped
     environment:
       BACKEND_UPSTREAM: ${BACKEND_UPSTREAM:?请在前端配置中填写后端地址}

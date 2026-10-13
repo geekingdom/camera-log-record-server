@@ -80,8 +80,8 @@ def test_compose_declares_restart_log_rotation_and_frontend_healthcheck():
     assert "frontend:" in compose and "wget -q -O /dev/null http://127.0.0.1/" in compose
 
 
-def test_docker_build_supports_company_pip_default_and_external_ci_override():
-    """生产镜像默认内网源，CI 必须能显式覆盖为公网 PyPI。"""
+def test_docker_build_supports_company_registry_defaults_and_external_ci_override():
+    """生产镜像默认公司源，CI 必须显式覆盖 Python 与 npm 的公网依赖源。"""
     for filename in ("api.Dockerfile", "worker.Dockerfile"):
         source = (root / "deploy" / filename).read_text(encoding="utf-8")
         assert "ARG PIP_INDEX_URL=http://af.hikvision.com.cn/" in source
@@ -89,9 +89,26 @@ def test_docker_build_supports_company_pip_default_and_external_ci_override():
         assert '--index-url "$PIP_INDEX_URL"' in source
     compose = (root / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "PIP_INDEX_URL: ${PIP_INDEX_URL:-http://af.hikvision.com.cn/" in compose
+    assert "NPM_REGISTRY: ${NPM_REGISTRY:-http://af.hikvision.com.cn/artifactory/api/npm/npm-hiktest/}" in compose
+    standalone_frontend = (root / "deploy" / "frontend.yml").read_text(encoding="utf-8")
+    assert "NPM_REGISTRY: ${NPM_REGISTRY:-http://af.hikvision.com.cn/artifactory/api/npm/npm-hiktest/}" in standalone_frontend
+    assert "NPM_STRICT_SSL: ${NPM_STRICT_SSL:-false}" in standalone_frontend
+    frontend = (root / "deploy" / "frontend.Dockerfile").read_text(encoding="utf-8")
+    assert "ARG NPM_REGISTRY=http://af.hikvision.com.cn/artifactory/api/npm/npm-hiktest/" in frontend
+    assert "ARG NPM_STRICT_SSL=false" in frontend
+    assert 'npm config set registry "$NPM_REGISTRY"' in frontend
+    assert 'npm config set strict-ssl "$NPM_STRICT_SSL"' in frontend
     workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "PIP_INDEX_URL: https://pypi.org/simple" in workflow
+    assert "NPM_REGISTRY: https://registry.npmjs.org/" in workflow
+    assert 'NPM_REGISTRY=https://registry.npmjs.org/' in workflow
     assert 'PIP_INDEX_URL=https://pypi.org/simple' in workflow
+    deploy_script = (root / "deploy.sh").read_text(encoding="utf-8")
+    assert "NPM_REGISTRY,NPM_STRICT_SSL" in deploy_script
+    for filename in ("all.env.example", "frontend.env.example"):
+        example = (root / "deploy" / "config" / filename).read_text(encoding="utf-8")
+        assert "NPM_REGISTRY=http://af.hikvision.com.cn/artifactory/api/npm/npm-hiktest/" in example
+        assert "NPM_STRICT_SSL=false" in example
 
 
 def test_single_host_compose_uses_empty_volume_initializers_and_authenticated_clients():

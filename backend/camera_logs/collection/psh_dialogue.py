@@ -132,7 +132,7 @@ class PshDialogue:
                     return "CHALLENGE", source
                 # 普通登录横幅也包含 help，不能把它误当作 debug 不受支持的响应。
                 if re.search(rb"(?:unknown command|not found|unsupported command|supported commands:)", clean, re.IGNORECASE) and re.search(rb"(?:^|[\r\n])#\s*(?:$|[\r\n])", clean):
-                    return "FALLBACK", None
+                    return "UNSUPPORTED", None
             await self._changed.wait()
 
     async def _probe_ls(self, write, newline):
@@ -162,16 +162,19 @@ class PshDialogue:
                 return
             await self._changed.wait()
 
-    async def observe_initial_mode(self) -> None:
+    async def observe_initial_mode(self, *, required: bool = False) -> None:
         """初始化前短暂等候横幅，由唯一 reader 读取，不占用定时发送预算。"""
         if self.mode == "UNKNOWN":
             try:
-                async with asyncio.timeout(.25):
+                async with asyncio.timeout(10 if required else .25):
                     while self.mode == "UNKNOWN" and not self._closed:
                         self._changed.clear()
                         await self._changed.wait()
             except TimeoutError:
-                pass
+                if required:
+                    raise ConnectionError("从机登录横幅尚未被采集接收器确认") from None
+        if required and (self.mode == "UNKNOWN" or self._closed):
+            raise ConnectionError("从机登录交接未完成或连接已关闭")
 
     async def _recover_command_channel(self, write: Callable, newline: str, timeout: float) -> bool:
         """取消口令输入后先确认新 shell 提示符，再无密码探测；未确认时绝不发送 ls。"""
@@ -208,9 +211,9 @@ class PshDialogue:
         })
         return self.command_safe
 
-    async def ensure_ash(self, write: Callable, newline: str, timeout: float) -> None:
+    async def ensure_ash(self, write: Callable, newline: str, timeout: float, *, verify_current_mode: bool = False) -> None:
         """串行完成一次 debug、解密、口令发送及 ASH 确认；失败不会在本次握手内重试。"""
-        if self.mode == "ASH":
+        if self.mode == "ASH" and not verify_current_mode:
             await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})
             return
         self._active, self._buffer = True, b""
@@ -220,7 +223,9 @@ class PshDialogue:
         try:
             async with asyncio.timeout(timeout):
                 await _notify(self.on_event, "STARTED", {"mode": self.mode})
-                if self.mode == "UNKNOWN":
+                # 从机显式 debug 必须确认当前远端的响应，不能因旧横幅或异步打印
+                # 误判 ASH 而跳过。真实 ASH 的 debug-not-found 仍由公共响应解析确认。
+                if self.mode == "UNKNOWN" and not verify_current_mode:
                     await self._probe_ls(write, newline)
                     if self.mode == "ASH":
                         await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})
@@ -230,11 +235,10 @@ class PshDialogue:
                 stage = "WAIT_CHALLENGE"
                 await write(("debug" + newline).encode())
                 response, source = await self._wait_response()
-                if response == "FALLBACK":
-                    self._buffer = b""
-                    self._response, self._source = PshResponse(), None
-                    await write(("zhimakaimen" + newline).encode())
-                    response, source = await self._wait_response()
+                if response == "UNSUPPORTED":
+                    awaiting_challenge = False
+                    stage = "DEBUG_UNSUPPORTED"
+                    raise PshSwitchError("设备未接受 debug 命令")
                 awaiting_challenge = False
                 if response == "ASH":
                     await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})

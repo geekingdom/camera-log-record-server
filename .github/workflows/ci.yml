@@ -140,6 +140,8 @@ jobs:
       # GitHub runner无法访问公司内网制品库，显式覆盖镜像构建参数；生产部署不继承此覆盖。
       PIP_INDEX_URL: https://pypi.org/simple
       PIP_TRUSTED_HOST: pypi.org
+      NPM_REGISTRY: https://registry.npmjs.org/
+      NPM_STRICT_SSL: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -251,8 +253,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: 使用公网 PyPI 构建组件镜像
-        run: echo "PIP_INDEX_URL=https://pypi.org/simple" >> "$GITHUB_ENV"; echo "PIP_TRUSTED_HOST=pypi.org" >> "$GITHUB_ENV"
+      - name: 使用公网依赖源构建组件镜像
+        run: |
+          echo "PIP_INDEX_URL=https://pypi.org/simple" >> "$GITHUB_ENV"
+          echo "PIP_TRUSTED_HOST=pypi.org" >> "$GITHUB_ENV"
+          echo "NPM_REGISTRY=https://registry.npmjs.org/" >> "$GITHUB_ENV"
+          echo "NPM_STRICT_SSL=true" >> "$GITHUB_ENV"
       - name: 验证 Linux 独立组件部署
         run: python scripts/verify_component_deployment.py --timeout 240
   native-smoke:

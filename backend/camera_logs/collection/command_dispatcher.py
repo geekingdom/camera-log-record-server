@@ -116,9 +116,9 @@ class CommandDispatcher:
                 waiter.set_result(None)
             self._prompt_tail = combined[-(len(needle) - 1):] if len(needle) > 1 else b""
 
-    async def observe_initial_mode(self) -> None:
+    async def observe_initial_mode(self, *, required: bool = False) -> None:
         """初始化 debug 前观察当前设备 shell，ASH 已确认时不重复发送口令。"""
-        await self._debug.observe_initial_mode()
+        await self._debug.observe_initial_mode(required=required)
 
     async def ensure_ash(
         self, *, newline: str = "\n", timeout_seconds: float = 10, session_guard: Callback | None = None,
@@ -197,7 +197,11 @@ class CommandDispatcher:
                     raise ConnectionError("connection is stopping")
                 if command.strip() == "debug":
                     # 一次 debug、解密和口令输入作为一个队列项，后续命令不能穿插为口令。
-                    await self._debug.ensure_ash(self.write_debug, newline, timeout_seconds)
+                    slave = self._task.get("protocol") == "SSH" and self._task.get("sshTarget") in {
+                        "SLAVE_1", "SLAVE_2", "SLAVE_3",
+                    }
+                    await self._debug.ensure_ash(self.write_debug, newline, timeout_seconds,
+                                                 verify_current_mode=slave)
                     self._command_blocked = False
                 elif prompt:
                     prompt_future = asyncio.get_running_loop().create_future()
