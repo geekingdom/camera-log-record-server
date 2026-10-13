@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import re
 
 import pytest
 from camera_logs.collection.collector import Collector
@@ -19,6 +20,7 @@ class NestedShell:
         self.mode = actual_mode
         self.advertised_mode = advertised_mode
         self.in_slave = False
+        self.target = 'SLAVE_1'
         self.sent = []
         self.closed = False
         self.ash_ready = asyncio.Event()
@@ -37,6 +39,8 @@ class NestedShell:
         self.sent.append((self.in_slave, data))
         if data.startswith(b'dbclient '):
             address = data.split(b'@', 1)[1].split(b' ', 1)[0]
+            self.target = {b'192.168.253.164': 'SLAVE_1', b'192.168.253.166': 'SLAVE_2',
+                           b'192.168.253.167': 'SLAVE_3'}[address]
             self.queue.put_nowait(b'admin@' + address + b"'s password: ")
         elif data == b'device-login\n':
             self.in_slave = True
@@ -45,13 +49,21 @@ class NestedShell:
             self.queue.put_nowait(b"ls\n'ls' Not Supported, Try 'help'\n# " if self.mode == 'psh' else b'ls\nbin etc proc\n# ')
         elif data == b'debug\n':
             assert self.in_slave
-            self.queue.put_nowait(CHALLENGE[:80].encode())
-            self.queue.put_nowait(CHALLENGE[80:].encode() + b'\nPassword:')
+            if self.mode == 'ash':
+                self.queue.put_nowait(b'-ash: debug: not found\n# ')
+            else:
+                self.queue.put_nowait(CHALLENGE[:80].encode())
+                self.queue.put_nowait(CHALLENGE[80:].encode() + b'\nPassword:')
         elif data == b'slave-debug-password\n':
             assert self.in_slave
             self.mode = 'ash'
             self.queue.put_nowait(b'BusyBox built-in shell (ash)\n# ')
             self.ash_ready.set()
+        elif data.startswith(b'ifconfig;'):
+            marker = re.search(rb'(__SLAVE_BOOT_[0-9a-f]+):%s', data).group(1)
+            addresses = {'SLAVE_1': b'192.168.253.164', 'SLAVE_2': b'192.168.253.166', 'SLAVE_3': b'192.168.253.167'}
+            self.queue.put_nowait(b'eth0\n inet addr:' + addresses.get(self.target, addresses['SLAVE_1']) + b'\n')
+            self.queue.put_nowait(b'\n' + marker + b':0\n')
 
     async def close(self):
         self.closed = True
@@ -92,7 +104,7 @@ async def test_slave_debug_all_entries_confirm_current_shell(tmp_path, entry, ad
             await collector.enqueue_manual('debug')
         await asyncio.wait_for(connection.ash_ready.wait(), 2)
         async with asyncio.timeout(2):
-            while 'ASH_READY' not in events:
+            while sum(data == b'debug\n' for _, data in connection.sent) < 2:
                 await asyncio.sleep(.01)
         assert resolved == [CHALLENGE]
         assert connection.maximum_readers == 1
@@ -146,7 +158,7 @@ async def test_slave_first_manual_debug_waits_for_delayed_banner_handoff(tmp_pat
             'storageIdentity': 'synthetic-slave'}
 
     async def factory(config):
-        shell = ShellBootstrap(connection, config)
+        shell = ShellBootstrap(connection, config, lambda _task, _source: 'slave-debug-password')
         await shell.enter_slave(config['sshTarget'], 'device-login')
         original = shell.read
         first = True
@@ -165,7 +177,7 @@ async def test_slave_first_manual_debug_waits_for_delayed_banner_handoff(tmp_pat
                           resolve_debug_password=lambda _task, _source: 'slave-debug-password')
     try:
         await collector.start()
-        assert collector._commands._debug.mode == 'PSH'
+        assert collector._commands._debug.mode == 'ASH'
         await collector.enqueue_manual('debug')
         assert connection.mode == 'ash'
     finally:

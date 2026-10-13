@@ -63,6 +63,8 @@ async def test_heartbeat_drain_failure_closes_real_socket_and_reconnects_runtime
         handler = asyncio.current_task()
         handlers.add(handler)
         try:
+            writer.write(b"BusyBox built-in shell (ash)\n# ")
+            await writer.drain()
             while await reader.read(65536):
                 pass
             eof_numbers.add(number)

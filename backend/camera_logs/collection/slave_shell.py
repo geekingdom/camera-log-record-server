@@ -12,6 +12,7 @@ from camera_logs.collection.psh_dialogue import PshDialogue
 SLAVE_ADDRESSES = {"SLAVE_1": "192.168.253.164", "SLAVE_2": "192.168.253.166", "SLAVE_3": "192.168.253.167"}
 _SHELL = re.compile(rb"(?:built-in shell|Protect Shell)\s*\((?:ash|psh)\)", re.IGNORECASE)
 _DENIED = re.compile(rb"permission denied|authentication failed|password:\s*$", re.IGNORECASE)
+_INET = re.compile(rb"(?:^|[\r\n\t ])inet (?:addr:)?(\d{1,3}(?:\.\d{1,3}){3})(?=[\r\n\t ]|$)")
 
 
 class SlaveLoginError(ConnectionError):
@@ -32,6 +33,8 @@ class ShellBootstrap:
         self.space_available = asyncio.Event()
         self.space_available.set()
         self.ready = False
+        self.bootstrap_verified = False
+        self.verified_shell_mode = None
         self.eof = False
         self.pending = b""
         self.reader = asyncio.create_task(self._receive())
@@ -73,10 +76,10 @@ class ShellBootstrap:
                     raise SlaveLoginError("从机登录期间连接关闭")
                 await self.changed.wait()
 
-    async def ensure_ash(self):
+    async def ensure_ash(self, *, verify_current_mode=False):
         """先识别主机模式，PSH才调用已有解密器；默认ASH不发送debug。"""
         await self.dialogue.observe_initial_mode()
-        await self.dialogue.ensure_ash(self._guarded_write, "\n", 20)
+        await self.dialogue.ensure_ash(self._guarded_write, "\n", 20, verify_current_mode=verify_current_mode)
 
     async def enter_slave(self, target, password):
         """等待指定内网地址密码提示，单次提交密码，新的ASH/PSH横幅均代表进入从机。"""
@@ -91,10 +94,21 @@ class ShellBootstrap:
         self.buffer = b""
         await self._guarded_write((password + "\n").encode())
         found = await self.wait_match(_SHELL, authenticating=True)
-        # 同一事件循环内无await完成切换；此前密码提示和主机横幅不会进入日志。
-        self.pending = self.buffer[found.start():]
+        # 从机必须使用独立对话状态，不能继承主机已确认的 ASH/PSH 模式。
+        self.dialogue.close()
+        self.dialogue = PshDialogue(self.dialogue.task, self.dialogue.provider)
+        self.buffer = self.buffer[found.start():]
+        self.dialogue.feed(self.buffer)
+        await self.ensure_ash(verify_current_mode=True)
+        output, status = await self.command("ifconfig")
+        if status != 0 or address.encode() not in _INET.findall(output):
+            raise SlaveLoginError("从机接口地址未匹配指定目标")
+        # 所有管理握手字节均已在 buffer 中消费；只有完整验证后才交给采集器。
+        self.pending = b""
         self.buffer = b""
         self.ready = True
+        self.bootstrap_verified = True
+        self.verified_shell_mode = self.dialogue.mode
         return self
 
     async def command(self, command):
@@ -103,7 +117,7 @@ class ShellBootstrap:
         self.buffer = b""
         await self._guarded_write(f'{command}; printf "\\n{marker}:%s\\n" "$?"\n'.encode())
         matched = await self.wait_match(re.compile(rb"\r?\n" + marker.encode() + rb":([0-9]+)\r?\n"))
-        return int(matched.group(1))
+        return self.buffer[:matched.start()], int(matched.group(1))
 
     async def _guarded_write(self, data):
         """所有引导字节发送前复核任务状态，取消或资格失效不会继续提交口令/管理命令。"""

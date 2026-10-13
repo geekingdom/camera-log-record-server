@@ -40,8 +40,12 @@ class _QueueConnection:
         if data.startswith(b"dbclient"):
             await self.queue.put(b"admin@192.168.253.164 password: ")
         elif data == b"secret\n":
-            # 新从机横幅可以是 PSH；交接后 Collector 仍应从同一 reader 收到日志。
-            await self.queue.put(b"BusyBox Protect Shell (psh)\r\n# slave-log\r\n")
+            await self.queue.put(b"BusyBox built-in shell (ash)\r\n# ")
+        elif data == b"debug\n":
+            await self.queue.put(b"-ash: debug: not found\r\n# ")
+        elif data.startswith(b"ifconfig;"):
+            marker = re.search(rb"(__SLAVE_BOOT_[0-9a-f]+):%s", data)
+            await self.queue.put(b"inet addr:192.168.253.164\r\n\n" + marker.group(1) + b":0\r\n")
 
     async def close(self):
         self.closed = True
@@ -143,8 +147,9 @@ async def test_psh_slave_banner_hands_only_slave_bytes_to_collector():
     shell = ShellBootstrap(connection, {"protocol": "SSH"})
     try:
         await shell.enter_slave("SLAVE_1", "secret")
-        # 模式匹配起点后的新横幅及日志进入采集器，主机横幅和密码提示不会泄漏。
-        assert await shell.read() == b"Protect Shell (psh)\r\n# slave-log\r\n"
+        await connection.queue.put(b"slave-log\r\n")
+        # 管理横幅和密码提示不会泄漏，只有验证后的后续日志进入采集器。
+        assert await asyncio.wait_for(shell.read(), 1) == b"slave-log\r\n"
         assert shell.ready
     finally:
         await shell.close()
@@ -339,9 +344,11 @@ async def test_every_slave_factory_handshakes_before_collector_initialization(tm
 
     assert len(connections) == 2
     for connection in connections:
-        assert connection.writes == [
-            b"dbclient admin@192.168.253.164 -y; exit\n", b"secret\n", b"collector-initial\n",
+        assert connection.writes[:3] == [
+            b"dbclient admin@192.168.253.164 -y; exit\n", b"secret\n", b"debug\n",
         ]
+        assert connection.writes[3].startswith(b"ifconfig;")
+        assert connection.writes[4:] == [b"collector-initial\n"]
 
 
 async def test_cancelled_temporary_bootstrap_closes_reader_and_clears_resource_lease(tmp_path, monkeypatch):

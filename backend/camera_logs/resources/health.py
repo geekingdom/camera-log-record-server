@@ -189,6 +189,13 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
             await _transition_identity_task(repo, task, snapshot["id"], identity, timestamp, session)
     if snapshot.get("healthStatus") == "OFFLINE":
         await _authorize_offline_recoveries(repo, snapshot["id"], timestamp, session)
+    if snapshot.get("healthStatus") != "ONLINE":
+        # 认证从失败恢复时，只唤醒仍由同一节点持有且正在重连的 SSH 会话。
+        # 标记由运行实例按 owner CAS 消费，停止、暂停和后继运行均不会被旧认证改写。
+        await repo.db.tasks.update_many({
+            "resourceId": snapshot["id"], "protocol": "SSH", "desiredState": "RUNNING",
+            "status": {"$in": ["CONNECTING", "RECONNECTING"]}, "nodeId": {"$ne": None},
+        }, {"$set": {"reconnectWake": {"resourceId": snapshot["id"], "requestedAt": timestamp}}}, session=session)
     if authorize_user_recovery:
         await grant_after_user_authentication(repo, changed, session)
     # 显式 resume 的设备探测成功，只把同一暂停运行恢复至 PAUSED，领取层再沿用 runId。

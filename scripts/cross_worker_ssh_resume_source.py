@@ -121,7 +121,9 @@ class SshSource:
                 sequence = 0
                 while not reader.done():
                     await source.emitting.wait()
-                    line = f"sourceSession={number} sourceSeq={sequence:06d} payload=live\n".encode()
+                    # 首行同时模拟真实ASH登录横幅，仍纳入源端逐字节完整性校验。
+                    payload_text = "BusyBox built-in shell (ash)" if sequence == 0 else "live"
+                    line = f"sourceSession={number} sourceSeq={sequence:06d} payload={payload_text}\n".encode()
                     process.stdout.write(line)
                     await process.stdout.drain()
                     source.sent.append(line)

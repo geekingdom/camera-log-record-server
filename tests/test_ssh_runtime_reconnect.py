@@ -66,6 +66,8 @@ async def test_ssh_idle_reconnects_after_close_and_reuses_run_budget(tmp_path):
         process_handlers.add(handler)
         payload = bytearray()
         payloads.append(payload)
+        process.stdout.write("BusyBox built-in shell (ash)\n# ")
+        await process.stdout.drain()
         while chunk := await process.stdin.read(1):
             payload.extend(chunk.encode() if isinstance(chunk, str) else chunk)
             expected = {b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"}

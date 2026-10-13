@@ -308,8 +308,8 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
         existing_names: set[str] = set()
         with partial.open("wb") as target_file, gzip_tar_writer(target_file) as bundle:
             if target.exists():
-                with target.open("rb") as source, tarfile.open(fileobj=_ProgressReader(source, "TAR"), mode="r:gz") as previous:
-                    for member in previous.getmembers():
+                with target.open("rb") as source, tarfile.open(fileobj=_ProgressReader(source, "TAR"), mode="r|gz") as previous:
+                    for member in previous:
                         if not member.isfile() or not member.name.endswith(".log"):
                             raise OSError("已有小时归档包含非日志成员")
                         stream = previous.extractfile(member)
@@ -323,12 +323,12 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
                     index_digest, index_size = _hash_stream(source, limiter)
                 if (index_digest, index_size) != (segment["indexSha256"], segment["indexBytes"]):
                     raise OSError("原始索引摘要校验失败")
-                if log.exists():
+                if log.exists() and segment["logName"] in existing_names:
                     with log.open("rb") as source:
                         digest, size = _hash_stream(source, limiter)
                     if digest != segment["sha256"] or size != segment["rawSize"]:
                         raise OSError("原始日志摘要校验失败")
-                elif segment["logName"] not in existing_names:
+                elif not log.exists() and segment["logName"] not in existing_names:
                     raise OSError("待恢复原始日志不存在")
                 if segment["logName"] not in existing_names:
                     info = bundle.gettarinfo(str(log), arcname=segment["logName"])
@@ -340,14 +340,22 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
         # tar 已替换而元数据尚未替换时，原始分卷仍在。以成员名和摘要复核后把
         # 缺失的成员补进旁路清单，重试不会重复写入 tar。
         members = old_members + additions
-        with partial.open("rb") as source, tarfile.open(fileobj=_ProgressReader(source, "VERIFY"), mode="r:gz") as bundle:
-            names = bundle.getnames()
-            if len(names) != len(members) or set(names) != {str(item["logName"]) for item in members} or any(not name.endswith(".log") for name in names):
-                raise OSError("小时归档成员不符合日志合同")
-            for member in members:
-                stream = bundle.extractfile(str(member["logName"]))
+        # 单遍顺序解压并逐成员完整SHA核验，不先getnames扫描一次再回卷解压。
+        expected = {str(member["logName"]): member for member in members}
+        if len(expected) != len(members):
+            raise OSError("小时归档元数据包含重复成员")
+        checked = set()
+        with partial.open("rb") as source, tarfile.open(fileobj=_ProgressReader(source, "VERIFY"), mode="r|gz") as bundle:
+            for info in bundle:
+                member = expected.get(info.name)
+                if not info.isfile() or member is None or info.name in checked or not info.name.endswith(".log"):
+                    raise OSError("小时归档成员不符合日志合同")
+                stream = bundle.extractfile(info)
                 if stream is None or _hash_stream(stream, limiter) != (member["sha256"], member["rawSize"]):
                     raise OSError("小时归档正文校验失败")
+                checked.add(info.name)
+        if checked != set(expected):
+            raise OSError("小时归档成员缺失")
         with partial.open("rb") as handle:
             os.fsync(handle.fileno())
         os.replace(partial, target)
@@ -357,6 +365,8 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
             os.fsync(directory)
         finally:
             os.close(directory)
+        from camera_logs.logs.archive_receipts import persist_verified
+        persist_verified(target, members)
         for segment in all_segments:
             Path(segment["logPath"]).unlink(missing_ok=True)
         pending_path.unlink(missing_ok=True)

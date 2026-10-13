@@ -80,6 +80,7 @@ class Collector:
         self._accepting_commands = True
         self._stopping_commands = False
         self._initializing = True
+        self._protocol_initializing = False
         self._command_status: dict[str, str] = {}
         self._prefixer = LinePrefixer()
         self._terminal_error: Exception | None = None
@@ -111,18 +112,29 @@ class Collector:
         if connection is None:
             raise ConnectionError("connection factory did not return a connection")
         self._connection = connection
-        self.liveness_read_observation_started = time.monotonic()
-        self._sender = asyncio.create_task(self._sender_loop())
-        # 必须先启动接收协程：初始化命令发送后设备可能立即返回提示符。
-        self._reader = asyncio.create_task(self._reader_loop())
         try:
             slave = self.task.get("protocol") == "SSH" and self.task.get("sshTarget") in {
                 "SLAVE_1", "SLAVE_2", "SLAVE_3",
             }
-            # 从机工厂交接的登录横幅须先交给唯一reader观察，避免首条手动/定时debug
-            # 把尚未消费的旧横幅当成自己的切换响应；无初始化debug也遵循同一顺序。
-            if slave or any(str(item["command"]).strip() == "debug" for item in self.task.get("initialCommands", [])):
-                await self._commands.observe_initial_mode(required=slave)
+            # 从机工厂必须先完成目标IP验证，未确认前不启动reader，禁止主机输出落盘。
+            if slave:
+                await self._commands.accept_verified_slave(connection)
+            self._protocol_initializing = not slave and self.task.get("protocol") in {"SSH", "TELNET_DEVICE"}
+            self.liveness_read_observation_started = time.monotonic()
+            self._sender = asyncio.create_task(self._sender_loop())
+            self._reader = asyncio.create_task(self._reader_loop())
+            if not slave and self.task.get("protocol") in {"SSH", "TELNET_DEVICE"}:
+                await self._commands.observe_initial_mode()
+                try:
+                    await self._commands.ensure_ash()
+                except (PshSwitchError, CommandChannelBlocked):
+                    # 主机/设备Telnet尽力切换：失败已由对话记录，继续初始化及接收。
+                    # 未退出密码提示时沿用发送队列的恢复保护，不将普通命令误作口令。
+                    pass
+            elif not slave and any(str(item["command"]).strip() == "debug" for item in self.task.get("initialCommands", [])):
+                await self._commands.observe_initial_mode()
+            self._protocol_initializing = False
+            self.liveness_read_observation_started = time.monotonic()
             for item in self.task.get("initialCommands", []):
                 await self._send_initial(item)
             self._initializing = False
@@ -362,7 +374,8 @@ class Collector:
                         await self._reset_liveness_observation()
                     flush_deadline = asyncio.get_running_loop().time() + buffering.batch_parameters()[1]
                     # 协议心跳不算日志；真实存储阻塞结束后重新观察，避免把背压算成静默。
-                    if time.monotonic() - self.liveness_read_observation_started >= idle_timeout:
+                    # 协议握手自带有界超时；解密等待不能触发日志空闲关闭整个连接。
+                    if not self._protocol_initializing and time.monotonic() - self.liveness_read_observation_started >= idle_timeout:
                         await _call(self._on_state, "IDLE_TIMEOUT", {"taskId": self.task_id, "sessionId": self.session_id})
                         break
                     continue

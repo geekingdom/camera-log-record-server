@@ -116,6 +116,14 @@ class CommandDispatcher:
                 waiter.set_result(None)
             self._prompt_tail = combined[-(len(needle) - 1):] if len(needle) > 1 else b""
 
+    async def accept_verified_slave(self, connection: AsyncConnection) -> None:
+        """只接收本连接引导器完成ASH与目标IP验证后的模式，禁止依赖任务历史缓存。"""
+        if (getattr(connection, "bootstrap_verified", False) is not True
+                or getattr(connection, "verified_shell_mode", None) != "ASH"):
+            raise ConnectionError("从机连接尚未通过ASH及目标IP验证")
+        self._debug.mode = "ASH"
+        await _call(self._debug.on_event, "ALREADY_ASH", {"mode": "ASH"})
+
     async def observe_initial_mode(self, *, required: bool = False) -> None:
         """初始化 debug 前观察当前设备 shell，ASH 已确认时不重复发送口令。"""
         await self._debug.observe_initial_mode(required=required)

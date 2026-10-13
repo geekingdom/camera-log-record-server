@@ -19,6 +19,7 @@ from camera_logs.collection.coredump_lease import (
 )
 from camera_logs.collection.liveness import RuntimeLiveness
 from camera_logs.collection.runtime import SessionRuntime
+from camera_logs.collection.slave_shell import SlaveLoginError
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
 from camera_logs.logs.storage import HourArchive
@@ -107,6 +108,64 @@ def runtime_for_callbacks(tmp_path):
     runtime.started_at = datetime(2026, 9, 8, tzinfo=UTC)
     runtime.stopping = False
     return runtime
+
+
+def test_reconnect_wake_consumes_only_current_ssh_owner(tmp_path):
+    """认证恢复只能缩短当前SSH会话退避，旧运行不得清除后继会话的唤醒标记。"""
+    async def scenario():
+        settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                            node_id="node-a")
+        repo = Repository(AsyncMongoMockClient().camera_logs, settings)
+        current = {"id": "task", "runId": "run", "nodeId": "node-a", "generation": 2,
+                   "protocol": "SSH", "desiredState": "RUNNING", "status": "RECONNECTING",
+                   "reconnectWake": {"resourceId": "camera", "requestedAt": datetime.now(UTC)}}
+        await repo.db.tasks.insert_one(current)
+        runtime = object.__new__(SessionRuntime)
+        runtime.repo, runtime.task, runtime.stopping = repo, dict(current), False
+        assert await runtime._consume_reconnect_wake()
+        assert "reconnectWake" not in await repo.db.tasks.find_one({"id": "task"})
+
+        successor = current | {"runId": "next", "generation": 3,
+                               "reconnectWake": {"resourceId": "camera", "requestedAt": datetime.now(UTC)}}
+        await repo.db.tasks.replace_one({"id": "task"}, successor)
+        assert not await runtime._consume_reconnect_wake()
+        assert "reconnectWake" in await repo.db.tasks.find_one({"id": "task"})
+
+    asyncio.run(scenario())
+
+
+def test_slave_connection_failure_uses_fixed_ten_second_retry(tmp_path):
+    """从机工厂失败不走指数抖动，认证恢复等待器接收固定十秒窗口。"""
+    async def scenario():
+        settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                            node_id="node-a")
+        repo = Repository(AsyncMongoMockClient().camera_logs, settings)
+        task = {
+            "id": "slave", "runId": "run", "nodeId": "node-a", "generation": 1,
+            "resourceId": "camera", "protocol": "SSH", "sshTarget": "SLAVE_1",
+            "desiredState": "RUNNING", "status": "PENDING", "passwordEncrypted": repo.encrypt(""),
+            "storageIdentity": "synthetic-slave", "initialCommands": [], "scheduledCommands": [],
+        }
+        await repo.db.tasks.insert_one(dict(task))
+        waits = []
+
+        async def failing_factory(_config):
+            raise SlaveLoginError("switch failed")
+
+        runtime = SessionRuntime(repo, task, failing_factory)
+
+        async def wait(seconds):
+            waits.append(seconds)
+            runtime.stopping = True
+
+        runtime._wait_reconnect = wait
+        try:
+            await asyncio.wait_for(runtime.background, 1)
+            assert waits == [10]
+        finally:
+            await runtime.stop()
+
+    asyncio.run(scenario())
 
 
 def test_runtime_stop_collector_accepts_closed_asyncssh_read_disconnect(tmp_path):
@@ -705,6 +764,7 @@ async def test_default_idle_timeout_closes_before_reconnect_and_replays_initial_
             self.number, self.order = number, order
             self.created_at = time.monotonic()
             self.received = asyncio.Queue()
+            self.received.put_nowait(b"BusyBox built-in shell (ash)\n# ")
             self.sent = []
             self.close_count = 0
             self.closed_at = None

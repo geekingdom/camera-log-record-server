@@ -1,5 +1,13 @@
 # 当前状态总表
 
+| 当前需求（2026-10-13，协议初始化、从机恢复及晚间归档补偿，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 主机SSH/Telnet设备尽力自动ASH；串口仅显式debug；从机须ASH及精确IP验证才采集 | `collection/collector.py`、`command_dispatcher.py`、`slave_shell.py` | 从机64项、真实网络暂停重连7项通过；35主机ASH及两次从机192.168.253.164实测通过，临时连接关闭 | 后端全量1840项通过，后增慢库进度回归在9项目录专项通过；公司PSH以模拟协议回归覆盖 |
+| 从机连接失败固定10秒重试；认证恢复成功立即唤醒仍RUNNING的SSH主从任务 | `collection/runtime.py`、`resources/health.py` | 运行/资源61项通过，停/暂停/采集中及旧owner不误唤醒 | 公司服务器部署后复核认证变化唤醒 |
+| 晚间旧小时仍显示写入、节点无归档队列；重启历史补偿及完整校验优化 | `logs/archive_receipts.py`、`archive_catalog_recovery.py`、`maintenance.py`、`compression.py`及runtime目录CAS | 归档119项、目录9项通过；持久待办5秒泵、迟到OPEN及保留期保护；480MiB合成0.940→0.710秒、完整SHA一致 | 目标服务器升级后观察积压补偿；现场日志只覆盖至13:34，晚间根因不能仅据前端状态断言 |
+
+本轮工作记录见[协议初始化与实机证据](history/2026-10-13-protocol-ash-identity.md)和[晚间归档补偿与测量](history/2026-10-13-evening-archive.md)。前端190项及构建、全仓Ruff通过。本次提交要求GitHub八项CI全部成功后交付，实际运行结果以该提交的GitHub检查及交付消息为准；公司现场积压消化与PSH仍需部署观察。
+
 | 当前需求（2026-10-13，从机debug与公司npm构建，完整CI通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 公司前端Docker构建使用内网npm源 | `deploy/frontend.Dockerfile`、两种前端Compose、环境样例及CI | npm ci之前配置公司registry及strict-ssl=false，现有.env无需修改；可选两参数透传、CI覆盖公网源；部署61项及Compose展开通过 | 公网Docker完整/分组件构建CI通过；公司镜像源仍需现场验证 |

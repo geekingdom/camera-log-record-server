@@ -274,10 +274,10 @@ async def test_recovery_scan_reports_unique_disk_pending_archive_targets(tmp_pat
     reported = []
     monkeypatch.setattr("camera_logs.node.performance_runtime.archive_spool_snapshot",
                         lambda pending, oldest: reported.append((pending, oldest)))
-    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda _spool: None)
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda _spool, **_kwargs: None)
     monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive", lambda _target: None)
 
-    assert await recover_orphan_archives(repo) == 0
+    assert await pump_pending_archives(repo) == 0
     assert reported and reported[-1][0] == 2
     assert reported[-1][1] >= 0
 

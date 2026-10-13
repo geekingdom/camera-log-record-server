@@ -65,17 +65,19 @@ async def test_pause_stops_real_runtime_without_reconnect_and_preserves_run_lock
     class Connection:
         def __init__(self):
             self.received = asyncio.Queue()
+            self.received.put_nowait(b"BusyBox built-in shell (ash)\n# ")
             self.sent = []
             self.close_count = 0
             self.opened = asyncio.Event()
 
         async def read(self, _size=65536):
-            self.opened.set()
             value = await self.received.get()
             return value or b""
 
         async def write(self, data):
             self.sent.append(data)
+            if data == b"initialise\n":
+                self.opened.set()
 
         async def close(self):
             self.close_count += 1

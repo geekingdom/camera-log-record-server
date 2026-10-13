@@ -1,6 +1,7 @@
 """验证从机登录单接收器、主机输出隔离及共享端口引导边界，不访问真实设备。"""
 
 import asyncio
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,12 +13,13 @@ from camera_logs.collection.slave_ssh import connect_slave, dropbear_command
 
 class Shell:
     """按写入阶段返回分包横幅，保留命令用于验证口令仅在正确阶段发送。"""
-    def __init__(self, *, accepted=True):
+    def __init__(self, *, accepted=True, address=b"192.168.253.164"):
         self.queue = asyncio.Queue()
         self.queue.put_nowait(b"BusyBox main built-in shell (ash)\r\n# ")
         self.writes = []
         self.closed = False
         self.accepted = accepted
+        self.address = address
 
     async def read(self, size):
         return await self.queue.get()
@@ -34,6 +36,12 @@ class Shell:
             else:
                 self.queue.put_nowait(b"Permission denied\r\n")
                 self.queue.put_nowait(b"")
+        elif data.startswith(b"ifconfig;"):
+            marker = re.search(rb"(__SLAVE_BOOT_[0-9a-f]+):%s", data).group(1)
+            self.queue.put_nowait(b"eth0 Link encap:Ethernet\n inet addr:" + self.address + b"\n")
+            self.queue.put_nowait(b"\n" + marker + b":0\n")
+        elif data == b"debug\n":
+            self.queue.put_nowait(b"-ash: debug: not found\n# ")
 
     async def close(self):
         self.closed = True
@@ -44,10 +52,11 @@ async def test_slave_fragmented_login_excludes_host_and_password_prompt():
     shell = ShellBootstrap(connection, {"protocol": "SSH"})
     try:
         await shell.enter_slave("SLAVE_1", "secret")
-        data = await shell.read()
+        connection.queue.put_nowait(b"slave-log\r\n")
+        data = await asyncio.wait_for(shell.read(), 1)
         assert b"slave-log" in data
         assert b"main" not in data and b"password" not in data
-        assert connection.writes == [b"dbclient admin@192.168.253.164 -y; exit\n", b"secret\n"]
+        assert connection.writes[:2] == [b"dbclient admin@192.168.253.164 -y; exit\n", b"secret\n"]
         connection.queue.put_nowait(b"last-log\n")
         connection.queue.put_nowait(b"")
         assert await shell.read() == b"last-log\n"
@@ -65,6 +74,17 @@ async def test_failed_slave_auth_never_enters_logging_mode():
             await shell.enter_slave("SLAVE_1", "secret")
         assert not shell.ready
         assert connection.writes.count(b"secret\n") == 1
+    finally:
+        await shell.close()
+
+
+async def test_slave_wrong_interface_ip_never_enters_verified_logging_mode():
+    connection = Shell(address=b"192.168.253.199")
+    shell = ShellBootstrap(connection, {"protocol": "SSH"})
+    try:
+        with pytest.raises(Exception, match="接口地址"):
+            await shell.enter_slave("SLAVE_1", "secret")
+        assert not shell.ready and not shell.bootstrap_verified
     finally:
         await shell.close()
 
@@ -122,3 +142,54 @@ async def test_host_debug_failure_is_retryable_without_slave_initialization(monk
     with pytest.raises(SlaveLoginError, match="后续重连"):
         await connect_slave(SimpleNamespace(repo=object()), {}, direct)
     direct.assert_not_awaited()
+
+
+@pytest.mark.parametrize('output,status', [
+    (b'inet addr:192.168.253.165\n', 0),
+    (b'inet addr:192.168.253.164.9\n', 0),
+    (b'inet addr:192.168.253.164.example\n', 0),
+    (b'ifconfig 192.168.253.164\n# ', 0),
+    (b'inet 192.168.253.164\n', 1),
+])
+async def test_slave_identity_never_accepts_wrong_echo_or_failed_command(output, status):
+    """只接受成功ifconfig的完整inet地址字段，回显、前缀与失败退出均不得交接。"""
+    connection = Shell()
+    original = connection.write
+
+    async def write(data):
+        if data.startswith(b'ifconfig;'):
+            marker = re.search(rb'(__SLAVE_BOOT_[0-9a-f]+):%s', data).group(1)
+            connection.queue.put_nowait(output + b'\n' + marker + f':{status}\n'.encode())
+        else:
+            await original(data)
+
+    connection.write = write
+    shell = ShellBootstrap(connection, {'protocol': 'SSH'})
+    try:
+        with pytest.raises(ConnectionError, match='接口地址'):
+            await shell.enter_slave('SLAVE_1', 'secret')
+        assert not shell.ready and not shell.bootstrap_verified
+    finally:
+        await shell.close()
+
+
+async def test_slave_valid_ip_without_completion_marker_is_not_verified():
+    """IP文字已经到达但响应中途断开，不能把半个ifconfig当成成功。"""
+    connection = Shell()
+    original = connection.write
+
+    async def write(data):
+        if data.startswith(b'ifconfig;'):
+            connection.queue.put_nowait(b'inet addr:192.168.253.164\n')
+            connection.queue.put_nowait(b'')
+        else:
+            await original(data)
+
+    connection.write = write
+    shell = ShellBootstrap(connection, {'protocol': 'SSH'})
+    try:
+        with pytest.raises(ConnectionError):
+            await shell.enter_slave('SLAVE_1', 'secret')
+        assert not shell.ready
+    finally:
+        await shell.close()

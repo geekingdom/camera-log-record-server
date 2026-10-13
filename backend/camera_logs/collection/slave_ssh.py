@@ -238,7 +238,9 @@ async def ensure_service(worker, config, port, direct_connect):
                 bootstrap = ShellBootstrap(connection, config, PshPasswordProvider(repo.settings), guard)
                 try:
                     await bootstrap.ensure_ash()
-                    await bootstrap.command(dropbear_command(port))
+                    _output, status = await bootstrap.command(dropbear_command(port))
+                    if status != 0:
+                        raise SlaveLoginError("主机从机SSH服务启动命令失败")
                     await repo.audit("system", "slave-ssh-bootstrap-temporary-attempt", config["id"])
                     await record_slave_bootstrap_event(
                         repo, config, phase="TEMPORARY_BOOTSTRAPPED", outcome="UNKNOWN", level="WARNING",
@@ -325,7 +327,7 @@ async def connect_slave(worker, config, direct_connect):
     except BaseException as error:
         await close_bootstrap(shell, config)
         if isinstance(error, PshSwitchError):
-            raise SlaveLoginError("主机ASH切换未完成，未执行从机初始化，将在后续重连重试") from None
+            raise SlaveLoginError("主机或从机ASH确认未完成，未执行从机初始化，将在后续重连重试") from None
         raise
 
 

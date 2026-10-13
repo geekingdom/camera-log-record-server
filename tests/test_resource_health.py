@@ -7,6 +7,7 @@ import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from camera_logs.resources.health import (
+    _apply_success,
     check_resource,
     failure_backoff_seconds,
     grant_after_user_authentication,
@@ -64,6 +65,41 @@ def test_periodic_failure_count_persists_and_success_resets_to_one_minute(tmp_pa
         succeeded = await repo.db.resources.find_one({"id": "camera"})
         assert succeeded["healthFailureCount"] == 0
         assert 55 <= (succeeded["nextHealthCheckAt"].replace(tzinfo=before.tzinfo) - before).total_seconds() <= 65
+
+    asyncio.run(scenario())
+
+
+def test_authentication_recovery_wakes_only_current_connecting_ssh_tasks(tmp_path):
+    """失败资源恢复只唤醒当前SSH连接，不改变暂停、停止或已采集任务的用户意图。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        resource = {
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.70", "deletedAt": None,
+            "healthStatus": "AUTH_FAILED", "healthFailureCount": 3, "model": "DS", "subSerialNumber": "SN",
+        }
+        await repo.db.resources.insert_one(resource)
+        await repo.db.tasks.insert_many([
+            {"id": "host", "resourceId": "camera", "protocol": "SSH", "sshTarget": "HOST",
+             "desiredState": "RUNNING", "status": "RECONNECTING", "nodeId": "node-a"},
+            {"id": "slave", "resourceId": "camera", "protocol": "SSH", "sshTarget": "SLAVE_2",
+             "desiredState": "RUNNING", "status": "CONNECTING", "nodeId": "node-a"},
+            {"id": "paused", "resourceId": "camera", "protocol": "SSH", "sshTarget": "SLAVE_1",
+             "desiredState": "PAUSED", "status": "RECONNECTING", "nodeId": "node-a"},
+            {"id": "stopped", "resourceId": "camera", "protocol": "SSH", "sshTarget": "SLAVE_3",
+             "desiredState": "STOPPED", "status": "RECONNECTING", "nodeId": "node-a"},
+            {"id": "collecting", "resourceId": "camera", "protocol": "SSH", "sshTarget": "HOST",
+             "desiredState": "RUNNING", "status": "COLLECTING", "nodeId": "node-a"},
+            {"id": "telnet", "resourceId": "camera", "protocol": "TELNET_DEVICE",
+             "desiredState": "RUNNING", "status": "RECONNECTING", "nodeId": "node-a"},
+        ])
+        await _apply_success(repo, resource, {"model": "DS", "subSerialNumber": "SN"})
+        rows = {row["id"]: row async for row in repo.db.tasks.find({"resourceId": "camera"})}
+        assert rows["host"]["reconnectWake"]["resourceId"] == "camera"
+        assert rows["slave"]["reconnectWake"]["resourceId"] == "camera"
+        for identifier in ("paused", "stopped", "collecting", "telnet"):
+            assert "reconnectWake" not in rows[identifier]
+        assert rows["paused"]["desiredState"] == "PAUSED"
+        assert rows["stopped"]["desiredState"] == "STOPPED"
 
     asyncio.run(scenario())
 

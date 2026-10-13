@@ -10,7 +10,7 @@ from camera_logs.node import performance_runtime
 
 
 def test_pressure_archive_limits_hash_copy_and_final_verification(tmp_path, monkeypatch):
-    """索引摘要、原文摘要、tar 复制和发布复核都必须经过同一个后台限速器。"""
+    """索引摘要、tar复制和完整发布复核仍经过限速器，省去重复原文预读。"""
     consumed = []
 
     class RecordingLimiter:
@@ -34,8 +34,8 @@ def test_pressure_archive_limits_hash_copy_and_final_verification(tmp_path, monk
 
     compression.publish_hour_archive([segment], tmp_path / "hour.tar.gz", background_rate=123, create_index=False)
 
-    # 索引摘要一次，正文在摘要、tar 复制、归档复核三个阶段各一次。
-    assert sum(consumed) == len(index_data) + len(log_data) * 3
+    # 索引摘要一次，正文复制一次、完整归档SHA复核一次，省去原文额外预读。
+    assert sum(consumed) == len(index_data) + len(log_data) * 2
 
 
 async def test_cancelled_compression_shutdown_keeps_pool_until_thread_exit(monkeypatch):

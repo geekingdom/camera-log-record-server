@@ -25,6 +25,8 @@ async def test_telnet_device_pause_closes_tcp_and_resume_reuses_budget(tmp_path)
         received.append(payload)
         eof.append(closed)
         try:
+            writer.write(b"BusyBox built-in shell (ash)\n# ")
+            await writer.drain()
             while chunk := await reader.read(65536):
                 payload.extend(chunk)
                 writer.write(b"device log\n")

@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pymongo.errors import ConnectionFailure, ExecutionTimeout, PyMongoError
+from pymongo.errors import ConnectionFailure, DuplicateKeyError, ExecutionTimeout, PyMongoError
 
 from camera_logs.collection.collector import Collector, CommandChannelBlocked
 from camera_logs.collection.coredump_lease import (
@@ -34,6 +34,7 @@ from camera_logs.collection.runtime_monitors import (
     release_monitor_leases,
     stop_session_monitors,
 )
+from camera_logs.collection.slave_shell import SlaveLoginError
 from camera_logs.collection.ssh_admission import SshCapacityError, SshSlotUncertain
 from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
@@ -153,8 +154,21 @@ class SessionRuntime:
                     # 的时间重写它。首次直接收到 READY 时才由插入路径提供这些值。
                     set_on_insert["runStartedAt"] = value.pop("runStartedAt")
                     set_on_insert["sessionStartedAt"] = value.pop("sessionStartedAt")
-                await self.repo.db.files.update_one({"id": file_id}, {"$set": value,
-                    "$setOnInsert": set_on_insert}, upsert=True)
+                query = {"id": file_id}
+                if entry["status"] == "OPEN":
+                    # 独立目录恢复可能先完成READY；迟到实时水位绝不能重新打开已归档分卷。
+                    query["status"] = {"$in": ["OPEN", None]}
+                try:
+                    await self.repo.db.files.update_one(query, {"$set": value,
+                        "$setOnInsert": set_on_insert}, upsert=True)
+                except DuplicateKeyError:
+                    existing = await self.repo.db.files.find_one({"id": file_id})
+                    if (entry["status"] != "OPEN" or existing is None
+                            or existing.get("status") not in {"READY", "DELETING"}
+                            or any(existing.get(key) != entry.get(key) for key in
+                                   ("taskId", "runId", "sessionId", "nodeId"))):
+                        raise
+                    self.catalog_ready.add(file_id)
                 # update_one 可让出事件循环；仅消费仍是本次快照的条目，不能丢掉
                 # 期间收到的后续日志水位或归档最终状态。
                 if self.catalog_dirty.get(file_id) is entry:
@@ -362,11 +376,46 @@ class SessionRuntime:
             await self.repo.db.commands.update_one({**scope, "status": "SENDING"},
                 {"$set": {"status": status, "error": error, "completedAt": now()}})
 
+    async def _consume_reconnect_wake(self):
+        """只消费本运行仍在退避的认证恢复标记，旧会话不得清除后继请求。"""
+        if self.task.get("protocol") != "SSH":
+            return False
+        try:
+            async with asyncio.timeout(2):
+                current = await self.repo.db.tasks.find_one({
+                    **owner_filter(self.task), "desiredState": "RUNNING", "status": "RECONNECTING",
+                    "reconnectWake": {"$exists": True},
+                }, {"reconnectWake": 1})
+                if current is None:
+                    return False
+                changed = await self.repo.db.tasks.update_one({
+                    **owner_filter(self.task), "desiredState": "RUNNING", "status": "RECONNECTING",
+                    "reconnectWake": current["reconnectWake"],
+                }, {"$unset": {"reconnectWake": ""}})
+            return bool(changed.matched_count)
+        except (PyMongoError, TimeoutError):
+            # 认证恢复只是缩短既有等待；数据库暂不可用时保留原有重连节奏。
+            logger.exception("认证恢复唤醒查询失败 task=%s", self.task["id"])
+            return False
+
+    async def _wait_reconnect(self, seconds):
+        """等待重连退避，认证成功可唤醒当前 SSH 运行，停止/失属仍由原收尾流程处理。"""
+        deadline = time.monotonic() + seconds
+        while not self.stopping:
+            if await self._consume_reconnect_wake():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            # 无跨进程内存信号时短轮询持久化标记；只在失败退避窗口执行。
+            await asyncio.sleep(min(1, remaining))
+
     async def run(self):
         """连接失败指数退避，先释放旧连接再重试；每次登录后重新发送初始化命令。"""
         delay = 1
         while not self.stopping:
             session_commands = None
+            fixed_slave_retry = False
             try:
                 config = dict(self.task)
                 config["password"] = self.repo.decrypt(config["passwordEncrypted"])
@@ -381,7 +430,7 @@ class SessionRuntime:
                          "coredumpCheckedAt": None}
                 admitted = await self.repo.db.tasks.update_one(
                     {**owner_filter(self.task), "status": {"$ne": "BLOCKED"}},
-                    {"$set": reset})
+                    {"$set": reset, "$unset": {"reconnectWake": ""}})
                 if not admitted.matched_count:
                     raise OwnershipLost("重连前任务归属或准入已失效")
                 self.collector = Collector(config, self.repo.settings.log_root, connection_factory=self.factory,
@@ -410,8 +459,12 @@ class SessionRuntime:
                 logger.info("运行实例停止重连，归属或准入已失效 task=%s", self.task["id"])
                 break
             except PshSwitchError as exc:
-                self.error = str(exc)
-                break
+                if self.task.get("protocol") != "SSH" or self.task.get("sshTarget", "HOST") == "HOST":
+                    self.error = str(exc)
+                    break
+                delay = 10
+                fixed_slave_retry = True
+                logger.info("从机调试切换失败，十秒后重试 task=%s error=%s", self.task["id"], exc)
             except SshSlotUncertain as exc:
                 # 只保存不带栈的身份快照；反复抛同一异常会累加历史帧并耗尽日志轮转。
                 logger.exception("SSH名额结果未知，保持隔离 task=%s", self.task["id"])
@@ -421,14 +474,26 @@ class SessionRuntime:
             except SshCapacityError as exc:
                 await self.repo.db.tasks.update_one(owner_filter(self.task), {"$set": {"error": str(exc)}})
                 logger.info("等待设备SSH连接名额 task=%s", self.task["id"])
+            except SlaveLoginError as exc:
+                # 从机登录/切换失败通常需要等待主机或设备端状态收敛；固定十秒避免快速重试。
+                self.error = None
+                delay = 10
+                fixed_slave_retry = True
+                logger.info("从机连接或切换失败，十秒后重试 task=%s error=%s", self.task["id"], exc)
             except Exception as exc:
                 logger.exception("采集会话异常 task=%s", self.task["id"])
                 import asyncssh
-                if isinstance(exc, asyncssh.PermissionDenied):
+                if self.task.get("protocol") == "SSH" and self.task.get("sshTarget", "HOST") != "HOST":
+                    # 从机工厂的认证、ifconfig、服务引导和连接异常均可能随主机恢复而消失；
+                    # 固定十秒避免快速重试。所有权丢失和SSH关闭不确定已在此前分支隔离。
+                    delay = 10
+                    fixed_slave_retry = True
+                    logger.info("从机连接失败，十秒后重试 task=%s error=%s", self.task["id"], type(exc).__name__)
+                elif isinstance(exc, asyncssh.PermissionDenied):
                     # 凭据被拒绝不会因重试自行恢复，保留失败状态等待管理员修正账号配置。
                     self.error = "SSH账号认证失败"
                     break
-                if isinstance(exc, asyncssh.HostKeyNotVerifiable):
+                elif isinstance(exc, asyncssh.HostKeyNotVerifiable):
                     # 指纹缺失或变化必须人工确认，绝不能绕过 known_hosts 自动重连。
                     self.error = "SSH主机指纹未登记或不匹配"
                     break
@@ -459,9 +524,12 @@ class SessionRuntime:
                     "level": "WARNING", "outcome": "UNKNOWN", "message": "连接中断，设备端未提供补传",
                 })
                 await self.on_state("RECONNECTING", {"sessionId": self.collector.session_id})
-                import random
-                await asyncio.sleep(delay+random.random())
-                delay = min(delay*2, 60)
+                if fixed_slave_retry:
+                    await self._wait_reconnect(10)
+                else:
+                    import random
+                    await self._wait_reconnect(delay + random.random())
+                    delay = min(delay*2, 60)
 
     async def stop(self):
         """禁用重试并等待采集器收尾，连接释放完成后才能取消运行等待。"""

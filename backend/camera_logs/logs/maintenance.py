@@ -280,22 +280,27 @@ def _members(path: Path) -> list[dict[str, Any]]:
         raise ValueError("invalid archive metadata")
     required = {"taskId", "runId", "sessionId", "hourStart", "rawSize", "sha256", "firstSequence", "lastSequence",
                 "logName", "indexName", "indexSha256", "indexBytes"}
-    names: set[str] = set()
-    with tarfile.open(path, "r:gz") as archive:
-        archive_members = {item.name: item for item in archive.getmembers() if item.isfile()}
-        if len(archive_members) != len(members) or any(not name.endswith(".log") for name in archive_members):
-            raise ValueError("archive contains non-log or duplicate members")
-        for member in members:
-            if not isinstance(member, dict) or not required <= member.keys():
-                raise ValueError("archive metadata member is incomplete")
-            log_path = _member_path(path, member["logName"], ".log")
-            index_path = _member_path(path, member["indexName"], ".index.jsonl")
-            if log_path.name in names or not isinstance(member["rawSize"], int) or not isinstance(member["indexBytes"], int):
-                raise ValueError("archive metadata member is invalid")
-            names.add(log_path.name)
-            source = archive.extractfile(archive_members.get(log_path.name))
+    expected = {}
+    for member in members:
+        if not isinstance(member, dict) or not required <= member.keys():
+            raise ValueError("archive metadata member is incomplete")
+        log_path = _member_path(path, member["logName"], ".log")
+        _member_path(path, member["indexName"], ".index.jsonl")
+        if (log_path.name in expected or not isinstance(member["rawSize"], int)
+                or not isinstance(member["indexBytes"], int)):
+            raise ValueError("archive metadata member is invalid")
+        expected[log_path.name] = member
+    checked = set()
+    # 一次顺序解压，不先遍历整个gzip再seek回第一成员重新解压。
+    with tarfile.open(path, "r|gz") as archive:
+        for info in archive:
+            member = expected.get(info.name)
+            if not info.isfile() or member is None or info.name in checked:
+                raise ValueError("archive contains non-log or duplicate members")
+            source = archive.extractfile(info)
             if source is None or _hash_stream(source) != (member["sha256"], member["rawSize"]):
                 raise ValueError("archive log checksum or size mismatch")
+            index_path = _member_path(path, member["indexName"], ".index.jsonl")
             with index_path.open("rb") as index:
                 if _hash_stream(index) != (member["indexSha256"], member["indexBytes"]):
                     raise ValueError("archive index checksum or size mismatch")
@@ -303,6 +308,9 @@ def _members(path: Path) -> list[dict[str, Any]]:
                 first = index.readline()
                 if first:
                     member["firstReceivedAt"] = json.loads(first).get("receivedAt")
+            checked.add(info.name)
+    if checked != set(expected):
+        raise ValueError("archive members missing")
     return members
 
 
@@ -367,17 +375,20 @@ def _scanned_orphan_archives(root: Path) -> tuple[list[Path], list[Path], list[P
     return sorted(spools), sorted(pending_journals), sorted(archives), modified
 
 
-def _scanned_pending_archives(root: Path) -> tuple[list[Path], list[Path], dict[Path, float]]:
+def _scanned_pending_archives(root: Path) -> tuple[list[Path], list[Path], dict[Path, float], list[Path]]:
     """仅在线程中枚举可恢复 spool 和旧 pending，不读取 tar、raw 或外部索引。"""
     spools: list[Path] = []
     pending_journals: list[Path] = []
     modified: dict[Path, float] = {}
+    receipts: list[Path] = []
     for directory, names, files in os.walk(root):
         names[:] = [name for name in names if name != "exports"]
         parent = Path(directory)
         for name in files:
             path = parent / name
-            if name.endswith(".tar.gz.pending.json"):
+            if name.endswith(".tar.gz.catalog.pending.json"):
+                receipts.append(path)
+            elif name.endswith(".tar.gz.pending.json"):
                 pending_journals.append(path)
             elif ".tar.gz.pending." in name and name.endswith(".json"):
                 spools.append(path)
@@ -387,7 +398,7 @@ def _scanned_pending_archives(root: Path) -> tuple[list[Path], list[Path], dict[
                 modified[path] = path.stat().st_mtime
             except FileNotFoundError:
                 continue
-    return sorted(spools), sorted(pending_journals), modified
+    return sorted(spools), sorted(pending_journals), modified, sorted(receipts)
 
 
 def _members_and_archive_bytes(path: Path) -> tuple[list[dict[str, Any]], int]:
@@ -397,7 +408,7 @@ def _members_and_archive_bytes(path: Path) -> tuple[list[dict[str, Any]], int]:
 
 async def pump_pending_archives(repo: Any) -> int:
     """每五秒独立补充持久归档槽位，避免历史 tar 校验或索引回填饿死 spool。"""
-    spools, pending_journals, modified = await job_thread(_scanned_pending_archives, _root(repo))
+    spools, pending_journals, modified, receipts = await job_thread(_scanned_pending_archives, _root(repo))
     from camera_logs.node.performance_runtime import archive_spool_snapshot
     pending_targets: dict[Path, float] = {}
     scheduled = 0
@@ -425,10 +436,67 @@ async def pump_pending_archives(repo: Any) -> int:
         except Exception:
             record_pending(source, source)
             logger.exception("归档持久清单补充登记失败 path=%s", source)
+    from camera_logs.logs.archive_catalog_recovery import reconcile_receipts
+    compression_targets = set(pending_targets)
+    for receipt in receipts:
+        record_pending(Path(str(receipt).removesuffix(".catalog.pending.json")), receipt)
+    completed = await reconcile_receipts(repo, receipts, _register_archive_members)
+    for target in completed:
+        if target not in compression_targets:
+            pending_targets.pop(target, None)
     current = now().timestamp()
     oldest_seconds = max(0, current - min(pending_targets.values())) if pending_targets else 0
     archive_spool_snapshot(len(pending_targets), oldest_seconds)
     return scheduled
+
+
+async def _register_archive_members(repo: Any, path: Path, members: list[dict], archive_bytes: int) -> int:
+    """复用已完成校验的成员更新目录，保留身份CAS及删除状态，刷新共享包大小。"""
+    root = _root(repo)
+    _contained(repo, path)
+    registered = 0
+    group_id = hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()
+    identifiers = [_archive_id(root, _member_path(path, member["logName"], ".log")) for member in members]
+    existing_records = {record["id"]: record async for record in repo.db.files.find({"id": {"$in": identifiers}})}
+    for member in members:
+        log_path = _member_path(path, member["logName"], ".log")
+        index_path = None if member.get("_legacy") else _member_path(path, member["indexName"], ".index.jsonl")
+        identifier = _archive_id(root, log_path)
+        existing = existing_records.get(identifier)
+        if existing and existing.get("status") not in {"OPEN", "READY"}:
+            continue
+        identity = {key: member[key] for key in ("taskId", "runId", "sessionId")}
+        identity["nodeId"] = repo.settings.node_id
+        if existing and any(existing.get(key) != value for key, value in identity.items()):
+            raise ValueError("archive identity differs from open catalog record")
+        document = {
+            "id": identifier, **identity,
+            "hour": datetime.fromisoformat(member["hourStart"]).astimezone(UTC).isoformat(),
+            "path": str(path), "archiveName": path.name, "archiveMember": log_path.name,
+            "archiveGroupId": group_id, "rawFileName": log_path.name,
+            "bytes": member["rawSize"], "archiveBytes": archive_bytes, "sha256": member["sha256"],
+            "firstSequence": member["firstSequence"], "lastSequence": member["lastSequence"],
+            "segmentNumber": int(match.group(1)) if not member.get("_legacy") and (
+                match := re.search(r"-part-(\d+)\.log$", log_path.name)) else 0,
+            "status": "READY", "updatedAt": now(),
+        }
+        if index_path is not None:
+            document["indexPath"] = str(index_path)
+        if member.get("firstReceivedAt"):
+            document["firstReceivedAt"] = member["firstReceivedAt"]
+        if existing and all(existing.get(key) == value for key, value in document.items() if key != "updatedAt"):
+            # 超时后的下一轮跳过已完成成员，不能每次从头更新导致大包永远无法确认。
+            continue
+        if existing:
+            result = await repo.db.files.update_one(
+                {"id": identifier, "status": {"$in": ["OPEN", "READY"]}, **identity}, {"$set": document})
+            registered += result.modified_count
+        else:
+            result = await repo.db.files.update_one(
+                {"id": identifier, **identity, "status": {"$in": ["OPEN", "READY"]}},
+                {"$set": document, "$setOnInsert": {"createdAt": now()}}, upsert=True)
+            registered += int(result.upserted_id is not None)
+    return registered
 
 
 async def recover_orphan_archives(repo: Any) -> int:
@@ -439,7 +507,6 @@ async def recover_orphan_archives(repo: Any) -> int:
     # 节点启动等待积压小时包。发布后的 metadata 仍在后续维护周期回写目录记录。
     spooled_logs: set[Path] = set()
     spools, pending_journals, archives, pending_modified = await job_thread(_scanned_orphan_archives, root)
-    from camera_logs.node.performance_runtime import archive_spool_snapshot
     pending_targets: dict[Path, float] = {}
 
     def record_pending(target: Path, source: Path) -> None:
@@ -465,9 +532,6 @@ async def recover_orphan_archives(repo: Any) -> int:
             logger.exception("归档 spool 恢复登记失败 path=%s", spool)
     for pending in pending_journals:
         record_pending(Path(str(pending).removesuffix(".pending.json")), pending)
-    current = now().timestamp()
-    oldest_seconds = max(0, current - min(pending_targets.values())) if pending_targets else 0
-    archive_spool_snapshot(len(pending_targets), oldest_seconds)
     await _recover_proven_raw_segments(repo, spooled_logs)
     # 提交清单先于 tar 原子替换落盘。仅扫描已有 tar 会遗漏此后断电时留下的
     # ``.tar.gz.pending.json``，因此将两类路径归一为同一个归档目标并去重处理。
@@ -486,42 +550,19 @@ async def recover_orphan_archives(repo: Any) -> int:
                 continue
             if await _ready_group_matches(repo, path):
                 continue
-            members, archive_bytes = await job_thread(_members_and_archive_bytes, path)
-            group_id = hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()
-            for member in members:
-                log_path = _member_path(path, member["logName"], ".log")
-                index_path = None if member.get("_legacy") else _member_path(path, member["indexName"], ".index.jsonl")
-                identifier = _archive_id(root, log_path)
-                existing = await repo.db.files.find_one({"id": identifier})
-                if existing and existing.get("status") != "OPEN":
-                    continue
-                identity = {key: member[key] for key in ("taskId", "runId", "sessionId")}
-                identity["nodeId"] = repo.settings.node_id
-                if existing and any(existing.get(key) != value for key, value in identity.items()):
-                    raise ValueError("archive identity differs from open catalog record")
-                document = {
-                    "id": identifier, **identity,
-                    "hour": datetime.fromisoformat(member["hourStart"]).astimezone(UTC).isoformat(),
-                    "path": str(path), "archiveName": path.name, "archiveMember": log_path.name,
-                    "archiveGroupId": group_id, "rawFileName": log_path.name,
-                    "bytes": member["rawSize"], "archiveBytes": archive_bytes, "sha256": member["sha256"],
-                    "firstSequence": member["firstSequence"], "lastSequence": member["lastSequence"],
-                    "segmentNumber": int(match.group(1)) if not member.get("_legacy") and (
-                        match := re.search(r"-part-(\d+)\.log$", log_path.name)) else 0,
-                    "status": "READY", "updatedAt": now(),
-                }
-                if index_path is not None:
-                    document["indexPath"] = str(index_path)
-                if member.get("firstReceivedAt"):
-                    document["firstReceivedAt"] = member["firstReceivedAt"]
-                if existing:
-                    result = await repo.db.files.update_one(
-                        {"id": identifier, "status": "OPEN", **identity}, {"$set": document})
-                    registered += result.modified_count
-                else:
-                    result = await repo.db.files.update_one(
-                        {"id": identifier}, {"$setOnInsert": {**document, "createdAt": now()}}, upsert=True)
-                    registered += int(result.upserted_id is not None)
+            from camera_logs.node.performance_runtime import (
+                archive_finished,
+                archive_running,
+                archive_started,
+            )
+            token = object()
+            archive_started(token)
+            archive_running(token)
+            try:
+                members, archive_bytes = await job_thread(_members_and_archive_bytes, path)
+                registered += await _register_archive_members(repo, path, members, archive_bytes)
+            finally:
+                archive_finished(token)
         except Exception:
             logger.exception("归档恢复失败 path=%s", path)
     return registered
@@ -548,7 +589,8 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
     async for document in cursor:
         # 一个共享小时 tar 可被多个 files 成员引用。先读取完整成员组，任一
         # 受保护、未过期、非本节点或未进入可删除状态都阻止物理删除。
-        if _pending_path(Path(document["path"])).exists():
+        if (_pending_path(Path(document["path"])).exists()
+                or Path(str(document["path"]) + ".catalog.pending.json").exists()):
             skipped += 1
             continue
         group = [item async for item in repo.db.files.find({"path": document["path"]})]
@@ -613,7 +655,7 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
             cleanup_path = cleanup_path if cleanup_path.is_absolute() else Path(repo.settings.log_root) / cleanup_path
             cleanup_allowed = path.exists() and not path.is_symlink()
             await asyncio.to_thread(path.unlink, missing_ok=True)
-            sidecars = {_metadata_path(path), index_path(path)}
+            sidecars = {_metadata_path(path), index_path(path), Path(str(path) + ".catalog.pending.json")}
             for member in claimed_group:
                 if member.get("indexPath"):
                     sidecars.add(_contained(repo, member["indexPath"]))

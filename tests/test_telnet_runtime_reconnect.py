@@ -48,6 +48,8 @@ async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(t
                 await writer.drain()
                 password = (await reader.readuntil(b"\n")).rstrip(b"\r\n")
                 logins.append((connection_number, username, password))
+                writer.write(b"BusyBox built-in shell (ash)\n# ")
+                await writer.drain()
             while True:
                 writer.send_iac(b"\xff\xf1")
                 await writer.drain()

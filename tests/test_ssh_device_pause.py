@@ -58,6 +58,8 @@ async def test_ssh_pause_closes_server_session_and_resume_reuses_run_budget(tmp_
         number = len(payloads) + 1
         payload = bytearray()
         payloads.append(payload)
+        process.stdout.write("BusyBox built-in shell (ash)\n# ")
+        await process.stdout.drain()
         try:
             while chunk := await process.stdin.read(1):
                 payload.extend(chunk.encode() if isinstance(chunk, str) else chunk)
