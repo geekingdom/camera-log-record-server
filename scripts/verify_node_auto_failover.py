@@ -43,13 +43,16 @@ from verify_cross_worker_ssh_resume import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def wait_files(database, task_id, node_id):
+async def wait_files(database, task_id, node_id, *, run_id=None):
     """等待 Worker 关闭时将实际会话日志发布为可读取归档。"""
     observed = []
+    query = {"taskId": task_id, "nodeId": node_id}
+    if run_id is not None:
+        query["runId"] = run_id
     try:
         async with asyncio.timeout(20):
             while True:
-                observed = [item async for item in database.files.find({"taskId": task_id, "nodeId": node_id})]
+                observed = [item async for item in database.files.find(query)]
                 ready = [item for item in observed if item.get("status") == "READY"]
                 if ready and all(Path(item["path"]).is_file() for item in ready):
                     return ready
@@ -171,7 +174,7 @@ async def single_node_fallback(isapi_test_port=80):
                 stopped.raise_for_status()
                 await operation(client, stopped.json()["id"])
                 await asyncio.wait_for(source.closed.wait(), 15)
-                files = await wait_files(mongo[database], task_id, "failover-a")
+                files = await wait_files(mongo[database], task_id, "failover-a", run_id=second["runId"])
                 new_files = [item for item in files if item["runId"] == second["runId"]]
                 if not old_files or not new_files or any(not Path(item["path"]).is_relative_to(base / "failover-a") for item in files):
                     raise RuntimeError("单节点回退归档未按新旧运行完整发布到 A 根目录")

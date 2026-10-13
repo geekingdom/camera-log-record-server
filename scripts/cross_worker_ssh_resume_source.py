@@ -120,7 +120,9 @@ class SshSource:
                 reader = asyncio.create_task(read_stdin())
                 sequence = 0
                 while not reader.done():
-                    await source.emitting.wait()
+                    # 登录横幅属于协议握手，业务日志暂停不能阻止新会话初始化。
+                    if sequence:
+                        await source.emitting.wait()
                     # 首行同时模拟真实ASH登录横幅，仍纳入源端逐字节完整性校验。
                     payload_text = "BusyBox built-in shell (ash)" if sequence == 0 else "live"
                     line = f"sourceSession={number} sourceSeq={sequence:06d} payload={payload_text}\n".encode()
