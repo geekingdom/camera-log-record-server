@@ -39,6 +39,8 @@ class Worker:
         self.input_rate = InputRateMeter()
         self.last_maintenance = 0.0
         self.maintenance_task = None
+        self.last_archive_pump = 0.0
+        self.archive_pump_task = None
         self.releases = {}
         # 仅记录本实例亲自关闭过、但持久化收尾失败的运行；不能把任意 BLOCKED 当成可自动释放。
         self.failed_cleanups = {}
@@ -498,6 +500,8 @@ class Worker:
                 self.track_background(asyncio.create_task(run_export(self.repo, export)), "coredump 导出")
         if time.monotonic() - self.last_maintenance >= 60:
             self.start_maintenance()
+        if time.monotonic() - self.last_archive_pump >= 5:
+            self.start_archive_pump()
 
     def start_maintenance(self):
         """启动与周期共用唯一维护作业；历史恢复再慢也不阻塞心跳或服务就绪。"""
@@ -505,6 +509,24 @@ class Worker:
             self.last_maintenance = time.monotonic()
             self.maintenance_task = asyncio.create_task(self._maintain_guarded())
         return self.maintenance_task
+
+    def start_archive_pump(self):
+        """独立补充持久归档槽位，不等待历史归档登记或全文索引回填。"""
+        if self.archive_pump_task is None or self.archive_pump_task.done():
+            self.last_archive_pump = time.monotonic()
+            self.archive_pump_task = asyncio.create_task(self._pump_archives_guarded())
+        return self.archive_pump_task
+
+    async def _pump_archives_guarded(self):
+        """保留轻量扫描异常并让下个五秒周期重试。"""
+        try:
+            from camera_logs.logs.maintenance import pump_pending_archives
+
+            await pump_pending_archives(self.repo)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("节点归档 spool 补充失败，下轮继续 node=%s", self.repo.settings.node_id)
 
     async def _maintain_guarded(self):
         """取回维护异常并允许下周期重试，取消仍由节点生命周期负责。"""
@@ -589,6 +611,9 @@ class Worker:
         if self.maintenance_task:
             self.maintenance_task.cancel()
             tasks.append(self.maintenance_task)
+        if self.archive_pump_task:
+            self.archive_pump_task.cancel()
+            tasks.append(self.archive_pump_task)
         if self.coredump_scan_task:
             self.coredump_scan_task.cancel()
             tasks.append(self.coredump_scan_task)

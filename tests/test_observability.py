@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from camera_logs.common import observability
@@ -12,6 +13,11 @@ from camera_logs.common import observability
 
 def _read_lines(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _day_directory(root, instant):
+    """测试按处理器固定的上海日零点目录定位当天活动日志。"""
+    return root / f"{instant.astimezone(observability.LOG_TIMEZONE):%Y-%m-%dT00-00-00}"
 
 
 @pytest.mark.parametrize("host_zone", ["UTC", "America/Los_Angeles", "Asia/Shanghai"])
@@ -49,10 +55,11 @@ def test_json_logging_redacts_nested_values_and_exception_trace(tmp_path, capsys
     finally:
         listener.stop()
 
-    content = (tmp_path / "camera-logs.jsonl").read_text(encoding="utf-8")
+    path = next(tmp_path.glob("*T00-00-00/camera-logs.jsonl"))
+    content = path.read_text(encoding="utf-8")
     for secret in ("visible-secret", "plain-secret", "another-secret", "ciphertext", "trace-secret", "trace-password"):
         assert secret not in content
-    records = _read_lines(tmp_path / "camera-logs.jsonl")
+    records = _read_lines(path)
     assert records[0]["context"]["password"] == "[REDACTED]"
     assert records[0]["context"]["nested"][0]["authorization"] == "[REDACTED]"
     assert "[REDACTED]" in records[1]["exception"]
@@ -70,12 +77,76 @@ def test_rotating_jsonl_keeps_backups(tmp_path, monkeypatch):
     finally:
         listener.stop()
 
-    assert (tmp_path / "camera-logs.jsonl").exists()
-    assert list(tmp_path.glob("camera-logs.*.jsonl"))
+    directories = list(tmp_path.glob("*T00-00-00"))
+    assert len(directories) == 1
+    assert (directories[0] / "camera-logs.jsonl").exists()
+    assert list(directories[0].glob("camera-logs.*.jsonl"))
 
 
-def test_service_logs_rotate_at_shanghai_day_boundary_and_clean_only_expired_shards(tmp_path, monkeypatch):
-    """跨上海日期立即切片；过期新旧分片可删，但活动文件和同目录其它文件绝不误删。"""
+def test_service_log_rotation_preserves_existing_shard_symbolic_link(tmp_path, monkeypatch):
+    """轮转时把链接视为已占用分片名，不能覆盖或删除它。"""
+    current = [datetime(2026, 10, 1, 12, tzinfo=observability.LOG_TIMEZONE)]
+    monkeypatch.setattr(observability.DailySizeRotatingFileHandler, "_local_now", staticmethod(lambda: current[0]))
+    directory = _day_directory(tmp_path, current[0])
+    directory.mkdir()
+    outside = tmp_path / "outside.log"
+    outside.write_text("outside", encoding="utf-8")
+    shard_link = directory / "camera-logs.001.jsonl"
+    shard_link.symlink_to(outside)
+
+    handler = observability.DailySizeRotatingFileHandler(tmp_path, max_bytes=1, retention_days=7)
+    try:
+        handler.handle(logging.makeLogRecord({"name": "test.linked-shard", "levelno": logging.INFO,
+                                              "levelname": "INFO", "msg": "first", "args": ()}))
+        handler.handle(logging.makeLogRecord({"name": "test.linked-shard", "levelno": logging.INFO,
+                                              "levelname": "INFO", "msg": "second", "args": ()}))
+    finally:
+        handler.close()
+
+    assert shard_link.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "outside"
+    assert (directory / "camera-logs.002.jsonl").exists()
+
+
+def test_service_log_setup_rejects_broken_active_file_symbolic_link(tmp_path, monkeypatch):
+    """活动文件即使是断开的符号链接，也不能作为服务日志写入目标。"""
+    current = datetime(2026, 10, 1, 12, tzinfo=observability.LOG_TIMEZONE)
+    monkeypatch.setattr(observability.DailySizeRotatingFileHandler, "_local_now", staticmethod(lambda: current))
+    directory = _day_directory(tmp_path, current)
+    directory.mkdir()
+    (directory / "camera-logs.jsonl").symlink_to(tmp_path / "missing.log")
+
+    with pytest.raises(OSError, match="不能是符号链接"):
+        observability.DailySizeRotatingFileHandler(tmp_path, max_bytes=1, retention_days=7)
+
+
+def test_midnight_rotation_rejects_new_active_file_symbolic_link_before_moving_old_shard(tmp_path, monkeypatch):
+    """午夜目标活动文件被替换为链接时，旧日活动分片必须仍保留且不得写入链接目标。"""
+    current = [datetime(2026, 10, 1, 23, 59, tzinfo=observability.LOG_TIMEZONE)]
+    monkeypatch.setattr(observability.DailySizeRotatingFileHandler, "_local_now", staticmethod(lambda: current[0]))
+    handler = observability.DailySizeRotatingFileHandler(tmp_path, max_bytes=1024, retention_days=7)
+    old_active = _day_directory(tmp_path, current[0]) / "camera-logs.jsonl"
+    handler.handle(logging.makeLogRecord({"name": "test.midnight-link", "levelno": logging.INFO,
+                                          "levelname": "INFO", "msg": "first", "args": ()}))
+    outside = tmp_path / "outside.log"
+    outside.write_text("outside", encoding="utf-8")
+    current[0] = datetime(2026, 10, 2, 0, tzinfo=observability.LOG_TIMEZONE)
+    next_directory = _day_directory(tmp_path, current[0])
+    next_directory.mkdir()
+    (next_directory / "camera-logs.jsonl").symlink_to(outside)
+
+    try:
+        with pytest.raises(OSError, match="不能是符号链接"):
+            handler.doRollover()
+    finally:
+        handler.close()
+
+    assert old_active.exists()
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_service_logs_rotate_into_shanghai_date_directories_and_clean_expired_logs(tmp_path, monkeypatch):
+    """跨上海日期切换目录；过期日期目录只删除自身受管日志并兼容旧根分片。"""
     current = [datetime(2026, 10, 1, 23, 59, tzinfo=observability.LOG_TIMEZONE)]
     monkeypatch.setattr(observability.DailySizeRotatingFileHandler, "_local_now", staticmethod(lambda: current[0]))
     listener = observability.setup_logging(tmp_path, retention_days=7)
@@ -89,39 +160,100 @@ def test_service_logs_rotate_at_shanghai_day_boundary_and_clean_only_expired_sha
     finally:
         listener.stop()
 
-    shard = tmp_path / "camera-logs.2026-10-01.001.jsonl"
+    expired_directory = _day_directory(tmp_path, datetime(2026, 10, 1, tzinfo=observability.LOG_TIMEZONE))
+    shard = expired_directory / "camera-logs.001.jsonl"
     legacy = tmp_path / "camera-logs.jsonl.1"
+    legacy_dated = tmp_path / "camera-logs.2026-10-01.001.jsonl"
+    old_root_active = tmp_path / "camera-logs.jsonl"
     unrelated = tmp_path / "device.log"
     legacy.write_text("legacy", encoding="utf-8")
+    legacy_dated.write_text("legacy dated", encoding="utf-8")
+    root_handle = old_root_active.open("a", encoding="utf-8")
+    root_handle.write("old worker remains active\n")
+    root_handle.flush()
     unrelated.write_text("keep", encoding="utf-8")
     old_timestamp = datetime(2026, 10, 1, tzinfo=observability.LOG_TIMEZONE).timestamp()
     import os
     os.utime(shard, (old_timestamp, old_timestamp))
     os.utime(legacy, (old_timestamp, old_timestamp))
-    handler.cleanup_expired(reference=datetime(2026, 10, 10, tzinfo=observability.LOG_TIMEZONE))
+    os.utime(legacy_dated, (old_timestamp, old_timestamp))
+    os.utime(old_root_active, (old_timestamp, old_timestamp))
+    handler.cleanup_expired(reference=datetime(2026, 10, 9, tzinfo=observability.LOG_TIMEZONE))
+    root_handle.write("still held by old worker\n")
+    root_handle.close()
 
-    assert not shard.exists()
+    assert not shard.exists() and not expired_directory.exists()
     assert not legacy.exists()
-    assert (tmp_path / "camera-logs.jsonl").exists()
+    assert not legacy_dated.exists()
+    assert old_root_active.read_text(encoding="utf-8") == "old worker remains active\nstill held by old worker\n"
+    assert (_day_directory(tmp_path, current[0]) / "camera-logs.jsonl").exists()
     assert unrelated.exists()
 
 
-def test_service_log_retention_hot_update_cleans_expired_files(tmp_path):
-    """管理员热更新由下一条后台队列日志清理过期文件，不阻塞 API 事件循环。"""
+def test_service_log_retention_hot_update_cleans_expired_directories_immediately(tmp_path):
+    """管理员热更新在线程中立即清理过期日期目录，无需等待下一条运行日志。"""
     listener = observability.setup_logging(tmp_path, retention_days=7)
-    expired = tmp_path / "camera-logs.2026-01-01.001.jsonl"
+    expired_directory = tmp_path / "2026-01-01T00-00-00"
+    expired_directory.mkdir()
+    expired = expired_directory / "camera-logs.001.jsonl"
     expired.write_text("old", encoding="utf-8")
     old_timestamp = datetime(2026, 1, 1, tzinfo=observability.LOG_TIMEZONE).timestamp()
     import os
     os.utime(expired, (old_timestamp, old_timestamp))
     try:
         observability.set_service_log_retention_days(1)
-        handler = next(handler for handler in listener.handlers if isinstance(handler, observability.DailySizeRotatingFileHandler))
-        handler.handle(logging.makeLogRecord({"name": "test.hot-update", "levelno": logging.INFO,
-                                              "levelname": "INFO", "msg": "apply retention", "args": ()}))
         assert not expired.exists()
+        assert not expired_directory.exists()
     finally:
         listener.stop()
+
+
+def test_expired_service_log_directory_keeps_unknown_files_and_links(tmp_path):
+    """受管分片可清理，但未知文件和链接绝不能被递归删除或使目录误删。"""
+    listener = observability.setup_logging(tmp_path, retention_days=1)
+    expired_directory = tmp_path / "2026-01-01T00-00-00"
+    expired_directory.mkdir()
+    managed = expired_directory / "camera-logs.001.jsonl"
+    managed.write_text("old", encoding="utf-8")
+    outside = tmp_path / "outside.log"
+    outside.write_text("outside", encoding="utf-8")
+    link = expired_directory / "camera-logs.002.jsonl"
+    link.symlink_to(outside)
+    unknown = expired_directory / "keep.txt"
+    unknown.write_text("keep", encoding="utf-8")
+    try:
+        handler = next(handler for handler in listener.handlers if isinstance(handler, observability.DailySizeRotatingFileHandler))
+        handler.cleanup_expired(reference=datetime(2026, 10, 10, tzinfo=observability.LOG_TIMEZONE))
+        assert not managed.exists()
+        assert link.is_symlink() and outside.read_text(encoding="utf-8") == "outside"
+        assert unknown.read_text(encoding="utf-8") == "keep"
+        assert expired_directory.is_dir()
+    finally:
+        listener.stop()
+
+
+def test_expired_service_log_directory_reports_permission_error_without_recursive_logging(tmp_path, monkeypatch, capsys):
+    """日期目录中的受管分片删除失败要保留文件并输出诊断，不经运行日志 handler 再入。"""
+    handler = observability.DailySizeRotatingFileHandler(tmp_path, max_bytes=1024, retention_days=1)
+    expired_directory = tmp_path / "2026-01-01T00-00-00"
+    expired_directory.mkdir()
+    managed = expired_directory / "camera-logs.001.jsonl"
+    managed.write_text("old", encoding="utf-8")
+    original_unlink = Path.unlink
+
+    def reject_managed_unlink(path, *args, **kwargs):
+        if path == managed:
+            raise PermissionError("denied")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", reject_managed_unlink)
+    try:
+        handler.cleanup_expired(reference=datetime(2026, 10, 10, tzinfo=observability.LOG_TIMEZONE))
+    finally:
+        handler.close()
+
+    assert managed.exists()
+    assert "WARNING 服务运行日志日期目录分片失败" in capsys.readouterr().err
 
 
 def test_json_logging_bounds_large_exception_trace_after_redaction():

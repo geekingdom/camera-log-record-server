@@ -97,7 +97,7 @@ async def test_sealing_more_than_two_groups_does_not_wait_for_archive_queue(tmp_
 
     scheduled = []
 
-    def record_schedule(target):
+    def record_schedule(target, **_kwargs):
         scheduled.append(target)
 
     monkeypatch.setattr(storage, "schedule_pending_archive", record_schedule)
@@ -116,7 +116,7 @@ async def test_fifty_six_routes_keep_writing_when_bounded_archive_queue_is_full(
 
     pending = []
 
-    def bounded_schedule(spool):
+    def bounded_schedule(spool, **_kwargs):
         # 模拟唯一调度器已有八个低速归档；其余工作只能由不可变磁盘清单承接。
         if len(pending) < compression.MAX_SCHEDULED_ARCHIVES:
             pending.append(Path(spool))

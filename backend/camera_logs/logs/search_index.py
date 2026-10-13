@@ -12,6 +12,8 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from camera_logs.logs.process_progress import advance as advance_progress
+
 SCHEMA_VERSION = 2
 MAX_INDEX_BYTES = 256 * 1024 * 1024
 MIN_FREE_BYTES = 128 * 1024 * 1024
@@ -95,6 +97,8 @@ def build_index(archive_path: Path) -> bool:
         try:
             connection = sqlite3.connect(temporary)
             try:
+                # 单条 FTS 写入也可能长时间占用 CPU；SQLite VM 每推进一段指令即刷新真实进度。
+                connection.set_progress_handler(lambda: advance_progress("INDEX") or 0, 1_000)
                 rowid = 0
                 with archive_path.open("rb") as archive_file:
                     fingerprint = _stat_fingerprint(os.fstat(archive_file.fileno()))
@@ -115,6 +119,7 @@ def build_index(archive_path: Path) -> bool:
                             head, tail, has_newline, read = bytearray(), bytearray(), False, 0
                             while raw := stream.read(256 * 1024):
                                 read += len(raw)
+                                advance_progress("INDEX", len(raw))
                                 if len(head) < 16:
                                     head.extend(raw[:16 - len(head)])
                                 tail[:] = (tail + raw)[-16:]

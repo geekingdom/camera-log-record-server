@@ -192,7 +192,7 @@ onMounted(() => void load());
           <div class="retention-control"><el-input-number v-model="retentionDays" :min="1" :max="3650" controls-position="right" aria-label="日志保存天数" /><span>天</span></div>
         </section>
         <section class="settings-band">
-          <div><h4>服务运行日志保留</h4><p>API 与 Worker 的 JSONL 运行日志按上海日期和 20 MiB 分片，达到保留期后仅清理本服务分片。</p></div>
+          <div><h4>服务运行日志保留</h4><p>API 与 Worker 按上海日期目录保存 JSONL，当天每 20 MiB 分片；达到保留期后仅清理本服务的过期日期目录。</p></div>
           <div class="retention-control"><el-input-number v-model="serviceLogRetentionDays" :min="1" :max="3650" controls-position="right" aria-label="服务运行日志保留天数" /><span>天</span></div>
         </section>
         <section class="settings-band">

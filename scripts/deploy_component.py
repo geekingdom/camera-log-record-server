@@ -15,6 +15,13 @@ from urllib.request import urlopen
 
 from deploy_health import _compose, _run, _service_ready
 
+_WORKER_STOP_TIMEOUT_SECONDS = 150
+_MONGO_URI = re.compile(r"mongodb(?:\+srv)?://\S+", re.IGNORECASE)
+_SENSITIVE_DIAGNOSTIC_VALUE = re.compile(
+    r"(?i)(?P<prefix>[\"']?(?:[A-Za-z0-9_.-]*(?:password|secret|token|key)[A-Za-z0-9_.-]*)[\"']?\s*[=:]\s*)"
+    r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,}\]]+)"
+)
+
 
 def require(values, *names):
     """只报告缺少的变量名称，不将密码、URI 或完整配置写入终端。"""
@@ -140,9 +147,9 @@ def _recovery_result(prefix, phase, deadline, *, token=None):
                "camera_logs.node.deployment_recovery", phase]
     if token is not None:
         command.extend(["--token", token])
-    result = _run(command, deadline)
+    result = _run(command, deadline, command_timeout=max(1, deadline - time.monotonic()))
     if result.returncode:
-        raise RuntimeError(f"Worker 部署恢复{phase}阶段失败")
+        raise RuntimeError(f"Worker 部署恢复{phase}阶段失败 exit={result.returncode}；{_diagnostic(result)}")
     for line in reversed(result.stdout.splitlines()):
         try:
             payload = json.loads(line)
@@ -151,6 +158,19 @@ def _recovery_result(prefix, phase, deadline, *, token=None):
         if isinstance(payload, dict):
             return payload
     raise RuntimeError(f"Worker 部署恢复{phase}阶段未返回有效证明")
+
+
+def _diagnostic(result):
+    """返回部署子进程最后的脱敏诊断，避免 prepare 失败时仅剩抽象错误。"""
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    output = _MONGO_URI.sub("<redacted-mongo-uri>", output)
+    output = _SENSITIVE_DIAGNOSTIC_VALUE.sub(r"\g<prefix><redacted>", output)
+    return output[-1200:] or "无安全诊断输出"
+
+
+def _phase_deadline(timeout, *, minimum=0):
+    """每个部署阶段独立计时，构建或 prepare 不得侵占 Worker 停止宽限期。"""
+    return time.monotonic() + max(timeout, minimum)
 
 
 def _stopped_container(container, deadline):
@@ -180,12 +200,13 @@ def _recovery_journal(path, payload=None):
 
 def deploy_worker_with_recovery(prefix, timeout, *, build=True, journal=None):
     """按准备、停止确认、完成的固定顺序替换 Worker，未知容器状态绝不完成恢复。"""
-    deadline = time.monotonic() + timeout
     if build:
-        built = _run([*prefix, "build", "worker"], deadline)
+        built_deadline = _phase_deadline(timeout)
+        built = _run([*prefix, "build", "worker"], built_deadline,
+                     command_timeout=max(1, built_deadline - time.monotonic()))
         if built.returncode:
-            raise RuntimeError("Worker 新镜像构建失败")
-    current = _run([*prefix, "ps", "-q", "worker"], deadline)
+            raise RuntimeError(f"Worker 新镜像构建失败 exit={built.returncode}；{_diagnostic(built)}")
+    current = _run([*prefix, "ps", "-q", "worker"], _phase_deadline(timeout, minimum=30))
     if current.returncode:
         raise RuntimeError("无法读取现有 Worker 容器，未开始部署恢复")
     old = current.stdout.strip()
@@ -194,19 +215,23 @@ def deploy_worker_with_recovery(prefix, timeout, *, build=True, journal=None):
         if pending:
             if pending.get("compose") != prefix:
                 raise RuntimeError("Worker 部署恢复记录不属于当前 Compose 项目或环境")
-            _stopped_container(pending["container"], deadline)
-            completed = _recovery_result(prefix, "complete", deadline, token=pending["token"])
+            _stopped_container(pending["container"], _phase_deadline(timeout, minimum=_WORKER_STOP_TIMEOUT_SECONDS))
+            completed = _recovery_result(prefix, "complete", _phase_deadline(timeout), token=pending["token"])
             journal.unlink()
-            started = _run([*prefix, "up", "--detach", "worker"], deadline)
+            started_deadline = _phase_deadline(timeout, minimum=30)
+            started = _run([*prefix, "up", "--detach", "worker"], started_deadline,
+                           command_timeout=max(1, started_deadline - time.monotonic()))
             if started.returncode:
                 raise RuntimeError("Worker 恢复完成后启动失败")
             return completed
         # 首次部署没有本次脚本可停止的旧容器，不能把遗留 BLOCKED 任务当成关闭证据。
-        started = _run([*prefix, "up", "--detach", "worker"], deadline)
+        started_deadline = _phase_deadline(timeout, minimum=30)
+        started = _run([*prefix, "up", "--detach", "worker"], started_deadline,
+                       command_timeout=max(1, started_deadline - time.monotonic()))
         if started.returncode:
             raise RuntimeError("Worker 首次启动失败")
         return {"prepared": 0, "proved": 0, "released": 0, "reason": "NO_RUNNING_OLD_WORKER"}
-    prepared = _recovery_result(prefix, "prepare", deadline)
+    prepared = _recovery_result(prefix, "prepare", _phase_deadline(timeout))
     token = prepared.get("token")
     if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
         raise RuntimeError("Worker 部署恢复准备阶段未返回合法令牌")
@@ -215,14 +240,18 @@ def deploy_worker_with_recovery(prefix, timeout, *, build=True, journal=None):
         raise RuntimeError("Worker 部署恢复准备阶段存在无法证明的旧运行，未停止容器")
     if journal:
         _recovery_journal(journal, {"token": token, "container": old, "compose": prefix})
-    stopped = _run([*prefix, "stop", "worker"], deadline)
+    stopped_deadline = _phase_deadline(timeout, minimum=_WORKER_STOP_TIMEOUT_SECONDS)
+    stopped = _run([*prefix, "stop", "worker"], stopped_deadline,
+                   command_timeout=_WORKER_STOP_TIMEOUT_SECONDS)
     if stopped.returncode:
-        raise RuntimeError("旧 Worker 容器停止失败")
-    _stopped_container(old, deadline)
-    completed = _recovery_result(prefix, "complete", deadline, token=token)
+        raise RuntimeError(f"旧 Worker 容器停止失败 exit={stopped.returncode}；{_diagnostic(stopped)}")
+    _stopped_container(old, _phase_deadline(timeout, minimum=_WORKER_STOP_TIMEOUT_SECONDS))
+    completed = _recovery_result(prefix, "complete", _phase_deadline(timeout), token=token)
     if journal:
         journal.unlink(missing_ok=True)
-    started = _run([*prefix, "up", "--detach", "worker"], deadline)
+    started_deadline = _phase_deadline(timeout, minimum=30)
+    started = _run([*prefix, "up", "--detach", "worker"], started_deadline,
+                   command_timeout=max(1, started_deadline - time.monotonic()))
     if started.returncode:
         raise RuntimeError("Worker 新容器启动失败；已写入的关闭证明保留供后续恢复")
     return completed
@@ -236,7 +265,6 @@ def deploy(component, project, compose_file, env_file, timeout, *, build=True):
         raise ValueError("Compose 配置无效或缺少必填项；请对照 deploy/config 中的中文示例检查")
     config = json.loads(result.stdout)
     values = validate(component, config)
-    deadline = time.monotonic() + timeout
     if component == "worker":
         journal = Path(env_file).resolve().parent / f".worker-deployment-recovery-{project}.json"
         recovery = deploy_worker_with_recovery(prefix, timeout, build=build, journal=journal)
@@ -246,6 +274,8 @@ def deploy(component, project, compose_file, env_file, timeout, *, build=True):
         if build:
             command.insert(-1, "--build")
         subprocess.run(command, check=True)
+    # 构建与受控关闭有独立阶段预算；健康检查必须从新容器启动后重新计时。
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if component == "database":
             ready = all(_service_ready(project, compose_file, env_file, f"mongo{n}", True, deadline) for n in (1, 2, 3))

@@ -22,18 +22,26 @@ from camera_logs.logs.archive_spool import load as load_archive_spool
 from camera_logs.logs.archive_spool import pending_path as _spool_pending_path
 from camera_logs.logs.archive_spool import write_json_atomic as _write_json_atomic
 from camera_logs.logs.job_threads import job_thread
+from camera_logs.logs.process_progress import advance as advance_progress
+from camera_logs.logs.process_progress import create as create_progress
+from camera_logs.logs.process_progress import install as install_progress
+from camera_logs.logs.process_progress import snapshot as progress_snapshot
 from camera_logs.logs.search_index import build_index
 
 logger = logging.getLogger(__name__)
 
 _pool: ProcessPoolExecutor | None = None
+_pool_progress = None
 _dispatcher: asyncio.Task | None = None
 _dispatcher_loop = None
 MAX_SCHEDULED_ARCHIVES = 8
+RESERVED_RECOVERY_ARCHIVES = 2
 ARCHIVE_RETRY_BASE_SECONDS = 30
 ARCHIVE_RETRY_MAX_SECONDS = 300
 ARCHIVE_RETRY_MAX_EXPONENT = 4
 MAX_ARCHIVE_RETRY_ENTRIES = 1024
+PROCESS_PROGRESS_TIMEOUT_SECONDS = 300
+PROCESS_TERMINATE_GRACE_SECONDS = 5
 _scheduled_targets: set[Path] = set()
 _scheduled_futures: dict[Path, asyncio.Future] = {}
 _retry_not_before: dict[Path, float] = {}
@@ -57,9 +65,12 @@ _index_jobs: deque[_Job] = deque()
 
 def _pool_for_current_process() -> ProcessPoolExecutor:
     """延迟创建唯一压缩进程，避免归档与索引争抢采集写入线程池。"""
-    global _pool
+    global _pool, _pool_progress
     if _pool is None:
-        _pool = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+        context = multiprocessing.get_context("spawn")
+        _pool_progress = create_progress(context)
+        _pool = ProcessPoolExecutor(max_workers=1, mp_context=context, initializer=install_progress,
+                                    initargs=(_pool_progress,))
     return _pool
 
 
@@ -67,8 +78,9 @@ async def _run_in_pool(function, *arguments):
     """提交已获父进程槽位的工作；子进程队列此时最多只有当前一项。"""
     pool = _pool_for_current_process()
     try:
+        submitted_at = time.monotonic()
         future = asyncio.get_running_loop().run_in_executor(pool, function, *arguments)
-        return await _wait_future(future)
+        return await _wait_future(future, progress=_pool_progress, pool=pool, submitted_at=submitted_at)
     except BrokenProcessPool:
         # 当前作业的 tar 发布状态不可判定，不能整批重试；只废弃已损坏的执行器，
         # 让后续仍由 spool/pending 保证可恢复的作业在新进程中重新提交。
@@ -78,10 +90,11 @@ async def _run_in_pool(function, *arguments):
 
 async def _discard_broken_pool(pool: ProcessPoolExecutor) -> None:
     """同步回收异常退出的进程池，避免全局引用让后续作业持续提交失败。"""
-    global _pool
+    global _pool, _pool_progress
     await job_thread(pool.shutdown, wait=True, cancel_futures=True)
     if _pool is pool:
         _pool = None
+        _pool_progress = None
 
 
 def _start_dispatcher() -> None:
@@ -149,16 +162,39 @@ async def _dispatch_jobs() -> None:
         for job in (*_archive_jobs, *_index_jobs):
             if not job.result.done():
                 job.result.cancel()
+            if job.callback is not None:
+                try:
+                    # 排队项从未进入主循环，必须在此结算持久 spool 的身份、重试
+                    # 状态和性能 token；否则下一轮恢复会误判队列仍满。
+                    job.callback(asyncio.CancelledError())
+                except Exception:
+                    logger.exception("取消排队后台作业的收尾失败")
         _archive_jobs.clear()
         _index_jobs.clear()
 
 
-async def _wait_future(future: asyncio.Future):
+async def _wait_future(future: asyncio.Future, *, progress=None, pool=None, submitted_at=0.0):
     """等待不可取消底层作业；后台失败不能覆盖已收到的调用方取消。"""
     cancelled = False
     while not future.done():
         try:
-            await asyncio.shield(future)
+            if progress is None:
+                await asyncio.shield(future)
+            else:
+                await asyncio.wait_for(asyncio.shield(future), timeout=1)
+        except TimeoutError:
+            if progress is None:
+                break
+            stamp, processed, phase = progress_snapshot(progress)
+            if time.monotonic() - max(submitted_at, stamp) < PROCESS_PROGRESS_TIMEOUT_SECONDS:
+                continue
+            logger.error("后台压缩进程无进展，终止执行器 phase=%s processedBytes=%s", phase, processed)
+            await job_thread(_terminate_pool, pool)
+            global _pool, _pool_progress
+            if _pool is pool:
+                _pool = _pool_progress = None
+            await asyncio.gather(future, return_exceptions=True)
+            raise TimeoutError("后台压缩进程持续无进展")
         except asyncio.CancelledError:
             cancelled = True
         except Exception:  # noqa: BLE001 - 完成态由 future.result 或取消优先级统一处理。
@@ -198,7 +234,22 @@ def _hash_stream(stream, limiter=None):
             limiter.consume(len(chunk))
         digest.update(chunk)
         size += len(chunk)
+        advance_progress("HASH", len(chunk))
     return digest.hexdigest(), size
+
+
+class _ProgressReader:
+    """为 tar 的 gzip 元数据遍历补充真实读取进度，避免 getmembers 长读被误判卡死。"""
+    def __init__(self, source, phase: str):
+        self.source, self.phase = source, phase
+
+    def read(self, size=-1):
+        data = self.source.read(size)
+        advance_progress(self.phase, len(data))
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self.source, name)
 
 
 def _metadata_path(target: Path) -> Path:
@@ -224,6 +275,7 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
             self.remaining -= len(data)
             if limiter:
                 limiter.consume(len(data))
+            advance_progress("TAR", len(data))
             return data
     new_segments = [dict(segment) for segment in segments]
     metadata_path = _metadata_path(target)
@@ -256,7 +308,7 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
         existing_names: set[str] = set()
         with partial.open("wb") as target_file, gzip_tar_writer(target_file) as bundle:
             if target.exists():
-                with tarfile.open(target, "r:gz") as previous:
+                with target.open("rb") as source, tarfile.open(fileobj=_ProgressReader(source, "TAR"), mode="r:gz") as previous:
                     for member in previous.getmembers():
                         if not member.isfile() or not member.name.endswith(".log"):
                             raise OSError("已有小时归档包含非日志成员")
@@ -288,7 +340,7 @@ def publish_hour_archive(segments: Iterable[dict], target: Path, background_rate
         # tar 已替换而元数据尚未替换时，原始分卷仍在。以成员名和摘要复核后把
         # 缺失的成员补进旁路清单，重试不会重复写入 tar。
         members = old_members + additions
-        with tarfile.open(partial, "r:gz") as bundle:
+        with partial.open("rb") as source, tarfile.open(fileobj=_ProgressReader(source, "VERIFY"), mode="r:gz") as bundle:
             names = bundle.getnames()
             if len(names) != len(members) or set(names) != {str(item["logName"]) for item in members} or any(not name.endswith(".log") for name in names):
                 raise OSError("小时归档成员不符合日志合同")
@@ -356,7 +408,7 @@ async def compress_hour(segments: list[dict], target: Path) -> Path:
         archive_finished(token)
 
 
-def _schedule_archive(kind: str, identity: Path, *arguments: object) -> asyncio.Future | None:
+def _schedule_archive(kind: str, identity: Path, *arguments: object, admission_limit: int = MAX_SCHEDULED_ARCHIVES) -> asyncio.Future | None:
     """将一个可恢复归档公平登记为有限候选，失败项退避后才允许下轮重试。"""
     identity = Path(identity)
     exists = identity.exists() if kind == "spool" else (identity.exists() or _pending_path(identity).exists())
@@ -368,7 +420,7 @@ def _schedule_archive(kind: str, identity: Path, *arguments: object) -> asyncio.
         return _scheduled_futures[identity]
     if time.monotonic() < _retry_not_before.get(identity, 0):
         return None
-    if len(_scheduled_targets) >= MAX_SCHEDULED_ARCHIVES:
+    if len(_scheduled_targets) >= admission_limit:
         return None
     from camera_logs.node.performance_runtime import archive_finished, archive_started
 
@@ -393,7 +445,7 @@ def _schedule_archive(kind: str, identity: Path, *arguments: object) -> asyncio.
                 _retry_attempts.pop(oldest, None)
             _retry_not_before[identity] = time.monotonic() + delay
             logger.warning("后台归档失败 target=%s errorType=%s retryAfterSeconds=%s",
-                           identity, type(error).__name__, delay)
+                           identity, type(error).__name__, delay, exc_info=error)
         archive_finished(token)
 
     future = _enqueue(kind, *arguments, token=token, callback=complete)
@@ -403,16 +455,17 @@ def _schedule_archive(kind: str, identity: Path, *arguments: object) -> asyncio.
     return future
 
 
-def schedule_pending_archive(target: Path) -> asyncio.Future | None:
-    """将独立 spool 放入有限调度队列；队满时由维护器从磁盘恢复。"""
+def schedule_pending_archive(target: Path, *, recovery: bool | None = None) -> asyncio.Future | None:
+    """登记持久 spool；实时 Writer 显式传 False，缺省兼容旧维护调用的全额容量。"""
     spool = Path(target)
-    return _schedule_archive("spool", spool, spool)
+    limit = MAX_SCHEDULED_ARCHIVES if recovery is not False else MAX_SCHEDULED_ARCHIVES - RESERVED_RECOVERY_ARCHIVES
+    return _schedule_archive("spool", spool, spool, admission_limit=limit)
 
 
 def schedule_recovery_archive(target: Path) -> asyncio.Future | None:
     """登记旧共享 pending 清单的恢复，不在节点启动路径等待压缩完成。"""
     archive = Path(target)
-    return _schedule_archive("archive", archive, [], archive)
+    return _schedule_archive("archive", archive, [], archive, admission_limit=MAX_SCHEDULED_ARCHIVES)
 
 
 async def compress_spool(spool: Path) -> Path:
@@ -437,12 +490,21 @@ def _terminate_pool(pool: ProcessPoolExecutor) -> None:
     for process in tuple(getattr(pool, "_processes", {}).values()):
         if process.is_alive():
             process.terminate()
+    deadline = time.monotonic() + PROCESS_TERMINATE_GRACE_SECONDS
+    for process in tuple(getattr(pool, "_processes", {}).values()):
+        process.join(max(0, deadline - time.monotonic()))
+        if process.is_alive():
+            process.kill()
+    for process in tuple(getattr(pool, "_processes", {}).values()):
+        process.join(PROCESS_TERMINATE_GRACE_SECONDS)
+        if process.is_alive():
+            raise RuntimeError("压缩子进程在 kill 后仍未退出，拒绝启动新的写入进程")
     pool.shutdown(wait=True, cancel_futures=True)
 
 
 async def shutdown_compression(*, timeout_seconds: float | None = None) -> None:
     """收尾压缩器；超时后终止独立子进程，原始日志与恢复清单留待下次启动。"""
-    global _pool
+    global _pool, _pool_progress
     cancelled = False
     try:
         if timeout_seconds is None:
@@ -459,6 +521,7 @@ async def shutdown_compression(*, timeout_seconds: float | None = None) -> None:
             await job_thread(_terminate_pool, pool)
             if _pool is pool:
                 _pool = None
+                _pool_progress = None
         await _drain_dispatcher()
     except asyncio.CancelledError:
         cancelled = True
@@ -469,5 +532,6 @@ async def shutdown_compression(*, timeout_seconds: float | None = None) -> None:
         finally:
             if _pool is pool:
                 _pool = None
+                _pool_progress = None
     if cancelled:
         raise asyncio.CancelledError

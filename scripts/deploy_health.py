@@ -8,13 +8,13 @@ import time
 from pathlib import Path
 
 
-def _run(command: list[str], deadline: float) -> subprocess.CompletedProcess[str]:
-    """在总健康检查剩余时间内运行 Docker 命令，不让单次调用无限阻塞。"""
+def _run(command: list[str], deadline: float, *, command_timeout: float = 10) -> subprocess.CompletedProcess[str]:
+    """在阶段剩余时间内运行 Docker 命令，调用方显式扩大构建或停止的单次上限。"""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return subprocess.CompletedProcess(command, 124, "", "deadline expired")
     try:
-        return subprocess.run(command, text=True, capture_output=True, check=False, timeout=min(10, remaining))
+        return subprocess.run(command, text=True, capture_output=True, check=False, timeout=min(command_timeout, remaining))
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(command, 124, "", "command timed out")
 

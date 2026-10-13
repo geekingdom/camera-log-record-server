@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import multiprocessing
 import os
 import tarfile
 import time
@@ -121,3 +122,113 @@ async def test_broken_process_pool_is_rebuilt_for_later_spooled_archive(tmp_path
         member = archive.extractfile(log.name)
         assert member is not None
         assert hashlib.sha256(member.read()).hexdigest() == hashlib.sha256(body).hexdigest()
+
+
+async def test_stalled_child_is_terminated_and_later_spool_uses_new_pool(tmp_path, monkeypatch):
+    """运行期无进展 watchdog 终止真实卡住发布，spool 与原始物料可由新池恢复。"""
+    monkeypatch.setattr(compression, "PROCESS_PROGRESS_TIMEOUT_SECONDS", 2)
+    body, index_body = b"recovered after stall\n", b'{"sequence":3}\n'
+    log, index = tmp_path / "stalled.log", tmp_path / "stalled.index.jsonl"
+    target = tmp_path / "stalled.tar.gz"
+    log.write_bytes(body)
+    os.mkfifo(index)
+    spool = archive_spool.persist(target, [_segment(log, index, body, index_body)])
+
+    with pytest.raises(TimeoutError, match="持续无进展"):
+        await compression.compress_spool(spool)
+    assert compression._pool is None
+    assert spool.exists()
+    assert Path(f"{target}.pending.json").exists()
+    assert log.read_bytes() == body
+
+    index.unlink()
+    index.write_bytes(index_body)
+    assert await compression.compress_spool(spool) == target
+    assert not spool.exists()
+    assert not log.exists()
+
+
+async def test_stalled_first_spool_does_not_block_later_spools_or_its_retry(tmp_path, monkeypatch):
+    """队首 FIFO 卡死后同一调度器继续发布后项，修复首项后按退避重试。"""
+    monkeypatch.setattr(compression, "PROCESS_PROGRESS_TIMEOUT_SECONDS", 2)
+    monkeypatch.setattr(compression, "ARCHIVE_RETRY_BASE_SECONDS", 0.2)
+    bad_log, bad_index = tmp_path / "bad.log", tmp_path / "bad.index.jsonl"
+    bad_target = tmp_path / "bad.tar.gz"
+    body, index_body = b"body\n", b'{"sequence":4}\n'
+    bad_log.write_bytes(body)
+    os.mkfifo(bad_index)
+    bad_spool = archive_spool.persist(bad_target, [_segment(bad_log, bad_index, body, index_body)])
+    normal = []
+    for number in range(2):
+        log, index = tmp_path / f"normal-{number}.log", tmp_path / f"normal-{number}.index.jsonl"
+        target = tmp_path / f"normal-{number}.tar.gz"
+        log.write_bytes(body)
+        index.write_bytes(index_body)
+        normal.append((target, archive_spool.persist(target, [_segment(log, index, body, index_body)])))
+
+    failed = compression.schedule_pending_archive(bad_spool)
+    later = [compression.schedule_pending_archive(spool) for _target, spool in normal]
+    assert failed is not None and all(future is not None for future in later)
+    with pytest.raises(TimeoutError, match="持续无进展"):
+        await failed
+    await asyncio.gather(*later)
+    assert all(target.exists() and not spool.exists() for target, spool in normal)
+
+    bad_index.unlink()
+    bad_index.write_bytes(index_body)
+    await asyncio.sleep(0.22)
+    retried = compression.schedule_pending_archive(bad_spool)
+    assert retried is not None
+    assert await retried == bad_target
+
+
+async def test_watchdog_uses_submission_time_when_pool_progress_is_old(monkeypatch):
+    """空闲池的旧心跳不能让新提交作业在第一次一秒轮询时被误杀。"""
+    progress = compression.create_progress(multiprocessing.get_context("spawn"))
+    assert not hasattr(progress[0], "get_lock")
+    progress[0].value = time.monotonic() - 600
+    future = asyncio.get_running_loop().create_future()
+    waiter = asyncio.create_task(compression._wait_future(
+        future, progress=progress, pool=None, submitted_at=time.monotonic(),
+    ))
+    await asyncio.sleep(1.05)
+    assert not waiter.done()
+    future.set_result("completed")
+    assert await waiter == "completed"
+
+
+def test_terminate_pool_refuses_new_writer_when_killed_process_stays_alive(monkeypatch):
+    """不可中断子进程在 kill 后仍存活时保留故障池，不能启动并发写者。"""
+    monkeypatch.setattr(compression, "PROCESS_TERMINATE_GRACE_SECONDS", 0)
+
+    class StuckProcess:
+        def __init__(self):
+            self.calls = []
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            self.calls.append("terminate")
+
+        def kill(self):
+            self.calls.append("kill")
+
+        def join(self, timeout=None):
+            self.calls.append(("join", timeout))
+
+    class Pool:
+        def __init__(self, process):
+            self._processes = {1: process}
+            self.shutdown_called = False
+
+        def shutdown(self, **_kwargs):
+            self.shutdown_called = True
+
+    process = StuckProcess()
+    pool = Pool(process)
+    with pytest.raises(RuntimeError, match="拒绝启动新的写入进程"):
+        compression._terminate_pool(pool)
+    assert process.calls[0] == "terminate"
+    assert "kill" in process.calls
+    assert not pool.shutdown_called

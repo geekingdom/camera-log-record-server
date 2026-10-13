@@ -61,6 +61,34 @@ def _pending_path(path: Path) -> Path:
     return Path(str(path) + ".pending.json")
 
 
+def _remove_empty_log_ancestors(root: Path, archive: Path) -> None:
+    """在已删归档的原目录向上 rmdir 空目录，绝不越过日志根或穿过软链接。"""
+    root = Path(root).absolute()
+    archive = Path(archive)
+    archive = archive if archive.is_absolute() else root / archive
+    try:
+        archive.relative_to(root)
+    except ValueError:
+        return
+    if root.is_symlink() or not root.is_dir():
+        return
+    ancestors: list[Path] = []
+    current = archive.parent
+    while current != root:
+        if current.is_symlink():
+            return
+        ancestors.append(current)
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+    for directory in ancestors:
+        try:
+            directory.rmdir()
+        except OSError:
+            return
+
+
 def _pending_segments(path: Path) -> list[dict[str, Any]] | None:
     """读取待提交清单；格式损坏交由压缩器拒绝，维护不把它误作已完成归档。"""
     pending = _pending_path(path)
@@ -339,9 +367,68 @@ def _scanned_orphan_archives(root: Path) -> tuple[list[Path], list[Path], list[P
     return sorted(spools), sorted(pending_journals), sorted(archives), modified
 
 
+def _scanned_pending_archives(root: Path) -> tuple[list[Path], list[Path], dict[Path, float]]:
+    """仅在线程中枚举可恢复 spool 和旧 pending，不读取 tar、raw 或外部索引。"""
+    spools: list[Path] = []
+    pending_journals: list[Path] = []
+    modified: dict[Path, float] = {}
+    for directory, names, files in os.walk(root):
+        names[:] = [name for name in names if name != "exports"]
+        parent = Path(directory)
+        for name in files:
+            path = parent / name
+            if name.endswith(".tar.gz.pending.json"):
+                pending_journals.append(path)
+            elif ".tar.gz.pending." in name and name.endswith(".json"):
+                spools.append(path)
+            else:
+                continue
+            try:
+                modified[path] = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+    return sorted(spools), sorted(pending_journals), modified
+
+
 def _members_and_archive_bytes(path: Path) -> tuple[list[dict[str, Any]], int]:
     """在同一工作线程完成重建校验后的归档大小读取。"""
     return _members(path), path.stat().st_size
+
+
+async def pump_pending_archives(repo: Any) -> int:
+    """每五秒独立补充持久归档槽位，避免历史 tar 校验或索引回填饿死 spool。"""
+    spools, pending_journals, modified = await job_thread(_scanned_pending_archives, _root(repo))
+    from camera_logs.node.performance_runtime import archive_spool_snapshot
+    pending_targets: dict[Path, float] = {}
+    scheduled = 0
+
+    def record_pending(target: Path, source: Path) -> None:
+        stamp = modified.get(source)
+        if stamp is not None:
+            key = target.resolve()
+            pending_targets[key] = min(pending_targets.get(key, stamp), stamp)
+
+    # 新 spool 与旧事务清单共用年龄顺序，避免升级遗留清单永远排在新格式之后。
+    spool_paths = set(spools)
+    candidates = sorted([*spools, *pending_journals],
+                        key=lambda path: (modified.get(path, float("inf")), str(path)))
+    for source in candidates:
+        try:
+            if source in spool_paths:
+                target, _ = await asyncio.to_thread(load_archive_spool, source)
+                record_pending(target, source)
+                scheduled += int(schedule_pending_archive(source, recovery=True) is not None)
+            else:
+                target = Path(str(source).removesuffix(".pending.json"))
+                record_pending(target, source)
+                scheduled += int(schedule_recovery_archive(target) is not None)
+        except Exception:
+            record_pending(source, source)
+            logger.exception("归档持久清单补充登记失败 path=%s", source)
+    current = now().timestamp()
+    oldest_seconds = max(0, current - min(pending_targets.values())) if pending_targets else 0
+    archive_spool_snapshot(len(pending_targets), oldest_seconds)
+    return scheduled
 
 
 async def recover_orphan_archives(repo: Any) -> int:
@@ -522,6 +609,9 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
             path = _contained(repo, document["path"])
             if path.suffixes[-2:] != [".tar", ".gz"]:
                 raise ValueError("retention only deletes published archives")
+            cleanup_path = Path(document["path"])
+            cleanup_path = cleanup_path if cleanup_path.is_absolute() else Path(repo.settings.log_root) / cleanup_path
+            cleanup_allowed = path.exists() and not path.is_symlink()
             await asyncio.to_thread(path.unlink, missing_ok=True)
             sidecars = {_metadata_path(path), index_path(path)}
             for member in claimed_group:
@@ -530,6 +620,8 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
             await asyncio.gather(*(asyncio.to_thread(sidecar.unlink, missing_ok=True) for sidecar in sidecars))
             deleted = await repo.db.files.delete_many({"path": str(path), "status": "DELETING"})
             removed += deleted.deleted_count
+            if cleanup_allowed:
+                await asyncio.to_thread(_remove_empty_log_ancestors, Path(repo.settings.log_root), cleanup_path)
         except Exception:
             failures += 1
             logger.exception("归档保留清理失败 path=%s", document.get("path"))

@@ -88,3 +88,27 @@ async def test_blocked_archive_recovery_is_single_flight_and_does_not_block_tick
     finally:
         release.set()
         await worker.close()
+
+
+async def test_archive_pump_runs_while_full_maintenance_is_blocked(tmp_path, monkeypatch):
+    """历史 tar 恢复卡住时，独立 spool pump 仍按五秒周期取得新的调度机会。"""
+    worker, _repo = await make_worker(tmp_path)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked_maintenance():
+        entered.set()
+        await release.wait()
+
+    pump = AsyncMock()
+    monkeypatch.setattr(worker, "_maintain", blocked_maintenance)
+    monkeypatch.setattr("camera_logs.logs.maintenance.pump_pending_archives", pump)
+    maintenance = worker.start_maintenance()
+    await entered.wait()
+    try:
+        pumping = worker.start_archive_pump()
+        await pumping
+        pump.assert_awaited_once_with(worker.repo)
+        assert not maintenance.done()
+    finally:
+        release.set()
+        await worker.close()

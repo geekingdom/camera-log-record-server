@@ -12,8 +12,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from camera_logs.logs import storage
 from camera_logs.logs.compression import publish_hour_archive
-from camera_logs.logs.storage import MAX_LOG_BYTES, HourlyWriter
+from camera_logs.logs.storage import MAX_LOG_BYTES, HourArchive, HourlyWriter
 
 
 def _metadata(path):
@@ -155,7 +156,7 @@ async def test_deferred_archive_notifies_catalog_callback_without_a_later_write(
     """收尾延后归档成功后立即通知目录，不能等待下一次采集或维护扫描。"""
     published, completed = [], asyncio.get_running_loop().create_future()
 
-    def schedule(_spool):
+    def schedule(_spool, **_kwargs):
         return completed
 
     async def on_archive(archive):
@@ -185,7 +186,7 @@ async def test_deferred_archive_catalog_callback_times_out_without_retaining_not
         started.set()
         await release.wait()
 
-    monkeypatch.setattr("camera_logs.logs.storage.schedule_pending_archive", lambda _spool: completed)
+    monkeypatch.setattr("camera_logs.logs.storage.schedule_pending_archive", lambda _spool, **_kwargs: completed)
     monkeypatch.setattr("camera_logs.logs.storage.ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS", .01)
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device", on_archive=on_archive)
     await writer.write(b"timeout\n")
@@ -195,6 +196,56 @@ async def test_deferred_archive_catalog_callback_times_out_without_retaining_not
     await asyncio.sleep(.03)
 
     assert writer._archive_notification_task is None
+
+
+async def test_deferred_archive_catalog_notifies_every_member_of_large_hour_batch(tmp_path, monkeypatch):
+    """单小时超过八个分卷时，完整批次仍逐项登记为 READY，不能按分卷丢弃。"""
+    completed = asyncio.get_running_loop().create_future()
+    published = []
+
+    async def on_archive(archive):
+        published.append(archive.member_name)
+
+    monkeypatch.setattr(storage, "MAX_LOG_BYTES", 1)
+    monkeypatch.setattr(storage, "schedule_pending_archive", lambda _spool, **_kwargs: completed)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device", on_archive=on_archive)
+    await writer.write_many([(b"x", datetime(2026, 9, 8, 1, tzinfo=UTC)) for _ in range(60)])
+    assert await writer.close(defer=True) is None
+
+    completed.set_result(tmp_path / "published.tar.gz")
+    while len(published) < 60 and writer._archive_notification_task is None:
+        await asyncio.sleep(0)
+    if writer._archive_notification_task is not None:
+        await writer._archive_notification_task
+
+    assert len(published) == 60
+    assert len(set(published)) == 60
+
+
+async def test_hung_archive_catalog_keeps_only_eight_pending_batches(tmp_path, monkeypatch):
+    """Mongo 回调挂起时队列按批次限八个，额外已发布批次交由 metadata 维护补偿。"""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def on_archive(_archive):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(storage, "ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS", 1)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device", on_archive=on_archive)
+    batches = tuple(
+        (HourArchive("task", "run", "session", datetime(2026, 9, 8, 1, tzinfo=UTC), tmp_path / f"{index}.tar.gz",
+                     1, str(index), 1, 1),)
+        for index in range(storage.MAX_PENDING_ARCHIVE_NOTIFICATIONS + 2)
+    )
+    writer._queue_archive_notifications(batches[0])
+    await started.wait()
+    for batch in batches[1:]:
+        writer._queue_archive_notifications(batch)
+
+    assert len(writer._archive_notifications) == storage.MAX_PENDING_ARCHIVE_NOTIFICATIONS
+    release.set()
+    assert writer._archive_notification_task is not None
+    await writer._archive_notification_task
 
 
 def test_failed_archive_keeps_raw_log_and_index(tmp_path, monkeypatch):

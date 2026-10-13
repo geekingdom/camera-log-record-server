@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import logging.handlers
@@ -52,6 +53,8 @@ _BEARER_TEXT = re.compile(r"(?i)(\bbearer\s+)[^\s,}\]\"']+")
 _CURRENT_LOG_NAME = "camera-logs.jsonl"
 _MANAGED_SHARD_NAME = re.compile(r"^camera-logs\.\d{4}-\d{2}-\d{2}\.\d{3,}\.jsonl$")
 _LEGACY_SHARD_NAME = re.compile(r"^camera-logs\.jsonl\.\d+$")
+_DAY_DIRECTORY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})T00-00-00$")
+_DAY_SHARD_NAME = re.compile(r"^camera-logs\.\d{3,}\.jsonl$")
 _SERVICE_LOG_HANDLERS: weakref.WeakSet[DailySizeRotatingFileHandler] = weakref.WeakSet()
 
 
@@ -176,16 +179,17 @@ def _validated_service_log_retention_days(value: object) -> int:
 
 
 class DailySizeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
-    """按上海自然日及大小切分服务 JSONL，并只清理本处理器创建或继承的轮转文件。"""
+    """把服务 JSONL 写入上海自然日目录，并在目录内按大小分片。"""
 
     def __init__(self, directory: Path, *, max_bytes: int, retention_days: int):
         self.directory = directory
         self.max_bytes = max_bytes
         self.retention_days = _validated_service_log_retention_days(retention_days)
-        self._cleanup_requested = False
-        super().__init__(directory / _CURRENT_LOG_NAME, "a", encoding="utf-8", delay=False)
-        # BaseRotatingHandler 在初始化期间才设置 baseFilename 并打开活动文件。
-        self._current_day = self._existing_file_day() or self._local_now().date()
+        self._current_day = self._local_now().date()
+        active = self._active_path(self._current_day)
+        if active.is_symlink():
+            raise OSError("服务运行日志活动文件不能是符号链接")
+        super().__init__(active, "a", encoding="utf-8", delay=False)
         self.cleanup_expired()
 
     @staticmethod
@@ -193,12 +197,20 @@ class DailySizeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
         """统一以服务器上海时区判断每日边界，避免容器时区改变轮转结果。"""
         return datetime.now(LOG_TIMEZONE)
 
-    def _existing_file_day(self):
-        """重启后根据活动文件最后写入日恢复边界，首条新日志即可跨日切分。"""
-        try:
-            return datetime.fromtimestamp(Path(self.baseFilename).stat().st_mtime, LOG_TIMEZONE).date()
-        except FileNotFoundError:
-            return None
+    def _day_directory(self, day) -> Path:
+        """返回受管的上海自然日目录，目录名不携带时区歧义。"""
+        return self.directory / f"{day.isoformat()}T00-00-00"
+
+    def _active_path(self, day) -> Path:
+        """创建当天受管目录，并返回当日唯一活动分片路径。"""
+        directory = self._day_directory(day)
+        directory.mkdir(parents=True, exist_ok=True)
+        if directory.is_symlink() or not directory.is_dir():
+            raise OSError("服务运行日志日期目录无效")
+        active = directory / _CURRENT_LOG_NAME
+        if active.is_symlink():
+            raise OSError("服务运行日志活动文件不能是符号链接")
+        return active
 
     def shouldRollover(self, record: logging.LogRecord) -> bool:
         """下一条记录跨日或超过大小上限时，先归档现有活动分片。"""
@@ -212,35 +224,55 @@ class DailySizeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
 
     def _next_shard(self, day) -> Path:
         """同一天按递增序号命名，绝不覆盖已有运行日志。"""
-        prefix = f"camera-logs.{day.isoformat()}."
+        prefix = "camera-logs."
         index = 1
         while True:
-            candidate = self.directory / f"{prefix}{index:03d}.jsonl"
-            if not candidate.exists():
+            candidate = self._day_directory(day) / f"{prefix}{index:03d}.jsonl"
+            if not candidate.exists() and not candidate.is_symlink():
                 return candidate
             index += 1
 
     def doRollover(self) -> None:
-        """原子移动活动文件后重开新片，归档失败时保留原文件并让日志框架处理错误。"""
+        """关闭当前分片后在同日递增编号，跨日切换至新的受管目录。"""
+        next_day = self._local_now().date()
+        # 必须先检查新活动路径；否则午夜遇到链接时会先移动旧分片，再留下关闭的处理器。
+        next_active = self._active_path(next_day)
         self.stream.close()
         source = Path(self.baseFilename)
-        if source.exists() and source.stat().st_size:
+        if source.exists() and not source.is_symlink() and source.is_file() and source.stat().st_size:
             source.replace(self._next_shard(self._current_day))
-        self._current_day = self._local_now().date()
+        self._current_day = next_day
+        self.baseFilename = str(next_active)
         self.stream = self._open()
         self.cleanup_expired()
 
     def emit(self, record: logging.LogRecord) -> None:
-        """在监听器线程执行文件维护，避免管理员请求在 ASGI 事件循环中进行目录扫描或删除。"""
-        if self._cleanup_requested:
-            self._cleanup_requested = False
-            self.cleanup_expired()
+        """文件轮转只在监听器线程执行，避免日志调用方承担目录操作。"""
         super().emit(record)
 
     def cleanup_expired(self, *, reference: datetime | None = None) -> None:
-        """仅清理当前服务目录中已过期的受管分片；活动文件、设备正文和其它文件永不匹配。"""
-        cutoff = (reference or self._local_now()).timestamp() - timedelta(days=self.retention_days).total_seconds()
-        for candidate in self.directory.iterdir():
+        """清理过期受管日志；未知文件或链接永不递归删除且会保留其日期目录。"""
+        moment = reference or self._local_now()
+        cutoff = moment.timestamp() - timedelta(days=self.retention_days).total_seconds()
+        cutoff_day = (moment - timedelta(days=self.retention_days)).date()
+        try:
+            entries = list(self.directory.iterdir())
+        except FileNotFoundError:
+            return
+        for candidate in entries:
+            if candidate.is_symlink():
+                continue
+            matched_day = _DAY_DIRECTORY_NAME.fullmatch(candidate.name)
+            if matched_day is not None:
+                try:
+                    day = datetime.fromisoformat(matched_day.group(1)).date()
+                except ValueError:
+                    continue
+                if not candidate.is_dir() or day >= cutoff_day:
+                    continue
+                self._clear_expired_day_directory(candidate)
+                continue
+            # 旧进程可能仍持有根目录活动文件；即使 mtime 已旧，也不能 unlink。
             if not (_MANAGED_SHARD_NAME.fullmatch(candidate.name) or _LEGACY_SHARD_NAME.fullmatch(candidate.name)):
                 continue
             try:
@@ -248,13 +280,52 @@ class DailySizeRotatingFileHandler(logging.handlers.BaseRotatingHandler):
                     candidate.unlink()
             except FileNotFoundError:
                 continue
+            except OSError as error:
+                self._report_cleanup_error("历史分片", candidate, error)
+
+    @staticmethod
+    def _report_cleanup_error(operation: str, path: Path, error: OSError) -> None:
+        """直接输出清理 I/O 故障，避免当前文件 handler 因日志再入而递归。"""
+        sys.stderr.write(f"WARNING 服务运行日志{operation}失败 path={path} errorType={type(error).__name__}\n")
+
+    @classmethod
+    def _clear_expired_day_directory(cls, directory: Path) -> None:
+        """只清除已过期日期目录内的自有常规日志文件，目录不为空则保守保留。"""
+        try:
+            entries = list(directory.iterdir())
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            cls._report_cleanup_error("日期目录扫描", directory, error)
+            return
+        for candidate in entries:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            if candidate.name != _CURRENT_LOG_NAME and not _DAY_SHARD_NAME.fullmatch(candidate.name):
+                continue
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                cls._report_cleanup_error("日期目录分片", candidate, error)
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            # 未知文件、子目录、链接或并发新写入使目录非空时保守保留，无需告警。
+            if error.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+                return
+            cls._report_cleanup_error("日期目录", directory, error)
+            return
 
     def set_retention_days(self, retention_days: int) -> None:
-        """热更新保留期，下一条队列日志在后台监听器中复核旧分片。"""
+        """热更新后立即清理已过期受管日志，调用者已在后台线程执行此操作。"""
         self.acquire()
         try:
             self.retention_days = _validated_service_log_retention_days(retention_days)
-            self._cleanup_requested = True
+            self.cleanup_expired()
         finally:
             self.release()
 

@@ -17,8 +17,10 @@ from camera_logs.common.database import Repository, now
 from camera_logs.logs import maintenance
 from camera_logs.logs.maintenance import (
     _archive_id,
+    _remove_empty_log_ancestors,
     apply_retention,
     cleanup_exports,
+    pump_pending_archives,
     recover_orphan_archives,
 )
 from cryptography.fernet import Fernet
@@ -62,6 +64,41 @@ async def test_retention_removes_unprotected_archive_without_retain_until(tmp_pa
     assert result["removed"] == 1
     assert not path.exists()
     assert await repo.db.files.find_one({"id": "old"}) is None
+
+
+async def test_retention_removes_only_empty_device_log_ancestors(tmp_path):
+    """归档成功删除后只向上 rmdir 空设备目录，日志根和含其他文件的目录保留。"""
+    repo = repository(tmp_path)
+    path = tmp_path / "device" / "task" / "2026-10-01" / "08" / "old.tar.gz"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"published")
+    await repo.db.files.insert_one({"id": "old", "nodeId": "node", "status": "READY",
+                                    "hour": (now() - timedelta(days=8)).isoformat(), "path": str(path)})
+
+    assert (await apply_retention(repo))["removed"] == 1
+    assert not path.parent.exists()
+    assert not (tmp_path / "device").exists()
+    assert tmp_path.exists()
+
+
+def test_empty_log_ancestor_cleanup_stops_at_nonempty_and_symlinked_parent(tmp_path):
+    """辅助清理不递归删除非空目录，也不经由软链接目录向上遍历。"""
+    root = tmp_path / "logs"
+    nested = root / "device" / "task" / "hour"
+    nested.mkdir(parents=True)
+    (root / "device" / "keep.txt").write_text("keep")
+    _remove_empty_log_ancestors(root, nested / "expired.tar.gz")
+    assert not nested.exists()
+    assert (root / "device").exists()
+    assert (root / "device" / "keep.txt").exists()
+
+    outside = tmp_path / "outside"
+    symlink_parent = root / "linked"
+    outside.mkdir()
+    symlink_parent.symlink_to(outside, target_is_directory=True)
+    _remove_empty_log_ancestors(root, symlink_parent / "expired.tar.gz")
+    assert symlink_parent.is_symlink()
+    assert outside.exists()
 
 
 async def test_retention_preserves_recent_protected_remote_and_job_references(tmp_path):
@@ -181,6 +218,46 @@ async def test_recovery_queues_immutable_spool_without_waiting_for_publication(t
     assert await recover_orphan_archives(repo) == 0
     assert queued == [spool]
     assert spool.exists()
+
+
+async def test_pending_archive_pump_admits_later_spools_after_completed_batch(tmp_path, monkeypatch):
+    """轻量 pump 不等完整归档恢复；首批发布后下批 spool 在下一轮公平补入。"""
+    spools = [tmp_path / f"hour-{number}.tar.gz.pending.{number}.json" for number in range(12)]
+    for spool in spools:
+        spool.write_text(json.dumps({"target": str(tmp_path / f"hour-{spool.stem}.tar.gz"), "segments": [{}]}))
+    active, calls = set(), []
+
+    def schedule(spool, **_kwargs):
+        calls.append(spool)
+        if len(active) >= 8:
+            return None
+        active.add(spool)
+        return object()
+
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", schedule)
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive", lambda _target: None)
+    assert await pump_pending_archives(repository(tmp_path)) == 8
+    completed = set(active)
+    for spool in completed:
+        spool.unlink()
+    active.clear()
+    assert await pump_pending_archives(repository(tmp_path)) == 4
+    assert calls[-4:] == sorted(set(spools) - completed, key=lambda path: (path.stat().st_mtime, str(path)))
+
+
+async def test_pending_archive_pump_includes_legacy_pending_journal(tmp_path, monkeypatch):
+    """轻量 pump 也补充旧事务清单，不必等待完整历史归档扫描。"""
+    target = tmp_path / "legacy" / "hour.tar.gz"
+    target.parent.mkdir()
+    pending = Path(f"{target}.pending.json")
+    pending.write_text('{"formatVersion": 1, "segments": [{"taskId": "task"}]}')
+    queued = []
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive", lambda _spool: None)
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive",
+                        lambda archive: queued.append(archive) or object())
+
+    assert await pump_pending_archives(repository(tmp_path)) == 1
+    assert queued == [target]
 
 
 async def test_recovery_scan_reports_unique_disk_pending_archive_targets(tmp_path, monkeypatch):
@@ -532,3 +609,22 @@ async def test_export_cleanup_keeps_failed_lookup_and_continues_with_next_eligib
 
     assert await cleanup_exports(repo) == 1
     assert failed.exists() and not eligible.exists()
+
+
+async def test_pump_orders_legacy_and_new_spools_together_by_age(tmp_path, monkeypatch):
+    """旧事务清单与新 spool 混合按年龄补充，旧格式不会被新格式积压饿死。"""
+    old = tmp_path / "old.tar.gz.pending.json"
+    middle = tmp_path / "middle.tar.gz.pending.1.json"
+    newest = tmp_path / "new.tar.gz.pending.json"
+    old.write_text('{}')
+    middle.write_text(json.dumps({"target": str(tmp_path / "middle.tar.gz"), "segments": [{}]}))
+    newest.write_text('{}')
+    for stamp, path in enumerate((old, middle, newest), start=1):
+        os.utime(path, (stamp, stamp))
+    calls = []
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive",
+                        lambda path, **kwargs: calls.append((path, kwargs.get("recovery"))) or object())
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_recovery_archive",
+                        lambda path: calls.append((path, True)) or object())
+    assert await pump_pending_archives(repository(tmp_path)) == 3
+    assert calls == [(tmp_path / "old.tar.gz", True), (middle, True), (tmp_path / "new.tar.gz", True)]

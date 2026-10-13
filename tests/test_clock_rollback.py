@@ -43,7 +43,12 @@ async def test_rollback_seals_a_new_fragment_without_reordering(tmp_path, rollba
 async def test_repeated_rollbacks_bound_pending_archives_and_preserve_sequence(tmp_path, monkeypatch):
     """反复回拨在队满时留下独立 spool，不阻塞后续采集写入。"""
     scheduled = []
-    monkeypatch.setattr(storage, "schedule_pending_archive", lambda spool: scheduled.append(spool))
+
+    def schedule(spool, *, recovery):
+        assert recovery is False
+        scheduled.append(spool)
+
+    monkeypatch.setattr(storage, "schedule_pending_archive", schedule)
     first = datetime(2026, 9, 8, 2, 30, tzinfo=UTC)
     chunks = [(f"chunk-{number}\n".encode(), first - timedelta(seconds=number)) for number in range(4)]
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")

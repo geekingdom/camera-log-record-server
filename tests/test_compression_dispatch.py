@@ -98,6 +98,49 @@ async def test_one_spool_failure_does_not_block_later_archive(monkeypatch, tmp_p
     assert calls == [tmp_path / "first.pending.json", tmp_path / "second.pending.json"]
 
 
+async def test_dispatcher_cancellation_releases_queued_spools_for_a_restart(monkeypatch, tmp_path):
+    """停止中的调度器也结算排队 spool，下一启动轮可继续发布全部持久任务。"""
+    first_started, release_first = asyncio.Event(), asyncio.Event()
+    published = []
+    clock = [0.0]
+    spools = [tmp_path / f"queued-{number}.pending.json" for number in range(8)]
+    for spool in spools:
+        spool.write_text("spool")
+
+    async def run(_function, spool, *_arguments):
+        if spool == spools[0]:
+            first_started.set()
+            await release_first.wait()
+        published.append(spool)
+        return tmp_path / f"{spool.stem}.tar.gz"
+
+    monkeypatch.setattr(performance_runtime, "background_settings", lambda: (999, True))
+    monkeypatch.setattr(compression, "_run_in_pool", run)
+    monkeypatch.setattr(compression.time, "monotonic", lambda: clock[0])
+    scheduled = [compression.schedule_pending_archive(spool) for spool in spools]
+    assert all(future is not None for future in scheduled)
+    await first_started.wait()
+
+    dispatcher = compression._dispatcher
+    assert dispatcher is not None
+    dispatcher.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher
+    results = await asyncio.gather(*scheduled, return_exceptions=True)
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    assert not compression._scheduled_targets
+    assert not compression._scheduled_futures
+    assert performance_runtime.archive_snapshot()["runningJobs"] == 0
+
+    # 取消仍沿用既有退避，物理 spool 保留，下一轮维护可在退避后重新登记。
+    clock[0] = compression.ARCHIVE_RETRY_BASE_SECONDS
+    restarted = [compression.schedule_pending_archive(spool) for spool in spools]
+    assert all(future is not None for future in restarted)
+    release_first.set()
+    await asyncio.gather(*restarted)
+    assert published == spools
+
+
 async def test_failed_spools_back_off_so_later_spool_gets_a_fair_slot(monkeypatch, tmp_path):
     """前八个失败 spool 退避后，下一维护轮必须能发布排在其后的正常 spool。"""
     tick = [0.0]
@@ -224,3 +267,35 @@ async def test_cancelled_process_wait_does_not_release_single_slot_early(monkeyp
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await running
+
+
+async def test_live_sealing_cannot_consume_recovery_reserved_slots(tmp_path, monkeypatch):
+    """持续实时封存不能抢走历史恢复名额；历史项进入同一队列后正常完成。"""
+    release = asyncio.Event()
+    completed = []
+
+    async def run(_function, spool, *_arguments):
+        await release.wait()
+        completed.append(spool)
+        return spool
+
+    monkeypatch.setattr(compression, "_run_in_pool", run)
+    live = []
+    for number in range(6):
+        spool = tmp_path / f"live-{number}"
+        spool.touch()
+        live.append(compression.schedule_pending_archive(spool, recovery=False))
+    old = tmp_path / "old"
+    old.touch()
+    try:
+        for number in range(20):
+            fresh = tmp_path / f"fresh-{number}"
+            fresh.touch()
+            assert compression.schedule_pending_archive(fresh, recovery=False) is None
+        recovering = compression.schedule_pending_archive(old, recovery=True)
+        assert recovering is not None
+        assert len(compression._scheduled_targets) == 7
+    finally:
+        release.set()
+    await asyncio.gather(*live, recovering)
+    assert old in completed

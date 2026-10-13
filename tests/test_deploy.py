@@ -196,6 +196,25 @@ def test_health_commands_have_bounded_subprocess_timeout(monkeypatch):
     assert captured["timeout"] == 4.0
 
 
+def test_worker_stop_and_build_use_stage_appropriate_subprocess_timeouts(monkeypatch):
+    """Worker 的120秒优雅停止和镜像构建不能被健康探测的十秒上限误杀。"""
+    captured = []
+
+    def fake_subprocess_run(command, **kwargs):
+        captured.append((command, kwargs["timeout"]))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    module_globals = health["_run"].__globals__
+    monkeypatch.setitem(module_globals["subprocess"].__dict__, "run", fake_subprocess_run)
+    monkeypatch.setitem(module_globals, "time", type("Clock", (), {"monotonic": staticmethod(lambda: 0.0)}))
+
+    health["_run"](["docker", "compose", "build", "worker"], 240.0, command_timeout=240)
+    health["_run"](["docker", "compose", "stop", "worker"], 240.0, command_timeout=150)
+
+    assert captured == [(["docker", "compose", "build", "worker"], 240.0),
+                        (["docker", "compose", "stop", "worker"], 150)]
+
+
 def test_deploy_script_protects_existing_volumes_before_generating_keys():
     """入口脚本必须在创建环境前检查同项目卷，并使用稳定的默认项目名。"""
     script = (root / "deploy.sh").read_text(encoding="utf-8")
