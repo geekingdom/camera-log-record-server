@@ -9,6 +9,8 @@
 
 本轮详见[PSH从机实测与保护](history/2026-10-14-slave-psh-identity.md)。上一轮最新提交`c2a6de1`的[CI38410325125](https://github.com/geekingdom/camera-log-record-server/actions/runs/38410325125)八项全部成功；本轮修改必须提交后等待新CI完整成功再交付。
 
+本轮提交`b8ed918`的CI七项成功，cross-worker-read旧ISAPI验收仍把401后转离线的停止原因断言为OFFLINE而失败。现按持久401策略严格验证AUTH_FAILED、锁存仍在且SSH登录次数为1；真实Mongo/API/Worker复跑通过，54行归档正文逐行一致。修正提交继续等待完整CI。
+
 | 当前需求（2026-10-13，协议初始化、从机恢复及晚间归档补偿，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 主机SSH/Telnet设备尽力自动ASH；串口仅显式debug；从机须ASH及精确IP验证才采集 | `collection/collector.py`、`command_dispatcher.py`、`slave_shell.py` | 从机64项、真实网络暂停重连7项通过；35主机ASH及两次从机192.168.253.164实测通过，临时连接关闭 | 后端全量1840项通过，后增慢库进度回归在9项目录专项通过；公司PSH以模拟协议回归覆盖 |

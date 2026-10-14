@@ -126,7 +126,10 @@ async def main(isapi_port=80):
                 stopped = await wait_task(client, task_id,
                                           lambda task: task["desiredState"] == "STOPPED" and task["status"] == "STOPPED",
                                           "HTTP异常且持续无输出未停止")
-                assert stopped["resourceHealthRecovery"]["reason"] == "OFFLINE"
+                # 先前401锁存直到成功认证才清除，后续离线不能退回普通离线重连策略。
+                assert stopped["resourceHealthRecovery"]["reason"] == "AUTH_FAILED"
+                assert (await repo.db.resources.find_one({"id": resource_id})).get("authRejectedAt") is not None
+                assert source.connection_count == 1, "401后的静默停止不能先重复登录"
                 await asyncio.wait_for(source.closed.wait(), 10)
                 files = await wait_files(mongo[name], task_id, node_id)
                 assert files and all(item["bytes"] > 0 for item in files)
