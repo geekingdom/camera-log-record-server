@@ -118,6 +118,9 @@ class Repository:
         )
         await self.db.log_gap_snapshots.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.coredump_files.create_index([("resourceId", 1), ("receivedAt", -1), ("id", 1)])
+        # 资源看板按上海日统计所有可见目录项，时间前缀限制候选集后再按资源聚合。
+        await self.db.coredump_files.create_index([("receivedAt", 1), ("resourceId", 1)],
+                                                  name="coredump_files_received_resource")
         await self.db.coredump_files.create_index([("nodeId", 1), ("status", 1), ("updatedAt", -1)])
         # 源文件复核按节点和稳定游标限量读取，存在性条件在索引候选内过滤。
         await self.db.coredump_files.create_index([("nodeId", 1), ("id", 1)])

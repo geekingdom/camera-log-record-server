@@ -18,7 +18,7 @@ interface SessionUser {
   mustChangePassword?: boolean;
 }
 
-export const DEFAULT_WORKSPACE = "resources";
+export const DEFAULT_WORKSPACE = "dashboard";
 
 interface WorkspaceNavigationOptions {
   activeTab: Ref<string>;

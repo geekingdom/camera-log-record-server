@@ -60,7 +60,7 @@ async function newPage(isAdmin) {
     // collecting:stop 的 500 是本用例刻意注入的 API 失败；它不代表应用抛出了控制台异常。
     if (message.type() === "error" && !message.text().startsWith("Failed to load resource:")) errors.push(message.text());
   });
-  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByText(isAdmin ? "可启动任务" : "本人任务", { exact: true }).waitFor();
   return { context, page, get taskReads() { return taskReads; } };

@@ -1,6 +1,7 @@
 // 工作区导航元数据独立于根协调逻辑，权限过滤仍由 App 根据当前会话执行。
 import {
   BookOpen,
+  ChartNoAxesCombined,
   FileCode2,
   HardDrive,
   Radio,
@@ -12,6 +13,7 @@ import {
 } from "lucide-vue-next";
 
 export const workspaceNavigation = [
+  { key: "dashboard", label: "资源看板", icon: ChartNoAxesCombined },
   { key: "resources", label: "设备资源", icon: HardDrive, scope: "tasks:read" },
   { key: "tasks", label: "采集任务", icon: Radio, scope: "tasks:read" },
   { key: "logs", label: "日志工作台", icon: Terminal, scope: "logs:read" },

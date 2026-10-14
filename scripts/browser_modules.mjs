@@ -111,7 +111,7 @@ async function navigate(label) {
 
 try {
   await mkdir(output, { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
 
   await navigate("后台配置");

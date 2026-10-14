@@ -116,7 +116,7 @@ async function assertMobileLatencyTags() {
 
 try {
   await mkdir(output, { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "服务节点", exact: true }).click();
   await page.locator("h1").filter({ hasText: "服务节点" }).waitFor();
   await page.getByText("无样本", { exact: true }).first().waitFor();

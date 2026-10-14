@@ -104,7 +104,7 @@ await page.route("**/api/v1/**", async route => {
 });
 
 await mkdir(screenshots, { recursive: true });
-await page.goto(baseUrl, { waitUntil: "networkidle" });
+await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
 await page.getByRole("tab", { name: "设备资源", exact: true }).click();
 await page.getByLabel("查看 coredump 文件").first().click();
 const drawer = page.getByRole("dialog", { name: /验收网络设备 A.*Coredump 文件/ });

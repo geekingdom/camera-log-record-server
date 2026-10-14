@@ -1,5 +1,6 @@
 // 用户会话浏览器验收：所有 API 都由路由替身响应，不访问真实设备或服务数据。
 import assert from "node:assert/strict";
+import { dashboardFixture } from "./dashboard_fixture.mjs";
 import { mkdir } from "node:fs/promises";
 
 const baseUrl = process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
@@ -90,6 +91,8 @@ await context.route("**/api/v1/**", async (route) => {
     current = null;
     return route.fulfill({ status: 204 });
   }
+  if (path === "/api/v1/dashboard")
+    return json(route, dashboardFixture(undefined, 7, Boolean(current?.isAdmin), current?.scopes.includes("*") || current?.scopes.includes("logs:read")));
   if (path === "/api/v1/tasks")
     return json(route, {
       items: [
@@ -176,8 +179,9 @@ async function waitForUserTags() {
 }
 try {
   await mkdir(output, { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await login("admin");
+  await page.getByRole("tab", { name: "设备资源", exact: true }).click();
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   await page.getByRole("tab", { name: "账号管理", exact: true }).click();
   await page.getByRole("tab", { name: "用户账号", exact: true }).click();
@@ -186,9 +190,9 @@ try {
   await waitForUserTags();
   assert.deepEqual(
     await page
-      .locator(".user-manager .el-tag")
+      .locator(".user-manager .el-table__body-wrapper .el-tag")
       .allTextContents(),
-    ["全部权限", "启用", "查看任务", "logs:read", "启用"],
+    ["全部权限", "启用", "查看设备与任务", "查看日志与 Coredump", "下载日志与 Coredump", "查看命令模板", "创建命令模板", "查看我的服务账号", "查看设备与任务", "查看日志与 Coredump", "启用"],
   );
   await page.getByRole("button", { name: "新建用户", exact: true }).waitFor();
   await page.screenshot({
@@ -234,9 +238,11 @@ try {
     .getByRole("dialog", { name: "确认修改密码", exact: true })
     .getByRole("button", { name: "确认", exact: true })
     .click();
+  await page.getByRole("tab", { name: "设备资源", exact: true }).click();
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   await page.getByRole("button", { name: "退出", exact: true }).click();
   await login("reader");
+  await page.getByRole("tab", { name: "设备资源", exact: true }).click();
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   assert.equal(
     await page.getByRole("tab", { name: "账号管理", exact: true }).count(),

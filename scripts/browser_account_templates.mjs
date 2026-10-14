@@ -69,7 +69,7 @@ try {
     page.setDefaultTimeout(5_000);
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173");
+    await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`);
 
     await page.getByRole("tab", { name: "账号管理", exact: true }).click();
     await page.getByRole("button", { name: "新建用户", exact: true }).click();

@@ -140,7 +140,7 @@ ui.on("console", message => {
 
 try {
   await mkdir(resolve("output/playwright"), { recursive: true });
-  await ui.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await ui.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`, { waitUntil: "networkidle" });
   await ui.getByRole("tab", { name: "日志工作台", exact: true }).click();
   await selectTask(ui, taskA);
   await ui.getByRole("tab", { name: "小时归档与检索", exact: true }).click();

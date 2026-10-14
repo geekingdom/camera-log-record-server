@@ -1,5 +1,6 @@
-// 工作区导航回归：用隔离Vite和模拟接口验证默认资源页、哈希恢复、权限回退与资源分页刷新。
+// 工作区导航回归：用隔离Vite和模拟接口验证默认看板页、哈希恢复、权限回退与资源分页刷新。
 import assert from "node:assert/strict";
+import { dashboardFixture } from "./dashboard_fixture.mjs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -63,6 +64,7 @@ try {
     if (request.method() === "POST" && path === "/api/v1/auth/login") return json(route, { user: administrator });
     if (request.method() !== "GET") throw new Error(`不应发出写请求：${request.method()} ${path}`);
     if (path === "/api/v1/auth/me") return json(route, { user: account });
+    if (path === "/api/v1/dashboard") return json(route, dashboardFixture(undefined, 7, account.isAdmin, account.isAdmin));
     if (path === "/api/v1/resources") {
       const page = Number(url.searchParams.get("page") || "1");
       const pageSize = Number(url.searchParams.get("pageSize") || "20");
@@ -88,8 +90,8 @@ try {
   const baseUrl = process.env.BASE_URL || `http://127.0.0.1:${server.httpServer.address().port}`;
 
   await page.goto(baseUrl, { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
-  assert.equal(new URL(page.url()).hash, "#resources", "首次登录必须进入设备资源页");
+  await page.getByRole("heading", { name: "资源看板", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).hash, "#dashboard", "首次登录必须进入资源看板");
   await page.screenshot({ path: `${screenshots}/navigation-desktop.png`, fullPage: true, animations: "disabled" });
 
   const taskRequestsBeforeNavigation = taskRequests.length;
@@ -149,20 +151,20 @@ try {
 
   await page.getByRole("button", { name: "退出", exact: true }).click();
   await page.getByRole("button", { name: "登录", exact: true }).waitFor();
-  assert.equal(new URL(page.url()).hash, "#resources", "退出不能被未登录权限回退改成API文档页");
+  assert.equal(new URL(page.url()).hash, "#dashboard", "退出不能被未登录权限回退改成API文档页");
   await page.getByRole("textbox", { name: "用户名", exact: true }).fill("navigation-admin");
   await page.getByRole("textbox", { name: "密码", exact: true }).fill("mock-password-only");
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
-  assert.equal(new URL(page.url()).hash, "#resources", "重新登录必须进入设备资源页");
+  await page.getByRole("heading", { name: "资源看板", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).hash, "#dashboard", "重新登录必须进入资源看板");
 
   await page.evaluate(() => sessionStorage.setItem("camera-log-record-token", "navigation-operator"));
   await page.goto(`${baseUrl}/?session=operator#settings`, { waitUntil: "networkidle" });
-  await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
-  assert.equal(new URL(page.url()).hash, "#resources", "无权限页必须优先回退设备资源");
+  await page.getByRole("heading", { name: "资源看板", exact: true }).waitFor();
+  assert.equal(new URL(page.url()).hash, "#dashboard", "无权限页必须优先回退资源看板");
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ passed: true, taskNavigationRequests: 1, sameTabResetRequests: 1,
-    reloginWorkspace: "resources", resourceRefreshPage: 2, screenshots, consoleErrors: 0 }));
+    reloginWorkspace: "dashboard", resourceRefreshPage: 2, screenshots, consoleErrors: 0 }));
 } finally {
   releaseTaskRequest?.();
   if (browser) await browser.close();

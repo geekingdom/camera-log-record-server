@@ -58,7 +58,7 @@ try {
     const ui = await context.newPage();
     const errors = [];
     ui.on("pageerror", error => errors.push(error.message));
-    await ui.goto(process.env.BASE_URL || "http://127.0.0.1:5173");
+    await ui.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`);
     await ui.getByRole("tab", { name: "日志工作台", exact: true }).click();
     assert.equal(await ui.getByRole("combobox", { name: "选择日志任务" }).count(), 0, "工作台不应保留全任务下拉框");
     await ui.getByRole("button", { name: "选择任务", exact: true }).click();

@@ -72,7 +72,7 @@ page.on("pageerror", (error) => errors.push(error.message));
 page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
 
 try {
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByText(task.name, { exact: true }).waitFor();
   await page.getByRole("button", { name: "编辑任务", exact: true }).first().click();

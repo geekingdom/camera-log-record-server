@@ -9,7 +9,7 @@ const repository = fileURLToPath(new URL("../..", import.meta.url));
 // 所有脚本在独立生产预览端口执行；新增工作台功能不得依赖本机5173开发服务。
 const scripts = [
   "browser_workspace_layout", "browser_api_reference", "browser_account_templates",
-  "browser_template_navigation", "browser_default_resource_navigation",
+  "browser_template_navigation", "browser_default_resource_navigation", "browser_dashboard",
   "browser_resource_bulk_delete", "browser_task_bulk_operations",
   "browser_coredump_shared_monitor", "browser_blocked_recovery", "browser_command_history",
   "browser_resource_authentication_records", "browser_node_dashboard",

@@ -140,7 +140,7 @@ async function assertToolbarGeometry(width, collapsed = false) {
 
 try {
   await mkdir(screenshots, { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   await latestRequest({ page: "1", pageSize: "20" });
 

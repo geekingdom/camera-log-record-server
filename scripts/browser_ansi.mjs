@@ -82,7 +82,7 @@ page.setDefaultTimeout(10000);
 const issues = [];
 try {
   await mkdir(output, { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "日志工作台", exact: true }).click();
   await page.getByRole("heading", { name: "日志工作台", exact: true }).waitFor();
   await page.getByRole("combobox", { name: "选择日志任务", exact: true }).click();

@@ -63,6 +63,8 @@ def create_app(settings=None, db=None):
                         task.cancel()
                     if background:
                         await asyncio.gather(*background, return_exceptions=True)
+                    from camera_logs.dashboard.api import shutdown_dashboard_cache
+                    await shutdown_dashboard_cache(app)
         finally:
             try:
                 if client is not None:
@@ -142,6 +144,8 @@ def create_app(settings=None, db=None):
     install_resource_routes(app, repo, listing)
     from camera_logs.resource_metrics.api import install_resource_metric_routes
     install_resource_metric_routes(app)
+    from camera_logs.dashboard.api import install_dashboard_routes
+    install_dashboard_routes(app)
     from camera_logs.commands.templates import install_template_routes
     install_template_routes(app, repo, listing)
     from camera_logs.commands.api import install_command_routes

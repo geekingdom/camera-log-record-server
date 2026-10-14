@@ -38,7 +38,7 @@ const output = "output/playwright";
 
 try {
   await mkdir(output, { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("cell", { name: "采集失败", exact: true }).waitFor();
   await page.locator(".task-filters .el-select").click();

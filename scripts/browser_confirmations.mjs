@@ -116,7 +116,7 @@ async function navigate(label) {
 }
 
 try {
-  await ui.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await ui.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await navigate("采集任务");
   for (const [name, action] of [["待启动任务", "启动任务"], ["运行中任务", "停止任务"], ["可暂停任务", "暂停任务"], ["已暂停任务", "继续任务"]]) {
     const row = ui.locator(".el-table__body tr").filter({ hasText: name });

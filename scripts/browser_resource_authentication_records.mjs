@@ -87,7 +87,7 @@ try {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   const cameraRow = page.getByRole("row").filter({ hasText: "模拟海康" });
   const serialRow = page.getByRole("row").filter({ hasText: "模拟串口" });
   await cameraRow.getByRole("button", { name: "查看认证记录" }).waitFor();

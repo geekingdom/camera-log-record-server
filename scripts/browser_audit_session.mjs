@@ -66,7 +66,7 @@ async function waitForApi(path, action) {
 }
 
 async function loginAndChangeInitialPassword() {
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   if (unauthenticatedMeChecks !== 1)
     throw new Error(`首次未登录 auth/me 应恰有一次 401，实际为 ${unauthenticatedMeChecks} 次`);
 

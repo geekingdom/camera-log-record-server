@@ -76,7 +76,7 @@ try {
   page.setDefaultTimeout(8_000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "domcontentloaded" });
   await page.getByRole("row", { name: /凭据默认值设备/ }).waitFor();
 
   // 离线网络资源仍可从快捷入口创建 Telnet 串口任务，SSH 和 Telnet 设备选项必须禁用。

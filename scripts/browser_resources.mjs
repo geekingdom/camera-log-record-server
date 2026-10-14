@@ -59,7 +59,7 @@ async function confirmSaveIfNeeded() {
 }
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   await page.getByRole("button", { name: "新建资源", exact: true }).click();
   await page.getByLabel("资源名称", { exact: true }).fill("网络设备 A");

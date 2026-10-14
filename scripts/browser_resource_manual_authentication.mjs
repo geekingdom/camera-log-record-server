@@ -53,7 +53,7 @@ page.on("console", message => {
 });
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   const owned = page.getByRole("row").filter({ hasText: "可认证海康" });
   const foreign = page.getByRole("row").filter({ hasText: "他人海康" });
   const deleted = page.getByRole("row").filter({ hasText: "已删除海康" });
@@ -81,7 +81,7 @@ try {
 
   allowTaskControl = false;
   const readOnlyControlPage = await context.newPage();
-  await readOnlyControlPage.goto(baseUrl, { waitUntil: "networkidle" });
+  await readOnlyControlPage.goto(`${baseUrl}/#resources`, { waitUntil: "networkidle" });
   const readOnlyOwned = readOnlyControlPage.getByRole("row").filter({ hasText: "可认证海康" });
   assert.equal(await readOnlyOwned.getByRole("button", { name: "立即认证设备" }).count(), 0,
     "缺少任务控制权限时不得展示可停止关联任务的认证入口");

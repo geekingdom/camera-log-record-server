@@ -27,7 +27,7 @@ try {
     page.setDefaultTimeout(10_000);
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto(process.env.BROWSER_BASE_URL || 'http://127.0.0.1:5173', { waitUntil: 'domcontentloaded', timeout: 10_000 });
+    await page.goto(`${process.env.BROWSER_BASE_URL || 'http://127.0.0.1:5173'}/#resources`, { waitUntil: 'domcontentloaded', timeout: 10_000 });
     await page.getByText('当前连通', { exact: true }).waitFor();
     const serialRow = page.getByRole('row').filter({ hasText: serialResource.name });
     assert.equal(await serialRow.getByText('当前连通', { exact: true }).count(), 0, '串口资源不应显示海康认证状态');

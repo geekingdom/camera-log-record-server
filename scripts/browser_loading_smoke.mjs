@@ -16,7 +16,7 @@ page.on("request", request => {
   if (new URL(request.url()).pathname.startsWith("/api/") && request.method() !== "GET") mutations.push(request.method());
 });
 try {
-  await page.goto(baseUrl);
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`);
   await page.getByRole("button", { name: "新建资源", exact: true }).waitFor();
   assert(scripts.some(path => /ResourceWorkspace-.*\.js$/.test(path)), "必须针对生产分块运行");
   assert(!scripts.some(path => /(?:AuditWorkspace|TaskEditor|ResourceEditor)-.*\.js$/.test(path)), "首屏不应加载未访问模块");

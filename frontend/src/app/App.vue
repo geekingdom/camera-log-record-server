@@ -33,6 +33,7 @@ const loadAccessManager = () => import("../features/access/AccountWorkspace.vue"
 const loadAuditWorkspace = () => import("../features/audit/AuditWorkspace.vue");
 const loadSettingsManager = () => import("../features/settings/SettingsManager.vue");
 const loadResourceWorkspace = () => import("../features/resources/ResourceWorkspace.vue");
+const loadDashboardWorkspace = () => import("../features/dashboard/DashboardWorkspace.vue");
 const loadApiReferenceWorkspace = () => import("../features/api/ApiReferenceWorkspace.vue");
 const sidebarCollapsed = ref(
   localStorage.getItem("camera-log-sidebar-collapsed") === "true",
@@ -83,7 +84,7 @@ const {
     selectedResource.value = undefined;
     selectedTask.value = undefined;
     selectedLogTask.value = "";
-    activeTab.value = "resources";
+    activeTab.value = "dashboard";
   },
   refreshWorkspace: async () => {
     navigation.requestRefresh();
@@ -135,7 +136,8 @@ provide(permissionKey, {
 });
 const visibleNavigation = computed(() =>
   workspaceNavigation.filter(
-    (item) => (!item.admin || user.value?.isAdmin) && hasScope(item.scope),
+    (item) => (!item.admin || user.value?.isAdmin) && hasScope(item.scope) &&
+      (item.key !== "dashboard" || hasScope("tasks:read")),
   ).map(item => item.key === "access" && !user.value?.isAdmin ? { ...item, label: "我的服务账号" } : item),
 );
 const selectedTask = ref<Task>(),
@@ -148,7 +150,9 @@ async function refresh(quiet = false) {
     return;
   if (!quiet) busy.value = true;
   try {
-    if (activeTab.value === "resources")
+    if (activeTab.value === "dashboard")
+      return;
+    else if (activeTab.value === "resources")
       await resourceWorkspace.value?.reload();
     else if (activeTab.value === "tasks") await loadTasks();
     else if (activeTab.value === "templates") await loadTemplates();
@@ -201,6 +205,15 @@ function owns(item: { createdBy?: string }) {
 function viewTask(task: Task) {
   selectedLogTask.value = task.id;
   activeTab.value = "logs";
+}
+function viewDashboardResources() {
+  if (hasScope("tasks:read")) activeTab.value = "resources";
+}
+function viewDashboardTasks() {
+  if (hasScope("tasks:read")) navigate("tasks");
+}
+function viewDashboardNodes() {
+  if (user.value?.isAdmin) activeTab.value = "nodes";
 }
 function createTemplate() {
   selectedTemplate.value = undefined;
@@ -277,7 +290,7 @@ onBeforeUnmount(() => {
             v-if="activeTab === 'empty'"
             description="当前账号没有可用的平台权限"
           />
-          <div class="page-head">
+          <div v-if="activeTab !== 'dashboard'" class="page-head">
             <h1>
               {{ activeNavigationLabel }}
             </h1>
@@ -307,7 +320,17 @@ onBeforeUnmount(() => {
               >
             </div>
           </div>
-          <template v-if="activeTab === 'tasks'">
+          <AsyncView
+            v-if="activeTab === 'dashboard'"
+            :loader="loadDashboardWorkspace"
+            :component-props="{
+              canOpenResources: hasScope('tasks:read'),
+              canOpenTasks: hasScope('tasks:read'),
+              canOpenNodes: Boolean(user?.isAdmin),
+            }"
+            :listeners="{ openResources: viewDashboardResources, openTasks: viewDashboardTasks, openNodes: viewDashboardNodes }"
+          />
+          <template v-else-if="activeTab === 'tasks'">
             <AsyncView
               :loader="loadTaskOverview"
               :component-props="{

@@ -87,7 +87,7 @@ async function createTemporaryUser() {
 }
 
 async function loginTemporaryUser(user) {
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByLabel("用户名", { exact: true }).fill(user.username);
   await page.getByLabel("密码", { exact: true }).fill(user.initialPassword);
   await page.getByRole("button", { name: "登录", exact: true }).click();
@@ -98,6 +98,7 @@ async function loginTemporaryUser(user) {
   await passwordDialog.getByRole("button", { name: "保存新密码", exact: true }).click();
   await page.getByRole("dialog", { name: "确认修改密码", exact: true })
     .getByRole("button", { name: "确认", exact: true }).click();
+  await page.getByRole("tab", { name: "设备资源", exact: true }).click();
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   // 密码轮换会递增账号版本；finally 必须使用新版本才能软删除临时账号。
   user.version += 1;

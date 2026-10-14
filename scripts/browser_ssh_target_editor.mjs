@@ -54,7 +54,7 @@ page.on("console", message => { if (message.type() === "error") errors.push(mess
 
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByRole("button", { name: "编辑任务", exact: true }).click();
   await page.getByRole("heading", { name: "基本连接", exact: true }).waitFor();

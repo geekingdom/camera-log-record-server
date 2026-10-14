@@ -57,7 +57,7 @@ try {
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
     await page.getByRole("tab", { name: "后台配置", exact: true }).click();
     const modules = page.locator(".settings-module-tabs");
     const platformModule = modules.getByText("平台与容量", { exact: true });

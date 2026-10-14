@@ -28,7 +28,7 @@ const errors = []; page.on("pageerror", error => errors.push(error.message));
 async function confirm() { const dialog = page.locator(".el-message-box"); if (await dialog.isVisible().catch(() => false)) await dialog.getByRole("button", { name: "确认", exact: true }).click(); }
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   await page.getByRole("button", { name: "编辑资源", exact: true }).click();
   const editor = page.getByRole("dialog", { name: "编辑设备资源", exact: true });

@@ -52,6 +52,55 @@ export interface ResourceMetricsPage {
   nextCursor?: string | null;
   owner?: { id?: string; name?: string } | null;
 }
+/** 资源看板按上海自然日汇总，不携带日志正文或节点敏感诊断。 */
+export interface DashboardDailyMetric {
+  date: string;
+  bytes: number;
+  fileCount: number;
+}
+export interface DashboardResourceRank {
+  resourceId: string;
+  name: string;
+  ip: string;
+  bytes: number;
+  fileCount: number;
+}
+export interface DashboardNodeHealth {
+  id: string;
+  name: string;
+  healthLevel: string;
+  reasons: string[];
+  accepting: boolean;
+  activeTasks: number;
+  capacity: number;
+  inputBytesPerSecond: number;
+  lastHeartbeat: string | null;
+}
+export interface DashboardCoredumpItem {
+  resourceId: string;
+  name: string;
+  ip: string;
+  fileCount: number;
+  bytes: number;
+  lastReceivedAt: string | null;
+}
+export interface DashboardSnapshot {
+  /** 服务端成功生成该快照的 UTC 时刻，用于页面更新时间而非浏览器收包时间。 */
+  generatedAt: string;
+  date: string;
+  days: 7 | 14 | 30;
+  range: { startDate: string; endDate: string };
+  overview: { resources: number; onlineResources: number; collectingTasks: number; tasks: number; nodes: number | null };
+  availability: { logs: boolean; nodes: boolean };
+  /** 无日志读取权限时服务端明确返回 null，而不是将受限统计伪装为零。 */
+  daily: DashboardDailyMetric[] | null;
+  topResources: DashboardResourceRank[] | null;
+  topResourcesTruncated: boolean | null;
+  coredumps: { resourceCount: number; fileCount: number; bytes: number; items: DashboardCoredumpItem[]; truncated: boolean } | null;
+  /** 普通账号不接收节点标识、健康原因或节点数量。 */
+  nodes: DashboardNodeHealth[] | null;
+  notes?: string[];
+}
 /** 海康网络设备认证历史的安全结果分类。 */
 export type AuthenticationRecordResult = "SUCCESS" | "AUTH_FAILED" | "OFFLINE" | "ERROR";
 /** 单次认证仅保存身份摘要和安全提示，不包含认证凭据或设备原始响应。 */

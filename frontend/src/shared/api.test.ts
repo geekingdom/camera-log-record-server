@@ -31,6 +31,18 @@ describe("设备身份模糊筛选 API", () => {
   });
 });
 
+describe("运行看板 API", () => {
+  it("只按约定传递统计窗口和上海自然日", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({})));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.dashboard(14, "2026-10-14");
+
+    expect(fetch.mock.calls[0][0]).toBe("/api/v1/dashboard?days=14&date=2026-10-14");
+  });
+});
+
 describe("阻塞任务重新启动 API", () => {
   it("提交隔离确认并保留服务端 detail 中的错误码", async () => {
     vi.stubGlobal("crypto", { randomUUID: () => "request-key" });

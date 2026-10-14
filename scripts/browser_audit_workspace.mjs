@@ -54,7 +54,7 @@ async function waitForApi(path, action) {
 }
 
 async function login() {
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByLabel("用户名", { exact: true }).fill(username);
   await page.getByLabel("密码", { exact: true }).fill(initialPassword);
   await page.getByRole("button", { name: "登录", exact: true }).click();

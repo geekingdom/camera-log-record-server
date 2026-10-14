@@ -58,7 +58,7 @@ try {
   const row = name => page.getByRole("row").filter({ hasText: name });
   const select = async name => row(name).locator(".el-checkbox").click();
 
-  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   assert.equal(requests.lists.at(-1).createdBy, undefined, "管理员默认查看全部资源");
   assert.equal(await page.getByText("创建时间（北京时间）", { exact: true }).count(), 1);

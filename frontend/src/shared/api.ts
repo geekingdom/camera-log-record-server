@@ -14,6 +14,7 @@ import type {
   ResourceAuthentication,
   AuthenticationRecord,
   AuthenticationRecordResult,
+  DashboardSnapshot,
   CursorPage,
   ResourceAuthType,
   ResourceKind,
@@ -165,6 +166,10 @@ function pick(source: object, fields: string[]) {
   );
 }
 export const api = {
+  /** 资源看板只接受受限自然日与窗口长度，后端按当前用户读取权限过滤汇总。 */
+  dashboard: (days: 7 | 14 | 30, date: string) => request<DashboardSnapshot>(
+    `/dashboard?${new URLSearchParams({ days: String(days), date })}`,
+  ),
   resources: (
     page?: number,
     pageSize?: number,

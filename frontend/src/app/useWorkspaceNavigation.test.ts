@@ -25,9 +25,9 @@ async function settleNavigation() {
   await Promise.resolve();
 }
 
-function subject(hash = "#resources", { enabled = true, busy = false, failSynchronously = false, refreshOverride }: SubjectOptions = {}) {
-  const activeTab = ref("resources");
-  const available = ref([{ key: "resources" }, { key: "tasks" }]);
+function subject(hash = "#dashboard", { enabled = true, busy = false, failSynchronously = false, refreshOverride }: SubjectOptions = {}) {
+  const activeTab = ref("dashboard");
+  const available = ref([{ key: "dashboard" }, { key: "resources" }, { key: "tasks" }]);
   const page = ref(1), pageSize = ref(20), selectedResource = ref<Resource>();
   const authenticated = ref(enabled), sessionUser = ref(enabled ? { mustChangePassword: false } : undefined), loading = ref(busy);
   const writes: string[] = [], refreshes: string[] = [], errors: unknown[] = [];
@@ -102,23 +102,23 @@ describe("useWorkspaceNavigation", () => {
     expect(state.writes).toEqual(["tasks", "resources"]);
   });
 
-  it("首次挂载会写入默认资源页哈希但不刷新", async () => {
+  it("首次挂载会写入默认资源看板哈希但不刷新", async () => {
     const state = subject();
     state.navigation.syncWorkspaceHash();
     await settleNavigation();
-    expect(state.writes).toEqual(["resources"]);
+    expect(state.writes).toEqual(["dashboard"]);
     expect(state.refreshes).toEqual([]);
   });
 
-  it("退出时不改写默认资源页，下一次会话启用权限后才回退", async () => {
+  it("退出时不改写默认资源看板，下一次会话启用权限后才回退", async () => {
     const state = subject("#tasks", { enabled: false });
     state.navigation.restoreWorkspaceFromHash();
     await settleNavigation();
-    expect(state.activeTab.value).toBe("resources");
+    expect(state.activeTab.value).toBe("dashboard");
 
     state.available.value = [{ key: "api-reference" }];
     await settleNavigation();
-    expect(state.activeTab.value).toBe("resources");
+    expect(state.activeTab.value).toBe("dashboard");
     state.sessionUser.value = { mustChangePassword: false };
     state.authenticated.value = true;
     await settleNavigation();

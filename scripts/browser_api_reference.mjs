@@ -40,7 +40,7 @@ try {
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173");
+    await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`);
     assert.equal(await page.getByRole("tab", { name: "后台配置", exact: true }).count(), 0, "普通用户不应看到后台配置入口");
     assert.equal(await page.getByRole("tab", { name: "API 文档", exact: true }).count(), 1, "普通用户必须能访问 API 文档");
     adminMode = true;

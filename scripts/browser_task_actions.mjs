@@ -48,7 +48,7 @@ async function actionNames(name) {
 
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await page.getByText("采集中串口", { exact: true }).waitFor();
   assert.deepEqual(await actionNames("采集中串口"), ["停止任务"]);

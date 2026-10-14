@@ -103,7 +103,7 @@ await context.routeWebSocket("**/api/v1/tasks/*/logs*", socket => socket.close()
 const page = await context.newPage();
 page.setDefaultTimeout(10_000);
 try {
-  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "日志工作台", exact: true }).click();
   await page.getByRole("button", { name: "选择任务", exact: true }).click();
   const picker = page.getByRole("dialog", { name: "选择日志任务" });

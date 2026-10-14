@@ -79,7 +79,7 @@ async function confirmIfShown() {
 }
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "新建资源", exact: true }).click();
   await page.getByText("批量添加", { exact: true }).click();
   await page.getByLabel("起始 IP", { exact: true }).fill("192.0.2.20");

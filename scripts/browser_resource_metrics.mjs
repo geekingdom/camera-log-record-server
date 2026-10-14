@@ -53,7 +53,7 @@ const errors = []; page.on("pageerror", error => errors.push(error.message)); pa
 });
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   assert.equal(await page.getByLabel("查看 CPU 与内存趋势").count(), 1, "仅启用的海康资源显示趋势入口");
   await page.getByLabel("查看 CPU 与内存趋势").click();

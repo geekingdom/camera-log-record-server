@@ -58,7 +58,7 @@ try {
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "服务节点", exact: true }).click();
   await page.getByText("采集节点 A", { exact: true }).waitFor();
   await page.getByText("4", { exact: true }).first().waitFor();

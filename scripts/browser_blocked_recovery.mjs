@@ -69,7 +69,7 @@ try {
   const row = () => page.getByRole("row").filter({ hasText: task.name });
   const restart = () => row().getByLabel("重新启动任务");
 
-  await page.goto(process.env.BASE_URL || "http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto(`${process.env.BASE_URL || "http://127.0.0.1:5173"}/#resources`, { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "采集任务", exact: true }).click();
   await row().waitFor();
   assert.equal(await restart().count(), 1, "BLOCKED 任务必须显示重新启动");

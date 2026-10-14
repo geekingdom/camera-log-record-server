@@ -80,7 +80,7 @@ async function openDeleteConfirmation() {
 }
 try {
   await mkdir("output/playwright", { recursive: true });
-  await page.goto("http://127.0.0.1:5173", { waitUntil: "networkidle" });
+  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
   for (const width of [1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 });
