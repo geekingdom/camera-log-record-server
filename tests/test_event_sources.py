@@ -5,10 +5,18 @@ from datetime import UTC, datetime, timedelta
 pytest_plugins = ("test_api",)
 
 
+def _utc_window(stamp):
+    """围绕当前样本构造查询窗口，避免请求事件的 30 天 TTL 使回归失效。"""
+    return {
+        "start": (stamp - timedelta(minutes=1)).isoformat(),
+        "end": (stamp + timedelta(minutes=1)).isoformat(),
+    }
+
+
 def test_event_api_presents_verified_user_system_and_service_token_sources(client):
     """审计记录优先显示真实用户，系统和服务账号保留各自可追溯身份。"""
     repo = client.app.state.repo
-    stamp = datetime(2026, 9, 14, 8, tzinfo=UTC)
+    stamp = datetime.now(UTC).replace(microsecond=0)
     client.portal.call(repo.db.users.insert_one, {
         "id": "operator", "username": "operator-login", "displayName": "值班操作员",
     })
@@ -21,9 +29,7 @@ def test_event_api_presents_verified_user_system_and_service_token_sources(clien
         {"actor": "bootstrap", "action": "create_user", "createdAt": stamp + timedelta(seconds=4)},
     ])
 
-    response = client.get("/api/v1/audit-events", params={
-        "start": "2026-09-14T00:00:00+00:00", "end": "2026-09-15T00:00:00+00:00",
-    })
+    response = client.get("/api/v1/audit-events", params=_utc_window(stamp))
 
     assert response.status_code == 200, response.text
     rows = {item["action"]: item for item in response.json()["items"]}
@@ -40,7 +46,7 @@ def test_event_api_presents_verified_user_system_and_service_token_sources(clien
 def test_event_api_presents_runtime_node_task_anonymous_http_and_historical_sources(client):
     """无 actor 时仅按事件记录的节点、任务、HTTP 来源或缺失状态说明来源。"""
     repo = client.app.state.repo
-    stamp = datetime(2026, 9, 14, 8, tzinfo=UTC)
+    stamp = datetime.now(UTC).replace(microsecond=0)
     client.portal.call(repo.db.nodes.insert_one, {"id": "collector-a", "name": "采集节点 A"})
     # task 的 createdBy 故意存在，断言运行事件不会把它展示成操作者。
     client.portal.call(repo.db.tasks.insert_one, {
@@ -56,12 +62,8 @@ def test_event_api_presents_runtime_node_task_anonymous_http_and_historical_sour
         {"method": "GET", "route": "/api/v1/legacy", "createdAt": stamp + timedelta(seconds=1)},
     ])
 
-    runtime = client.get("/api/v1/runtime-events", params={
-        "start": "2026-09-14T00:00:00+00:00", "end": "2026-09-15T00:00:00+00:00",
-    })
-    request = client.get("/api/v1/request-events", params={
-        "start": "2026-09-14T00:00:00+00:00", "end": "2026-09-15T00:00:00+00:00",
-    })
+    runtime = client.get("/api/v1/runtime-events", params=_utc_window(stamp))
+    request = client.get("/api/v1/request-events", params=_utc_window(stamp))
 
     assert runtime.status_code == request.status_code == 200
     runtime_rows = {item["type"]: item for item in runtime.json()["items"]}
@@ -78,7 +80,7 @@ def test_event_api_presents_runtime_node_task_anonymous_http_and_historical_sour
 def test_runtime_event_api_presents_debug_and_coredump_phases_with_matching_outcomes(client):
     """调试与核心转储阶段必须给出可行动摘要，列表结果与派生筛选保持一致。"""
     repo = client.app.state.repo
-    stamp = datetime(2026, 9, 14, 8, tzinfo=UTC)
+    stamp = datetime.now(UTC).replace(microsecond=0)
     client.portal.call(repo.db.events.insert_many, [
         {"type": "DEBUG_MODE", "phase": "ALREADY_ASH", "createdAt": stamp},
         {"type": "DEBUG_MODE", "phase": "STARTED", "createdAt": stamp + timedelta(seconds=1)},
@@ -90,15 +92,9 @@ def test_runtime_event_api_presents_debug_and_coredump_phases_with_matching_outc
         {"type": "COREDUMP_MOUNT", "status": "FAILED", "createdAt": stamp + timedelta(seconds=7)},
     ])
 
-    response = client.get("/api/v1/runtime-events", params={
-        "start": "2026-09-14T00:00:00+00:00", "end": "2026-09-15T00:00:00+00:00",
-    })
-    pending = client.get("/api/v1/runtime-events", params={
-        "start": "2026-09-14T00:00:00+00:00", "end": "2026-09-15T00:00:00+00:00", "outcome": "PENDING",
-    })
-    failed = client.get("/api/v1/runtime-events", params={
-        "start": "2026-09-14T00:00:00+00:00", "end": "2026-09-15T00:00:00+00:00", "outcome": "FAILED",
-    })
+    response = client.get("/api/v1/runtime-events", params=_utc_window(stamp))
+    pending = client.get("/api/v1/runtime-events", params=_utc_window(stamp) | {"outcome": "PENDING"})
+    failed = client.get("/api/v1/runtime-events", params=_utc_window(stamp) | {"outcome": "FAILED"})
 
     assert response.status_code == pending.status_code == failed.status_code == 200
     rows = {(item["type"], item.get("phase") or item.get("status")): item for item in response.json()["items"]}

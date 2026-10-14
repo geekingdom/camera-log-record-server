@@ -58,9 +58,23 @@ try {
   await page.screenshot({ path: "output/playwright/dashboard-1440.png", fullPage: true, animations: "disabled" });
   for (const width of [768, 390, 320]) {
     await page.setViewportSize({ width, height: 900 });
-    await page.waitForTimeout(180);
+    await page.waitForFunction(() => {
+      const root = document.documentElement;
+      const viewportWidth = window.innerWidth;
+      return root.scrollWidth <= viewportWidth + 1 &&
+        Array.from(document.querySelectorAll(".dashboard canvas")).every(canvas =>
+          canvas.getBoundingClientRect().right <= viewportWidth + 1,
+        );
+    }, undefined, { timeout: 2_000 });
     await assertHeaderClear();
-    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), `${width}看板横向溢出`);
+    const overflow = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+      header: document.querySelector(".dashboard-head")?.getBoundingClientRect().toJSON(),
+      controls: document.querySelector(".dashboard-controls")?.getBoundingClientRect().toJSON(),
+    }));
+    assert.ok(overflow.scrollWidth <= overflow.viewportWidth + 1, `${width}看板横向溢出：${JSON.stringify(overflow)}`);
     await page.screenshot({ path: `output/playwright/dashboard-${width}.png`, fullPage: true, animations: "disabled" });
   }
   fail = true;

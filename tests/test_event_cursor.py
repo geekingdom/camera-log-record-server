@@ -61,7 +61,8 @@ def test_audit_cursor_uses_raw_mixed_id_tie_breaker_without_count_or_skip(client
 def test_event_cursor_binds_filter_and_only_counts_when_requested(client):
     """游标不得跨集合或完整筛选复用；显式 includeTotal 才执行计数。"""
     repo = client.app.state.repo
-    stamp = datetime(2026, 9, 14, 8, tzinfo=UTC)
+    # request_events 使用真实 30 天 TTL，样本须与测试执行时间保持在同一保留窗口。
+    stamp = datetime.now(UTC).replace(microsecond=0)
     client.portal.call(repo.db.request_events.insert_many, [
         {"id": "request-a", "route": "/api/v1/a", "httpStatus": 200, "createdAt": stamp},
         {"id": "request-b", "route": "/api/v1/a", "httpStatus": 200, "createdAt": stamp - timedelta(seconds=1)},
