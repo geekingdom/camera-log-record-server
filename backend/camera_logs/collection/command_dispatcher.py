@@ -67,8 +67,10 @@ class CommandDispatcher:
         stopping: Callable[[], bool],
         closed: Callable[[], bool],
         close_failed_slave: Callback | None = None,
+        on_command_written: Callback | None = None,
     ) -> None:
         self._close_failed_slave = close_failed_slave
+        self._on_command_written = on_command_written
         self._task = task
         self._connection, self._accepting = connection, accepting
         self._stopping, self._closed = stopping, closed
@@ -81,6 +83,10 @@ class CommandDispatcher:
         self._prompt_tail = b""
         self._capture: _Capture | None = None
         self.sending_future: asyncio.Future[None] | None = None
+
+    def can_send_shell_keepalive(self) -> bool:
+        """仅在已确认 shell 且未进入 PSH 恢复时允许生成保活输入。"""
+        return not self._command_blocked and self._debug.command_safe
 
     async def enqueue(
         self,
@@ -224,6 +230,7 @@ class CommandDispatcher:
                     capture = self._capture = _Capture(capture_marker, capture_maximum, self._received_epoch)
                 if command.strip() != "debug":
                     await connection.write((command + newline).encode())
+                    await _call(self._on_command_written, command)
                 if prompt and command.strip() != "debug":
                     await asyncio.wait_for(prompt_future, timeout_seconds)
                 if capture is not None:

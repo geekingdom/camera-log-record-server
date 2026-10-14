@@ -90,6 +90,37 @@ async def test_manual_priority_preserves_inflight_command_and_scheduled_fifo(tmp
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+async def test_queued_shell_keepalive_skips_when_a_normal_command_writes_first(tmp_path):
+    """低优先级保活等待队列期间已有普通输入时，发送前 guard 必须丢弃过期的 `:`。"""
+    connection = Connection()
+    collector = collector_for(tmp_path, connection)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def guard():
+        entered.set()
+        await release.wait()
+
+    await collector.start()
+    active = asyncio.create_task(collector.enqueue_manual("inflight", session_guard=guard))
+    keepalive = normal = None
+    try:
+        await entered.wait()
+        keepalive = asyncio.create_task(collector._enqueue_shell_keepalive())
+        normal = asyncio.create_task(collector._enqueue("normal", "\n", priority=2))
+        await asyncio.sleep(0)
+        release.set()
+        await active
+        await normal
+        with pytest.raises(Exception) as raised:
+            await keepalive
+        assert raised.type.__name__ == "CommandChannelBlocked"
+        assert connection.sent == [b"inflight\n", b"normal\n"]
+    finally:
+        release.set()
+        await collector.stop()
+        await asyncio.gather(active, *[task for task in (keepalive, normal) if task], return_exceptions=True)
+
+
 async def test_cancelled_queued_command_does_not_reserve_or_write(tmp_path):
     """排队取消未进入发送阶段，不能占用定时预算，也不能在后续释放队列时补发。"""
     connection = Connection()

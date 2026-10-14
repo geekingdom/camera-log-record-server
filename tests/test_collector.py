@@ -167,6 +167,26 @@ def test_manual_command_is_serialized_after_initialization_and_never_replayed(tm
     assert status == "SENT"
 
 
+def test_shell_keepalive_applies_to_network_shells_but_never_to_telnet_serial(tmp_path, monkeypatch):
+    """设备 Telnet 与 SSH 可保活；串口没有 shell 空闲语义，不得生成额外输入。"""
+    async def scenario(protocol, target=None):
+        collector = Collector(
+            {"id": f"keepalive-{protocol}", "runId": "run", "storageIdentity": "testingdevice",
+             "protocol": protocol, "sshTarget": target, "initialCommands": [], "scheduledCommands": []},
+            tmp_path, connection_factory=lambda _: FakeConnection(),
+        )
+        collector._start_shell_keepalive()
+        try:
+            return collector._shell_keepalive is not None
+        finally:
+            await collector._stop_shell_keepalive()
+
+    monkeypatch.setattr(collector_module, "_SHELL_KEEPALIVE_SECONDS", 60)
+    assert asyncio.run(scenario("SSH", "SLAVE_1"))
+    assert asyncio.run(scenario("TELNET_DEVICE"))
+    assert not asyncio.run(scenario("TELNET_SERIAL"))
+
+
 def test_manual_command_waits_for_its_prompt_within_serial_queue(tmp_path):
     async def scenario():
         connection = FakeConnection()

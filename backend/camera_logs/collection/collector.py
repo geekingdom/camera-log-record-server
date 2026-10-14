@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Mapping
@@ -26,6 +27,10 @@ from .contracts import call_callback as _call
 from .line_prefix import LinePrefixer
 from .psh_dialogue import PshSwitchError
 from .scheduled_supervision import supervise_scheduled
+from .shell_keepalive import ShellKeepalive
+
+_SHELL_KEEPALIVE_SECONDS = 60
+logger = logging.getLogger(__name__)
 
 
 class Collector:
@@ -73,6 +78,7 @@ class Collector:
         self._sender: asyncio.Task[None] | None = None
         self._reader: asyncio.Task[None] | None = None
         self._scheduled: list[asyncio.Task[None]] = []
+        self._shell_keepalive: asyncio.Task[None] | None = None
         self._coredump_monitor: asyncio.Task[None] | None = None
         self._coredump_cleanup: Any | None = None
         self._coredump_report: Callback | None = None
@@ -101,7 +107,9 @@ class Collector:
             stopping=lambda: self._stopping_commands,
             closed=lambda: self._connection_closed,
             close_failed_slave=self._close_failed_slave,
+            on_command_written=self._observe_shell_command,
         )
+        self._last_shell_command_monotonic = time.monotonic()
 
     async def start(self) -> None:
         if self._connection is not None:
@@ -145,6 +153,7 @@ class Collector:
             )
             for position, item in enumerate(self.task.get("scheduledCommands", [])):
                 self._scheduled.append(asyncio.create_task(supervise_scheduled(self, position, item)))
+            self._start_shell_keepalive()
         except BaseException:
             # 初始化失败时本实例已经拥有连接和后台协程，必须立即进入同一关闭路径。
             await self.stop()
@@ -224,6 +233,59 @@ class Collector:
         return await self._commands.capture_command(
             command, timeout_seconds=timeout_seconds, session_guard=session_guard,
         )
+
+    def _supports_shell_keepalive(self) -> bool:
+        """只向需要交互 shell 的网络会话写保活，串口和传输层保活保持独立。"""
+        return (self.task.get("protocol") or self.task.get("protocolType")) in {"SSH", "TELNET_DEVICE"}
+
+    def _observe_shell_command(self, _command: str) -> None:
+        """仅在发送队列实际写入普通 shell 命令后刷新保活计时，排队不算活动。"""
+        self._last_shell_command_monotonic = time.monotonic()
+
+    def _start_shell_keepalive(self) -> None:
+        """初始化完成后启动会话内保活；从机同样复用其已经验证的单一 shell。"""
+        if self._supports_shell_keepalive() and self._shell_keepalive is None:
+            keepalive = ShellKeepalive(
+                interval_seconds=lambda: _SHELL_KEEPALIVE_SECONDS,
+                last_command_monotonic=lambda: self._last_shell_command_monotonic,
+                closed=self._closed.is_set,
+                ready=self._shell_keepalive_ready,
+                enqueue=self._enqueue_shell_keepalive,
+                task_id=self.task_id,
+                session_id=self.session_id,
+                logger=logger,
+            )
+            self._shell_keepalive = asyncio.create_task(keepalive.run())
+
+    def _shell_keepalive_ready(self) -> bool:
+        """生成保活前检查会话仍可写，不能让保活触发 PSH 恢复或建立额外连接。"""
+        return (
+            not self._stopping_commands
+            and self._accepting_commands
+            and self._connection is not None
+            and self._commands.can_send_shell_keepalive()
+        )
+
+    async def _enqueue_shell_keepalive(self) -> None:
+        """通过唯一发送队列写 shell 空操作，保持接收器和命令顺序不变。"""
+        # `:` 是 POSIX shell 内建空操作，不读取设备状态、无输出，也不占业务预算。
+        await self._enqueue(":", "\n", priority=3, timeout_seconds=10,
+                            session_guard=self._guard_shell_keepalive)
+
+    def _guard_shell_keepalive(self) -> None:
+        """发送队列取出保活时再次核对调试状态，防止排队期间进入未知 PSH。"""
+        if time.monotonic() - self._last_shell_command_monotonic < _SHELL_KEEPALIVE_SECONDS:
+            raise CommandChannelBlocked("已有普通 shell 输入，跳过过期保活")
+        if not self._commands.can_send_shell_keepalive():
+            raise CommandChannelBlocked("PSH 命令通道尚未确认，跳过 shell 保活")
+
+    async def _stop_shell_keepalive(self) -> None:
+        """关闭入口统一取消保活，避免停止后仍有排队输入。"""
+        task, self._shell_keepalive = self._shell_keepalive, None
+        if task:
+            task.cancel()
+            if task is not asyncio.current_task():
+                await asyncio.gather(task, return_exceptions=True)
 
     def command_status(self, command_id: str) -> str | None:
         return self._command_status.get(command_id)
@@ -453,6 +515,7 @@ class Collector:
                 buffering.budget().pending.pop(id(self), None)
                 for task in self._scheduled:
                     task.cancel()
+                await self._stop_shell_keepalive()
                 if self._sender and self._sender is not asyncio.current_task():
                     self._commands.fail_queued(ConnectionError("connection closed before command dispatch"))
                     self._sender.cancel()
@@ -545,6 +608,7 @@ class Collector:
         self._stopping_commands = True
         for task in self._scheduled:
             task.cancel()
+        await self._stop_shell_keepalive()
         try:
             await self.stop_coredump_monitor()
         finally:
