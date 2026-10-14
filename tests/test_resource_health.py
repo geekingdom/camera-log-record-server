@@ -6,6 +6,7 @@ from datetime import UTC, timedelta
 import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
+from camera_logs.resources.authentication import DeviceOfflineError
 from camera_logs.resources.health import (
     _apply_success,
     check_resource,
@@ -121,12 +122,91 @@ def test_auth_failure_marks_resource_and_stops_only_running_tasks(tmp_path, monk
         await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
         resource = await repo.db.resources.find_one({"id": "camera"})
         assert resource["healthStatus"] == "AUTH_FAILED"
+        assert resource["authRejectedAt"] is not None
         running = await repo.db.tasks.find_one({"id": "running"})
         paused = await repo.db.tasks.find_one({"id": "paused"})
         assert running["desiredState"] == "STOPPED"
         assert running["resourceHealthRecovery"]["resourceId"] == "camera"
         assert paused["desiredState"] == "PAUSED"
         assert "resourceHealthRecovery" not in paused
+    asyncio.run(scenario())
+
+
+def test_auth_rejection_latch_survives_error_and_success_authorizes_system_stop(tmp_path, monkeypatch):
+    """401 锁存跨后续设备错误保留，成功认证才授权原系统停止任务恢复。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        resource = {
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.71", "username": "admin",
+            "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None,
+            "healthStatus": "ONLINE", "healthFailureCount": 0,
+        }
+        task = {
+            "id": "task", "resourceId": "camera", "protocol": "SSH", "desiredState": "RUNNING",
+            "status": "RECONNECTING", "nodeId": "node-a", "runId": "run-a", "generation": 1,
+        }
+        await repo.db.resources.insert_one(resource)
+        await repo.db.tasks.insert_one(task)
+
+        async def rejected(**_kwargs):
+            raise PermissionError("bad credentials")
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        failed = await repo.db.resources.find_one({"id": "camera"})
+        assert await stop_unresponsive_task(repo, task, liveness_check=lambda: True)
+        stopped = await repo.db.tasks.find_one({"id": "task"})
+        assert failed["authRejectedAt"] is not None
+        assert stopped["resourceHealthRecovery"]["reason"] == "AUTH_FAILED"
+
+        async def offline(**_kwargs):
+            raise DeviceOfflineError("unreachable")
+
+        monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", offline)
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        errored = await repo.db.resources.find_one({"id": "camera"})
+        assert errored["healthStatus"] == "OFFLINE"
+        assert errored["authRejectedAt"] == failed["authRejectedAt"]
+
+        monkeypatch.setattr(
+            "camera_logs.resources.health.authenticate_network_resource",
+            lambda **_kwargs: asyncio.sleep(0, result={"model": "M", "subSerialNumber": "S", "softwareVersion": "V"}),
+        )
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        recovered = await repo.db.resources.find_one({"id": "camera"})
+        authorized = await repo.db.tasks.find_one({"id": "task"})
+        assert recovered["healthStatus"] == "ONLINE"
+        assert "authRejectedAt" not in recovered
+        assert authorized["resourceHealthRecovery"]["authorizedAt"] is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("health_status", ["ERROR", "ONLINE"])
+def test_legacy_auth_stop_is_authorized_by_success_without_resource_latch(tmp_path, monkeypatch, health_status):
+    """旧版本资源无401锁存时，成功认证仍恢复系统停止，用户停止不受影响。"""
+    async def scenario():
+        repo = _repo(tmp_path)
+        await repo.db.resources.insert_one({
+            "id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.71", "username": "admin",
+            "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"), "deletedAt": None,
+            "healthStatus": health_status,
+        })
+        marker = {"resourceId": "camera", "reason": "AUTH_FAILED", "desiredState": "RUNNING"}
+        await repo.db.tasks.insert_many([
+            {"id": "system", "resourceId": "camera", "protocol": "SSH", "desiredState": "STOPPED",
+             "nodeId": "node-a", "runId": "run-a", "resourceHealthRecovery": marker},
+            {"id": "user", "resourceId": "camera", "protocol": "SSH", "desiredState": "STOPPED"},
+        ])
+        monkeypatch.setattr(
+            "camera_logs.resources.health.authenticate_network_resource",
+            lambda **_kwargs: asyncio.sleep(0, result={"model": "M", "subSerialNumber": "S", "softwareVersion": "V"}),
+        )
+        await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
+        system = await repo.db.tasks.find_one({"id": "system"})
+        user = await repo.db.tasks.find_one({"id": "user"})
+        assert system["resourceHealthRecovery"]["authorizedAt"] is not None
+        assert user["desiredState"] == "STOPPED" and "resourceHealthRecovery" not in user
     asyncio.run(scenario())
 
 
@@ -436,8 +516,8 @@ def test_offline_recovery_auto_authorizes_only_safe_system_stops(tmp_path, monke
     asyncio.run(scenario())
 
 
-def test_auth_failure_recovery_still_requires_user_credential_update(tmp_path, monkeypatch):
-    """实际 OFFLINE 后若认证失败，随后 ONLINE 仍须由用户更新凭据才能恢复。"""
+def test_auth_failure_recovery_auto_authorizes_after_verified_success(tmp_path, monkeypatch):
+    """实际 OFFLINE 后的401由成功认证自动恢复，用户停止或暂停仍不含系统恢复标记。"""
     async def scenario():
         repo = _repo(tmp_path)
         await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.8",
@@ -469,8 +549,8 @@ def test_auth_failure_recovery_still_requires_user_credential_update(tmp_path, m
         await reconcile_authorized_recoveries(repo)
 
         task = await repo.db.tasks.find_one({"id": "requires-user-auth"})
-        assert task["desiredState"] == "STOPPED" and task["resourceHealthRecovery"]["reason"] == "AUTH_FAILED"
-        assert "authorizedAt" not in task["resourceHealthRecovery"]
+        assert task["desiredState"] == "RUNNING" and task["status"] == "COLLECTING"
+        assert "resourceHealthRecovery" not in task
         assert (await repo.db.resources.find_one({"id": "camera"}))["healthStatus"] == "ONLINE"
     asyncio.run(scenario())
 

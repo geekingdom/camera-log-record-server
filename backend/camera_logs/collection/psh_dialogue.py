@@ -20,6 +20,7 @@ from .psh_response import PshResponse
 _ANSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 _MODE = re.compile(rb"(?:Protect Shell|built-in shell)\s*\((psh|ash)\)", re.IGNORECASE)
 _ASH_COMMAND_ERROR = re.compile(rb"(?:^|[\r\n])(?:/bin/)?-?(?:a?sh):\s*debug:\s*(?:not found|command not found)", re.IGNORECASE)
+_ASH_DEBUG_USAGE = re.compile(rb"(?:^|[\r\n])ERROR:\s*No parameters, see [\'\"]debug -h[\'\"]\s*(?:[\r\n]|$)", re.IGNORECASE)
 _SOURCE = re.compile(rb"^[ \t]*(?:enc_string:[ \t]*)?([A-Za-z0-9+/]{32,}={0,2})[ \t]*\r?$", re.MULTILINE)
 _PASSWORD = re.compile(rb"password\s*:", re.IGNORECASE)
 _PROMPT = re.compile(rb"(?:^|[\r\n])[^\r\n]{0,80}[#$][ \t]*(?:$|[\r\n])")
@@ -120,6 +121,11 @@ class PshDialogue:
             if not confirming and _ASH_COMMAND_ERROR.search(clean):
                 self.mode = "ASH"
                 return "ASH", None
+            usage = _ASH_DEBUG_USAGE.search(clean) if not confirming else None
+            prompts = list(_PROMPT.finditer(clean)) if usage else []
+            if usage and prompts and prompts[-1].start() >= usage.end() - 1 and not _PASSWORD.search(clean):
+                # 帮助错误须等本次普通提示符；仍在口令输入时绝不能把ls当作密码发送。
+                return "VERIFY_SHELL", None
             if confirming:
                 if matches or re.search(rb"(?:incorrect|invalid|wrong)\s+password|password\s+(?:incorrect|invalid|wrong)|authentication\s+failed", clean, re.IGNORECASE) or _PASSWORD.search(clean):
                     raise PshSwitchError("设备未确认 ASH 模式，口令可能已失效")
@@ -202,6 +208,10 @@ class PshDialogue:
 
     async def recover_command_channel(self, write: Callable, newline: str, timeout: float) -> bool:
         """在已阻断时显式恢复命令通道；每次 debug 只重试本次握手，不复用旧口令。"""
+        if self.task.get("protocol") == "SSH" and self.task.get("sshTarget") in {"SLAVE_1", "SLAVE_2", "SLAVE_3"}:
+            # Ctrl-C可能退出内层dbclient；从机失败必须重新建连，不在未知父shell恢复命令。
+            self.command_safe = False
+            return False
         self.command_safe = await self._recover_command_channel(write, newline, timeout)
         failure = "PSH 调试失败，本次命令未自动重试"
         await _notify(self.on_event, "RECOVERED" if self.command_safe else "BLOCKED", {
@@ -235,6 +245,14 @@ class PshDialogue:
                 stage = "WAIT_CHALLENGE"
                 await write(("debug" + newline).encode())
                 response, source = await self._wait_response()
+                if response == "VERIFY_SHELL":
+                    awaiting_challenge = False
+                    stage = "VERIFY_SHELL"
+                    await self._probe_ls(write, newline)
+                    if self.mode != "ASH":
+                        raise PshSwitchError("debug参数提示后未能确认ASH模式")
+                    await _notify(self.on_event, "ALREADY_ASH", {"mode": "ASH"})
+                    return
                 if response == "UNSUPPORTED":
                     awaiting_challenge = False
                     stage = "DEBUG_UNSUPPORTED"

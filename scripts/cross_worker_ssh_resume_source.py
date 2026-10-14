@@ -80,6 +80,7 @@ class SshSource:
         self.connected, self.closed = asyncio.Event(), asyncio.Event()
         self.commands: list[bytearray] = []
         self.sent: list[bytes] = []
+        self.connections = set()
         self.active = self.connection_count = self.peak_active = 0
         self.login_banner_enabled = True
         self.emitting = asyncio.Event()
@@ -91,15 +92,18 @@ class SshSource:
 
         class Server(asyncssh.SSHServer):
             def connection_made(self, _connection) -> None:
+                self._conn = _connection
                 source.connection_count += 1
                 source.active += 1
                 source.peak_active = max(source.peak_active, source.active)
+                source.connections.add(_connection)
                 self.number = source.connection_count
                 source.closed.clear()
                 source.connected.set()
 
             def connection_lost(self, _error) -> None:
                 source.active -= 1
+                source.connections.discard(self._conn)
                 if source.active == 0:
                     source.closed.set()
 
@@ -187,6 +191,13 @@ class SshSource:
     def resume_emitting(self) -> None:
         """恢复下一会话的连续源输出。"""
         self.emitting.set()
+
+    async def disconnect_active(self) -> None:
+        """只关闭当前 SSH 会话，保留监听器以模拟设备断线后可恢复登录。"""
+        connections = tuple(self.connections)
+        for connection in connections:
+            connection.close()
+        await asyncio.gather(*(connection.wait_closed() for connection in connections))
 
     async def close(self) -> None:
         """关闭监听器；现有连接会由 API stop 路径负责先行回收。"""

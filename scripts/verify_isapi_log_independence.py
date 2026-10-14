@@ -159,7 +159,147 @@ async def main(isapi_port=80):
     print(json.dumps({"temporaryDatabaseDropped": True, "temporaryLogsDropped": True}))
 
 
+async def verify_auth_reconnect_latch(isapi_port=80):
+    """验证 401 锁存阻止 SSH 重连，只有 SUCCESS 放行且用户停止不会被重新唤醒。"""
+    configured = Settings()
+    if not local_mongo_uri(configured.mongo_uri):
+        raise RuntimeError("只允许回环 MongoDB 验证")
+    name = "isapi_auth_reconnect_" + uuid4().hex
+    token, key, password = secrets.token_urlsafe(32), Fernet.generate_key().decode(), secrets.token_urlsafe(24)
+    api_port, worker_port, node_id = free_port(), free_port(), "auth-reconnect-worker"
+    source, device = SshSource(password), DeviceInfoSource(password, isapi_port)
+    mongo = AsyncMongoClient(configured.mongo_uri, tz_aware=True, w="majority", journal=True)
+    processes, logs, failed = [], [], True
+    with tempfile.TemporaryDirectory(prefix="camera-isapi-auth-reconnect-") as temporary:
+        root = Path(temporary)
+        try:
+            await source.start()
+            await device.start()
+            for role, port, module in ((node_id, worker_port, "camera_logs.worker"),
+                                       ("auth-reconnect-api", api_port, "scripts.cross_worker_ssh_resume_api")):
+                log = (root / f"{role}.log").open("w")
+                logs.append(log)
+                env = environment(name, configured.mongo_uri, root / role, role, port, token, key, password,
+                                  start_background=False)
+                if isapi_port != 80:
+                    env["ISAPI_TEST_PORT"] = str(isapi_port)
+                processes.append(await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", module, cwd=ROOT, env=env, stdout=log, stderr=log,
+                ))
+            await asyncio.gather(*(wait_ready(f"http://127.0.0.1:{port}/health", processes)
+                                   for port in (worker_port, api_port)))
+            repo = Repository(mongo[name], Settings(
+                _env_file=None, mongo_uri=configured.mongo_uri, database_name=name, encryption_key=key,
+                internal_token=token, log_root=root / "verifier", start_background=False,
+            ))
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{api_port}",
+                                         headers={"Authorization": "Bearer " + token}, timeout=20) as client:
+                response = await client.post("/api/v1/admin/nodes", json={
+                    "id": node_id, "url": f"http://127.0.0.1:{worker_port}", "capacity": 10, "accepting": True,
+                })
+                response.raise_for_status()
+                response = await client.post("/api/v1/resources", headers={"Idempotency-Key": uuid4().hex}, json={
+                    "name": "401重连锁存回环设备", "kind": "HIKVISION_NETWORK", "ip": "127.0.0.1",
+                    "username": "collector", "password": password, "authType": "BASIC",
+                })
+                response.raise_for_status()
+                resource_id = response.json()["id"]
+                response = await client.post("/api/v1/tasks", headers={"Idempotency-Key": uuid4().hex}, json={
+                    "name": "401断线后认证恢复", "protocol": "SSH", "resourceId": resource_id,
+                    "ip": "127.0.0.1", "port": source.port, "username": "collector", "password": password,
+                    "autoStart": True, "initialCommands": [], "scheduledCommands": [],
+                })
+                response.raise_for_status()
+                task_id = response.json()["id"]
+                await wait_node_accepting(mongo[name], node_id)
+                await schedule_once(repo)
+                first = await wait_task(client, task_id, lambda task: task["status"] == "COLLECTING", "未开始采集")
+                with patch("camera_logs.resources.authentication._device_info_url",
+                           return_value=f"http://127.0.0.1:{isapi_port}/ISAPI/System/deviceInfo"):
+                    device.response_status = 401
+                    await check_resource(repo, await repo.db.resources.find_one({"id": resource_id}))
+                    rejected = await repo.db.resources.find_one({"id": resource_id})
+                    assert rejected["healthStatus"] == "AUTH_FAILED" and rejected.get("authRejectedAt") is not None
+                    lines_before_disconnect = len(source.sent)
+                    await asyncio.sleep(1)
+                    live_after_401 = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+                    assert live_after_401["status"] == "COLLECTING"
+                    assert source.connection_count == 1 and len(source.sent) > lines_before_disconnect
+                    await source.disconnect_active()
+                    await asyncio.wait_for(source.closed.wait(), 10)
+                    reconnecting = await wait_task(
+                        client, task_id, lambda task: task["status"] == "RECONNECTING", "断线后未进入重连等待",
+                    )
+                    assert reconnecting["desiredState"] == "RUNNING"
+                    await asyncio.sleep(3)
+                    assert source.connection_count == 1, "401 锁存后仍尝试 SSH 登录"
+
+                    device.response_status = 500
+                    await check_resource(repo, await repo.db.resources.find_one({"id": resource_id}))
+                    errored = await repo.db.resources.find_one({"id": resource_id})
+                    assert errored["healthStatus"] == "ERROR"
+                    assert errored.get("authRejectedAt") == rejected["authRejectedAt"]
+                    await asyncio.sleep(2)
+                    assert source.connection_count == 1, "ERROR 错误清除了 401 登录锁存"
+
+                    device.response_status = 200
+                    await check_resource(repo, await repo.db.resources.find_one({"id": resource_id}))
+                    recovered_resource = await repo.db.resources.find_one({"id": resource_id})
+                    assert recovered_resource["healthStatus"] == "ONLINE"
+                    assert "authRejectedAt" not in recovered_resource
+                    recovered = await wait_task(
+                        client, task_id,
+                        lambda task: task["status"] == "COLLECTING" and task.get("sessionId") != first["sessionId"],
+                        "SUCCESS 后没有自动恢复 SSH 采集",
+                    )
+                    assert recovered["desiredState"] == "RUNNING" and source.connection_count == 2
+
+                    device.response_status = 401
+                    await check_resource(repo, await repo.db.resources.find_one({"id": resource_id}))
+                    await source.disconnect_active()
+                    await asyncio.wait_for(source.closed.wait(), 10)
+                    await wait_task(client, task_id, lambda task: task["status"] == "RECONNECTING",
+                                    "第二次断线后未进入重连等待")
+                    stopped = await client.post(f"/api/v1/tasks/{task_id}/stop")
+                    stopped.raise_for_status()
+                    await wait_task(
+                        client, task_id,
+                        lambda task: task["desiredState"] == "STOPPED" and task["status"] == "STOPPED",
+                        "用户停止未完成",
+                    )
+                    device.response_status = 200
+                    await check_resource(repo, await repo.db.resources.find_one({"id": resource_id}))
+                    await asyncio.sleep(3)
+                    final = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+                    assert (final["desiredState"], final["status"]) == ("STOPPED", "STOPPED")
+                    assert source.connection_count == 2, "用户停止后 SUCCESS 重新建立了 SSH 会话"
+                print(json.dumps({"passed": True, "realMongoReplicaSet": True, "loopbackSsh": True,
+                                  "authFailedPreservesLiveCollection": True,
+                                  "authRejectedBlocksReconnect": True, "errorDoesNotClearLatch": True,
+                                  "successAutomaticallyRecovers": True, "userStopDoesNotRevive": True,
+                                  "connections": source.connection_count}, ensure_ascii=False))
+                failed = False
+        finally:
+            results = await asyncio.gather(*(stop(process) for process in reversed(processes)), return_exceptions=True)
+            for log in logs:
+                if failed:
+                    log.flush()
+                    print(Path(log.name).read_text(errors="replace")[-3000:])
+                log.close()
+            await source.close()
+            await device.close()
+            await mongo.drop_database(name)
+            await mongo.close()
+            if any(isinstance(result, BaseException) for result in results):
+                raise RuntimeError("隔离进程收尾失败")
+    print(json.dumps({"temporaryDatabaseDropped": True, "temporaryLogsDropped": True}))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--isapi-test-port", type=int, default=80)
-    asyncio.run(main(parser.parse_args().isapi_test_port))
+    parser.add_argument("--auth-reconnect-latch", action="store_true",
+                        help="验证 401 后断线重连门控、SUCCESS 放行及用户停止保护")
+    arguments = parser.parse_args()
+    asyncio.run(verify_auth_reconnect_latch(arguments.isapi_test_port)
+                if arguments.auth_reconnect_latch else main(arguments.isapi_test_port))

@@ -502,3 +502,36 @@ async def test_process_memory_aggregates_same_display_name_and_ignores_duplicate
     values = row["samples"][0]["values"]
     assert values == [{"id": "process:alpha_工作进程", "name": "alpha_工作进程", "value": 20, "unit": "KB"}]
     assert status_calls == ["cat /proc/11/status", "cat /proc/12/status"]
+
+
+@pytest.mark.asyncio
+async def test_missing_default_process_is_not_persisted_as_zero_but_real_zero_is_kept(monkeypatch):
+    """默认 bll/ipp 未出现时不生成零内存，实际 VmRSS 为零仍保留为有效采样。"""
+    from camera_logs.resource_metrics import runtime
+
+    db = AsyncMongoMockClient().db
+    rt = _runtime(db)
+    collector = SimpleNamespace(_closed=asyncio.Event())
+    rt.collector = collector
+    config = default_monitor_config()
+    config["items"] = []
+    await db.platform_settings.insert_one({"id": "platform", "resourceMonitor": config})
+
+    async def guard(*_):
+        return {"model": "M", "subSerialNumber": "S"}
+
+    async def capture(_collector, command, _guard):
+        if command == "ps":
+            return "11 a 1 S {Dsp_Main} /home/hikdsp"
+        return "VmRSS: 0 kB"
+
+    async def ash(**_):
+        return None
+
+    collector.ensure_ash_for_monitor = ash
+    monkeypatch.setattr(runtime, "_guard", guard)
+    monkeypatch.setattr(runtime, "_capture", capture)
+    await runtime.sample_once(rt, collector)
+
+    sample = (await db.resource_metric_hours.find_one({"resourceId": "x"}))["samples"][0]
+    assert sample["values"] == [{"id": "process:Dsp_Main", "name": "Dsp_Main", "value": 0, "unit": "KB"}]

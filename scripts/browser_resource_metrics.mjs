@@ -39,8 +39,8 @@ await context.route("**/api/v1/**", async route => {
     if (failNextMetrics) { failNextMetrics = false; return json(route, { message: "模拟监控读取失败" }, 500); }
     if (!url.searchParams.get("cursor")) return json(route, {
       items: [
-        { sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 21, unit: "%" }, { id: "process:dsp:99", name: "Dsp_Main", pid: 99, value: 2048, unit: "KB" }] },
-        { sampledAt: "2026-09-11T00:01:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 18, unit: "%" }, { id: "proc", name: "Dsp_Main", pid: 12, value: 2010, unit: "KB" }] },
+        { sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 21.123456, unit: "%" }, { id: "mem-available", name: "MemAvailable", value: 504824, unit: "KB" }, { id: "slab", name: "Slab", value: 43911, unit: "KB" }, { id: "process:dsp:99", name: "Dsp_Main", pid: 99, value: 56504, unit: "KB" }, { id: "process:zero", name: "真实零内存", value: 0, unit: "KB" }] },
+        { sampledAt: "2026-09-11T00:01:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 18, unit: "%" }, { id: "proc", name: "Dsp_Main", pid: 12, value: 56000, unit: "KB" }, { id: "process:bll", name: "facesnap_bll", value: 4096, unit: "KB" }, { id: "process:zero", name: "真实零内存", value: 0, unit: "KB" }] },
       ], nextCursor: "next-page",
     });
     return json(route, { items: [{ sampledAt: "2026-09-11T00:00:00.000Z", status: "TIMEOUT", errorCode: "COMMAND_TIMEOUT", values: [] }], nextCursor: null });
@@ -62,6 +62,23 @@ try {
   await page.locator(".metrics-chart canvas").first().waitFor();
   assert.equal(await page.getByText("Dsp_Main 最新值", { exact: true }).count(), 1, "PID变化后仅有一个同名进程摘要");
   assert.equal(await page.getByText(/Dsp_Main \(PID/).count(), 0, "进程对象不显示PID后缀");
+  assert.equal(await page.locator(".metrics-summary strong").filter({ hasText: /^504,824 KB$/ }).count(), 1, "摘要保留原始 KB 数值");
+  assert.equal(await page.locator(".metrics-summary strong").filter({ hasText: /^43,911 KB$/ }).count(), 1, "摘要保留原始 Slab KB 数值");
+  const missingSummary = page.locator(".metrics-summary > div").filter({ hasText: "facesnap_bll 最新值" });
+  assert.equal(await missingSummary.getByText("暂无数据", { exact: true }).count(), 1, "缺失进程不得显示为 0 或沿用旧值");
+  const zeroSummary = page.locator(".metrics-summary > div").filter({ hasText: "真实零内存 最新值" });
+  assert.equal(await zeroSummary.locator("strong").filter({ hasText: /^0 KB$/ }).count(), 1, "真实零值必须保留，不能显示为缺失");
+  await page.locator(".metrics-chart").scrollIntoViewIfNeeded();
+  const chartBounds = await page.locator(".metrics-chart").boundingBox();
+  assert.ok(chartBounds, "内存图必须有可悬停的绘制区域");
+  await page.mouse.move(chartBounds.x + chartBounds.width - 24, chartBounds.y + chartBounds.height / 2);
+  const metricTooltip = page.locator(".resource-metrics-chart-tooltip");
+  await metricTooltip.waitFor({ state: "visible" });
+  const tooltipText = await metricTooltip.innerText();
+  assert.match(tooltipText, /MemAvailable[\s\S]*492\.99 MB/, "tooltip 内存值最多两位小数");
+  assert.match(tooltipText, /Slab[\s\S]*42\.88 MB/, "tooltip Slab 值最多两位小数");
+  assert.match(tooltipText, /真实零内存[\s\S]*0 MB/, "tooltip 必须保留真实零值");
+  assert.match(tooltipText, /facesnap_bll[\s\S]*暂无数据/, "tooltip 缺失进程必须显示暂无数据");
   await page.getByText("比率", { exact: true }).click();
   await page.getByRole("heading", { name: "内存比率（初始有效值 = 100%）" }).waitFor();
   await page.mouse.move(10, 10);

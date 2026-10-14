@@ -25,7 +25,8 @@ class ShellBootstrap:
     def __init__(self, connection, task, provider=None, guard=None):
         self.connection = connection
         self.guard = guard
-        self.dialogue = PshDialogue(task, provider)
+        self.task = dict(task)
+        self.dialogue = PshDialogue(dict(task) | {"sshTarget": "HOST"}, provider)
         self.buffer = b""
         self.changed = asyncio.Event()
         self.queue = deque()
@@ -37,6 +38,9 @@ class ShellBootstrap:
         self.verified_shell_mode = None
         self.eof = False
         self.pending = b""
+        self.exit_marker = b"\x1eSLAVE_END_" + uuid.uuid4().hex.encode() + b"\x1f"
+        self.exit_tail = b""
+        self.identity_lost = False
         self.reader = asyncio.create_task(self._receive())
 
     async def _receive(self):
@@ -49,6 +53,15 @@ class ShellBootstrap:
                 data = await self.connection.read(65536)
                 if not data:
                     break
+                # 父ASH即便退回外层PSH，结束标记之后的主机字节也绝不能交给采集器。
+                data = self._filter_exit(data)
+                if self.identity_lost:
+                    if self.ready and data:
+                        self.queue.append(data)
+                        self.data_available.set()
+                    break
+                if not data:
+                    continue
                 if self.ready:
                     self.queue.append(data)
                     self.data_available.set()
@@ -57,16 +70,38 @@ class ShellBootstrap:
                     self.buffer = (self.buffer + data)[-131072:]
                     self.changed.set()
         finally:
+            if self.ready and self.exit_tail and not self.identity_lost:
+                self.queue.append(self.exit_tail)
+                self.exit_tail = b""
             self.eof = True
             self.dialogue.close()
             self.changed.set()
             self.data_available.set()
+
+    def _filter_exit(self, data):
+        """跨网络分包识别随机二进制边界，只暂存可能的标记前缀，不改变普通日志。"""
+        data = self.exit_tail + data
+        self.exit_tail = b""
+        position = data.find(self.exit_marker)
+        if position >= 0:
+            self.identity_lost = True
+            return data[:position]
+        keep = 0
+        for length in range(1, min(len(data), len(self.exit_marker) - 1) + 1):
+            if data.endswith(self.exit_marker[:length]):
+                keep = length
+        if keep:
+            self.exit_tail = data[-keep:]
+            return data[:-keep]
+        return data
 
     async def wait_match(self, pattern, timeout=20, *, authenticating=False):
         """只匹配当前阶段的新响应；连接关闭或超时一律失败，错误不包含密码与设备正文。"""
         async with asyncio.timeout(timeout):
             while True:
                 self.changed.clear()
+                if self.identity_lost:
+                    raise SlaveLoginError("从机会话在身份验证前已经结束")
                 found = pattern.search(self.buffer)
                 if found:
                     return found
@@ -88,25 +123,31 @@ class ShellBootstrap:
             raise SlaveLoginError("从机交互登录密码不支持换行或空字符")
         await self.ensure_ash()
         self.buffer = b""
-        # dbclient无论正常退出还是失败均关闭父shell，避免后续主机打印混入从机日志。
-        await self._guarded_write(f"dbclient admin@{address} -y; exit\n".encode())
+        # 随机控制字节由printf生成，命令回显不含实际标记；嵌套PSH返回仍由本机截断。
+        token = self.exit_marker[1:-1].decode()
+        await self._guarded_write(
+            f"dbclient admin@{address} -y; printf '\\036{token}\\037'; exit\n".encode())
         await self.wait_match(re.compile(re.escape(f"admin@{address}".encode()) + rb"[^\r\n]*password:\s*", re.IGNORECASE))
         self.buffer = b""
         await self._guarded_write((password + "\n").encode())
         found = await self.wait_match(_SHELL, authenticating=True)
         # 从机必须使用独立对话状态，不能继承主机已确认的 ASH/PSH 模式。
         self.dialogue.close()
-        self.dialogue = PshDialogue(self.dialogue.task, self.dialogue.provider)
+        self.dialogue = PshDialogue(self.task | {"sshTarget": target}, self.dialogue.provider)
         self.buffer = self.buffer[found.start():]
         self.dialogue.feed(self.buffer)
         await self.ensure_ash(verify_current_mode=True)
         output, status = await self.command("ifconfig")
-        if status != 0 or address.encode() not in _INET.findall(output):
+        observed = set(_INET.findall(output))
+        external = str(self.task.get("ip", "")).encode()
+        if status != 0 or address.encode() not in observed or (external and external in observed):
             raise SlaveLoginError("从机接口地址未匹配指定目标")
         # 所有管理握手字节均已在 buffer 中消费；只有完整验证后才交给采集器。
         self.pending = b""
         self.buffer = b""
         self.ready = True
+        self.verified_target = target
+        self.verified_address = address
         self.bootstrap_verified = True
         self.verified_shell_mode = self.dialogue.mode
         return self
@@ -151,6 +192,8 @@ class ShellBootstrap:
 
     async def write(self, data):
         """后续初始化、定时和手动命令仍复用同一条从机shell输入。"""
+        if self.identity_lost or self.eof:
+            raise SlaveLoginError("从机会话已经结束，禁止向主机发送后续命令")
         await self.connection.write(data)
 
     async def close(self):

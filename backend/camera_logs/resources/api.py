@@ -414,7 +414,9 @@ def install_resource_routes(app, repo, listing):
             """版本 CAS 与审计共享会话；凭据和设备元信息已在事务外准备。"""
             changed = await repo().db.resources.find_one_and_update(
                 {"id": identifier, "version": body.version, "deletedAt": None},
-                {"$set": update, "$inc": {"version": 1, **({"healthRevision": 1} if checked.kind == "HIKVISION_NETWORK" else {})}},
+                {"$set": update, "$inc": {"version": 1, **({"healthRevision": 1} if checked.kind == "HIKVISION_NETWORK" else {})},
+                 # 编辑凭据已通过本次设备认证；清掉旧401锁存，和周期/手动认证保持一致。
+                 **({"$unset": {"authRejectedAt": ""}} if checked.kind == "HIKVISION_NETWORK" else {})},
                 return_document=ReturnDocument.AFTER,
                 session=session,
             )

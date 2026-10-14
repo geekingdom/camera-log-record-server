@@ -30,6 +30,19 @@ describe("资源监控数据转换", () => {
     expect(missing[0]?.points.some(([, value]) => value === null)).toBe(true);
   });
 
+  it("最新一分钟缺失时显示无数据，真实零值仍是有效内存采样", () => {
+    const memory = metricSeries([
+      { sampledAt: "2026-09-11T00:00:00.000Z", status: "OK", values: [{ id: "process:missing", name: "缺失进程", value: 12, unit: "KB" as const }, { id: "process:zero", name: "零内存", value: 0, unit: "KB" as const }] },
+      { sampledAt: "2026-09-11T00:01:00.000Z", status: "PARTIAL", values: [{ id: "process:zero", name: "零内存", value: 0, unit: "KB" as const }] },
+    ], "KB");
+
+    expect(memory.find(item => item.name === "缺失进程")?.points.at(-1)).toEqual([Date.parse("2026-09-11T00:01:00.000Z"), null]);
+    expect(memory.find(item => item.name === "零内存")?.points.at(-1)).toEqual([Date.parse("2026-09-11T00:01:00.000Z"), 0]);
+    expect(metricSummaries(memory).map(item => [item.name, item.value])).toEqual([
+      ["缺失进程", null], ["零内存", 0],
+    ]);
+  });
+
   it("拒绝超过 31 天或未来的自定义范围", () => {
     const now = new Date("2026-09-11T00:00:00.000Z");
     expect(validMetricRange(new Date("2026-08-11T00:00:00.000Z"), now, now)).toBe(true);

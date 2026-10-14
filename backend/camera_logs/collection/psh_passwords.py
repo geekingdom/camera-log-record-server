@@ -91,11 +91,20 @@ class PshPasswordProvider:
 
     @staticmethod
     def _task_key(task: Mapping[str, Any]) -> str:
+        """生成 mock 专用设备键；SSH 从机以逻辑目标区分，主机兼容既有键。"""
         protocol = task.get("protocol") or task.get("protocolType")
         ip, port = task.get("ip"), task.get("port")
         if not isinstance(protocol, str) or not isinstance(ip, str) or port is None:
             raise ValueError("TASK_INVALID")
-        return f"{protocol}:{ip}:{port}"
+        key = f"{protocol}:{ip}:{port}"
+        if protocol != "SSH":
+            return key
+        target = task.get("sshTarget", "HOST")
+        if target == "HOST":
+            return key
+        if target in {"SLAVE_1", "SLAVE_2", "SLAVE_3"}:
+            return f"{key}:{target}"
+        raise ValueError("TASK_INVALID")
 
     async def _mock_password(self, task: Mapping[str, Any]) -> str:
         """每次调用都重新读取 mock 文件，便于测试和本地口令轮换。"""

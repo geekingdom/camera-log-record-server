@@ -182,3 +182,109 @@ async def test_slave_first_manual_debug_waits_for_delayed_banner_handoff(tmp_pat
         assert connection.mode == 'ash'
     finally:
         await collector.stop()
+
+
+@pytest.mark.parametrize('entry', ['initial', 'manual', 'scheduled'])
+async def test_failed_slave_debug_closes_instead_of_recovering_parent(tmp_path, entry):
+    """从机调试失败不能发送Ctrl-C恢复到父PSH，更不能继续初始化/采集父日志。"""
+    connection = NestedShell()
+    task = {'id': 'strict-slave', 'runId': 'run', 'storageIdentity': 'test', 'protocol': 'SSH',
+            'sshTarget': 'SLAVE_1', 'initialCommands': [], 'scheduledCommands': []}
+    if entry == 'initial':
+        task['initialCommands'] = [{'command': 'debug', 'timeoutSeconds': .05}, {'command': 'must-not-send'}]
+    if entry == 'scheduled':
+        task['scheduledCommands'] = [{'id': 'debug', 'command': 'debug', 'intervalSeconds': .01,
+                                      'totalExecutions': 1, 'timeoutSeconds': .05}]
+
+    async def factory(config):
+        shell = ShellBootstrap(connection, config, lambda *_: 'slave-debug-password')
+        await shell.enter_slave('SLAVE_1', 'device-login')
+        original = connection.write
+
+        async def silent_debug(data):
+            if data == b'debug\n':
+                connection.sent.append((True, data))
+            else:
+                await original(data)
+        connection.write = silent_debug
+        return shell
+
+    collector = Collector(task, tmp_path, connection_factory=factory)
+    try:
+        if entry == 'initial':
+            with pytest.raises(ConnectionError):
+                await collector.start()
+        else:
+            await collector.start()
+            if entry == 'manual':
+                debug = asyncio.create_task(collector.enqueue_manual('debug', timeout_seconds=.05))
+                await asyncio.sleep(.01)
+                queued = asyncio.create_task(collector.enqueue_manual('must-not-send'))
+                results = await asyncio.wait_for(asyncio.gather(debug, queued, return_exceptions=True), 2)
+                assert all(isinstance(result, ConnectionError) for result in results)
+            else:
+                async with asyncio.timeout(2):
+                    while not connection.closed:
+                        await asyncio.sleep(.01)
+        assert connection.closed
+        assert not any(b'\x03' in data or b'must-not-send' in data for _, data in connection.sent)
+    finally:
+        await collector.stop()
+
+
+async def test_failed_slave_close_preserves_uncertain_transport_error(tmp_path):
+    """严格终止沿用Collector关闭锁，失败不确认transport释放并保留原异常。"""
+    from unittest.mock import AsyncMock
+    collector = Collector({'id': 'uncertain', 'runId': 'run', 'storageIdentity': 'test'}, tmp_path, connection_factory=AsyncMock())
+    error = ConnectionError('transport close uncertain')
+    connection = type('Connection', (), {'close': AsyncMock(side_effect=error)})()
+    collector._connection = connection
+    await collector._close_failed_slave()
+    assert collector._terminal_error is error
+    assert not collector._connection_closed
+    assert not collector._accepting_commands
+    with pytest.raises(ConnectionError):
+        await collector.stop()
+
+
+async def test_failed_slave_debug_with_transport_close_error_still_closes_collector(tmp_path):
+    """真实从机包装先终止唯一读取者，底层关闭失败也不能让收尾或父机输出悬挂。"""
+    connection = NestedShell()
+    original_close = connection.close
+    task = {'id': 'close-error-slave', 'runId': 'run', 'storageIdentity': 'test', 'protocol': 'SSH',
+            'sshTarget': 'SLAVE_1', 'initialCommands': [], 'scheduledCommands': []}
+
+    async def factory(config):
+        shell = ShellBootstrap(connection, config, lambda *_: 'slave-debug-password')
+        await shell.enter_slave('SLAVE_1', 'device-login')
+        original_write = connection.write
+
+        async def silent_debug(data):
+            if data == b'debug\n':
+                connection.sent.append((True, data))
+            else:
+                await original_write(data)
+
+        async def close_after_reader_shutdown():
+            raise ConnectionError('synthetic transport close uncertainty')
+
+        connection.write = silent_debug
+        connection.close = close_after_reader_shutdown
+        return shell
+
+    collector = Collector(task, tmp_path, connection_factory=factory)
+    try:
+        await collector.start()
+        with pytest.raises(ConnectionError):
+            await collector.enqueue_manual('debug', timeout_seconds=.05)
+        await asyncio.wait_for(collector.wait_closed(), 1)
+        assert collector._terminal_error is not None
+        assert not connection.closed
+        connection.close = original_close
+        await asyncio.gather(collector._reader, return_exceptions=True)
+    finally:
+        connection.close = original_close
+        try:
+            await collector.stop()
+        except ConnectionError:
+            pass

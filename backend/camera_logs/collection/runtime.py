@@ -24,6 +24,7 @@ from camera_logs.collection.coredump_lease import (
 from camera_logs.collection.liveness import RuntimeLiveness
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
+from camera_logs.collection.resource_auth_gate import wait_for_resource_authentication
 from camera_logs.collection.runtime_events import (
     apply_runtime_state,
     record_debug_event,
@@ -417,6 +418,8 @@ class SessionRuntime:
             session_commands = None
             fixed_slave_retry = False
             try:
+                if not await wait_for_resource_authentication(self.repo, self.task, stopping=lambda: self.stopping):
+                    raise OwnershipLost("重连前资源认证、归属或运行意图已失效")
                 config = dict(self.task)
                 config["password"] = self.repo.decrypt(config["passwordEncrypted"])
                 config["knownHosts"] = self.repo.settings.known_hosts
@@ -452,6 +455,10 @@ class SessionRuntime:
                     self.resource_monitor_task = asyncio.create_task(monitor_session(self, self.collector))
                 delay = 1
                 await self.collector.wait_closed()
+                if self.task.get("protocol") == "SSH" and self.task.get("sshTarget", "HOST") != "HOST":
+                    # 从机内层 EOF 与握手/切换错误一样等待十秒，避免主机切换期快速重试。
+                    delay = 10
+                    fixed_slave_retry = True
             except asyncio.CancelledError:
                 raise
             except OwnershipLost:

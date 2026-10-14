@@ -25,12 +25,21 @@ export function memoryUnit(series: MetricSeries[], window: AxisWindow = {}) {
   const { max } = metricAxis(series, window); const magnitude = Math.abs(max);
   return magnitude >= 1024 * 1024 ? { factor: 1024 * 1024, unit: "GB" } : magnitude >= 1024 ? { factor: 1024, unit: "MB" } : { factor: 1, unit: "KB" };
 }
-export function memoryLabel(value: number, display = { factor: 1, unit: "KB" }): string {
+/** 图表刻度、提示和摘要统一展示内存；缺失点不可伪装成设备报告的零值。 */
+export function memoryLabel(value: number | string | null | undefined, display = { factor: 1, unit: "KB" }): string {
   const { factor, unit } = display;
-  return `${(value / factor).toLocaleString("zh-CN", { maximumFractionDigits: 6 })} ${unit}`;
+  const numeric = Number(value);
+  if (value === null || value === undefined || (typeof value === "string" && (!value.trim() || value.trim() === "-")) || !Number.isFinite(numeric)) return "暂无数据";
+  return `${(numeric / factor).toLocaleString("zh-CN", { maximumFractionDigits: 2 })} ${unit}`;
+}
+/** CPU 与比率同样区分空点和真实零值，且不让 tooltip 泄露超过两位的小数。 */
+export function percentageLabel(value: number | string | null | undefined): string {
+  const numeric = Number(value);
+  if (value === null || value === undefined || (typeof value === "string" && (!value.trim() || value.trim() === "-")) || !Number.isFinite(numeric)) return "暂无数据";
+  return `${numeric.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} %`;
 }
 /** 值域越窄，刻度保留越多小数，避免 MB 级小波动被格式化为同一个整数。 */
 export function memoryPrecision(bounds: { min: number; max: number }, factor: number): number {
   const step = Math.abs(bounds.max - bounds.min) / (5 * factor);
-  return Math.max(0, Math.min(6, step >= 1 ? 1 : Math.ceil(-Math.log10(Math.max(step, 1e-9))) + 1));
+  return Math.max(0, Math.min(2, step >= 1 ? 1 : Math.ceil(-Math.log10(Math.max(step, 1e-9))) + 1));
 }

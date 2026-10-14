@@ -344,9 +344,9 @@ async def test_every_slave_factory_handshakes_before_collector_initialization(tm
 
     assert len(connections) == 2
     for connection in connections:
-        assert connection.writes[:3] == [
-            b"dbclient admin@192.168.253.164 -y; exit\n", b"secret\n", b"debug\n",
-        ]
+        assert connection.writes[0].startswith(b"dbclient admin@192.168.253.164 -y; printf ")
+        assert connection.writes[0].endswith(b"; exit\n")
+        assert connection.writes[1:3] == [b"secret\n", b"debug\n"]
         assert connection.writes[3].startswith(b"ifconfig;")
         assert connection.writes[4:] == [b"collector-initial\n"]
 

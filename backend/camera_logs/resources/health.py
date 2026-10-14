@@ -77,7 +77,7 @@ async def _resume_requested_after_probe(repo, snapshot, resource, session):
     return False
 
 
-async def _commit_health_result(repo, snapshot, changes, session):
+async def _commit_health_result(repo, snapshot, changes, session, *, unset=()):
     """按租约令牌提交结果；恢复后来到的旧结果只释放自身租约并保留到期请求。"""
     current = await repo.db.resources.find_one(_result_filter(snapshot), session=session)
     if current is None:
@@ -85,9 +85,12 @@ async def _commit_health_result(repo, snapshot, changes, session):
     if await _resume_requested_after_probe(repo, snapshot, current, session):
         changes.pop("nextHealthCheckAt", None)
     update = {"$set": changes, "$inc": {"healthRevision": 1}}
+    unset_fields = {field: "" for field in unset}
     if "healthLeaseToken" in snapshot:
         # 网络请求已经完成，且查询条件仍匹配原令牌时才可交还领取权。
-        update["$unset"] = {"healthLeaseUntil": "", "healthLeaseStartedAt": "", "healthLeaseToken": ""}
+        unset_fields.update(healthLeaseUntil="", healthLeaseStartedAt="", healthLeaseToken="")
+    if unset_fields:
+        update["$unset"] = unset_fields
     return await repo.db.resources.find_one_and_update(
         _result_filter(snapshot), update, return_document=ReturnDocument.AFTER, session=session,
     )
@@ -115,12 +118,19 @@ async def _apply_failure_commit(repo, snapshot, status, *, source, advance_failu
     """在调用方事务内提交认证失败及同一来源历史；活跃运行由 Worker 自行裁决停止。"""
     timestamp = now()
     failures = int(snapshot.get("healthFailureCount", 0)) + 1 if advance_failure else int(snapshot.get("healthFailureCount", 0))
+    changes = {
+        "healthStatus": status, "healthCheckedAt": timestamp,
+        "healthFailureCount": failures,
+        "nextHealthCheckAt": timestamp + timedelta(seconds=failure_backoff_seconds(failures))
+        if advance_failure else snapshot.get("nextHealthCheckAt", timestamp),
+    }
+    # HTTP 401 的含义与短暂网络错误不同：后续 OFFLINE/ERROR 不能证明凭据已经恢复。
+    # 锁存只存一个时间点，SUCCESS 原子清掉，不增加每次探测的文档或无限增长字段。
+    if status == "AUTH_FAILED":
+        changes["authRejectedAt"] = timestamp
     changed = await _commit_health_result(
         repo, snapshot,
-        {"healthStatus": status, "healthCheckedAt": timestamp,
-         "healthFailureCount": failures,
-         "nextHealthCheckAt": timestamp + timedelta(seconds=failure_backoff_seconds(failures))
-         if advance_failure else snapshot.get("nextHealthCheckAt", timestamp)},
+        changes,
         session,
     )
     if not changed:
@@ -177,7 +187,7 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
          "nextHealthCheckAt": timestamp + timedelta(seconds=HEALTH_INTERVAL_SECONDS),
          **({**metadata, "authenticatedAt": timestamp, "updatedAt": timestamp}
             if any(snapshot.get(key) != value for key, value in metadata.items()) else {})},
-        session,
+        session, unset=("authRejectedAt",),
     )
     if not changed:
         return False
@@ -187,8 +197,8 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
         identity = storage_identity(changed)
         async for task in repo.db.tasks.find(task_resource_query(snapshot["id"]), session=session):
             await _transition_identity_task(repo, task, snapshot["id"], identity, timestamp, session)
-    if snapshot.get("healthStatus") == "OFFLINE":
-        await _authorize_offline_recoveries(repo, snapshot["id"], timestamp, session)
+    # 旧版本可能只有任务AUTH_FAILED标记、资源已变ERROR；成功认证仍须授权其恢复。
+    await _authorize_health_recoveries(repo, snapshot["id"], timestamp, session)
     if snapshot.get("healthStatus") != "ONLINE":
         # 认证从失败恢复时，只唤醒仍由同一节点持有且正在重连的 SSH 会话。
         # 标记由运行实例按 owner CAS 消费，停止、暂停和后继运行均不会被旧认证改写。
@@ -248,13 +258,13 @@ async def apply_manual_result(repo, snapshot, *, status, metadata, actor,
     await audited_mutations.audited_mutation(repo, actor, action, snapshot["id"], commit)
 
 
-async def _authorize_offline_recoveries(repo, resource_id, timestamp, session):
-    """仅为本资源 OFFLINE 产生的系统停止标记授权，实际恢复仍等待收尾确认。"""
+async def _authorize_health_recoveries(repo, resource_id, timestamp, session):
+    """仅授权本资源健康策略产生的停止标记，用户停止没有标记故不会被自动恢复。"""
     async for task in repo.db.tasks.find(task_resource_query(resource_id), session=session):
         if task.get("protocol") == "TELNET_SERIAL":
             continue
         marker = task.get("resourceHealthRecovery")
-        if not marker or marker.get("resourceId") != resource_id or marker.get("reason") != "OFFLINE" \
+        if not marker or marker.get("resourceId") != resource_id or marker.get("reason") not in {"OFFLINE", "AUTH_FAILED"} \
                 or task.get("desiredState") != "STOPPED":
             continue
         await repo.db.tasks.update_one(

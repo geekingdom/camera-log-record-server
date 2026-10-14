@@ -1,5 +1,14 @@
 # 当前状态总表
 
+| 当前需求（2026-10-14，实机PSH从机身份与401重连保护，验证中） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 从机debug参数错误被误作挑战等待；主从PSH回退不能混入主机日志 | `psh_dialogue.py`、`slave_shell.py`、`command_dispatcher.py`、`collector.py` | 35实机从机1/2复现debug无参数后超时；修正后初始化/手动/定时debug均成功；两轮新连接均重新验证.164/.166，退出边界被捕获 | 实机三入口及退出、严格关闭失败回归通过；后端全量1873项通过，等待本次CI |
+| 从机身份不能沿用旧连接缓存，主从mock口令隔离 | `slave_shell.py`、`psh_passwords.py` | 外层HOST、内层SLAVE独立对话及口令键；目标绑定、外部主机IP拒绝、分包结束标记回归 | 本次公司HTTP接口仍不可达，实测使用提供口令的受限本机mock |
+| 资源401且日志停止后不得反复重新登录；认证成功后自动恢复 | `collection/resource_auth_gate.py`、`runtime.py`、`resources/health.py`、`health_policy.py`及资源API | 真实Mongo/API/Worker/SSH验收通过：401保留活连接，断线无新登录，ERROR不解锁，SUCCESS恢复；用户停止不复活 | 旧数据恢复/停止暂停/旧owner/数据库超时回归通过；后端全量1873项通过，等待本次CI |
+| 内存监控缺失进程不能显示0，数值最多两位小数 | `resourceMetrics.ts`、`metricAxis.ts`、`ResourceMetricsDialog.vue` | 后端稀疏采样缺项不写零、真实VmRSS零保留；null格式化修正和尾点缺失摘要回归 | 真实悬停492.99/42.88MB、缺失暂无数据、真实0MB均通过；191项前端测试与构建、1440/390截图检查通过 |
+
+本轮详见[PSH从机实测与保护](history/2026-10-14-slave-psh-identity.md)。上一轮最新提交`c2a6de1`的[CI38410325125](https://github.com/geekingdom/camera-log-record-server/actions/runs/38410325125)八项全部成功；本轮修改必须提交后等待新CI完整成功再交付。
+
 | 当前需求（2026-10-13，协议初始化、从机恢复及晚间归档补偿，本机验证完成） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 主机SSH/Telnet设备尽力自动ASH；串口仅显式debug；从机须ASH及精确IP验证才采集 | `collection/collector.py`、`command_dispatcher.py`、`slave_shell.py` | 从机64项、真实网络暂停重连7项通过；35主机ASH及两次从机192.168.253.164实测通过，临时连接关闭 | 后端全量1840项通过，后增慢库进度回归在9项目录专项通过；公司PSH以模拟协议回归覆盖 |

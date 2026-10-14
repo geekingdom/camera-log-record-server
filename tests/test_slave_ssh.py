@@ -56,7 +56,9 @@ async def test_slave_fragmented_login_excludes_host_and_password_prompt():
         data = await asyncio.wait_for(shell.read(), 1)
         assert b"slave-log" in data
         assert b"main" not in data and b"password" not in data
-        assert connection.writes[:2] == [b"dbclient admin@192.168.253.164 -y; exit\n", b"secret\n"]
+        assert connection.writes[0].startswith(b"dbclient admin@192.168.253.164 -y; printf ")
+        assert connection.writes[0].endswith(b"; exit\n")
+        assert connection.writes[1] == b"secret\n"
         connection.queue.put_nowait(b"last-log\n")
         connection.queue.put_nowait(b"")
         assert await shell.read() == b"last-log\n"
@@ -193,3 +195,55 @@ async def test_slave_valid_ip_without_completion_marker_is_not_verified():
         assert not shell.ready
     finally:
         await shell.close()
+
+
+@pytest.mark.parametrize('split', [1, 5, 20, 43])
+async def test_slave_exit_marker_blocks_parent_psh_bytes(split):
+    """dbclient退出仅回主机PSH时仍截断主机字节，跨包边界不泄漏且保留之前从机日志。"""
+    connection = Shell()
+    shell = ShellBootstrap(connection, {'protocol': 'SSH', 'sshTarget': 'SLAVE_1'})
+    try:
+        await shell.enter_slave('SLAVE_1', 'secret')
+        stream = b'slave-final\n' + shell.exit_marker + b'HOST LOG\nProtect Shell (psh)\n# '
+        boundary = len(b'slave-final\n') + min(split, len(shell.exit_marker))
+        connection.queue.put_nowait(stream[:boundary])
+        connection.queue.put_nowait(stream[boundary:])
+        received = b''
+        async with asyncio.timeout(1):
+            while data := await shell.read():
+                received += data
+        assert received == b'slave-final\n'
+        assert shell.identity_lost
+        with pytest.raises(ConnectionError):
+            await shell.write(b'ifconfig\n')
+    finally:
+        await shell.close()
+
+
+async def test_slave_rejects_host_external_address_even_with_target_alias():
+    """主机即使存在目标地址别名，也不能以此冒充已经进入从机。"""
+    connection = Shell(address=b'192.168.253.164\n inet addr:10.41.203.35')
+    shell = ShellBootstrap(connection, {'protocol': 'SSH', 'ip': '10.41.203.35', 'sshTarget': 'SLAVE_1'})
+    try:
+        with pytest.raises(ConnectionError, match='接口地址'):
+            await shell.enter_slave('SLAVE_1', 'secret')
+        assert not shell.bootstrap_verified
+    finally:
+        await shell.close()
+
+
+async def test_collector_rejects_verified_connection_for_another_slave(tmp_path):
+    """即使缓存为已验证ASH，从机1连接也不能交给从机2任务使用。"""
+    from camera_logs.collection.collector import Collector
+    connection = Shell()
+    shell = ShellBootstrap(connection, {'protocol': 'SSH', 'sshTarget': 'SLAVE_1'})
+    await shell.enter_slave('SLAVE_1', 'secret')
+    collector = Collector({'id': 'wrong-target', 'runId': 'run', 'storageIdentity': 'test',
+                           'protocol': 'SSH', 'sshTarget': 'SLAVE_2'}, tmp_path,
+                          connection_factory=AsyncMock(return_value=shell))
+    try:
+        with pytest.raises(ConnectionError, match='目标IP'):
+            await collector.start()
+        assert connection.closed
+    finally:
+        await collector.stop()

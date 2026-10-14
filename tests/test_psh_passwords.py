@@ -42,6 +42,29 @@ async def test_mock_reads_file_on_each_call_and_requires_exact_task_key(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_mock_passwords_distinguish_slave_targets_without_host_fallback(tmp_path):
+    """同一外层SSH端点的主机和三个从机各自使用确定的逻辑设备键。"""
+    path = tmp_path / "passwords.json"
+    path.write_text(json.dumps({
+        "SSH:192.0.2.10:22": "host-password",
+        "SSH:192.0.2.10:22:SLAVE_1": "slave-one-password",
+        "SSH:192.0.2.10:22:SLAVE_2": "slave-two-password",
+        "SSH:192.0.2.10:22:SLAVE_3": "slave-three-password",
+    }), encoding="utf-8")
+    provider = PshPasswordProvider(settings(psh_mode="mock", psh_mock_password_file=path))
+
+    assert await provider(task(), "ignored") == "host-password"
+    assert await provider(task() | {"sshTarget": "HOST"}, "ignored") == "host-password"
+    for target, password in (("SLAVE_1", "slave-one-password"), ("SLAVE_2", "slave-two-password"),
+                             ("SLAVE_3", "slave-three-password")):
+        assert await provider(task() | {"sshTarget": target}, "ignored") == password
+
+    path.write_text(json.dumps({"SSH:192.0.2.10:22": "host-password"}), encoding="utf-8")
+    with pytest.raises(PshPasswordError, match="缺失"):
+        await provider(task() | {"sshTarget": "SLAVE_1"}, "ignored")
+
+
+@pytest.mark.asyncio
 async def test_http_contract_returns_data_data_and_sends_required_headers():
     requests = []
 

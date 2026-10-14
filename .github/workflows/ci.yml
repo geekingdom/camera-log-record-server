@@ -61,6 +61,9 @@ jobs:
         run: python scripts/verify_authentication_history_concurrency.py
       - name: 验证ISAPI异常时继续收集日志并在输出消失后停止
         run: python scripts/verify_isapi_log_independence.py --isapi-test-port 18089
+      - name: 验证401锁存阻止SSH重连并由认证成功恢复
+        # 复用同一仅回环 MongoDB 副本集及 AsyncSSH 源，覆盖401后断线、ERROR不解锁、SUCCESS恢复和用户停止。
+        run: python scripts/verify_isapi_log_independence.py --isapi-test-port 18089 --auth-reconnect-latch
       - name: 验证Worker受控退出后自动恢复真实SSH采集
         run: sudo --preserve-env=MONGO_URI "$(command -v python)" scripts/verify_worker_sigterm_resume.py
       - name: 回收临时数据库容器

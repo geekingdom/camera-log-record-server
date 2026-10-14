@@ -61,8 +61,10 @@ async def stop_for_resource_health(repo, task, resource, session, *, require_own
         return False
     query = _task_control_query(task, require_owner=require_owner)
     timestamp = now()
+    # 401 锁存跨后续网络错误保留；停止标记必须保留其恢复前提，不能被 OFFLINE/ERROR 覆盖。
     marker = {"resourceId": resource["id"], "stoppedAt": timestamp,
-              "desiredState": "RUNNING", "reason": current_resource["healthStatus"]}
+              "desiredState": "RUNNING", "reason": "AUTH_FAILED" if current_resource.get("authRejectedAt")
+              else current_resource["healthStatus"]}
     changed = await repo.db.tasks.update_one(
         query, {"$set": {"desiredState": "STOPPED", "restartRequested": False,
                            "updatedAt": timestamp, "resourceHealthRecovery": marker}}, session=session,

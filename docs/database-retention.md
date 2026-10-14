@@ -193,3 +193,7 @@ python scripts/backfill_runtime_event_time.py --apply
 ## 已验证归档的目录待办
 
 每个已发布小时包最多一份磁盘`.catalog.pending.json`，绑定tar/metadata/索引版本；不新增持续写入Mongo集合。每个节点58路时通常每小时至多58份新待办，完成files目录登记即删除。数据库故障时保留待办和归档，不能因日志保留期删除尚未登记的成员。目录恢复沿用files唯一id和path查询索引，以成员身份及OPEN/READY状态CAS，部分完成可重复推进。节点重连唤醒标记嵌入task，单任务最多一份、按owner消费和下次连接清理，不增加认证历史条数。
+
+## 401连接保护锁存（2026-10-14）
+
+资源文档新增可选`authRejectedAt`时间戳，401覆盖该单值、认证成功删除。不会按重连写入新文档，不增加随时间增长的集合；运行时按已有资源id唯一索引读取，每次等待有2秒查询预算和1秒间隔。401后的ERROR/OFFLINE不清除该值；系统停止使用已有resourceHealthRecovery标记，成功后沿用所有权/旧运行关闭证明事务恢复，不增加历史记录或TTL要求。

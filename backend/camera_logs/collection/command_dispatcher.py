@@ -66,7 +66,9 @@ class CommandDispatcher:
         accepting: Callable[[], bool],
         stopping: Callable[[], bool],
         closed: Callable[[], bool],
+        close_failed_slave: Callback | None = None,
     ) -> None:
+        self._close_failed_slave = close_failed_slave
         self._task = task
         self._connection, self._accepting = connection, accepting
         self._stopping, self._closed = stopping, closed
@@ -119,7 +121,8 @@ class CommandDispatcher:
     async def accept_verified_slave(self, connection: AsyncConnection) -> None:
         """只接收本连接引导器完成ASH与目标IP验证后的模式，禁止依赖任务历史缓存。"""
         if (getattr(connection, "bootstrap_verified", False) is not True
-                or getattr(connection, "verified_shell_mode", None) != "ASH"):
+                or getattr(connection, "verified_shell_mode", None) != "ASH"
+                or getattr(connection, "verified_target", None) != self._task.get("sshTarget")):
             raise ConnectionError("从机连接尚未通过ASH及目标IP验证")
         self._debug.mode = "ASH"
         await _call(self._debug.on_event, "ALREADY_ASH", {"mode": "ASH"})
@@ -235,6 +238,21 @@ class CommandDispatcher:
                 if not future.done():
                     future.set_result(None)
             except Exception as error:  # noqa: BLE001 - 每个发送失败都必须结束对应等待 future。
+                slave_failure = (isinstance(error, PshSwitchError) and self._task.get("protocol") == "SSH"
+                                 and self._task.get("sshTarget") in {"SLAVE_1", "SLAVE_2", "SLAVE_3"})
+                if slave_failure:
+                    # 先关闭再结束等待者，初始化不能在关闭窗口继续向未知父shell发送命令。
+                    self._command_blocked = True
+                    try:
+                        if self._close_failed_slave:
+                            await _call(self._close_failed_slave)
+                        else:
+                            await connection.close()
+                    finally:
+                        self.fail_queued(ConnectionError("从机身份确认失败，取消本会话排队命令"))
+                        if not future.done():
+                            future.set_exception(ConnectionError("从机调试确认失败，必须重新验证连接身份"))
+                    return
                 if not future.done():
                     future.set_exception(error)
                 if isinstance(error, PshSwitchError):

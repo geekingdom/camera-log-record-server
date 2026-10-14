@@ -68,3 +68,26 @@ async def test_silent_device_does_not_emit_banner_after_reconnect(monkeypatch):
     finally:
         source.resume_emitting()
         await source.close()
+
+
+async def test_disconnect_active_closes_only_current_ssh_session(monkeypatch):
+    """测试可主动断开现有会话，同时保留回环监听器供认证恢复后的新连接使用。"""
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / 'scripts'))
+    source = importlib.import_module('cross_worker_ssh_resume_source').SshSource('local-test-only')
+    await source.start()
+    connection = None
+    try:
+        connection = await asyncssh.connect('127.0.0.1', source.port, username='collector',
+                                            password=source.password, known_hosts=None)
+        await connection.create_process(encoding=None)
+        await source.disconnect_active()
+        await asyncio.wait_for(source.closed.wait(), 2)
+        assert source.active == 0 and source.connection_count == 1
+        async with asyncssh.connect('127.0.0.1', source.port, username='collector',
+                                    password=source.password, known_hosts=None):
+            assert source.connection_count == 2
+    finally:
+        if connection is not None:
+            connection.close()
+            await connection.wait_closed()
+        await source.close()

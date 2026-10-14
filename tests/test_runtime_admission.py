@@ -24,7 +24,7 @@ def repository(tmp_path):
 async def test_obsolete_assignment_does_not_open_connection(tmp_path, change):
     """即使旧运行对象仍存活，数据库准入失败也必须在调用连接工厂前退出。"""
     repo = repository(tmp_path)
-    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+    task = {"id": "task", "desiredState": "RUNNING", "runId": "run", "nodeId": "node", "generation": 1,
             "status": "PENDING", "passwordEncrypted": repo.encrypt(""), "scheduledCommands": [],
             "storageIdentity": "testingdevice"}
     await repo.db.tasks.insert_one(task | change)
@@ -38,7 +38,7 @@ async def test_obsolete_assignment_does_not_open_connection(tmp_path, change):
 async def test_blocking_during_connecting_callback_prevents_factory(tmp_path, monkeypatch):
     """复位已成功但 CONNECTING 回调前刚被阻塞，仍不能继续打开连接。"""
     repo = repository(tmp_path)
-    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1,
+    task = {"id": "task", "desiredState": "RUNNING", "runId": "run", "nodeId": "node", "generation": 1,
             "status": "PENDING", "passwordEncrypted": repo.encrypt(""), "scheduledCommands": [],
             "storageIdentity": "testingdevice"}
     await repo.db.tasks.insert_one(task.copy())
@@ -61,7 +61,7 @@ async def test_blocking_during_connecting_callback_prevents_factory(tmp_path, mo
 async def test_blocked_task_is_not_reopened_by_state_callback(tmp_path, state):
     """相同代次的隔离状态也不能被关闭及重连回调恢复为正常采集。"""
     repo = repository(tmp_path)
-    task = {"id": "task", "runId": "run", "nodeId": "node", "generation": 1, "status": "BLOCKED"}
+    task = {"id": "task", "desiredState": "RUNNING", "runId": "run", "nodeId": "node", "generation": 1, "status": "BLOCKED"}
     await repo.db.tasks.insert_one(task.copy())
     runtime = object.__new__(SessionRuntime)
     runtime.task, runtime.repo, runtime.stopping = task, repo, True

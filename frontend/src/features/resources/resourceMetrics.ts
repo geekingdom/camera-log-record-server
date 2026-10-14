@@ -92,11 +92,10 @@ export function metricSeries(samples: ResourceMetricSample[], unit: MetricUnit):
 
 /** 以单条曲线的最新有效点与前一有效点计算变化量，绝不跨指标混合数值。 */
 export function metricSummary(series: MetricSeries): MetricSummary {
-  const values = series.points.map(point => point[1]).filter((value): value is number => value !== null);
-  if (!values.length) return { value: null, delta: null };
-  const latest = values.at(-1) ?? null;
-  const previous = values.length > 1 ? values.at(-2) ?? null : null;
-  return { value: latest, delta: latest !== null && previous !== null ? latest - previous : null };
+  const latest = series.points.at(-1)?.[1] ?? null;
+  if (latest === null) return { value: null, delta: null };
+  const previous = [...series.points.slice(0, -1)].reverse().find(([, value]) => value !== null)?.[1] ?? null;
+  return { value: latest, delta: previous === null ? null : latest - previous };
 }
 
 /** 逐项摘要保留指标身份，供界面分别展示 CPU、内存和不同进程的当前值。 */

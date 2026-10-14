@@ -100,6 +100,7 @@ class Collector:
             accepting=lambda: self._accepting_commands,
             stopping=lambda: self._stopping_commands,
             closed=lambda: self._connection_closed,
+            close_failed_slave=self._close_failed_slave,
         )
 
     async def start(self) -> None:
@@ -561,6 +562,13 @@ class Collector:
             self._closed.set()
         if self._terminal_error:
             raise self._terminal_error
+
+    async def _close_failed_slave(self) -> None:
+        """调试失败沿用统一关闭锁；关闭未知保留终结异常供运行时隔离，不能伪装释放。"""
+        try:
+            await self._close_connection()
+        except Exception as error:  # noqa: BLE001 - 保留关闭异常供运行时隔离，不能从sender后台丢失。
+            self._terminal_error = error
 
     async def _close_connection(self) -> None:
         """序列化所有关闭调用；失败或取消不确认释放，后续收尾仍可重试。"""

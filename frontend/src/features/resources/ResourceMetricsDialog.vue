@@ -10,7 +10,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { api } from "../../shared/api";
 import type { Resource, ResourceMetricSample } from "../../shared/types";
 import { metricIssueCount, metricSeries, metricSummaries, metricsCsv, validMetricRange } from "./resourceMetrics";
-import { memoryPrecision, memoryUnit, metricAxis } from "./metricAxis";
+import { memoryLabel, memoryPrecision, memoryUnit, metricAxis, percentageLabel } from "./metricAxis";
 import { relativeMetricSeries } from "./metricRelative";
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
@@ -59,7 +59,7 @@ function rangeValid() {
   return validMetricRange(start, end);
 }
 function number(value: number | null, unit: string) {
-  return value === null ? "-" : `${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} ${unit}`;
+  return value === null ? "暂无数据" : `${value.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} ${unit}`;
 }
 function delta(value: number | null, unit: string) {
   if (value === null) return "无前次采样";
@@ -72,7 +72,7 @@ function chartOption(series: ReturnType<typeof metricSeries>, unit: "KB" | "%"):
   return {
     animation: false,
     grid: { left: 58, right: 20, top: 42, bottom: 52 },
-    tooltip: { trigger: "axis", valueFormatter: (value: string | number) => unit === "KB" ? `${(Number(value) / (display?.factor ?? 1)).toLocaleString("zh-CN", { maximumFractionDigits: 6 })} ${display?.unit}` : `${value} %` },
+    tooltip: { trigger: "axis", className: "resource-metrics-chart-tooltip", valueFormatter: (value: string | number) => unit === "KB" ? memoryLabel(value, display) : percentageLabel(value) },
     legend: { type: "scroll", top: 4, selected: axisWindow.value.selected },
     xAxis: { type: "time", splitNumber: 5, minInterval: 60_000, axisLabel: { hideOverlap: true, formatter: (value: number) => new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }) } },
     yAxis: { type: "value", name: unit === "KB" ? display?.unit : "%", min: bounds.min, max: bounds.max, splitNumber: 5, axisLabel: { hideOverlap: true, showMinLabel: false, showMaxLabel: false, formatter: (value: number) => unit === "KB" ? `${(value / (display?.factor ?? 1)).toLocaleString("zh-CN", { maximumFractionDigits: precision })} ${display?.unit}` : `${value.toLocaleString("zh-CN", { maximumFractionDigits: 1 })} %` }, scale: true },

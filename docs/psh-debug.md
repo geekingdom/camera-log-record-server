@@ -53,7 +53,7 @@ Telnet 串口握手默认以 100 ms 字符间隔发送，避免突发输入在�
 
 ### 本地 Mock
 
-本地开发或合成验证可设置 `PSH_MODE=mock`，并通过 `PSH_MOCK_PASSWORD_FILE` 指向本地 JSON 文件。该文件每次取用时重新读取，键必须严格采用 `protocol:ip:port`：
+本地开发或合成验证可设置 `PSH_MODE=mock`，并通过 `PSH_MOCK_PASSWORD_FILE` 指向本地 JSON 文件。该文件每次取用时重新读取，主机及非SSH键采用 `protocol:ip:port`；SSH从机必须追加 `:SLAVE_1`、`:SLAVE_2` 或 `:SLAVE_3`，缺失时不回退主机口令：
 
 ```json
 {
