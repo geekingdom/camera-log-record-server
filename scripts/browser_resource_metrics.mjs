@@ -69,9 +69,12 @@ try {
   const zeroSummary = page.locator(".metrics-summary > div").filter({ hasText: "真实零内存 最新值" });
   assert.equal(await zeroSummary.locator("strong").filter({ hasText: /^0 KB$/ }).count(), 1, "真实零值必须保留，不能显示为缺失");
   await page.locator(".metrics-chart").scrollIntoViewIfNeeded();
-  const chartBounds = await page.locator(".metrics-chart").boundingBox();
+  const chartCanvas = page.locator(".metrics-chart canvas").first();
+  const chartBounds = await chartCanvas.boundingBox();
   assert.ok(chartBounds, "内存图必须有可悬停的绘制区域");
-  await page.mouse.move(chartBounds.x + chartBounds.width - 24, chartBounds.y + chartBounds.height / 2);
+  // canvas 出现不代表加载遮罩已退场；locator.hover 等待稳定与命中测试通过，
+  // 避免一次性页面坐标移动被遮罩吞掉后一直等不到 tooltip。落点留在绘图区内。
+  await chartCanvas.hover({ position: { x: chartBounds.width - 40, y: chartBounds.height / 2 } });
   const metricTooltip = page.locator(".resource-metrics-chart-tooltip");
   await metricTooltip.waitFor({ state: "visible" });
   const tooltipText = await metricTooltip.innerText();
