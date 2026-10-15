@@ -22,6 +22,33 @@ Authorization: Bearer <access-token>
 
 平台导航中的“API 文档”展示当前部署版本的公共接口，提供分类、搜索、权限、参数、请求与响应示例以及接入指南。目录来自 `GET /api/v1/api-reference`，有效服务 Token 或登录会话均可访问；查阅目录不会授予调用权限。目录只展示虚拟示例，不执行设备操作，不依赖 GitHub 或外部 CDN。
 
+目录版本为 `1.1`。每个操作包含可直接改造的 Python 调用示例；示例使用占位服务地址、令牌和标识，调用前必须替换，且不改变接口权限、幂等键、Cookie 或二进制响应的处理要求。
+
+### Python 示例使用方式
+
+进入“API 文档”，选择接口后点击“Python 调用示例”旁的复制按钮，保存为 `example.py`。使用 Python 3.11 或更新版本，HTTP 示例安装 `requests`，实时日志 WebSocket 示例安装 `websockets`：
+
+```sh
+python -m pip install requests websockets
+export CAMERA_LOGS_BASE_URL='http://你的平台地址:端口'
+export CAMERA_LOGS_TOKEN='你的服务账号令牌'
+python example.py
+```
+
+上述环境变量写法适用于 macOS/Linux；Windows PowerShell 使用 `$env:CAMERA_LOGS_BASE_URL='http://你的平台地址:端口'`，其他变量同理。服务地址不包含 `/api/v1` 后缀。每段源码顶部列出本例需要的变量；登录、当前会话、改密和退出示例使用 `CAMERA_LOGS_USERNAME`、`CAMERA_LOGS_PASSWORD` 建立 Cookie 会话，不以服务令牌替代登录。源码中的任务/资源/文件 ID、版本号、设备地址、时间范围和业务内容仍需按实际对象修改；编辑、删除时先查询当前 `version`。
+
+创建类示例要求设置 `CAMERA_LOGS_IDEMPOTENCY_KEY`：同一次业务请求的未知结果重试保留同一键和正文，新业务操作使用新键。下载和检索的创建接口返回异步作业，需先查询作业状态，成功后再调用内容或结果接口，不能把创建响应当成文件。文件示例使用流式写入，下载完成后才将 `.partial` 重命名；实时日志示例通过首帧认证并记录续传游标。调用错误通过 HTTP 状态异常暴露；示例不会自动重试写操作。
+
+## 资源看板
+
+`GET /api/v1/dashboard?days=7&date=2026-09-09` 需要 `tasks:read`，用于返回截至指定 `Asia/Shanghai` 自然日的资源、任务、已登记日志目录和 Coredump 概览。`days` 只能为 `7`、`14` 或 `30`；`date` 可省略为上海当天，不能晚于上海当天。查询超时返回 `503`，客户端应保留最近一次有效页面数据后重试。
+
+响应中的 `overview` 只计算未删除的当前资源和任务，历史日志目录仍按原资源归属汇总。`availability.logs=false` 时，`daily`、`topResources`、`topResourcesTruncated` 和 `coredumps` 均为 `null`，表示调用者没有 `logs:read`，不是零值。只有管理员获得 `nodes`、节点数和 `availability.nodes=true`；离线节点固定报告 `accepting=false`。日志统计只累计登记为 `OPEN` 或 `READY` 的原始分卷 `bytes`，不会读取设备正文，也不会因共享压缩包的 `archiveBytes` 重复计数。
+
+```json
+{"date":"2026-09-09","days":7,"range":{"startDate":"2026-09-03","endDate":"2026-09-09"},"overview":{"resources":1,"onlineResources":1,"collectingTasks":0,"tasks":1,"nodes":1},"availability":{"logs":true,"nodes":true},"daily":[{"date":"2026-09-09","bytes":1024,"fileCount":1}],"topResourcesTruncated":false}
+```
+
 ## 资源发现与任务摘要
 
 资源、任务、模板列表支持 `createdBy=<用户ID>` 按创建人精确筛选。控制台普通用户默认携带自己的ID，打开“查看全部”后可不限制创建人或指定其他创建人；管理员默认全部。API本身维持共享读取合同，不自动将无筛选参数请求缩窄为本人，模板始终额外应用本人/共享可见范围。
@@ -153,6 +180,8 @@ POST /api/v1/tasks/{taskId}/resume
 
 `GET /api/v1/resources/{resourceId}/authentication-records` 使用 `tasks:read` 权限。可同时传 `result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR`、`start/end` 带时区 ISO 8601 时间范围及 `identityChanged=true|false`；省略对应参数表示不限制该条件，时间范围为左闭右开。响应按 `createdAt,id` 稳定倒序：界面与兼容调用继续使用 `items/total/page/pageSize`，长期历史调用可先传空 `cursor=`，之后传上一页返回的 `nextCursor`，游标路径返回 `hasMore` 且不执行全量计数，响应中的 `total` 为 `null`。游标不能和大于 1 的 `page` 同时使用。每项含认证时间、触发来源、结果和型号/序列号前后值；首次认证 `initialAuthentication=true` 且不计为设备更换，认证失败不修改身份。软删除不删除认证记录；部署前未保存的逐次认证结果不推测补造。
 
+同一 UTC 日内连续、身份未变化且结果相同的**周期**认证会合并为一条，适用于 `SUCCESS`、`AUTH_FAILED`、`OFFLINE` 和 `ERROR`；`createdAt` 是首次观测、`latestAt` 是最近观测、`occurrenceCount` 是次数。结果变化、身份变化、首次认证、创建、编辑和人工认证均建立新的记录边界。周期认证得到 HTTP 401 后会锁存 `authRejectedAt` 并记录 `AUTH_FAILED`；后续 `OFFLINE` 或 `ERROR` 不会把它覆盖为凭据已恢复。该锁存不是永久的 `healthStatus=AUTH_FAILED`：得到 `SUCCESS` 的周期认证或人工认证都会清除它。成功认证只会为带有 `OFFLINE` 或 `AUTH_FAILED` 系统停止标记、且仍处于 `STOPPED` 的网络任务授权恢复，再由调度周期消费；持续输出的已领取会话不会因后台认证失败被抢停，需连接断开或连续 10 秒无输出才由本机收尾。用户停止或暂停的任务没有可消费的系统恢复标记，不会被自动重启，Telnet 串口不参与设备 HTTP 认证门控。
+
 ## 命令与模板
 
 `GET /api/v1/tasks/{taskId}/command-executions` 支持 `commandId` 按定时配置筛选、`kind=MANUAL|SCHEDULED` 按来源筛选及 `page/pageSize` 分页。记录的 `command`、`totalExecutions`、`intervalSeconds` 是发送预留时的配置快照，`attempt` 是本运行第几次占用发送预算。响应额外提供当前 `runId` 和 `scheduledCommands`，每项包含配置 ID、正文、总次数、间隔及当前运行 `attempts`；不会按相同正文合并。`commandSource=SNAPSHOT` 表示保存的正文，`CURRENT_CONFIGURATION` 表示旧记录依精确配置 ID 恢复，`UNAVAILABLE` 表示已无法还原。任务编辑会重新生成定时配置 ID，不能用编辑后的命令猜测已删除配置的历史正文。发送次数不等同于设备执行成功次数。
@@ -183,6 +212,8 @@ GET /api/v1/tasks/{taskId}/command-executions?page=1&pageSize=50
 ```
 
 PSH 调试失败只影响当次命令，不停止日志采集。后续定时或手动 `debug`、重连后的初始化 `debug` 均可独立执行；单次握手失败不重复提交口令。采集器先发送 Ctrl-C，确认新的普通提示符且无 Password 提示后才用 `ls` 恢复命令通道。恢复未确认时普通命令不会写入设备，后续 `debug` 可重新尝试恢复再执行。已阻断的定时普通命令不占用预算，也不生成执行记录；已开始的定时 `debug` 失败保留已占用的一次预算，记录为 `FAILED`。
+
+SSH 任务的 `sshTarget` 默认 `HOST`；SSH 主机与 `TELNET_DEVICE` 的自动 ASH 是尽力行为，切换失败不阻塞采集。选择 `SLAVE_1`、`SLAVE_2` 或 `SLAVE_3` 时，服务登录指定内网从机并必须重新确认从机的协议模式和目标身份；主机模式缓存不会替代从机验证，从机退出标记后的主机输出也不会写入从机日志。初始化、手动命令、定时命令和保活复用同一会话、接收器与发送队列。SSH 主机、已验证的 SSH 从机和 `TELNET_DEVICE` 在普通 shell 输入空闲 60 秒后才发送 `:` 空操作；从机保活只会写入已验证的单一从机 shell，不新建连接。发送前会再次检查连接、停止状态和 PSH 命令通道，不能发送时跳过。`TELNET_SERIAL` 不使用此应用层 shell 保活；暂停、停止、失败和取消都会取消保活并回收连接。资源 CPU、内存和 Coredump 监控可复用 `sshTarget=HOST` 的 SSH 主机连接或 `TELNET_DEVICE` 连接；SSH 从机和 `TELNET_SERIAL` 不会成为监控负责人。
 
 ## 后台配置与节点
 

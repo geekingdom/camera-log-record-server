@@ -22,6 +22,8 @@ export interface ReferenceOperation {
   parameters: ReferenceParameter[];
   requestSchema?: ReferenceSchema;
   requestExample: unknown;
+  /** 服务端生成的 Python 调用文本；页面只允许复制和展示，不能解释或执行。 */
+  pythonExample: string;
   responseStatus: number;
   responseExample: unknown;
 }

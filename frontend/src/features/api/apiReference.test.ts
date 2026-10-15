@@ -7,12 +7,19 @@ afterEach(() => vi.unstubAllGlobals());
 describe("内置接口目录", () => {
   it("通过既有请求边界读取 catalog，并保留当前会话", async () => {
     vi.stubGlobal("sessionStorage", { getItem: () => "reference-token" });
+    const pythonExample = "# pip install requests\nrequests.get('http://<服务地址>/api/v1/resources')";
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      version: "1.0", guides: [], operations: [], schemas: {}, errorExample: {},
+      version: "1.0", guides: [], operations: [{
+        id: "list-resources", method: "GET", path: "/resources", title: "资源列表", group: "资源", description: "读取资源。",
+        permission: "resources:read", headers: {}, parameters: [], requestExample: null,
+        pythonExample, responseStatus: 200, responseExample: { items: [] },
+      }], schemas: {}, errorExample: {},
     })));
     vi.stubGlobal("fetch", fetch);
 
-    await expect(loadApiReference()).resolves.toMatchObject({ version: "1.0" });
+    await expect(loadApiReference()).resolves.toMatchObject({
+      version: "1.0", operations: [expect.objectContaining({ pythonExample })],
+    });
     expect(fetch).toHaveBeenCalledOnce();
     const [url, init] = fetch.mock.calls[0];
     expect(url).toBe("/api/v1/api-reference");

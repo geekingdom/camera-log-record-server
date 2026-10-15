@@ -108,6 +108,56 @@ def test_reference_covers_every_public_http_route_and_websocket(client):
                 TypeAdapter(route.body_field.field_info.annotation).validate_python(example)
 
 
+def test_reference_documents_dashboard_permissions_and_response_availability(client):
+    """看板目录必须明确任务读取基线与日志、管理员两层可用性，不能退化为通用查询。"""
+    reference = client.get("/api/v1/api-reference").json()
+    operations = {item["id"]: item for item in reference["operations"]}
+    dashboard = operations["GET /api/v1/dashboard"]
+    assert reference["version"] == "1.1"
+    assert dashboard["title"] == "资源运行看板"
+    assert dashboard["group"] == "资源看板"
+    for text in ("tasks:read", "logs:read", "admin"):
+        assert text in dashboard["permission"]
+    for text in ("7、14或30", "null", "503", "原始分卷bytes"):
+        assert text in dashboard["description"]
+    assert dashboard["responseExample"]["availability"] == {"logs": True, "nodes": True}
+    guide = next(item["text"] for item in reference["guides"] if item["title"] == "资源看板")
+    for text in ("availability.logs=false", "archiveBytes", "accepting", "503"):
+        assert text in guide
+
+
+def test_reference_documents_authentication_merging_recovery_and_shell_boundaries(client):
+    """认证合并、401锁存和主从保活是运行契约，必须随文档发布。"""
+    reference = client.get("/api/v1/api-reference").json()
+    guides = {item["title"]: item["text"] for item in reference["guides"]}
+    history = guides["设备认证历史"]
+    recovery = guides["认证失败与任务恢复"]
+    shell = guides["SSH主从初始化与会话保活"]
+    for text in ("AUTH_FAILED", "OFFLINE", "ERROR", "occurrenceCount", "人工认证"):
+        assert text in history
+    for text in ("401", "锁存", "authRejectedAt", "周期认证", "SUCCESS", "OFFLINE", "AUTH_FAILED", "STOPPED", "10秒", "Telnet串口"):
+        assert text in recovery
+    assert "只有保存凭据后成功的人工认证才能授权恢复" not in recovery
+    assert "用户停止或暂停的任务" in recovery and "不会自动重启" in recovery
+    for text in ("SLAVE_1", "独立确认", "已验证的SSH从机", "60秒", "TELNET_SERIAL", "发送队列"):
+        assert text in shell
+    assert "sshTarget=HOST" in guides["设备CPU与内存监控"]
+    schemas = reference["schemas"]
+    assert "唯一发送队列" in schemas["TaskCreate"]["properties"]["initialCommands"]["description"]
+    assert "不阻塞采集" in schemas["TaskCreate"]["properties"]["initialCommands"]["description"]
+    assert "独立确认" in schemas["TaskCreate"]["properties"]["sshTarget"]["description"]
+
+
+def test_reference_documents_search_cancellation_ownership_and_protocol_response_types(client):
+    """相近下载和检索作业的取消权限及JSON/二进制内容端点不能混写。"""
+    operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
+    assert operations["DELETE /api/v1/log-searches/{identifier}"]["permission"] == "logs:read（取消本人作业；他人作业另需admin）"
+    assert operations["GET /api/v1/log-files/{identifier}/content"]["responseExample"] == {
+        "fileId": "file-example", "sessionId": "session-example", "data": "bG9nCg==", "nextOffset": 4,
+    }
+    assert "二进制" in operations["GET /api/v1/downloads/{identifier}/content"]["responseExample"]
+
+
 def test_reference_has_real_chinese_descriptions_for_every_input_parameter_and_nested_field(client):
     """公开目录不得再把未描述字段交给前端猜测，嵌套命令也必须有业务语义。"""
     reference = client.get("/api/v1/api-reference").json()

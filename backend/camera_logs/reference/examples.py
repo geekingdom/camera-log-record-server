@@ -48,6 +48,10 @@ def schema_example(schema, schemas, name="", depth=0):
         return schema["const"]
     if "enum" in schema:
         return schema["enum"][0]
+    if schema.get("pattern") == r"^\d{4}-\d{2}$":
+        return "2026-09"
+    if schema.get("pattern") == r"^\d{4}-\d{2}-\d{2}$":
+        return "2026-09-09"
     if "anyOf" in schema:
         return schema_example(next(item for item in schema["anyOf"] if item.get("type") != "null"), schemas, name, depth + 1)
     if schema.get("type") == "object":
@@ -97,6 +101,19 @@ def response_example(path, method, status):
     """返回代表性的成功响应字段；空响应和二进制使用明确的协议示例。"""
     if status == 204:
         return None
+    if path == "/api/v1/dashboard":
+        return {
+            "generatedAt": STAMP, "date": "2026-09-09", "days": 7,
+            "range": {"startDate": "2026-09-03", "endDate": "2026-09-09"},
+            "overview": {"resources": 1, "onlineResources": 1, "collectingTasks": 0, "tasks": 1, "nodes": 1},
+            "availability": {"logs": True, "nodes": True},
+            "daily": [{"date": "2026-09-09", "bytes": 1024, "fileCount": 1}],
+            "topResources": [{"resourceId": "resource-example", "name": "大厅设备", "ip": "192.0.2.10", "bytes": 1024, "fileCount": 1}],
+            "topResourcesTruncated": False,
+            "coredumps": {"resourceCount": 0, "fileCount": 0, "bytes": 0, "items": [], "truncated": False},
+            "nodes": [{"id": "collector-01", "name": "采集节点", "healthLevel": "HEALTHY", "reasons": [], "accepting": True, "activeTasks": 0, "capacity": 100, "inputBytesPerSecond": 0, "lastHeartbeat": STAMP}],
+            "notes": ["日志统计基于已登记目录的原始分卷 bytes，受目录保留和发布时机影响，不代表实时物理 I/O。"],
+        }
     if path == "/api/v1/resources/batch":
         return {"items": [RESOURCE]}
     if path == "/health":

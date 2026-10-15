@@ -7,6 +7,9 @@ const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
 const python = process.env.PYTHON_BIN || ".venv/bin/python";
 const catalog = JSON.parse(execFileSync(python, ["-c", "import json; from camera_logs.main import create_app; from camera_logs.reference.catalog import catalog; print(json.dumps(catalog(create_app())))"], { encoding: "utf8" }));
+assert.ok(catalog.operations.length > 0, "接口目录必须包含操作");
+assert.ok(catalog.operations.every(operation => typeof operation.pythonExample === "string" && operation.pythonExample.trim()),
+  "每个 HTTP 和 WebSocket 操作都必须提供非空 Python 调用示例");
 const screenshots = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
 
@@ -16,6 +19,12 @@ try {
     let referenceRequests = 0;
     let adminMode = false;
     const context = await browser.newContext({ viewport: { width, height } });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: async text => { window.__apiReferenceCopiedText = text; } },
+      });
+    });
     await context.route("**/api/v1/**", async route => {
       const path = new URL(route.request().url()).pathname;
       if (path === "/api/v1/auth/me") {
@@ -102,12 +111,13 @@ try {
     await page.locator(".parameter-row").first().waitFor();
     await page.locator(".api-code-section pre").nth(0).waitFor();
     await page.locator(".api-code-section pre").nth(1).waitFor();
+    await page.getByRole("heading", { name: "Python 调用示例", exact: true }).waitFor();
     await page.locator(".api-guides").getByText("第三方鉴权", { exact: true }).waitFor();
     await page.waitForTimeout(350);
     const metrics = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
       clientWidth: document.documentElement.clientWidth,
-      requestBlocks: document.querySelectorAll(".api-code-section pre").length,
+      codeBlocks: document.querySelectorAll(".api-code-section pre").length,
       parameters: document.querySelectorAll(".parameter-row").length,
       guides: document.querySelectorAll(".api-guides section").length,
       overflow: [...document.querySelectorAll('body *')].filter(element => {
@@ -124,8 +134,17 @@ try {
     await page.screenshot({ path: `${screenshots}/api-reference-${width}.png`, fullPage: true, animations: "disabled" });
     assert.ok(metrics.scrollWidth <= metrics.clientWidth + 1, `页面不应横向溢出：${JSON.stringify({ width, ...metrics })}`);
     assert.ok(metrics.parameters > 0, "资源目录必须展示查询参数");
-    assert.equal(metrics.requestBlocks, 2, "详情必须展示请求和响应示例");
+    assert.equal(metrics.codeBlocks, 3, "详情必须展示请求、Python 和响应示例");
     assert.ok(metrics.guides > 1, "详情页必须展示接入指南");
+    const pythonSection = page.locator(".python-code-section");
+    const httpPythonExample = await pythonSection.locator("pre").innerText();
+    assert.ok(httpPythonExample.includes("requests"), "HTTP Python 示例必须使用 requests");
+    assert.ok(httpPythonExample.includes("http://127.0.0.1:8000"), "HTTP Python 示例必须保留本机回退地址");
+    await page.getByRole("button", { name: "复制 Python 调用示例" }).click();
+    assert.equal(await page.evaluate(() => window.__apiReferenceCopiedText), httpPythonExample,
+      "复制按钮必须写入当前 Python 示例文本");
+    const pythonNote = await pythonSection.locator(".python-example-note").innerText();
+    assert.ok(pythonNote.includes("pip install requests") && pythonNote.includes("占位值") && pythonNote.includes("不会发起请求"), "HTTP Python 区域必须说明依赖、占位值与只读行为");
     await search.fill("/logs");
     await page.locator(".api-operation-list > button").filter({ has: page.locator(".http-method.ws") }).click();
     const realtimeExample = await page.locator(".api-code-section pre").first().innerText();
@@ -133,6 +152,11 @@ try {
     assert.ok(realtimeExample.includes("wss://"), "HTTPS 实时示例必须支持 wss");
     const service = new URL(page.url());
     assert.ok(realtimeExample.includes(`${service.protocol === "https:" ? "wss:" : "ws:"}//${service.host}/api/v1/tasks/`), "当前部署示例必须保留协议和端口");
+    const websocketPythonExample = await pythonSection.locator("pre").innerText();
+    assert.ok(websocketPythonExample.includes("websocket"), "WebSocket Python 示例必须使用 WebSocket 客户端");
+    assert.ok(websocketPythonExample.includes("http://127.0.0.1:8000"), "WebSocket Python 示例必须保留本机回退地址");
+    const websocketNote = await pythonSection.locator(".python-example-note").innerText();
+    assert.ok(websocketNote.includes("pip install websockets"), "WebSocket Python 区域必须说明 websockets 安装方式");
     await page.screenshot({ path: `${screenshots}/api-reference-${width}.png`, fullPage: true, animations: "disabled" });
     assert.deepEqual(errors, []);
     await context.close();

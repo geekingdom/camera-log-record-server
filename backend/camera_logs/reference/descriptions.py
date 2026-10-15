@@ -56,7 +56,7 @@ FIELD_DESCRIPTIONS = {
     "fileIds": "需要冻结并导出的 Coredump 文件标识列表。",
     "hourIds": "需要加入日志下载作业的逻辑小时归档标识列表。",
     "id": "对象、命令配置或节点的稳定唯一标识。",
-    "initialCommands": "连接登录成功后按数组顺序执行的初始化命令配置。",
+    "initialCommands": "连接建立后按协议初始化阶段通过该会话唯一发送队列执行的初始化命令配置；SSH主机和TELNET_DEVICE自动ASH为尽力行为，自动ASH失败不阻塞采集，SSH从机须先完成独立协议与目标身份确认。",
     "input": "校验失败时服务端接收到的输入片段，仅在错误详情中出现。",
     "intervalSeconds": "同一条定时命令两次发送之间等待的秒数。",
     "ip": "设备资源、串口服务器或采集连接目标的 IPv4/IPv6 地址。",
@@ -88,7 +88,7 @@ FIELD_DESCRIPTIONS = {
     "scheduledCommands": "按各自次数和间隔独立执行的定时命令配置列表。",
     "scopes": "账户或 IP 规则被授予的平台权限标识列表。",
     "serialServerResourceId": "Telnet 串口任务可选关联的已登记串口服务器资源标识。",
-    "sshTarget": "SSH 日志采集任务类型：HOST 为主机，SLAVE_1、SLAVE_2、SLAVE_3 分别为从机 1、2、3；仅 SSH 可选择从机。",
+    "sshTarget": "SSH 日志采集目标：HOST 为默认主机；SLAVE_1、SLAVE_2、SLAVE_3 分别为指定从机。从机独立确认协议模式和目标身份，只采集从机输出；仅 SSH 可选择从机。",
     "sharedWith": "可读取此命令模板的指定有效用户标识列表。",
     "sharedWithAll": "是否将模板共享给全部有效平台用户，仅管理员可启用。",
     "sourceTemplateId": "创建或编辑任务时复制命令配置的来源模板标识。",
@@ -106,6 +106,11 @@ FIELD_DESCRIPTIONS = {
 
 # 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
 OPERATION_DESCRIPTIONS = {
+    ("GET", "/api/v1/dashboard"): (
+        "返回截至指定Asia/Shanghai自然日的资源、任务、日志目录和Coredump概览，需要tasks:read。"
+        "days只允许7、14或30；无logs:read时日志统计字段返回null，无admin时节点字段返回null。"
+        "日志统计只累计登记的原始分卷bytes，查询超时返回503。"
+    ),
     ("POST", "/api/v1/resources/batch"): (
         "批量创建1至256个海康网络设备资源，需要resources:create与Idempotency-Key。"
         "逐项重新认证，全部成功后原子提交；重复IP、已有资源IP或任一认证失败均不部分创建。"
@@ -141,7 +146,7 @@ PARAMETER_DESCRIPTIONS = {
     "cursor": "上页返回的稳定分页游标；管理事件传空字符串开启首屏游标查询，续页使用nextCursor并保持原筛选条件。不能与大于1的page同用。",
     "commandId": "按某一条定时命令配置标识筛选执行记录。",
     "createdBy": "按资源、任务或模板的创建用户标识筛选。",
-    "date": "按北京时间自然日筛选任务小时归档。",
+    "date": "按 Asia/Shanghai 自然日筛选任务小时归档或作为看板统计截至日。",
     "end": "查询范围结束时间，带时区 ISO 8601 且不包含该时刻。",
     "identifier": "路径所指资源、作业、文件、命令或操作的唯一标识。",
     "identityChanged": "仅返回身份信息是否发生变化的认证记录。",
