@@ -6,6 +6,7 @@ import { api } from "../../shared/api";
 import type { Task } from "../../shared/types";
 import LiveLogs from "./LiveLogs.vue";
 import LogArchives from "./LogArchives.vue";
+import DownloadHistory from "./DownloadHistory.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
 import LogTaskPicker from "./LogTaskPicker.vue";
 import { taskStatusLabel, taskStatusTone } from "../tasks/taskStatus";
@@ -95,6 +96,7 @@ onBeforeUnmount(() => { stateGeneration++; window.clearTimeout(stateTimer); });
   <el-tabs v-if="selected" v-model="tab" class="logs-workspace-tabs">
     <el-tab-pane label="实时打印" name="live"><LiveLogs v-if="tab === 'live'" :key="selected" :task-id="selected" :can-send="canSendCurrent" :user-id="props.userId" @history="tab = 'archives'" /></el-tab-pane>
     <el-tab-pane label="小时归档与检索" name="archives"><LogArchives v-if="tab === 'archives'" :key="selected" :task-id="selected" :can-download="props.canDownload" /></el-tab-pane>
+    <el-tab-pane v-if="props.canDownload" label="下载记录" name="downloads"><DownloadHistory v-if="tab === 'downloads'" :key="selected" :task-id="selected" /></el-tab-pane>
     <el-tab-pane label="命令记录" name="commands"><CommandHistory v-if="tab === 'commands'" :key="selected" :task-id="selected" /></el-tab-pane>
   </el-tabs>
   </div>

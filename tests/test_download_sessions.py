@@ -23,7 +23,8 @@ def test_ticket_transaction_failure_never_sets_cookie(client, monkeypatch):  # n
 
     repo = client.app.state.repo
     client.portal.call(repo.db.jobs.insert_one, {
-        "id": "unconfirmed", "taskId": "task-a", "status": "SUCCEEDED"})
+        "id": "unconfirmed", "taskId": "task-a", "status": "SUCCEEDED",
+        "resultPath": "/not-public/unconfirmed.tar.gz", "expiresAt": now() + timedelta(hours=1)})
 
     async def unavailable(*args):
         raise ConnectionFailure("simulated database failure")
@@ -42,7 +43,8 @@ def test_ticket_commit_acknowledgement_loss_recovers_without_reissuing(client, m
 
     repo = client.app.state.repo
     client.portal.call(repo.db.jobs.insert_one, {
-        "id": "confirmed", "taskId": "task-a", "status": "SUCCEEDED"})
+        "id": "confirmed", "taskId": "task-a", "status": "SUCCEEDED",
+        "resultPath": "/not-public/confirmed.tar.gz", "expiresAt": now() + timedelta(hours=1)})
     original = audited_mutations.mutation_transaction
     calls = []
 
@@ -64,7 +66,8 @@ def test_ticket_commit_acknowledgement_loss_recovers_without_reissuing(client, m
 def test_cookie_download_is_scoped_revocable_and_expires(client):  # noqa: F811
     repo = client.app.state.repo
     client.portal.call(repo.db.jobs.insert_one, {
-        "id": "export-a", "taskId": "task-a", "status": "SUCCEEDED"})
+        "id": "export-a", "taskId": "task-a", "status": "SUCCEEDED",
+        "resultPath": "/not-public/export-a.tar.gz", "expiresAt": now() + timedelta(hours=1)})
     user = client.post("/api/v1/users", json={
         "username": "download-token", "displayName": "下载令牌用户",
         "password": "download-token-password", "scopes": [],
@@ -121,7 +124,7 @@ def test_login_cookie_download_is_revoked_by_ip_scope_and_account_disable(tmp_pa
         browser.portal.call(repo.db.jobs.insert_one, {
             "id": "cookie-download", "taskId": "task-a", "nodeId": "test-node",
             "status": "SUCCEEDED", "kind": "DOWNLOAD", "actor": "other",
-            "expiresAt": now() + timedelta(hours=1),
+            "resultPath": "/not-public/cookie-download.tar.gz", "expiresAt": now() + timedelta(hours=1),
         })
         created = browser.post("/api/v1/users", headers={"Authorization": "Bearer download-policy-bootstrap"}, json={
             "username": "download-user", "displayName": "下载用户", "password": "download-user-password",

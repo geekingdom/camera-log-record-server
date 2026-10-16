@@ -207,3 +207,10 @@ else
   if [[ "$component" == worker ]]; then configure_nfs; fi
   python3 "$root/scripts/deploy_component.py" --component "$component" --project "$project" --compose-file "$compose_file" --env-file "$env_file"
 fi
+
+# ES索引独立于采集：配置后派生只读sidecar，失败不撤销已恢复的Worker。
+if [[ "$component" == all || "$component" == worker ]]; then
+  if ! python3 "$root/scripts/deploy_indexer.py" --env-file "$env_file" --project "$project" --compose-file "$compose_file"; then
+    echo "警告：旁路索引器未启动；采集与原文检索仍可用，请检查索引器部署" >&2
+  fi
+fi

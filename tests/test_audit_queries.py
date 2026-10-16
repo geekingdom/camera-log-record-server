@@ -318,8 +318,8 @@ def test_runtime_events_filter_and_sort_legacy_detected_time(client, created):
     })
     assert response.status_code == 200, response.text
     item = response.json()["items"][0]
-    assert item["detectedAt"].startswith("2026-09-08T08:00:00")
-    assert item["createdAt"].startswith("2026-09-08T08:00:00")
+    assert item["detectedAt"] == "2026-09-08T16:00:00+08:00"
+    assert item["createdAt"] == "2026-09-08T16:00:00+08:00"
 
 
 def test_normalized_runtime_page_does_not_aggregate(client, monkeypatch):

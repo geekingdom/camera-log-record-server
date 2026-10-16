@@ -48,7 +48,7 @@ Coredump 每个已登记文件版本只生成一次 `COREDUMP_DISCOVERED`，记�
 | `run_archives`、`record_purge_days`、`record_archive_maintenance` | 结束运行归档摘要、按日删除计数、维护租约和书签 | `runId`唯一、任务/结束时间及维护文档精确键读取 | 摘要随业务保留；计数和书签由维护作业持续覆盖，不累积明细正文 | 摘要只累计数量、状态与时间等有限字段；游标、租约和revision用于恢复与并发互斥 |
 | `audit_archive_chunks` | 将即将删除的审计最小可追溯字段按 UTC 日归档 | `day,part`唯一读取，`expiresAt` TTL | 每100条一个 gzip 压缩块，固定365天 TTL | 仅存`id`、操作者、动作、目标、请求ID、结果、时间和源ID；摘要过大或格式异常时保留源记录人工核查 |
 | `log_gap_snapshots` | 实时日志缺口目录的短游标快照 | `taskId`和随机快照ID精确读取，`expiresAt` TTL | 1小时 TTL；不保存日志正文 | 仅保存已授权任务、两端锚点、文件范围和续页位置；超时要求重新定位 |
-| `jobs`、下载/快照 reservation 与 claim | 搜索、日志下载和 coredump 导出；租约续期与物理临时文件协作 | node/status/lease、创建时间及 token 精确索引 | 临时会话和部分导出记录已有 TTL；`jobs` 本体保留 | 必须先确认执行租约关闭、产物已删除或已发布、取消/失败原因已落审计；TTL 只能清理无业务依赖的临时令牌，不能替代物理文件回收 |
+| `jobs`、下载/快照 reservation 与 claim | 搜索、日志下载和 coredump 导出；租约续期与物理临时文件协作 | node/status/lease、创建时间及 token 精确索引；任务下载历史使用`taskId,kind,createdAt,id`倒序索引 | 临时会话和部分导出记录已有 TTL；`jobs` 本体保留 | 成功日志下载在制品创建完成时快照当时`retentionDays`，写入`artifactCreatedAt`、`artifactRetentionDays`和`expiresAt`；后续设置变更不追溯。到期后先等待读者租约结束并回收物理制品，历史作业行保留。TTL只能清理无业务依赖的临时令牌，不能替代物理文件回收 |
 | `coredump_files` | NFS 扫描发现、稳定性状态转换、快照读者与导出状态 | 资源接收时间、节点状态、来源版本和快照 token 索引 | 目录元数据跟随 coredump 文件保留，当前不设 TTL | 先完成源文件、冻结副本、活动下载和导出引用的原子核验；物理文件成功删除后才可删除目录元数据，失败时保留可排障状态 |
 | `request_events` | 每个 HTTP 请求的脱敏观测记录 | route/status/task/clientIp/requestId 与时间索引 | 已启用固定30天 TTL | 不保存请求正文、密码、令牌或设备输出；TTL 有延迟，查询仍按时间范围限制 |
 
@@ -199,3 +199,9 @@ python scripts/backfill_runtime_event_time.py --apply
 ## 401连接保护锁存（2026-10-14）
 
 资源文档新增可选`authRejectedAt`时间戳，401覆盖该单值、认证成功删除。不会按重连写入新文档，不增加随时间增长的集合；运行时按已有资源id唯一索引读取，每次等待有2秒查询预算和1秒间隔。401后的ERROR/OFFLINE不清除该值；系统停止使用已有resourceHealthRecovery标记，成功后沿用所有权/旧运行关闭证明事务恢复，不增加历史记录或TTL要求。
+
+## Elasticsearch 旁路正文副本
+
+`camera-logs-v1` 每个 READY 文件按 32 KiB 记录文本块及一条完成证明，源版本+偏移作为确定性ID；它是允许重建的额外正文存储，非权威原始日志。默认按源小时保留7天，重建不延长，删除覆盖本节点的文本和完成证明。每轮索引开始执行到期删除及Mongo文件目录缺失/DELETED补偿；数据库失败不猜测删除，服务恢复后继续。每个Worker独立SQLite WAL仅保存来源版本、确认偏移和更新时间，不保存正文；过期检查点清除后仅会安全重放。查询鉴权仍在平台API，ES不暴露给用户，权限/容量/默认单分片无副本的部署限制见[旁路索引说明](elasticsearch-sidecar.md)。
+
+目录扫描复用 `files(nodeId,status,id)`，覆盖查询复用 `files(taskId,hour)`，跨页整包成员查询使用 `files_node_archive_members(nodeId,path,status,id)`，不引入逐日志行Mongo写入；真实 Explain 验证结果应记录在本轮实施历史中。

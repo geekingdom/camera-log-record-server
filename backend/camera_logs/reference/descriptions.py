@@ -106,6 +106,27 @@ FIELD_DESCRIPTIONS = {
 
 # 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
 OPERATION_DESCRIPTIONS = {
+    ("POST", "/api/v1/log-searches"): (
+        "创建历史检索作业，冻结指定任务和时间范围内的文件清单后异步扫描。"
+        "需要logs:read和Idempotency-Key；创建响应仅表示作业已受理，随后查询状态并分页读取结果。"
+    ),
+    ("GET", "/api/v1/log-searches/{identifier}"): (
+        "查询历史检索作业状态。轮询时可传includeResults=false省略较大的结果和冻结文件目录；"
+        "RUNNING结果只是已扫描部分，只有SUCCEEDED且truncated=false表示冻结范围扫描完整。"
+    ),
+    ("GET", "/api/v1/log-searches/{identifier}/results"): (
+        "分页读取历史检索作业已确认的结果。结果按作业当前状态返回；FAILED、CANCELLED或EXPIRED"
+        "保留的部分结果不代表剩余范围不存在匹配。"
+    ),
+    ("DELETE", "/api/v1/log-searches/{identifier}"): "取消本人创建的历史检索作业；取消他人作业需要admin。",
+    ("GET", "/api/v1/tasks/{task_id}/downloads"): (
+        "按创建时间倒序分页读取指定任务的日志下载历史，返回作业状态和下载制品当前可用性；"
+        "不暴露节点路径、写入租约或设备日志正文。"
+    ),
+    ("GET", "/api/v1/tasks/{task_id}/search-index-status"): (
+        "查询指定时间范围的历史检索候选索引覆盖状态。索引只用于跳过不可能命中的分卷；"
+        "coverageComplete=false或fallback=RAW_SCAN时，检索仍回退原始日志扫描。"
+    ),
     ("GET", "/api/v1/dashboard"): (
         "返回截至指定Asia/Shanghai自然日的资源、任务、日志目录和Coredump概览，需要tasks:read。"
         "days只允许7、14或30；无logs:read时日志统计字段返回null，无admin时节点字段返回null。"

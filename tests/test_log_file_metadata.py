@@ -10,7 +10,7 @@ def test_log_file_metadata_authorizes_task_and_returns_only_safe_fields(client):
     client.portal.call(repo.db.tasks.insert_one, {"id": "metadata-task", "name": "任务", "ip": "192.0.2.9"})
     client.portal.call(repo.db.files.insert_one, {
         "id": "metadata-file", "taskId": "metadata-task", "runId": "run", "sessionId": "session",
-        "nodeId": "node", "status": "READY", "bytes": 42, "hour": "2026-09-11T01:00:00+00:00",
+        "nodeId": "node", "status": "READY", "bytes": 42, "hour": "2026-09-11T09:00:00+08:00",
         "archiveName": "hour.tar.gz", "rawFileName": "part-000001.log", "segmentNumber": 1,
         "firstSequence": 7, "lastSequence": 9, "path": "/private/log.tar.gz",
         "rawPath": "/private/part.log", "indexPath": "/private/part.index.jsonl",
@@ -21,7 +21,7 @@ def test_log_file_metadata_authorizes_task_and_returns_only_safe_fields(client):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "id": "metadata-file", "taskId": "metadata-task", "runId": "run", "sessionId": "session",
-        "nodeId": "node", "status": "READY", "bytes": 42, "hour": "2026-09-11T01:00:00+00:00",
+        "nodeId": "node", "status": "READY", "bytes": 42, "hour": "2026-09-11T09:00:00+08:00",
         "archiveName": "hour.tar.gz", "rawFileName": "part-000001.log", "segmentNumber": 1,
         "firstSequence": 7, "lastSequence": 9,
     }

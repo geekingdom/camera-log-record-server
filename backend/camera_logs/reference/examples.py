@@ -1,6 +1,6 @@
 """接口文档的合成请求与响应示例；禁止读取实际账号、设备或运行配置。"""
 
-STAMP = "2026-09-09T10:00:00+00:00"
+STAMP = "2026-09-09T18:00:00+08:00"
 TASK = {"id": "task-example", "resourceId": "resource-example", "name": "大厅日志", "protocol": "SSH", "sshTarget": "HOST",
         "ip": "192.0.2.10", "port": 22, "status": "STOPPED", "desiredState": "STOPPED",
         "createdBy": "user-example", "createdByName": "集成账号", "version": 1}
@@ -79,7 +79,7 @@ def request_example(schema, schemas):
     if name == "BlockedRestart":
         return {"confirmIsolation": False}
     if name == "SearchCreate":
-        return {"taskId": "task-example", "start": STAMP, "end": "2026-09-09T11:00:00+00:00", "keyword": ""}
+        return {"taskId": "task-example", "start": STAMP, "end": "2026-09-09T19:00:00+08:00", "keyword": ""}
     if name == "DownloadCreate":
         return {"taskId": "task-example", "hourIds": [STAMP], "allowPartial": False}
     if name == "CoredumpExportCreate":
@@ -152,7 +152,7 @@ def response_example(path, method, status):
                          "sourceState": "OBSERVING", "sourceObservedAt": STAMP,
                          "sourceUnchangedSince": STAMP, "sourceStableAt": None, "version": 1})
         return {"id": "coredump-export-example", "kind": "COREDUMP_EXPORT", "status": "QUEUED",
-                "createdAt": STAMP, "expiresAt": "2026-09-10T10:00:00+00:00"}
+                "createdAt": STAMP, "expiresAt": "2026-09-10T18:00:00+08:00"}
     if path.endswith("/browser-session"):
         return {"url": "/api/v1/downloads/job-example/content", "expiresInSeconds": 300}
     if path.endswith("/content"):
@@ -163,6 +163,14 @@ def response_example(path, method, status):
         return page({"fileId": "file-example", "offset": 6, "lineStartFileId": "file-example",
                      "lineStartOffset": 0, "text": "[DSP] ERROR device disconnected"}) | {
                          "truncated": False, "status": "SUCCEEDED"}
+    if path.endswith("/search-index-status"):
+        return {
+            "enabled": True, "status": "READY", "totalFiles": 24, "coveredFiles": 24,
+            "coverageComplete": True, "latestIndexedHour": STAMP,
+            "contiguousCoveredThrough": STAMP, "truncated": False, "fallback": "RAW_SCAN",
+        }
+    if path.endswith("/downloads"):
+        return page(JOB | {"downloadAvailable": True})
     if path.endswith("/log-hours"):
         return page({"hourId": STAMP, "hour": STAMP, "status": "READY", "integrity": "VERIFIED",
                      "files": [{"id": "file-example", "bytes": 1024}], "bytes": 1024, "archiveBytes": 512})

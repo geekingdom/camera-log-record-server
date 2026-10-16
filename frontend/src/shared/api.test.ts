@@ -43,6 +43,32 @@ describe("运行看板 API", () => {
   });
 });
 
+describe("任务下载历史 API", () => {
+  it("按任务读取固定大小的下载记录页，并编码任务标识", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      items: [], total: 0, page: 1, pageSize: 20,
+    })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.taskDownloads("task id", 1);
+
+    expect(fetch.mock.calls[0][0]).toBe("/api/v1/tasks/task%20id/downloads?page=1&pageSize=20");
+  });
+});
+
+describe("检索索引覆盖 API", () => {
+  it("按任务与 UTC 半开区间读取覆盖状态", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "DISABLED" })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.searchIndexStatus("task id", "2026-10-16T00:00:00.000Z", "2026-10-16T01:00:00.000Z");
+
+    expect(fetch.mock.calls[0][0]).toBe("/api/v1/tasks/task%20id/search-index-status?start=2026-10-16T00%3A00%3A00.000Z&end=2026-10-16T01%3A00%3A00.000Z");
+  });
+});
+
 describe("阻塞任务重新启动 API", () => {
   it("提交隔离确认并保留服务端 detail 中的错误码", async () => {
     vi.stubGlobal("crypto", { randomUUID: () => "request-key" });

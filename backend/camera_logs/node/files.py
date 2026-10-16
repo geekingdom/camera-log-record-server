@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 from camera_logs.logs.archive_access import read_limiter, snapshot
+from camera_logs.logs.download_availability import download_available
 from camera_logs.logs.export_readers import ExportReader
 from camera_logs.logs.file_reads import FileReads
 from camera_logs.logs.job_threads import job_thread
@@ -232,8 +233,7 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
     async def download(identifier: str, request: Request, _: None = Depends(internal)):
         """用持续读者租约传输已发布导出，维护回收与慢客户端下载互斥。"""
         job = await repo.db.jobs.find_one({"id": identifier, "status": "SUCCEEDED"})
-        expires = job.get("expiresAt") if job else None
-        if not job or not job.get("resultPath") or (expires and expires.astimezone(UTC) <= datetime.now(UTC)):
+        if not job or not download_available(job):
             raise HTTPException(404, "导出文件不存在")
         path = _path(runtime, repo, {"path": job["resultPath"]})
         reader = ExportReader(repo, job)

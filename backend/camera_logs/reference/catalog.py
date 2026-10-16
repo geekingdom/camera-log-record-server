@@ -9,7 +9,7 @@ GUIDES = [
     {"title": "批量添加设备资源", "text": "新建资源的name可省略或留空，服务端使用规范IP作为名称。控制台支持同一地址族的起止IP生成最多256台海康网络设备，共用HTTP认证和监控配置，逐行名称与密码可修改。先调用POST /api/v1/resources/authenticate逐台认证，再通过POST /api/v1/resources/batch提交items列表及Idempotency-Key。保存时服务端重新认证全部设备，全部成功后在同一事务提交资源、IP占用和审计；认证失败或IP冲突不会部分添加。提交结果未知时保留原请求和同一幂等键重试；修改请求后使用新键。密码仅用于输入，不在创建响应中返回。"},
     {"title": "节点性能推荐与手动调整", "text": "GET /api/v1/admin/nodes的每个节点包含performanceRecommendation：available表示当前能否推荐，reason说明依据或不可用原因，policy为可应用的完整性能策略，resources为有效CPU与可用内存，reportedAt为依据心跳时间。只用新鲜节点遥测计算保守建议，容器配额优先于宿主总资源；不测算磁盘最佳吞吐。获取推荐不会修改已有配置；将policy按需编辑后通过PATCH /api/v1/admin/nodes/{node_id}携带version与performance保存，Worker后续心跳热应用。performance为管理员保存值，performanceStatus.effective为实际受资源约束后的值，三者不等同。"},
     {"title": "渐进式历史检索", "text": "POST /api/v1/log-searches冻结文件范围后返回作业。GET /api/v1/log-searches/{identifier}?includeResults=false用于轻量轮询，resultCount为当前已确认结果数；通过/results分页读取。RUNNING中的结果只是已扫描部分，SUCCEEDED且truncated=false才表示本次冻结范围扫描完成。FAILED/CANCELLED/EXPIRED中的已有结果不能证明其余范围没有匹配。普通状态接口默认仍包含结果以兼容现有调用。"},
-    {"title": "历史检索全文候选索引", "text": "小时归档旁自动维护SQLite FTS5候选索引，仅保存分卷边界和检索词候选，不保存日志正文，也不加入下载包。索引只用于跳过不可能命中的分卷，最终仍按原始字节确认；索引缺失、损坏、版本或归档指纹不符时自动回退原文扫描。短关键词和高频关键词可能扫描全部原文，结果上限与时间范围限制不变。"},
+    {"title": "历史检索全文候选索引", "text": "可选独立Elasticsearch进程从持久文件或归档建立可重建正文副本，不阻塞采集；默认热保留7天，按源小时到期和源目录删除补偿清理。GET /api/v1/tasks/{task_id}/search-index-status展示已覆盖文件与连续水位，未覆盖仍回原文。未启用ES或缺少其完整证据时，沿用小时归档旁SQLite FTS5候选索引（不保存正文、不加入下载包）。索引只用于跳过不可能命中的分卷，最终仍按原始字节确认；索引缺失、损坏、版本或归档指纹不符时自动回退原文扫描。短关键词和高频关键词可能扫描全部原文，结果上限与时间范围限制不变。"},
     {"title": "节点写入延迟限制", "text": "管理员通过POST /api/v1/admin/nodes登记、PATCH /api/v1/admin/nodes/{node_id}带version编辑writeLatencyLimitMs。单位毫秒，整数1至60000，默认200；每节点独立保存，达到75%预警，超过阈值限制新采集会话。保存后调度使用新配置，Worker下一周期更新心跳和准入，无需重启；旧心跳仍拒绝准入时需要等待新心跳。已有采集不因超限被主动停止。提高阈值只调整准入和健康判断，不提高磁盘吞吐、不改变日志顺序、批量写入或同步策略。"},
     {"title": "管理事件游标分页", "text": "audit-events、runtime-events和request-events仅管理员可访问。传cursor=开启游标首屏，使用返回nextCursor续页并保持原筛选和时间范围；返回items、pageSize、hasMore、nextCursor及total。默认不统计总数，total为null，显式includeTotal=true才执行精确统计。未传cursor仍保持page/pageSize旧接口。游标不能跨事件类别或筛选条件使用，页码大于1与游标同时提供返回422。游标是翻页位置而非历史快照，新记录在刷新首屏后可见，保留期内删除的记录不会补回。"},
     {"title": "Coredump时间含义", "text": "receivedAt和firstSeenAt是服务器首次扫描观测时间，不代表文件传输完成。sourceModifiedAt来自设备文件系统mtime，会受设备时间影响，因此可能早于或晚于接收观测时间；不能只比较这两个时间判断丢失或延迟。"},
@@ -55,12 +55,65 @@ SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网�
            "browser-session": "签发浏览器下载授权", "results": "分页查询检索结果", "log-hours": "查询任务小时日志", "log-days": "查询任务日志日期",
            "command-executions": "查询任务命令记录", "permissions": "查询可配置权限", "share-targets": "查询模板共享对象", "display-settings": "查询实时日志显示配置", "content": "读取日志内容"}
 
+_OPERATION_TITLES = {
+    ('GET', '/health'): '检查API服务健康状态',
+    ('GET', '/metrics'): '读取Prometheus监控指标',
+    ('GET', '/api/v1/api-reference'): '获取API接口文档目录',
+    ('GET', '/api/v1/users'): '查询用户列表',
+    ('POST', '/api/v1/users'): '创建用户账号',
+    ('PATCH', '/api/v1/users/{identifier}'): '修改用户账号',
+    ('DELETE', '/api/v1/users/{identifier}'): '删除用户账号',
+    ('GET', '/api/v1/tasks'): '分页查询采集任务列表',
+    ('GET', '/api/v1/tasks/{task_id}'): '查询单个采集任务详情',
+    ('GET', '/api/v1/operations/{identifier}'): '查询任务控制操作执行状态',
+    ('GET', '/api/v1/resources'): '分页查询设备资源列表',
+    ('GET', '/api/v1/resources/{identifier}'): '查询单个设备资源详情',
+    ('GET', '/api/v1/resources/{identifier}/coredump-monitor'): '查询设备Coredump监控与挂载状态',
+    ('POST', '/api/v1/resources/authenticate'): '认证待添加设备凭据',
+    ('POST', '/api/v1/resources/{identifier}/authenticate'): '立即重新认证已有设备资源',
+    ('GET', '/api/v1/command-templates'): '分页查询命令模板列表',
+    ('GET', '/api/v1/command-templates/{identifier}'): '查询单个命令模板详情',
+    ('POST', '/api/v1/tasks/{task_id}/commands'): '向采集会话发送手动命令',
+    ('GET', '/api/v1/commands/{identifier}'): '查询手动命令执行状态',
+    ('GET', '/api/v1/nodes'): '查询可见采集节点列表',
+    ('GET', '/api/v1/service-tokens'): '查询服务账号令牌列表',
+    ('DELETE', '/api/v1/service-tokens/{identifier}'): '撤销服务账号令牌',
+    ('GET', '/api/v1/log-files/{identifier}'): '查询日志分卷元数据与归档状态',
+    ('GET', '/api/v1/log-files/{identifier}/content'): '读取日志分卷原文字节',
+    ('GET', '/api/v1/downloads/{identifier}/content'): '下载已生成的日志归档文件',
+    ('GET', '/api/v1/resources/{resource_id}/coredumps'): '查询设备Coredump文件列表',
+    ('POST', '/api/v1/coredump-exports'): '创建Coredump批量导出作业',
+    ('GET', '/api/v1/coredump-exports/{identifier}'): '查询Coredump导出作业状态',
+    ('DELETE', '/api/v1/coredump-exports/{identifier}'): '取消Coredump导出作业',
+    ('POST', '/api/v1/coredump-exports/{identifier}/browser-session'): '签发Coredump导出文件浏览器下载授权',
+    ('POST', '/api/v1/coredumps/{identifier}/browser-session'): '签发单个Coredump浏览器下载授权',
+    ('GET', '/api/v1/coredump-exports/{identifier}/content'): '下载已生成的Coredump导出文件',
+    ('GET', '/api/v1/coredumps/{identifier}/content'): '下载单个Coredump文件',
+    ('GET', '/api/v1/audit-events'): '查询业务操作审计记录',
+    ('GET', '/api/v1/runtime-events'): '查询采集运行事件',
+    ('GET', '/api/v1/request-events'): '查询HTTP请求访问记录',
+    ('GET', '/api/v1/admin/nodes'): '查询节点管理列表及性能配置',
+    ('POST', '/api/v1/admin/nodes'): '登记采集节点',
+    ('PATCH', '/api/v1/admin/nodes/{node_id}'): '修改节点准入与性能配置',
+    ('DELETE', '/api/v1/admin/nodes/{node_id}'): '注销采集节点',
+    ('POST', '/api/v1/downloads/{identifier}/browser-session'): '签发日志归档浏览器下载授权',
+    ("POST", "/api/v1/log-searches"): "创建历史检索作业",
+    ("GET", "/api/v1/log-searches/{identifier}"): "查询历史检索作业状态",
+    ("GET", "/api/v1/log-searches/{identifier}/results"): "分页读取历史检索结果",
+    ("DELETE", "/api/v1/log-searches/{identifier}"): "取消历史检索作业",
+    ("POST", "/api/v1/downloads"): "创建日志下载作业",
+    ("GET", "/api/v1/downloads/{identifier}"): "查询日志下载作业状态",
+    ("GET", "/api/v1/tasks/{task_id}/downloads"): "分页读取任务下载历史",
+    ("DELETE", "/api/v1/downloads/{identifier}"): "取消日志下载作业",
+    ("GET", "/api/v1/tasks/{task_id}/search-index-status"): "查询历史检索索引覆盖状态",
+}
+
 
 def group(path):
     """按正式路径归类，不依赖前端功能是否对当前用户展示。"""
     for fragment, title in (("dashboard", "资源看板"), ("coredump", "Coredump文件"), ("resources", "设备资源"), ("command-templates", "命令模板"),
                              ("commands", "命令交互"), ("command-executions", "命令交互"),
-                             ("log-", "日志查询"), ("downloads", "日志下载"), ("tasks", "采集任务"),
+                             ("log-", "日志查询"), ("search-index", "日志查询"), ("downloads", "日志下载"), ("tasks", "采集任务"),
                              ("operations", "异步操作"), ("service-tokens", "服务令牌"),
                              ("users", "用户管理"), ("auth/", "登录会话"), ("events", "审计事件"),
                              ("nodes", "节点管理"), ("ip-policy", "来源IP策略"),
@@ -86,6 +139,8 @@ def permission(path, method):
         return "templates:read"
     if path == "/api/v1/users/creators":
         return "tasks:read 或 templates:read（最小历史创建人目录）"
+    if path.endswith("/search-index-status"):
+        return "logs:read"
     if path == "/api/v1/display-settings":
         return "有效Token或登录会话（仅返回实时日志内存上限）"
     if "/service-tokens" in path and (method == "GET" or path.endswith("/reveal")):
@@ -154,6 +209,16 @@ def request_headers(path, method, schema, idempotent):
     return headers
 
 
+def operation_title(method, path):
+    """为相同资源的创建、状态、结果和取消操作保留可区分的动作名称。"""
+    return _OPERATION_TITLES.get(
+        (method, path),
+        "资源运行看板" if path == "/api/v1/dashboard"
+        else "批量创建设备资源" if path == "/api/v1/resources/batch"
+        else SPECIAL.get(path.split("/")[-1], TITLES.get(method.lower(), method) + group(path)),
+    )
+
+
 def catalog(app):
     """完整枚举公共HTTP接口，再补充OpenAPI没有表达的WebSocket握手与消息。"""
     spec = app.openapi()
@@ -167,7 +232,7 @@ def catalog(app):
             verb = method.upper()
             schema = definition.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema")
             code = min(int(code) for code in definition["responses"] if code.startswith("2"))
-            title = "资源运行看板" if path == "/api/v1/dashboard" else "批量创建设备资源" if path == "/api/v1/resources/batch" else SPECIAL.get(path.split("/")[-1], TITLES.get(method, verb) + group(path))
+            title = operation_title(verb, path)
             idempotent = method == "post" and (path == "/api/v1/resources/batch" or path.split("/")[-1] in {"resources", "tasks", "command-templates", "downloads", "log-searches", "commands", "coredump-exports"})
             headers = request_headers(path, verb, schema, idempotent)
             parameters = [{**item, "description": describe_parameter(item),

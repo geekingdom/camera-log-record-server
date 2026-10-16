@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
+from camera_logs.common.presentation_time import utc_iso
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
 
@@ -88,7 +89,7 @@ async def register_candidate(
     })
     await repo.db.files.insert_one({
         "id": "synthetic-file", "taskId": "synthetic-task", "runId": "run-1", "sessionId": "session-1",
-        "nodeId": "development-node", "status": "READY", "hour": now().isoformat(),
+        "nodeId": "development-node", "status": "READY", "hour": utc_iso(now()),
         "path": str(archive), "indexPath": str(index), "archiveMember": log_name,
         **({"retainUntil": retain_until} if retain_until is not None else {}),
     })
@@ -147,7 +148,7 @@ async def test_plan_cleanup_rejects_shared_archive_member_missing_from_report(tm
     unknown_index.write_text('{"offset":0}\n', encoding="utf-8")
     await repo.db.files.insert_one({
         "id": "unknown-file", "taskId": "unknown-task", "runId": "run-2", "sessionId": "session-2",
-        "nodeId": "development-node", "status": "READY", "hour": now().isoformat(),
+        "nodeId": "development-node", "status": "READY", "hour": utc_iso(now()),
         "path": str(archive), "indexPath": str(unknown_index), "archiveMember": "unknown-part-000001.log",
     })
 

@@ -16,6 +16,7 @@ from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.request_context import request_context
 from camera_logs.common.security import actor, authorize
+from camera_logs.logs.download_availability import download_available
 from camera_logs.users.sessions import COOKIE, user_identity
 
 
@@ -102,6 +103,8 @@ def install_download_sessions(app):
         authorize(user, "logs:download", job["taskId"])
         if job["status"] != "SUCCEEDED":
             raise HTTPException(409, "导出尚未完成")
+        if not download_available(job):
+            raise HTTPException(410, "下载制品已过期或已清理")
         token = await issue_download_ticket(repo, user, identifier)
         path = f"/api/v1/downloads/{identifier}/content"
         response.set_cookie("download_access", token, httponly=True, samesite="strict", secure=request.url.scheme == "https",

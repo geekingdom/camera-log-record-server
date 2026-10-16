@@ -297,3 +297,52 @@ jobs:
           name: nfs-verification
           path: nfs-verification.jsonl
           if-no-files-found: ignore
+  elasticsearch-sidecar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install '.[test]'
+      - name: 启动隔离Elasticsearch并等待就绪
+        run: |
+          docker run --detach --name verify-es -p 127.0.0.1:19200:9200 --memory=1536m \
+            -e discovery.type=single-node -e xpack.security.enabled=false \
+            -e 'ES_JAVA_OPTS=-Xms512m -Xmx512m' docker.elastic.co/elasticsearch/elasticsearch:8.17.4
+          python - <<'PY'
+          import time, urllib.request
+          deadline = time.monotonic() + 120
+          while True:
+              try:
+                  urllib.request.urlopen('http://127.0.0.1:19200', timeout=2).close()
+                  break
+              except Exception:
+                  if time.monotonic() >= deadline:
+                      raise
+                  time.sleep(1)
+          PY
+      - name: 启动独立Mongo并等待就绪
+        run: |
+          docker run --detach --name verify-es-mongo -p 127.0.0.1:27019:27017 mongo:7.0 --bind_ip_all
+          python - <<'PY'
+          import time
+          from pymongo import MongoClient
+          deadline = time.monotonic() + 60
+          while True:
+              try:
+                  MongoClient('mongodb://127.0.0.1:27019/?directConnection=true', serverSelectionTimeoutMS=1000).admin.command('ping')
+                  break
+              except Exception:
+                  if time.monotonic() >= deadline:
+                      raise
+                  time.sleep(1)
+          PY
+      - name: 验证重放、字面候选、缺块回退和归档重建
+        run: python scripts/verify_elasticsearch_sidecar.py
+      - name: 验证索引器归档分组、目录补建及删除副本清理
+        run: python scripts/verify_elasticsearch_runner.py
+      - name: 清理隔离服务
+        if: always()
+        run: docker rm -fv verify-es verify-es-mongo

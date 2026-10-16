@@ -14,13 +14,14 @@ from zoneinfo import ZoneInfo
 from fastapi import Depends, HTTPException, Query
 
 from camera_logs.common.database import now
+from camera_logs.common.presentation_time import utc_iso
 from camera_logs.common.security import actor, authorize
 from camera_logs.coredumps.presence import visible_coredump_query
 from camera_logs.node.health import node_health
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 _MAX_TIME_MS = 3_000
-_RANK_LIMIT = 20
+_RANK_LIMIT = 10
 _REQUEST_TIMEOUT_SECONDS = 4
 _CACHE_SECONDS = 10
 _MAX_CACHE_ENTRIES = 32
@@ -81,7 +82,7 @@ def _file_match(task_ids: list[str], lower: datetime, upper: datetime) -> dict[s
     """只匹配调用方可读任务的有效目录记录，绝不查询日志正文或压缩包路径。"""
     return {
         "taskId": {"$in": task_ids},
-        "hour": {"$gte": lower.isoformat(), "$lt": upper.isoformat()},
+        "hour": {"$gte": utc_iso(lower), "$lt": utc_iso(upper)},
         "status": {"$in": ["OPEN", "READY"]},
         "bytes": {"$gt": 0},
     }

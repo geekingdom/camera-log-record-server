@@ -9,6 +9,7 @@ import type { LogFile, LogHour } from "../../shared/types";
 import HourFragments from "./HourFragments.vue";
 import ArchiveDatePicker from "./ArchiveDatePicker.vue";
 import LogFileViewer from "./LogFileViewer.vue";
+import SearchIndexCoverage from "./SearchIndexCoverage.vue";
 import { shanghaiDateTimeRange, shanghaiDateTimeToUtc, shanghaiToday } from "./archiveDate";
 import { stripTerminalControls } from "../../shared/terminalDisplay";
 const props = defineProps<{ taskId: string; canDownload?: boolean }>();
@@ -320,6 +321,7 @@ onBeforeUnmount(() => {
       <span>至</span>
       <label>结束时间<input v-model="searchEnd" type="datetime-local" step="60" aria-label="检索结束时间（上海时区）" /></label>
     </div>
+    <SearchIndexCoverage :task-id="taskId" :start="searchStart" :end="searchEnd" />
     <div class="search-row">
       <el-input
         v-model="keyword"

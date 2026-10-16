@@ -80,7 +80,7 @@ Content-Type: application/json
 省略 `keyword` 或传空字符串时，按接收块索引的 `[start,end)` 查询，最多 24 小时；时间不从设备正文推断。查询为异步作业，先获取状态，再调用 `/log-searches/{id}/results?page=1&pageSize=100`。结果示例：
 
 ```json
-{"items":[{"fileId":"file-example","offset":0,"length":4,"receivedAt":"2026-09-09T02:00:00+00:00","data":"bG9nCg==","text":"log\n"}],"total":1,"page":1,"pageSize":100,"status":"SUCCEEDED","truncated":false}
+{"items":[{"fileId":"file-example","offset":0,"length":4,"receivedAt":"2026-09-09T10:00:00+08:00","data":"bG9nCg==","text":"log\n"}],"total":1,"page":1,"pageSize":100,"status":"SUCCEEDED","truncated":false}
 ```
 
 每片最多 4096 字节，`data` 是原始字节的 Base64；按 `fileId` 和 `offset` 顺序拼接后解码。`text` 仅供预览，片段可跨中文字符或日志行，不应把替换字符当作原文。缺少时间索引时作业失败，不猜测时间。结果上限 1000 片，`truncated=true` 时缩小区间或读取原始文件；非空关键词继续使用原有字面检索规则。
@@ -350,10 +350,12 @@ POST /api/v1/downloads
 Idempotency-Key: dfa82b76-09d8-4d96-a0e8-74f9c6e97a5d
 Content-Type: application/json
 
-{"taskId":"task-example","hourIds":["2026-09-08T00:00:00+00:00"],"allowPartial":false}
+{"taskId":"task-example","hourIds":["2026-09-08T08:00:00+08:00"],"allowPartial":false}
 ```
 
 使用 `GET /api/v1/downloads/{jobId}` 查询状态；成功后从 `GET /api/v1/downloads/{jobId}/content` 下载，客户端可发送标准 `Range` 头继续未完成下载。`DELETE /api/v1/downloads/{jobId}` 取消队列或运行中的下载。
+
+`GET /api/v1/tasks/{taskId}/downloads?page=1&pageSize=20` 使用 `logs:download` 分页读取该任务的下载历史。每项给出作业状态和 `downloadAvailable`，后者仅表示当前制品仍可下载；历史列表不返回节点路径、写入租约或日志正文。
 
 创建下载或检索时，冻结文件清单、文件保留期保护、作业入队、幂等成功映射和操作审计共同提交。范围无效或审计失败不会单独延长保护期或留下可执行作业。同键同内容重试返回原作业和原文件快照，不会再次扫描扩大范围；同键不同内容返回409，提交确认不明且无法只读确认时返回503，须使用相同幂等键重试。历史PENDING映射若已有作业仅返回原记录，不补建作业或补造审计。
 
@@ -380,10 +382,10 @@ POST /api/v1/log-searches
 Idempotency-Key: c7a96caa-c5e1-467e-a2cc-b8776c8b4e5c
 Content-Type: application/json
 
-{"taskId":"task-example","keyword":"ERROR","start":"2026-09-08T00:00:00+00:00","end":"2026-09-08T01:00:00+00:00"}
+{"taskId":"task-example","keyword":"ERROR","start":"2026-09-08T08:00:00+08:00","end":"2026-09-08T09:00:00+08:00"}
 ```
 
-通过 `GET /api/v1/log-searches/{jobId}/results?page=1&pageSize=100` 读取结果。非空关键词的结果按完整匹配行返回，不含相邻行和行尾换行符；同一逻辑行多个命中只返回一项。
+创建历史检索作业后，先用 `GET /api/v1/log-searches/{jobId}?includeResults=false` 查询作业状态，再用 `GET /api/v1/log-searches/{jobId}/results?page=1&pageSize=100` 分页读取已确认结果；`DELETE /api/v1/log-searches/{jobId}` 取消本人作业，取消他人作业需要管理员。非空关键词的结果按完整匹配行返回，不含相邻行和行尾换行符；同一逻辑行多个命中只返回一项。
 
 ```json
 {"fileId":"file-example","offset":6,"lineStartFileId":"file-example","lineStartOffset":0,"text":"[DSP] ERROR device disconnected"}
@@ -396,6 +398,8 @@ Content-Type: application/json
 日志工作台默认展示上海时区当天归档，使用单日选择；历史检索独立设置开始与结束日期时间，可精确到分钟，默认最近一小时，单次不超过24小时。切换归档日期不覆盖检索范围。页面将上海时间转换为带时区的UTC参数提交，检索按服务端接收索引采用`[start,end)`区间，不解析设备正文中自行打印的时间。实时查找针对当前有界视图，段内查找针对当前读取段，均不等于扫描全部历史日志。字号、级别着色、匹配高亮、暂停视图和清空视图只影响浏览器显示。
 
 日志搜索和下载作业的执行者失联且租约到期后，状态查询返回 `status=FAILED`、`error=WORKER_EXECUTION_LOST` 和中文 `errorMessage`。服务不会自动重做不确定的文件操作，调用方可使用新的幂等键重新提交；原幂等键仍返回原作业。旧执行租约、令牌和实例ID不公开。该行为只适用于带执行租约的日志作业，详情见[作业恢复说明](log-job-recovery.md)。
+
+`GET /api/v1/tasks/{taskId}/search-index-status?start=<带时区ISO8601>&end=<带时区ISO8601>` 使用 `logs:read` 查询历史检索候选索引的覆盖情况；省略时间范围时沿用服务端默认查询范围。响应包含 `enabled`、`status`、`totalFiles`、`coveredFiles`、`coverageComplete`、`latestIndexedHour`、`contiguousCoveredThrough`、`truncated` 和 `fallback`。`fallback=RAW_SCAN` 或 `coverageComplete=false` 表示本次检索需要扫描对应原始日志，索引只用于跳过不可能命中的分卷，不改变最终字节确认结果。
 
 ## 错误格式
 

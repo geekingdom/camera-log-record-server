@@ -13,6 +13,7 @@ from camera_logs.common import audited_mutations
 from camera_logs.common.database import now, public
 from camera_logs.common.errors import StableCodeHTTPException
 from camera_logs.common.models import new_id
+from camera_logs.common.presentation_time import utc_instant, utc_now
 
 
 def _effective_status(document, user):
@@ -20,7 +21,7 @@ def _effective_status(document, user):
     if document.get("revoked"):
         return "REVOKED"
     expires_at = document.get("expiresAt")
-    if expires_at is not None and expires_at.replace(tzinfo=now().tzinfo) <= now():
+    if expires_at is not None and utc_instant(expires_at) <= utc_now():
         return "EXPIRED"
     if user is None:
         return "USER_MISSING"
@@ -149,7 +150,7 @@ async def update_service_token(repo, actor_id, identifier, body):
         if current["version"] != body.version:
             raise HTTPException(409, "服务令牌版本已变化，请刷新")
         expires_at = current.get("expiresAt")
-        if has_expiry_change and expires_at is not None and expires_at.replace(tzinfo=now().tzinfo) <= now():
+        if has_expiry_change and expires_at is not None and utc_instant(expires_at) <= utc_now():
             raise HTTPException(409, "服务令牌已过期，不能修改有效期")
         if "userId" in values:
             user = await repo.db.users.find_one(

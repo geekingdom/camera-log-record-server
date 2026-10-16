@@ -95,3 +95,16 @@ class Settings(BaseSettings):
         if self.psh_total_timeout_seconds < self.psh_request_timeout_seconds:
             raise ValueError("PSH 总超时不能小于单请求超时")
         return self
+
+    # ES检索副本默认关闭；采集进程不创建ES连接，独立indexer读取持久化日志。
+    elasticsearch_url: str = ''
+    elasticsearch_api_key: str = ''
+    elasticsearch_verify_tls: bool = True
+    elasticsearch_index: str = Field(default='camera-logs-v1', pattern=r'^[a-z][a-z0-9_-]{0,80}$')
+    elasticsearch_timeout_seconds: float = Field(default=5, gt=0, le=30)
+    elasticsearch_retention_days: int = Field(default=7, ge=1, le=3650)
+    elasticsearch_batch_chunks: int = Field(default=32, ge=1, le=128)
+    elasticsearch_poll_seconds: float = Field(default=30, ge=1, le=3600)
+    elasticsearch_file_pause_seconds: float = Field(default=.1, ge=0, le=60)
+    elasticsearch_checkpoint_path: Path = Path('data/indexer/checkpoints.sqlite')
+    elasticsearch_read_mib_per_second: int = Field(default=8, ge=1, le=200)

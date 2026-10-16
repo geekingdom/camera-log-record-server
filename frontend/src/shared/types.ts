@@ -394,6 +394,32 @@ export interface CoredumpExport {
   etag?: string;
   error?: string;
 }
+/** 下载作业历史仅暴露审计与制品可用性字段，不包含节点路径或写入租约。 */
+export interface DownloadHistoryItem {
+  id: string;
+  taskId: string;
+  status: string;
+  createdAt?: string;
+  expiresAt?: string;
+  filename?: string;
+  bytes?: number;
+  progress?: number;
+  error?: string;
+  /** 服务端在保留期和清理状态边界统一计算，前端不可自行推断。 */
+  downloadAvailable: boolean;
+}
+/** 搜索索引覆盖度只描述候选加速能力；未覆盖范围仍由原文扫描保证结果正确性。 */
+export interface SearchIndexStatus {
+  enabled: boolean;
+  status: "DISABLED" | "AVAILABLE" | "UNAVAILABLE" | string;
+  totalFiles: number;
+  coveredFiles: number;
+  coverageComplete: boolean;
+  latestIndexedHour?: string | null;
+  contiguousCoveredThrough?: string | null;
+  truncated?: boolean;
+  fallback: "RAW_SCAN" | string;
+}
 export interface CommandExecution {
   id?: string;
   command?: string;

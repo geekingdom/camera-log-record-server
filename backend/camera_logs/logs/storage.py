@@ -288,7 +288,7 @@ class HourlyWriter:
                                      source_index=source_index)
             positions.append(position)
             rows.append(json.dumps({"sequence": position.sequence, "offset": offset, "length": len(data),
-                                   "receivedAt": stamp.isoformat()}, separators=(",", ":")) + "\n")
+                                   "receivedAt": stamp.astimezone(self.zone).isoformat()}, separators=(",", ":")) + "\n")
             offset += len(data)
         payload = b"".join(data for _, data, _ in chunks)
         view = memoryview(payload)
@@ -333,7 +333,7 @@ class HourlyWriter:
         started = time.monotonic()
         try:
             self._index_handle.write(json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
-                "receivedAt": instant.astimezone(UTC).isoformat()}, separators=(",", ":")) + "\n")
+                "receivedAt": instant.astimezone(self.zone).isoformat()}, separators=(",", ":")) + "\n")
             self._index_handle.flush()
         finally:
             record_stage("indexAppendMs", (time.monotonic() - started) * 1000)

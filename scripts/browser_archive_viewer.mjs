@@ -82,6 +82,7 @@ await context.route("**/api/v1/**", async route => {
   if (path === "/api/v1/tasks") return json(route, { items: [task], total: 1, page: 1, pageSize: 100 });
   if (path === "/api/v1/resources") return json(route, { items: [{ id: "resource", name: "模拟设备", kind: "HIKVISION_NETWORK", ip: task.ip }], total: 1, page: 1, pageSize: 20 });
   if (path === `/api/v1/tasks/${task.id}`) return json(route, task);
+  if (path === `/api/v1/tasks/${task.id}/search-index-status`) return json(route, { enabled: false, status: "DISABLED", totalFiles: 0, coveredFiles: 0, coverageComplete: false, latestIndexedHour: null, contiguousCoveredThrough: null, truncated: false, fallback: "RAW_SCAN" });
   if (path === `/api/v1/tasks/${task.id}/log-days`) return json(route, { days: url.searchParams.get("month") === "2026-09" ? ["2026-09-11"] : [] });
   if (path === `/api/v1/tasks/${task.id}/log-hours`) return json(route, { items: [{ hourId: "hour", hour: "2026-09-11T00:00:00Z", status: "READY", integrity: "VERIFIED", bytes: file.bytes, archiveBytes: 2, files: [file] }], total: 1, page: 1, pageSize: 24 });
   if (path === "/api/v1/log-searches" && request.method() === "POST") { searchRequest = request.postDataJSON(); return json(route, { id: "search" }); }

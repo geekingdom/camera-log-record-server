@@ -79,6 +79,8 @@ await context.route("**/api/v1/**", async route => {
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (pathname === `/api/v1/tasks/${primaryTask.id}`) return json(route, primaryTask);
   if (pathname === `/api/v1/tasks/${secondaryTask.id}`) return json(route, secondaryTask);
+  if (pathname === `/api/v1/tasks/${primaryTask.id}/search-index-status` || pathname === `/api/v1/tasks/${secondaryTask.id}/search-index-status`)
+    return json(route, { enabled: false, status: "DISABLED", totalFiles: 0, coveredFiles: 0, coverageComplete: false, latestIndexedHour: null, contiguousCoveredThrough: null, truncated: false, fallback: "RAW_SCAN" });
   if (pathname.endsWith("/log-days")) return json(route, { days: [] });
   if (pathname.endsWith("/log-hours")) return json(route, { items: [], total: 0, page: 1, pageSize: 24 });
   if (pathname === `/api/v1/tasks/${primaryTask.id}/log-gap-catalog`) {

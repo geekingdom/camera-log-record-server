@@ -72,7 +72,8 @@ def test_hour_date_filter_uses_shanghai_day_and_keeps_pagination(client):
     result = client.get(path, params={"date": "2026-09-08", "pageSize": 1, "page": 2})
     assert result.status_code == 200
     assert result.json()["total"] == 2
-    assert result.json()["items"][0]["hour"] == "2026-09-07T16:00:00+00:00"
+    assert result.json()["items"][0]["hour"] == "2026-09-08T00:00:00+08:00"
+    assert result.json()["items"][0]["hourId"] == "2026-09-07T16:00:00+00:00"
     assert client.get(path, params={"date": "bad"}).status_code == 422
 
 

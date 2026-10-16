@@ -26,6 +26,7 @@ from camera_logs.logs.archive_access import (
     read_limiter,
     snapshot,
 )
+from camera_logs.logs.download_availability import artifact_retention
 from camera_logs.logs.export_locks import ExportLock
 from camera_logs.logs.export_output import write_zip
 from camera_logs.logs.export_writer import (  # noqa: F401 - 保留既有 writer helper 导入路径。
@@ -199,7 +200,7 @@ async def _cancelled(repo: Any, identifier: str) -> bool:
 
 
 def _expired(job: dict[str, Any]) -> bool:
-    value = job.get("expiresAt")
+    value = job.get("executionExpiresAt", job.get("expiresAt"))
     if value is None:
         return False
     stamp = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
@@ -572,6 +573,7 @@ async def run_job(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                             else:
                                 writer_started = True
                                 result = await _download(repo, job)
+                                result |= await artifact_retention(repo, datetime.now(UTC))
                         finally:
                             await writer_lock.close()
                         if not writer_started:

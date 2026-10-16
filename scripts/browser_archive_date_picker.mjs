@@ -106,6 +106,8 @@ await context.route("**/api/v1/**", async route => {
   ], 20));
   if (path === `/api/v1/tasks/${taskA.id}`) return json(route, taskA);
   if (path === `/api/v1/tasks/${taskB.id}`) return json(route, taskB);
+  if (path === `/api/v1/tasks/${taskA.id}/search-index-status` || path === `/api/v1/tasks/${taskB.id}/search-index-status`)
+    return json(route, { enabled: false, status: "DISABLED", totalFiles: 0, coveredFiles: 0, coverageComplete: false, latestIndexedHour: null, contiguousCoveredThrough: null, truncated: false, fallback: "RAW_SCAN" });
   const logDaysMatch = path.match(/^\/api\/v1\/tasks\/(calendar-task-[ab])\/log-days$/);
   if (logDaysMatch) {
     const taskId = logDaysMatch[1];

@@ -94,6 +94,7 @@ try {
           debugError,
         } : task);
       }
+      if (request.method() === "GET" && [task.id, otherTask.id].some(id => path === `/api/v1/tasks/${id}/search-index-status`)) return json(route, { enabled: false, status: "DISABLED", totalFiles: 0, coveredFiles: 0, coverageComplete: false, latestIndexedHour: null, contiguousCoveredThrough: null, truncated: false, fallback: "RAW_SCAN" });
       if (request.method() === "POST" && path === `/api/v1/tasks/${task.id}/commands`) { commandRequests.push(request.postDataJSON()); return json(route, { id: `command-${commandRequests.length}`, status: "QUEUED" }); }
       if (request.method() === "GET" && ["/api/v1/command-templates", "/api/v1/nodes", "/api/v1/admin/nodes", "/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(path)) return json(route, pageOf([]));
       if (request.method() === "GET" && path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
@@ -231,6 +232,7 @@ try {
     if (request.method() === "GET" && path === "/api/v1/tasks") return json(route, pageOf([task]));
     if (request.method() === "GET" && path === "/api/v1/resources") return json(route, pageOf([resource]));
     if (request.method() === "GET" && path === `/api/v1/tasks/${task.id}`) return json(route, task);
+    if (request.method() === "GET" && path === `/api/v1/tasks/${task.id}/search-index-status`) return json(route, { enabled: false, status: "DISABLED", totalFiles: 0, coveredFiles: 0, coverageComplete: false, latestIndexedHour: null, contiguousCoveredThrough: null, truncated: false, fallback: "RAW_SCAN" });
     if (request.method() === "GET" && ["/api/v1/command-templates", "/api/v1/nodes", "/api/v1/admin/nodes", "/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(path)) return json(route, pageOf([]));
     if (request.method() === "GET" && path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });
     if (request.method() === "GET" && path === "/api/v1/display-settings") return json(route, { liveLogBufferMiB: 10 });

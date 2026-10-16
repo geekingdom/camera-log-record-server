@@ -6,7 +6,7 @@ import secrets
 from fastapi import HTTPException, Request
 
 from camera_logs.access_policy.policy import apply_ip_permissions
-from camera_logs.common.database import now
+from camera_logs.common.presentation_time import utc_instant, utc_now
 from camera_logs.common.request_context import request_context
 from camera_logs.users.sessions import COOKIE, check_origin, required_login, session_identity, user_identity
 
@@ -19,7 +19,7 @@ async def authenticate(repo, token):
     digest = hashlib.sha256(token.encode()).hexdigest()
     record = await repo.db.tokens.find_one({"tokenHash": digest, "revoked": False})
     expires_at = record.get("expiresAt") if record else None
-    if not record or record.get("revoked") or (expires_at is not None and expires_at.replace(tzinfo=now().tzinfo) <= now()):
+    if not record or record.get("revoked") or (expires_at is not None and utc_instant(expires_at) <= utc_now()):
         raise required_login()
     user = await repo.db.users.find_one({"id": record.get("userId"), "enabled": True, "deletedAt": None})
     if user is None:

@@ -158,6 +158,34 @@ def test_reference_documents_search_cancellation_ownership_and_protocol_response
     assert "二进制" in operations["GET /api/v1/downloads/{identifier}/content"]["responseExample"]
 
 
+def test_reference_uses_explicit_titles_for_history_search_and_download_workflows(client):
+    """异步检索与下载不能因同属日志查询而在目录中得到相同模糊标题。"""
+    operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
+    assert operations["POST /api/v1/log-searches"]["title"] == "创建历史检索作业"
+    assert operations["GET /api/v1/log-searches/{identifier}"]["title"] == "查询历史检索作业状态"
+    assert operations["GET /api/v1/log-searches/{identifier}/results"]["title"] == "分页读取历史检索结果"
+    assert operations["DELETE /api/v1/log-searches/{identifier}"]["title"] == "取消历史检索作业"
+    history = operations["GET /api/v1/tasks/{task_id}/downloads"]
+    assert history["title"] == "分页读取任务下载历史"
+    assert history["permission"] == "logs:download"
+    assert history["responseExample"]["items"][0]["downloadAvailable"] is True
+
+
+def test_reference_documents_search_index_coverage_status(client):
+    """索引覆盖接口必须表达原文回退，不能把候选索引写成检索结果来源。"""
+    operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
+    status = operations["GET /api/v1/tasks/{task_id}/search-index-status"]
+    assert status["title"] == "查询历史检索索引覆盖状态"
+    assert status["group"] == "日志查询"
+    assert status["permission"] == "logs:read"
+    assert set(status["responseExample"]) == {
+        "enabled", "status", "totalFiles", "coveredFiles", "coverageComplete",
+        "latestIndexedHour", "contiguousCoveredThrough", "truncated", "fallback",
+    }
+    assert status["responseExample"]["fallback"] == "RAW_SCAN"
+    assert "原始日志扫描" in status["description"]
+
+
 def test_reference_has_real_chinese_descriptions_for_every_input_parameter_and_nested_field(client):
     """公开目录不得再把未描述字段交给前端猜测，嵌套命令也必须有业务语义。"""
     reference = client.get("/api/v1/api-reference").json()
@@ -330,3 +358,21 @@ def test_reference_coredumps_describe_binary_downloads_and_real_permissions(clie
     guides = "\n".join(item["text"] for item in reference["guides"])
     for text in ("WAITING_DEVICE", "新认证", "coredump_flag.cdf", "首次扫描观测时间", "sourceState", "设备时间影响"):
         assert text in guides
+
+
+def test_operation_names_distinguish_lists_details_states_and_downloads():
+    """全模块名称不能沿用分组名拼接，避免把取消作业误称删除文件。"""
+    from camera_logs.reference.catalog import operation_title
+    expected = {
+        ('GET', '/api/v1/log-files/{identifier}'): '查询日志分卷元数据与归档状态',
+        ('GET', '/api/v1/audit-events'): '查询业务操作审计记录',
+        ('GET', '/api/v1/runtime-events'): '查询采集运行事件',
+        ('GET', '/api/v1/request-events'): '查询HTTP请求访问记录',
+        ('DELETE', '/api/v1/coredump-exports/{identifier}'): '取消Coredump导出作业',
+        ('GET', '/api/v1/downloads/{identifier}/content'): '下载已生成的日志归档文件',
+        ('POST', '/api/v1/tasks/{task_id}/commands'): '向采集会话发送手动命令',
+    }
+    for key, title in expected.items():
+        assert operation_title(*key) == title
+    for route, identifier in (('tasks', 'task_id'), ('resources', 'identifier'), ('command-templates', 'identifier')):
+        assert operation_title('GET', f'/api/v1/{route}') != operation_title('GET', f'/api/v1/{route}/{{{identifier}}}')

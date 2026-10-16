@@ -53,7 +53,9 @@ async def search_candidates(repo, frozen_files, keyword, *, cancelled=None):
     """按节点批量获取索引证据；RPC失败仅降低速度，不降低结果完整性。"""
     if len(keyword) < 3 or any(character in keyword for character in "\r\n\0"):
         return {file["id"] for file in frozen_files}
-    evidence, remote = {}, defaultdict(list)
+    from camera_logs.indexing.query import query_evidence
+    evidence, _index_status = await query_evidence(repo.settings, frozen_files, keyword)
+    remote = defaultdict(list)
     # 以当前目录定位已发布归档，但只将成员/水位与冻结清单一致者用于排除。
     current_files = {}
     for start in range(0, len(frozen_files), 256):
@@ -64,6 +66,8 @@ async def search_candidates(repo, frozen_files, keyword, *, cancelled=None):
             current_files[file["id"]] = file
     local = []
     for frozen in frozen_files:
+        if frozen["id"] in evidence:
+            continue
         current = current_files.get(frozen["id"])
         if (frozen.get("status") != "READY" or current is None
                 or any(current.get(key) != frozen.get(key) for key in ("bytes", "archiveMember", "nodeId"))):

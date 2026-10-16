@@ -3,18 +3,14 @@
 import hashlib
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from camera_logs.common.event_indexes import install_event_indexes
-
-
-def now():
-    """返回统一的 UTC 时间，避免数据库记录混用本地时区。"""
-    return datetime.now(UTC)
+from camera_logs.common.presentation_time import now
 
 
 def public(document):
@@ -34,6 +30,7 @@ def public(document):
             "tokenHash",
             "tokenEncrypted",
             "path",
+            "resultPath",
             "rawPath",
             "indexPath",
             "leaseUntil",
@@ -55,6 +52,7 @@ def public(document):
             "resourceMonitorLeaseRunId",
             "resourceMonitorLeaseGeneration",
             "resourceMonitorLeaseNodeId",
+            "outputRecoveryLeases",
             "slaveSshBootstrap",
         }
     }
@@ -111,6 +109,8 @@ class Repository:
         await self.db.files.create_index([("taskId", 1), ("hour", 1)])
         # 旧归档全文索引按节点/READY/稳定ID游标补建，避免每轮扫全部历史目录。
         await self.db.files.create_index([("nodeId", 1), ("status", 1), ("id", 1)])
+        await self.db.files.create_index([("nodeId", 1), ("path", 1), ("status", 1), ("id", 1)],
+                                         name="files_node_archive_members")
         await self.db.files.create_index(
             [("deploymentClosedProof.nodeId", 1), ("status", 1), ("deploymentClosedProof.archiveRecoveredAt", 1)],
             name="files_deployment_closed_proof_recovery",
@@ -164,6 +164,9 @@ class Repository:
         await self.db.jobs.create_index([("nodeId", 1), ("status", 1), ("leaseUntil", 1)])
         await self.db.jobs.create_index([("status", 1), ("leaseUntil", 1)])
         await self.db.jobs.create_index([("nodeId", 1), ("status", 1), ("createdAt", 1), ("id", 1)])
+        # 下载历史按任务和创建时刻稳定分页，kind 前缀排除同集合内的搜索作业。
+        await self.db.jobs.create_index([("taskId", 1), ("kind", 1), ("createdAt", -1), ("id", -1)],
+                                        name="jobs_task_download_history")
         await self.db.jobs.create_index([("nodeId", 1), ("kind", 1), ("status", 1),
                                          ("outputExecutionState", 1), ("expiresAt", 1), ("id", 1)],
                                         name="jobs_export_cleanup_candidates")

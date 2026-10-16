@@ -45,6 +45,8 @@ def test_completion_transaction_retries_without_rebuilding_output(client, monkey
     persisted = client.portal.call(repo.db.jobs.find_one, {"id": job["id"]})
     assert persisted["outputExecutionState"] == "CLOSED"
     assert persisted["outputWriterClosedAt"] is not None
+    assert persisted["artifactCreatedAt"] is not None and persisted["artifactRetentionDays"] == 7
+    assert persisted["expiresAt"] - persisted["artifactCreatedAt"] == timedelta(days=7)
     assert client.portal.call(repo.db.audit.count_documents, {"action": "job_succeeded"}) == 1
 
 

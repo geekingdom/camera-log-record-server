@@ -1,0 +1,18 @@
+# 可选的专用ES单机实例；生产多节点或高可用请接入已有ES集群。
+# 独立于采集部署，限制宿主机内存；默认只向回环开放，由受信网络反向代理或调整绑定接入。
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.4
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'true'
+      xpack.security.http.ssl.enabled: 'false'
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:?请配置独立ES管理员密码}
+      ES_JAVA_OPTS: '-Xms1g -Xmx1g'
+    ports: ['${ES_BIND_IP:-127.0.0.1}:${ES_PORT:-9200}:9200']
+    mem_limit: 3g
+    volumes: ['elasticsearch-data:/usr/share/elasticsearch/data']
+    restart: unless-stopped
+    logging: {driver: local, options: {max-size: '10m', max-file: '7'}}
+volumes:
+  elasticsearch-data:

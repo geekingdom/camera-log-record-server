@@ -2,7 +2,7 @@
 import asyncio
 import base64
 import tarfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -132,6 +132,7 @@ async def test_internal_download_holds_export_reader_until_body_is_consumed(tmp_
         "id": "download", "nodeId": "node", "kind": "DOWNLOAD", "status": "SUCCEEDED",
         "resultPath": str(output), "filename": output.name, "outputExecutionState": "CLOSED",
         "outputWriterNodeId": "node", "outputWriterClosedAt": datetime.now(UTC), "outputReaders": [],
+        "expiresAt": datetime.now(UTC) + timedelta(hours=1),
     })
     app = FastAPI()
     reads = install_node_routes(app, repo, SimpleNamespace(log_root=tmp_path))

@@ -22,6 +22,7 @@ from typing import Any
 from pymongo import ReturnDocument
 
 from camera_logs.common.database import now
+from camera_logs.common.presentation_time import utc_iso
 from camera_logs.logs.archive_spool import load as load_archive_spool
 from camera_logs.logs.archive_spool import persist as persist_archive_spool
 from camera_logs.logs.catalog_identity import file_identity
@@ -585,7 +586,7 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
     removed = skipped = failures = 0
     query = {
         "nodeId": repo.settings.node_id, "$or": [
-            {"status": "READY", "hour": {"$lt": cutoff.isoformat()}},
+            {"status": "READY", "hour": {"$lt": utc_iso(cutoff)}},
             {"status": "DELETING"},
         ],
     }
@@ -612,7 +613,7 @@ async def apply_retention(repo: Any, *, development_file_ids: frozenset[str] | N
                 eligible = False
                 break
             if member.get("status") == "READY":
-                if member.get("hour", cutoff.isoformat()) >= cutoff.isoformat():
+                if member.get("hour", utc_iso(cutoff)) >= utc_iso(cutoff):
                     eligible = False
                     break
                 retain_until = member.get("retainUntil")

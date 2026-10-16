@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now, public
 from camera_logs.common.models import new_id
+from camera_logs.common.presentation_time import utc_iso
 from camera_logs.logs.order import ordered_files
 
 
@@ -19,6 +20,20 @@ async def _confirmed(database, actor_id, key, digest, *, session=None):
         if previous is not None:
             return previous
     return await audited_mutations._confirmed_existing(database, digest, "jobs", existing, session=session)
+
+
+def _canonical_hour_ids(hour_ids):
+    """把展示层的上海小时和历史 UTC 小时都规范为目录索引使用的 UTC 键。"""
+    values = []
+    for value in hour_ids:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            # 保持原有语义：未知目录 ID 由后续完整性校验报告 409，而非改成格式错误。
+            values.append(value)
+            continue
+        values.append(utc_iso(parsed) if parsed.tzinfo is not None else value)
+    return values
 
 
 def _file_query(body, kind, timestamp):
@@ -35,7 +50,8 @@ def _file_query(body, kind, timestamp):
     except ValueError as error:
         raise HTTPException(422, "时间范围须包含时区且不超过24小时") from error
     start, end = start.astimezone(timestamp.tzinfo), end.astimezone(timestamp.tzinfo)
-    query["hour"] = {"$gte": start.replace(minute=0, second=0, microsecond=0).isoformat(), "$lte": end.isoformat()}
+    # 目录 hour 始终是 UTC 文本键，不能把上海显示偏移量写入字符串范围比较。
+    query["hour"] = {"$gte": utc_iso(start.replace(minute=0, second=0, microsecond=0)), "$lte": utc_iso(end)}
     return query, {"start": start.isoformat(), "end": end.isoformat()}
 
 
@@ -59,6 +75,8 @@ async def submit_job(repo, actor_id, key, body, kind):
     """冻结目录水位、保护文件、发布作业与审计共享同一事务及固定幂等 ID。"""
     if not key or len(key) > 128:
         raise HTTPException(422, "必须提供不超过128字符的 Idempotency-Key")
+    if kind == "DOWNLOAD":
+        body.hourIds = _canonical_hour_ids(body.hourIds)
     digest = audited_mutations.request_digest(kind, body.model_dump())
     database = audited_mutations._majority_primary_database(repo)
     previous = await _confirmed(database, actor_id, key, digest)
@@ -67,7 +85,7 @@ async def submit_job(repo, actor_id, key, body, kind):
     task = await repo.get("tasks", body.taskId)
     identifier, timestamp = new_id(), now()
     query, bounds = _file_query(body, kind, timestamp)
-    expires = timestamp + timedelta(hours=24)
+    execution_expires = timestamp + timedelta(hours=24)
 
     async def commit(session):
         previous = await _confirmed(repo.db, actor_id, key, digest, session=session)
@@ -80,14 +98,17 @@ async def submit_job(repo, actor_id, key, body, kind):
                 continue
             protected = await repo.db.files.update_one(
                 {"id": file["id"], "status": {"$in": ["OPEN", "READY"]}},
-                {"$max": {"retainUntil": expires}}, session=session,
+                {"$max": {"retainUntil": execution_expires}}, session=session,
             )
             if protected.matched_count != 1:
                 raise HTTPException(409, "日志片段正在清理，请刷新后重试")
         document = body.model_dump() | bounds | {
             "id": identifier, "kind": kind, "status": "QUEUED", "progress": 0,
             "actor": actor_id, "files": files, "nodeId": task.get("nodeId") or files[0]["nodeId"],
-            "taskName": task["name"], "taskIp": task["ip"], "createdAt": timestamp, "expiresAt": expires,
+            "taskName": task["name"], "taskIp": task["ip"], "createdAt": timestamp,
+            # 排队和执行沿用 24 小时上限；成功后覆盖 expiresAt，使下载保留期从
+            # 制品真实创建完成而非提交排队时刻开始计算。
+            "executionExpiresAt": execution_expires, "expiresAt": execution_expires,
         }
         await repo.db.idempotency.insert_one({
             "actor": actor_id, "key": key, "digest": digest, "resourceId": identifier,

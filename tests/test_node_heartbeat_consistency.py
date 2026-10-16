@@ -99,4 +99,4 @@ def test_node_apis_agree_on_future_and_fresh_heartbeats(client, monkeypatch):  #
     assert nodes["fresh"]["health"]["status"] != "OFFLINE"
     assert admin["fresh"]["online"] is True
     assessed_at = datetime.fromisoformat(nodes["fresh"]["assessedAt"])
-    assert assessed_at.utcoffset() == timedelta(0)
+    assert assessed_at.utcoffset() == timedelta(hours=8)

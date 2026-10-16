@@ -12,6 +12,7 @@ from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, public
 from camera_logs.common.node_http import NodeHttpPool
 from camera_logs.common.observability import redact_text
+from camera_logs.common.presentation_time import PresentationTimeMiddleware
 
 
 def create_app(settings=None, db=None):
@@ -75,6 +76,8 @@ def create_app(settings=None, db=None):
                     listener.stop()
 
     app = FastAPI(title="设备日志记录服务", version="0.1.0", lifespan=lifespan)
+    # FastAPI 会先把 datetime 编码为字符串，因此在 ASGI 发送边界统一转换展示时区。
+    app.add_middleware(PresentationTimeMiddleware)
     @app.middleware("http")
     async def client_network_policy(request, call_next):
         """启动窗口先返回稳定 503，再在 API 请求前执行来源白名单。"""
@@ -153,6 +156,8 @@ def create_app(settings=None, db=None):
 
     from camera_logs.logs.api import install_log_routes
     install_log_routes(app)
+    from camera_logs.indexing.api import install_index_routes
+    install_index_routes(app)
     from camera_logs.coredumps.api import install_coredump_routes
     install_coredump_routes(app)
     from camera_logs.administration.api import install_admin_routes

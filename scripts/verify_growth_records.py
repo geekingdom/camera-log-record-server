@@ -88,9 +88,10 @@ async def main():
                  ("idempotency", {"resourceId": "cmd", "expiresAt": {"$gt": now()}}, {}),
                  ("operations", {"createdAt": {"$lt": now()}}, {"createdAt": 1, "_id": 1}),
                  ("jobs", {"nodeId": "node", "kind": "DOWNLOAD", "status": {"$in": ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"]},
-                           "outputExecutionState": {"$in": ["CLOSED", "WRITING"]}, "expiresAt": {"$lte": now()}}, {"expiresAt": 1, "id": 1})]
-        for collection, query, order in cases:
-            await db[collection].insert_many([{"id": f"filler-{i}", "taskId": "task", "runId": "run",
+                           "outputExecutionState": {"$in": ["CLOSED", "WRITING"]}, "expiresAt": {"$lte": now()}}, {"expiresAt": 1, "id": 1}),
+                 ("jobs", {"taskId": "download-history", "kind": "DOWNLOAD"}, {"createdAt": -1, "id": -1})]
+        for case_index, (collection, query, order) in enumerate(cases):
+            await db[collection].insert_many([{"id": f"filler-{collection}-{case_index}-{i}", "taskId": "download-history", "runId": "run",
                 "endedAt": stamp, "createdAt": stamp, "actor": "verify", "key": str(i),
                 "nodeId": "node", "kind": "DOWNLOAD", "status": "FAILED", "outputExecutionState": "CLOSED",
                 "resourceId": "cmd", "expiresAt": stamp if collection == "jobs" else now()+timedelta(days=1)} for i in range(500)])
@@ -102,7 +103,7 @@ async def main():
             plan = json.dumps(explain["queryPlanner"]["winningPlan"], default=str)
             assert '"stage": "SORT"' not in plan and "IXSCAN" in plan, plan
             assert stats["totalDocsExamined"] <= 10
-            explains[collection] = {key: stats[key] for key in ("nReturned", "totalKeysExamined", "totalDocsExamined")}
+            explains[f"{collection}-{case_index}"] = {key: stats[key] for key in ("nReturned", "totalKeysExamined", "totalDocsExamined")}
         print(json.dumps({"rollback": True, "segmented1001": True, "leaseExclusion": True, "explain": explains}))
     finally:
         await mongo.drop_database(name)

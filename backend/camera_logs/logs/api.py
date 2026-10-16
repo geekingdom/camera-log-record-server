@@ -17,10 +17,12 @@ from fastapi import Depends, HTTPException, Query, Request, Response, WebSocket,
 from fastapi.responses import StreamingResponse
 
 from camera_logs.access_policy.policy import apply_ip_permissions
-from camera_logs.common.database import now, public
+from camera_logs.common.database import public
 from camera_logs.common.models import DownloadCreate, SearchCreate
+from camera_logs.common.presentation_time import utc_iso
 from camera_logs.common.security import actor, authenticate, authorize
 from camera_logs.common.websocket_logging import bind_websocket_actor
+from camera_logs.logs.download_availability import download_available
 from camera_logs.logs.download_sessions import download_actor
 from camera_logs.logs.gap_catalog import catalog_cursor_page, catalog_gap_fragments
 from camera_logs.logs.hour_catalog import summarize_hours
@@ -124,8 +126,8 @@ def install_log_routes(app):
         query = {"taskId": task_id, "status": {"$ne": "DELETED"}}
         if date is not None:
             start = datetime.combine(date, datetime.min.time(), ZoneInfo("Asia/Shanghai"))
-            query["hour"] = {"$gte": start.astimezone(now().tzinfo).isoformat(),
-                             "$lt": (start+timedelta(days=1)).astimezone(now().tzinfo).isoformat()}
+            # hour 是历史 UTC 文本键，查询不能受展示时区或 now() 返回时区影响。
+            query["hour"] = {"$gte": utc_iso(start), "$lt": utc_iso(start + timedelta(days=1))}
         values = summarize_hours([file async for file in repo().db.files.find(query)])
         return {"items": values[(page-1)*pageSize:page*pageSize], "total": len(values), "page": page, "pageSize": pageSize}
 
@@ -139,7 +141,7 @@ def install_log_routes(app):
             start = datetime.strptime(month, "%Y-%m").replace(tzinfo=SHANGHAI)
             end = start.replace(year=start.year + (start.month == 12),
                                 month=1 if start.month == 12 else start.month + 1)
-            lower, upper = start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()
+            lower, upper = utc_iso(start), utc_iso(end)
         except (OverflowError, ValueError) as exc:
             raise HTTPException(422, "month必须是有效的 YYYY-MM 月份") from exc
         query = {
@@ -193,7 +195,7 @@ def install_log_routes(app):
         low, high = sorted((first_hour, last_hour))
         if high - low > timedelta(hours=24):
             return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "CATALOG_TOO_BROAD", "message": "缺口锚点超过 24 小时，无法建立有界目录快照。"}]}
-        query = {"taskId": task_id, "hour": {"$gte": low.isoformat(), "$lte": high.isoformat()}}
+        query = {"taskId": task_id, "hour": {"$gte": utc_iso(low), "$lte": utc_iso(high)}}
         files = [file async for file in repo().db.files.find(query).limit(501)]
         if len(files) > 500:
             return {"items": [], "nextCursor": None, "unrecoverable": [{"reason": "CATALOG_TOO_BROAD", "message": "缺口目录超过 500 个文件，请缩小范围或通过小时归档查看。"}]}
@@ -243,6 +245,25 @@ def install_log_routes(app):
         authorize(user, "logs:download" if doc["kind"] == "DOWNLOAD" else "logs:read", doc["taskId"])
         return public(doc)
 
+    @app.get("/api/v1/tasks/{task_id}/downloads")
+    async def download_history(task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+        """按创建时间稳定倒序列出任务下载历史，历史行不暴露节点路径或写入租约。"""
+        authorize(user, "logs:download", task_id)
+        await repo().get("tasks", task_id)
+        query = {"taskId": task_id, "kind": "DOWNLOAD"}
+        total = await repo().db.jobs.count_documents(query)
+        # 列表不携带作业冻结的数千分卷目录，避免分页行数有限但响应体无限放大。
+        fields = {key: 1 for key in ("id", "kind", "taskId", "nodeId", "status", "createdAt", "updatedAt",
+            "expiresAt", "artifactCreatedAt", "artifactRetentionDays", "filename", "bytes", "progress", "error",
+            "resultPath", "outputExecutionState", "outputCleanupState")}
+        cursor = repo().db.jobs.find(query, fields).sort([("createdAt", -1), ("id", -1)]).skip((page - 1) * pageSize).limit(pageSize)
+        items = []
+        async for document in cursor:
+            item = public(document)
+            item["downloadAvailable"] = download_available(document)
+            items.append(item)
+        return {"items": items, "total": total, "page": page, "pageSize": pageSize}
+
     @app.get("/api/v1/log-searches/{identifier}/results")
     async def results(identifier: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(100, ge=1, le=100)):
         doc = await repo().get("jobs", identifier)
@@ -257,6 +278,8 @@ def install_log_routes(app):
         authorize(user, "logs:download", doc["taskId"])
         if doc["status"] != "SUCCEEDED":
             raise HTTPException(409, "导出尚未完成")
+        if not download_available(doc):
+            raise HTTPException(410, "下载制品已过期或已清理")
         await repo().audit(user["id"], "download_content", identifier)
         return await proxy_file(repo(), doc["nodeId"], f"/internal/downloads/{identifier}", request.headers.get("range"))
 

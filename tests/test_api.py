@@ -130,6 +130,7 @@ def test_coredump_listing_hides_historical_flag_files_and_exposes_source_stabili
     """历史标志文件不参与搜索或分页，采集器观测到的稳定状态仍可供排障读取。"""
     repo = client.app.state.repo
     observed = "2026-09-10T01:02:03+00:00"
+    displayed = "2026-09-10T09:02:03+08:00"
     client.portal.call(repo.db.coredump_files.insert_many, [
         {"id": "flag-root", "resourceId": "fixture-device", "nodeId": "test", "name": "coredump_flag.cdf",
          "receivedAt": observed},
@@ -145,8 +146,8 @@ def test_coredump_listing_hides_historical_flag_files_and_exposes_source_stabili
     assert response.status_code == 200, response.text
     assert response.json() == {
         "items": [{"id": "core", "resourceId": "fixture-device", "nodeId": "test",
-                   "name": "文件(none)/core-001.gz", "receivedAt": observed, "sourceState": "STABLE",
-                   "sourceObservedAt": observed, "sourceUnchangedSince": observed, "sourceStableAt": observed}],
+                   "name": "文件(none)/core-001.gz", "receivedAt": displayed, "sourceState": "STABLE",
+                   "sourceObservedAt": displayed, "sourceUnchangedSince": displayed, "sourceStableAt": displayed}],
         "total": 1, "page": 1, "pageSize": 1,
     }
     assert client.portal.call(repo.db.coredump_files.count_documents, {"name": "coredump_flag.cdf"}) == 1
@@ -173,7 +174,7 @@ def test_task_list_combines_creator_filters_and_resource_deletion_time(client):
     response = client.get("/api/v1/tasks?createdBy=owner-a&status=STOPPED&search=%E5%8C%B9%E9%85%8D&resourceId=deleted-device")
     assert response.status_code == 200, response.text
     assert [item["id"] for item in response.json()["items"]] == ["owned-match"]
-    assert response.json()["items"][0]["resourceDeletedAt"] == "2026-09-09T10:00:00Z"
+    assert response.json()["items"][0]["resourceDeletedAt"] == "2026-09-09T18:00:00+08:00"
     owner_b = client.get("/api/v1/tasks?createdBy=owner-b").json()["items"]
     assert "resourceDeletedAt" not in next(item for item in owner_b if item["id"] == "other-owner")
 

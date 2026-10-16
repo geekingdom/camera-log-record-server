@@ -3,6 +3,8 @@ import type {
   LogFile,
   CommandExecution,
   CoredumpExport,
+  DownloadHistoryItem,
+  SearchIndexStatus,
   CoredumpFile,
   CoredumpMonitorStatus,
   CommandExecutionPage,
@@ -371,6 +373,10 @@ export const api = {
       progress?: number;
       error?: string;
     }>(`/downloads/${id}`),
+  taskDownloads: (taskId: string, page = 1) =>
+    request<Page<DownloadHistoryItem>>(`/tasks/${encodeURIComponent(taskId)}/downloads${query(page, 20)}`),
+  searchIndexStatus: (taskId: string, start: string, end: string) =>
+    request<SearchIndexStatus>(`/tasks/${encodeURIComponent(taskId)}/search-index-status?${new URLSearchParams({ start, end })}`),
   search: (taskId: string, keyword: string, start?: string, end?: string) =>
     request<{ id: string }>("/log-searches", {
       method: "POST",

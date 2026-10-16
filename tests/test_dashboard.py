@@ -72,7 +72,7 @@ def test_dashboard_uses_shanghai_days_and_raw_segment_bytes(dashboard_client):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["date"] == "2026-10-12"
-    assert body["generatedAt"].endswith("+00:00")
+    assert body["generatedAt"].endswith("+08:00")
     assert body["range"] == {"startDate": "2026-10-06", "endDate": "2026-10-12"}
     assert len(body["daily"]) == 7
     assert body["daily"][-1] == {"date": "2026-10-12", "bytes": 150, "fileCount": 2}
@@ -80,13 +80,32 @@ def test_dashboard_uses_shanghai_days_and_raw_segment_bytes(dashboard_client):
                                       "bytes": 150, "fileCount": 2}]
     assert body["coredumps"] == {"resourceCount": 1, "fileCount": 2, "bytes": 100, "items": [{
         "resourceId": "camera-a", "name": "大厅", "ip": "192.0.2.10", "fileCount": 2, "bytes": 100,
-        "lastReceivedAt": "2026-10-12T03:00:00+00:00",
+        "lastReceivedAt": "2026-10-12T11:00:00+08:00",
     }], "truncated": False}
     assert body["overview"] == {"resources": 2, "onlineResources": 1, "collectingTasks": 1,
                                  "tasks": 2, "nodes": 1}
     assert body["nodes"] == [{"id": "node-a", "name": "节点A", "healthLevel": "HEALTHY", "reasons": [], "accepting": True,
                                "activeTasks": 1, "capacity": 4, "inputBytesPerSecond": None,
                                "lastHeartbeat": body["nodes"][0]["lastHeartbeat"]}]
+
+
+def test_dashboard_limits_resource_ranking_to_top_ten(dashboard_client):
+    """排行接口与工作台固定展示十项，超过部分以截断标记提示而不扩张响应。"""
+    _seed_dashboard_data(dashboard_client)
+    repo = dashboard_client.app.state.repo
+    for index in range(11):
+        resource_id, task_id = f"rank-resource-{index}", f"rank-task-{index}"
+        dashboard_client.portal.call(repo.db.resources.insert_one, {"id": resource_id, "name": resource_id,
+            "ip": f"192.0.2.{30 + index}", "deletedAt": None, "healthStatus": "ONLINE"})
+        dashboard_client.portal.call(repo.db.tasks.insert_one, {"id": task_id, "resourceId": resource_id,
+            "desiredState": "STOPPED", "status": "STOPPED"})
+        dashboard_client.portal.call(repo.db.files.insert_one, {"id": f"rank-file-{index}", "taskId": task_id,
+            "hour": "2026-10-12T02:00:00+00:00", "status": "READY", "bytes": index + 1})
+
+    body = dashboard_client.get("/api/v1/dashboard?date=2026-10-12",
+                                headers={"Authorization": "Bearer dashboard-admin"}).json()
+
+    assert len(body["topResources"]) == 10 and body["topResourcesTruncated"] is True
 
 
 def test_dashboard_allows_task_read_without_log_read_but_marks_statistics_unavailable(dashboard_client):
