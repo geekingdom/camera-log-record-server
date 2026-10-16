@@ -149,10 +149,13 @@ async def test_ssh_pause_closes_server_session_and_resume_reuses_run_budget(tmp_
 
         commands = [item async for item in repo.db.commands.find({"kind": "SCHEDULED"})]
         assert authentication == [("collector", "password"), ("collector", "password")]
-        assert [_command_lines(payload) for payload in payloads] == [
-            [b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"],
-            [b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"],
-        ]
+        expected_commands = [b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"]
+        for payload in payloads:
+            lines = _command_lines(payload)
+            assert lines[:-1] == expected_commands
+            assert lines[-1:] == [b"outputClose"]
+            # 第一条来自既有初始化，末尾一条只由显式暂停/停止发送。
+            assert lines.count(b"outputClose") == 2
         assert first_session != second_session
         assert (await repo.db.budgets.find_one({"_id": "same-run:periodic"}))["attempts"] == 2
         assert len({item["sessionId"] for item in commands}) == 2

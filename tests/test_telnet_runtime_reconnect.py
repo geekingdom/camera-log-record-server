@@ -25,7 +25,10 @@ async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(t
     """协议 NOP 不算正文；旧 Telnet 关闭完成后才建新会话，预算按运行累计。"""
     handlers, server_eof, received, server_eofs = set(), asyncio.Event(), [], set()
     logins = []
-    initial_commands = ["outputClose", "outputOpen", "setDebug -m all -l 7 -d 111", "prtHardInfo"]
+    initial_commands = (
+        ["outputClose", "outputOpen", "setDebug -m all -l 7 -d 111", "prtHardInfo"]
+        if protocol == "TELNET_DEVICE" else ["outputOpen", "setDebug -m all -l 7 -d 111", "prtHardInfo"]
+    )
     client_heartbeats = set()
     client_close_finished, second_factory = asyncio.Event(), asyncio.Event()
     second_initialised, scheduled_twice = asyncio.Event(), asyncio.Event()
@@ -156,7 +159,19 @@ async def test_telnet_idle_reconnects_after_client_close_and_reuses_run_budget(t
         # 允许繁忙 CI 的调度余量，但默认退化到 15 秒或过早触发均应失败。
         assert len(idle_elapsed) == 1 and 9.99 <= idle_elapsed[0] < 13
         expected_commands = [command.encode() for command in initial_commands] + [b"probe"]
-        assert [_command_lines(payload) for payload in payloads] == [expected_commands, expected_commands]
+        first_lines, second_lines = [_command_lines(payload) for payload in payloads]
+        if protocol == "TELNET_DEVICE":
+            # 空闲超时断开首会话时不补发关闭命令，定时命令可能已在超时前发送。
+            assert first_lines in (expected_commands[:-1], expected_commands)
+            assert first_lines.count(b"outputClose") == 1
+            # 显式停止第二会话时才在既有命令之后追加一次关闭命令。
+            assert second_lines[:-1] == expected_commands
+            assert second_lines[-1:] == [b"outputClose"]
+            assert second_lines.count(b"outputClose") == 2
+        else:
+            assert first_lines in (expected_commands[:-1], expected_commands)
+            assert second_lines == expected_commands
+            assert b"outputClose" not in first_lines + second_lines
         expected_logins = [(1, b"operator", b"secret"), (2, b"operator", b"secret")]
         assert logins == (expected_logins if protocol == "TELNET_DEVICE" else [])
         assert client_heartbeats == {1, 2}

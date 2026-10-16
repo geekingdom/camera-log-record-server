@@ -22,6 +22,7 @@ from camera_logs.collection.coredump_lease import (
     record_coredump_status,
 )
 from camera_logs.collection.liveness import RuntimeLiveness
+from camera_logs.collection.output_recovery import claim_output_recovery_lease
 from camera_logs.collection.psh_dialogue import PshSwitchError
 from camera_logs.collection.psh_passwords import PshPasswordProvider
 from camera_logs.collection.resource_auth_gate import wait_for_resource_authentication
@@ -421,6 +422,13 @@ class SessionRuntime:
                 if not await wait_for_resource_authentication(self.repo, self.task, stopping=lambda: self.stopping):
                     raise OwnershipLost("重连前资源认证、归属或运行意图已失效")
                 config = dict(self.task)
+                resource = await self.repo.db.resources.find_one(
+                    {"id": config.get("resourceId"), "deletedAt": None}, {"kind": 1},
+                )
+                if resource:
+                    # 串口传输可能连向海康设备或普通串口服务器；输出控制只接受这里的
+                    # 资源快照，不能从协议名或端口猜测设备能力。
+                    config["resourceKind"] = resource.get("kind")
                 config["password"] = self.repo.decrypt(config["passwordEncrypted"])
                 config["knownHosts"] = self.repo.settings.known_hosts
                 config["verifyHostKey"] = self.repo.settings.ssh_verify_host_key
@@ -439,7 +447,8 @@ class SessionRuntime:
                 self.collector = Collector(config, self.repo.settings.log_root, connection_factory=self.factory,
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
                     reserve_execution=self.reserve, update_execution=self.update_execution,
-                    resolve_debug_password=self.debug_passwords, on_debug=self.on_debug)
+                    resolve_debug_password=self.debug_passwords, on_debug=self.on_debug,
+                    claim_output_recovery=lambda: claim_output_recovery_lease(self.repo, self.task))
                 collector = self.collector
                 collector._on_receive = lambda collector=collector: (
                     self.liveness.received(collector) if collector is self.collector else None

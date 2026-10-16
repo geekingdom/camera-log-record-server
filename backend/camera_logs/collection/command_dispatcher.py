@@ -21,7 +21,7 @@ class CommandChannelBlocked(RuntimeError):
     """PSH 恢复未确认，禁止把普通命令写入可能仍等待口令的设备。"""
 
 
-CommandItem = tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, bool, bytes | None, int, asyncio.Future[Any]]
+CommandItem = tuple[int, int, str, str, str | None, float, Callback | None, Callback | None, bool, bool, bytes | None, int, asyncio.Future[Any]]
 
 
 class CommandCaptureError(ConnectionError):
@@ -98,7 +98,7 @@ class CommandDispatcher:
         timeout_seconds: float = 30,
         before_send: Callback | None = None,
         session_guard: Callback | None = None,
-        allow_during_shutdown: bool = False, capture_marker: bytes | None = None,
+        allow_during_shutdown: bool = False, require_safe_channel: bool = False, capture_marker: bytes | None = None,
         capture_maximum: int = 0,
     ) -> bytes | None:
         """按优先级和入队序号串行提交命令，失败始终结束本命令等待者。"""
@@ -107,7 +107,7 @@ class CommandDispatcher:
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._counter += 1
         await self._queue.put((priority, self._counter, command, newline, prompt, timeout_seconds,
-                               before_send, session_guard, allow_during_shutdown, capture_marker,
+                               before_send, session_guard, allow_during_shutdown, require_safe_channel, capture_marker,
                                capture_maximum, future))
         return await future
 
@@ -174,7 +174,7 @@ class CommandDispatcher:
         """独占连接写入，重检会话归属与预算后才发送业务字节。"""
         while True:
             (_, _, command, newline, prompt, timeout_seconds, before_send, session_guard,
-             allow_during_shutdown, capture_marker, capture_maximum, future) = await self._queue.get()
+             allow_during_shutdown, require_safe_channel, capture_marker, capture_maximum, future) = await self._queue.get()
             self.sending_future = future
             prompt_future: asyncio.Future[None] | None = None
             capture: _Capture | None = None
@@ -190,6 +190,9 @@ class CommandDispatcher:
                     continue
                 if self._stopping() and not allow_during_shutdown:
                     raise ConnectionError("connection is stopping")
+                if require_safe_channel and not self.can_send_shell_keepalive():
+                    # 诊断/恢复命令不能在 PSH 边界自动探测或输入口令。
+                    raise CommandChannelBlocked("PSH 命令通道尚未确认，跳过诊断恢复命令")
                 if self._command_blocked:
                     # 恢复握手同样占用唯一发送槽；未回到 shell 时本次未进入业务发送阶段，
                     # 因而不能消耗定时预算，也不影响接收器继续保存设备日志。

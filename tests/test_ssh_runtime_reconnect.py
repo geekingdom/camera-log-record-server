@@ -152,10 +152,15 @@ async def test_ssh_idle_reconnects_after_close_and_reuses_run_budget(tmp_path):
         assert factory_calls == 2
         assert authentication == [("collector", "password"), ("collector", "password")]
         assert keepalive_connections == {1, 2}
-        assert [_command_lines(payload) for payload in payloads] == [
-            [b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"],
-            [b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"],
-        ]
+        expected_commands = [b"outputClose", b"outputOpen", b"setDebug -m all -l 7 -d 111", b"prtHardInfo", b"probe"]
+        first_lines, second_lines = [_command_lines(payload) for payload in payloads]
+        # 空闲超时后的 EOF 只断开传输，不能补发 outputClose。
+        assert first_lines in (expected_commands[:-1], expected_commands)
+        assert first_lines.count(b"outputClose") == 1
+        # 显式停止第二会话时，既有初始化与定时命令后只追加一次关闭命令。
+        assert second_lines[:-1] == expected_commands
+        assert second_lines[-1:] == [b"outputClose"]
+        assert second_lines.count(b"outputClose") == 2
         assert budget["attempts"] == 2
         assert len({item["sessionId"] for item in commands}) == 2
         assert [item["attempt"] for item in sorted(commands, key=lambda item: item["attempt"])] == [1, 2]

@@ -25,11 +25,15 @@ from .command_dispatcher import BudgetExhausted, CommandChannelBlocked, CommandD
 from .contracts import AsyncConnection, Callback, LogChunk
 from .contracts import call_callback as _call
 from .line_prefix import LinePrefixer
+from .output_recovery import OutputRecovery, OutputRecoveryCommandSkipped, supports_output_recovery
 from .psh_dialogue import PshSwitchError
 from .scheduled_supervision import supervise_scheduled
 from .shell_keepalive import ShellKeepalive
 
 _SHELL_KEEPALIVE_SECONDS = 60
+_OUTPUT_CLOSE_TIMEOUT_SECONDS = 2
+_OUTPUT_RECOVERY_LEASE_TIMEOUT_SECONDS = 2
+_LOGREAD_RECOVERY_COMMAND = "kill $(ps | grep logread | grep -v \"logread -n\" | grep -v grep | awk '{print $1}')"
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +53,7 @@ class Collector:
         on_debug: Callback | None = None,
         on_receive: Callback | None = None,
         on_liveness_reset: Callback | None = None,
+        claim_output_recovery: Callback | None = None,
     ) -> None:
         self.task = dict(task)
         self.task_id = str(task.get("id") or task.get("_id"))
@@ -98,6 +103,7 @@ class Collector:
         self.liveness_storage_busy = False
         self._on_receive = on_receive
         self._on_liveness_reset = on_liveness_reset
+        self._claim_output_recovery = claim_output_recovery
         self._commands = CommandDispatcher(
             self.task | {"id": self.task_id, "runId": self.run_id, "sessionId": self.session_id},
             resolve_debug_password=resolve_debug_password,
@@ -110,6 +116,15 @@ class Collector:
             on_command_written=self._observe_shell_command,
         )
         self._last_shell_command_monotonic = time.monotonic()
+        self._output_close_attempted = False
+        self._output_recovery = OutputRecovery(
+            self.task,
+            closed=self._closed.is_set,
+            ready=self._output_recovery_ready,
+            recover=self._recover_logread_output,
+            claim_lease=self._claim_output_recovery_lease if claim_output_recovery else None,
+            close_on_lease_failure=self._close_connection,
+        )
 
     async def start(self) -> None:
         if self._connection is not None:
@@ -306,12 +321,14 @@ class Collector:
         before_send: Callback | None = None,
         session_guard: Callback | None = None,
         allow_during_shutdown: bool = False,
+        require_safe_channel: bool = False,
     ) -> None:
         try:
             await self._commands.enqueue(
                 command, newline, priority=priority, prompt=prompt, timeout_seconds=timeout_seconds,
                 before_send=before_send, session_guard=session_guard,
                 allow_during_shutdown=allow_during_shutdown,
+                require_safe_channel=require_safe_channel,
             )
         except Exception:
             if command_id:
@@ -324,6 +341,78 @@ class Collector:
     async def _sender_loop(self) -> None:
         """兼容已有监督和验证入口；实际队列状态由命令派发器独占。"""
         await self._commands.sender_loop()
+
+    def _output_recovery_ready(self) -> bool:
+        """恢复命令仅能在当前网络 shell 已确认、会话仍可写时进入队列。"""
+        return (
+            not self._stopping_commands and self._accepting_commands and self._connection is not None
+            and self._commands.can_send_shell_keepalive() and self._verified_output_target()
+        )
+
+    async def _claim_output_recovery_lease(self) -> bool:
+        """有界领取资源 CAS；超时不可确认时关闭会话，不能重复执行 kill。"""
+        return bool(await asyncio.wait_for(
+            _call(self._claim_output_recovery), timeout=_OUTPUT_RECOVERY_LEASE_TIMEOUT_SECONDS,
+        ))
+
+    def _verified_output_target(self) -> bool:
+        """SSH 从机仅在引导器已验证本目标身份后允许控制其自身输出。"""
+        if self.task.get("protocol") != "SSH" or self.task.get("sshTarget", "HOST") == "HOST":
+            return True
+        return (
+            getattr(self._connection, "bootstrap_verified", False) is True
+            and getattr(self._connection, "verified_shell_mode", None) == "ASH"
+            and getattr(self._connection, "verified_target", None) == self.task.get("sshTarget")
+        )
+
+    def _guard_output_recovery(self) -> None:
+        """发送前二次确认，避免排队期间进入 PSH 或切换到关闭中的会话。"""
+        if not self._output_recovery_ready():
+            raise CommandChannelBlocked("输出恢复会话或 PSH 命令通道尚未确认")
+
+    async def _recover_logread_output(self) -> None:
+        """按发送队列顺序终止异常 logread 后重开输出；写入结果未知时不重试。"""
+        try:
+            await self._enqueue(
+                _LOGREAD_RECOVERY_COMMAND, "\n", priority=3, timeout_seconds=10,
+                session_guard=self._guard_output_recovery, require_safe_channel=True,
+            )
+        except CommandChannelBlocked as exc:
+            # 发送器仅在 socket 写入前给出该拒绝，输出与采集会话均保持原状。
+            raise OutputRecoveryCommandSkipped() from exc
+        await self._enqueue(
+            "outputOpen", "\n", priority=3, timeout_seconds=10,
+            session_guard=self._guard_output_recovery, require_safe_channel=True,
+        )
+
+    async def _close_device_output(self) -> None:
+        """人工暂停/停止前尽力关闭设备输出；超时或取消都不能阻塞连接回收。"""
+        if (self._output_close_attempted or not supports_output_recovery(self.task)
+                or self._connection_closed or self._sender is None or self._sender.done()):
+            return
+        self._output_close_attempted = True
+        try:
+            await asyncio.wait_for(
+                self._enqueue(
+                    "outputClose", "\n", priority=3, timeout_seconds=_OUTPUT_CLOSE_TIMEOUT_SECONDS,
+                    session_guard=self._guard_output_close, allow_during_shutdown=True,
+                    require_safe_channel=True,
+                ),
+                timeout=_OUTPUT_CLOSE_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except (CommandChannelBlocked, ConnectionError, OSError, TimeoutError):
+            # 关闭过程不重试：传输写入结果未知时不能把 outputClose 重复送往设备。
+            return
+        except Exception:
+            logger.exception("关闭设备输出失败 task=%s session=%s", self.task_id, self.session_id)
+
+    def _guard_output_close(self) -> None:
+        """停止窗口只允许已确认的 shell 写 outputClose，不触发 PSH 自动恢复。"""
+        if (self._connection is None or self._connection_closed or not self._commands.can_send_shell_keepalive()
+                or not self._verified_output_target()):
+            raise CommandChannelBlocked("输出关闭命令通道尚未确认")
 
     async def _write_debug(self, data: bytes) -> None:
         """兼容串口调试验证入口；实际逐片写入归命令派发器管理。"""
@@ -465,6 +554,7 @@ class Collector:
                 self.liveness_read_observation_started = received_monotonic
                 await _call(self._on_receive)
                 self._commands.observe_received(data)
+                self._output_recovery.observe(data)
                 received_at = datetime.now(UTC)
                 self.write_latency.begin()
                 prefixed = self._prefixer.prefix(data, received_at)
@@ -489,6 +579,7 @@ class Collector:
         finally:
             cleanup_error: Exception | None = None
             try:
+                await self._output_recovery.stop()
                 await self.stop_coredump_monitor(connection_usable=False)
                 await self._close_connection()
                 if pending:
@@ -583,8 +674,8 @@ class Collector:
             if position.rollback_from is not None:
                 await _call(self._on_state, "CLOCK_ROLLBACK", {
                     "taskId": self.task_id, "sessionId": self.session_id,
-                    "previousReceivedAt": position.rollback_from.isoformat(),
-                    "receivedAt": received_at.astimezone(UTC).isoformat(),
+                    "previousReceivedAt": position.rollback_from.astimezone(self._writer.zone).isoformat(),
+                    "receivedAt": received_at.astimezone(self._writer.zone).isoformat(),
                     "sequence": position.sequence, "path": str(position.path),
                 })
         await self._publish_archives()
@@ -610,7 +701,9 @@ class Collector:
             task.cancel()
         await self._stop_shell_keepalive()
         try:
+            await self._output_recovery.stop()
             await self.stop_coredump_monitor()
+            await self._close_device_output()
         finally:
             await self._close_connection()
             if self._reader:

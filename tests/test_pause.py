@@ -109,7 +109,9 @@ async def test_pause_stops_real_runtime_without_reconnect_and_preserves_run_lock
     paused = await repo.get("tasks", task["id"])
     assert factory.await_count == 1 and connection.close_count == 1
     assert runtime.background.done() and runtime.collector._closed.is_set()
-    assert connection.sent == [b"initialise\n"]
+    assert connection.sent[:-1] == [b"initialise\n"]
+    assert connection.sent[-1:] == [b"outputClose\n"]
+    assert connection.sent.count(b"outputClose\n") == 1
     assert paused["status"] == "PAUSED" and paused["nodeId"] is None and paused["runId"] == "preserved-run"
     assert await repo.db.endpoint_locks.find_one({"taskId": task["id"], "runId": "preserved-run"}) is not None
     assert (await repo.db.budgets.find_one({"_id": "preserved-run:periodic"}))["attempts"] == 2
