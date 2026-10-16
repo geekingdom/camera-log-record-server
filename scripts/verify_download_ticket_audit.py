@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -29,7 +30,11 @@ async def main():
     try:
         async with app.router.lifespan_context(app):
             repo, db = app.state.repo, app.state.repo.db
-            await db.jobs.insert_one({"id": "export", "taskId": "task", "status": "SUCCEEDED"})
+            # 票据审计验证必须提供实际已发布且未过期制品，不能用空终态绕过可用性门槛。
+            artifact = path / 'export.tar.gz'
+            artifact.write_bytes(b'isolated-download-ticket-fixture')
+            await db.jobs.insert_one({"id": "export", "taskId": "task", "kind": "DOWNLOAD", "status": "SUCCEEDED",
+                                      "resultPath": str(artifact), "expiresAt": datetime.now(UTC) + timedelta(days=1)})
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
                                          base_url="http://verify", headers={"Authorization": "Bearer " + token}) as client:
                 endpoint = "/api/v1/downloads/export/browser-session"

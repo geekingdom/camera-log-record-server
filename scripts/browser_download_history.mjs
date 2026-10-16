@@ -64,6 +64,12 @@ await context.route("**/api/v1/**", async route => {
   if (method === "GET" && path === "/api/v1/display-settings") return json(route, { liveLogBufferMiB: 10 });
   throw new Error(`未模拟的 API 请求：${method} ${path}`);
 });
+for (const task of tasks) {
+  await context.routeWebSocket(`**/api/v1/tasks/${task.id}/logs`, socket => {
+    // 保持精确任务订阅的握手成功；下载历史验收不注入实时正文。
+    socket.onMessage(() => {});
+  });
+}
 
 const pageUi = await context.newPage();
 pageUi.setDefaultTimeout(12_000);

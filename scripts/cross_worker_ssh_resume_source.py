@@ -154,12 +154,16 @@ class SshSource:
         self.port = self.server.get_port()
 
     async def wait_commands(self, sessions: int, timeout: float = 30, *, expect_probe: bool = True) -> None:
-        """确认每个 SSH 会话实际收到固定初始化命令，可选验证一个定时 probe。"""
+        """确认初始化前缀准确，且前缀后的命令只能是一次末尾 outputClose。"""
         expected = INITIAL_COMMANDS + (["probe"] if expect_probe else [])
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             received = self.command_lines()
-            if len(received) >= sessions and all(items[:5] == expected for items in received[:sessions]):
+            if len(received) >= sessions and all(
+                items[:len(expected)] == expected
+                and items[len(expected):] in ([], ["outputClose"])
+                for items in received[:sessions]
+            ):
                 return
             await asyncio.sleep(0.1)
         raise TimeoutError(f"源端命令不完整: {self.command_lines()!r}")
