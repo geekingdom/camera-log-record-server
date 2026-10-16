@@ -37,3 +37,5 @@
 完整配置副本已通过实际Docker Compose解析，backend、worker、frontend三种分拆部署配置均有效；没有启动公司配置所指向的服务。GitHub新增独立ES集成job，完整验收现在为九项。待提交推送后检查最新提交全部九项成功，失败则修复继续验证。
 
 首轮6443b76的CI38873902607：后端、ES真实集成、原生/组件/NFS部署、提交规则六项通过；跨Worker源命令旧固定五项切片、下载票据空制品夹具及下载历史WS未模拟导致三项失败。已保留严格顺序/审计/浏览器错误断言进行修复：真实双节点和单节点故障恢复均通过、真实下载票据审计回滚/确认丢失通过。修复提交继续等待全部CI。
+
+最终功能修正提交 `05f90be` 的 [CI38878143703](https://github.com/geekingdom/camera-log-record-server/actions/runs/38878143703) 九项全部成功：backend、frontend、cross-worker-read、container-smoke、component-smoke、native-smoke、nfs-smoke、elasticsearch-sidecar、commit-messages。临时ES验证容器已删除；随机验证索引、数据库和文件按finally清理。本地配置副本保留在用户指定目录，不入Git。文档结果记录提交也继续等待其最新CI，不以先前提交代替最新验证。

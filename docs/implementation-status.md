@@ -2,8 +2,8 @@
 
 | 当前需求（2026-10-16，进行中） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| outputClose收尾与logread超限恢复、ES独立旁路索引、Top10、下载历史及独立制品保留 | `collection`、新`indexing`、`logs`与前端工作台 | 真实ES故障/重放/缺块/归档重建、Mongo Explain与租约CAS通过；PSH安全通道拒绝不终止采集回归通过；前端197项/构建/全套浏览器通过 | 共享归档一次逻辑限速读取及真实runner补建/删除验证通过；后端1945项、最终98项专项、Ruff通过；等待提交后九项CI；见`docs/history/2026-10-16-indexing-downloads.md` |
-| API名称消歧与北京时间统一 | `reference`与时间序列化/存储边界 | 明确字段HTTP/WS上海时间、原始index时间与历史UTC目录查询回归通过；API名称跨模块审查完成 | 全量及专项通过；等待九项CI。Mongo BSON/内部hourId保持绝对时刻语义；完整.env副本及三个组件Compose解析通过 |
+| outputClose收尾与logread超限恢复、ES独立旁路索引、Top10、下载历史及独立制品保留 | `collection`、新`indexing`、`logs`与前端工作台 | 真实ES故障/重放/缺块/归档重建、Mongo Explain与租约CAS通过；PSH安全通道拒绝不终止采集回归通过；前端197项/构建/全套浏览器通过 | 共享归档一次逻辑限速读取及真实runner补建/删除验证通过；后端1945项、最终98项专项、Ruff通过；源码05f90be九项CI38878143703全部成功；见`docs/history/2026-10-16-indexing-downloads.md` |
+| API名称消歧与北京时间统一 | `reference`与时间序列化/存储边界 | 明确字段HTTP/WS上海时间、原始index时间与历史UTC目录查询回归通过；API名称跨模块审查完成 | 全量及专项通过；源码05f90be九项CI全部成功。Mongo BSON/内部hourId保持绝对时刻语义；完整.env副本及三个组件Compose解析通过 |
 
 
 | 当前需求（2026-10-15，API文档核对与Python示例，实现完成） | 实现位置 | 验证证据 | 未完成与下一步 |
