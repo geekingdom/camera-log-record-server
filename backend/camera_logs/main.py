@@ -86,7 +86,8 @@ def create_app(settings=None, db=None):
             return JSONResponse(status_code=503, content={"error": {
                 "code": "SERVICE_NOT_READY", "message": request.state.safe_error,
                 "requestId": getattr(request.state, "request_id", None)}})
-        if request.url.path.startswith("/api/v1/"):
+        from camera_logs.common.public_downloads import is_public_download
+        if request.url.path.startswith("/api/v1/") and not is_public_download(request.method, request.url.path):
             from camera_logs.access_policy.policy import enforce_ip
             try:
                 await enforce_ip(app.state.repo, request)
@@ -151,6 +152,8 @@ def create_app(settings=None, db=None):
     install_dashboard_routes(app)
     from camera_logs.commands.templates import install_template_routes
     install_template_routes(app, repo, listing)
+    from camera_logs.commands.common import install_common_command_routes
+    install_common_command_routes(app, repo)
     from camera_logs.commands.api import install_command_routes
     install_command_routes(app, repo, listing)
 

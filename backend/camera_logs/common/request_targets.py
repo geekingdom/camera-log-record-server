@@ -2,7 +2,7 @@
 
 TARGET_LABELS = {
     "nodes": "服务节点", "resources": "设备资源", "tasks": "采集任务",
-    "command-templates": "命令模板", "commands": "命令执行", "users": "用户账户",
+    "command-templates": "命令模板", "common-commands": "常用命令", "commands": "命令执行", "users": "用户账户",
     "service-tokens": "第三方服务账号", "downloads": "日志下载作业", "log-searches": "日志检索作业",
     "log-files": "日志文件", "coredumps": "Coredump文件", "coredump-exports": "Coredump导出作业",
     "operations": "任务操作", "platform-settings": "后台配置", "display-settings": "实时日志显示配置", "ip-policy": "平台IP访问规则",

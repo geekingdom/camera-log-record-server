@@ -251,9 +251,9 @@ export const api = {
   }),
   coredumpExport: (id: string) => request<CoredumpExport>(`/coredump-exports/${encodeURIComponent(id)}`),
   cancelCoredumpExport: (id: string) => request<void>(`/coredump-exports/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  coredumpBrowserDownload: (id: string, exportFile = false) => {
+  coredumpDownloadUrl: (id: string, exportFile = false) => {
     const prefix = exportFile ? "/coredump-exports" : "/coredumps";
-    return request<{ url: string }>(`${prefix}/${encodeURIComponent(id)}/browser-session`, { method: "POST" });
+    return `${base}${prefix}/${encodeURIComponent(id)}/content`;
   },
   createResource: (resource: {
     name: string;
@@ -396,16 +396,5 @@ export const api = {
     }>(`/log-searches/${id}?includeResults=false`),
   cancelJob: (id: string, kind: "downloads" | "log-searches") =>
     request<void>(`/${kind}/${id}`, { method: "DELETE" }),
-  browserDownload: (id: string) =>
-    request<{ url: string }>(`/downloads/${id}/browser-session`, {
-      method: "POST",
-    }),
+  downloadContentUrl: (id: string) => `${base}/downloads/${encodeURIComponent(id)}/content`,
 };
-export async function fetchDownload(id: string) {
-  const response = await fetch(`${base}/downloads/${id}/content`, {
-    headers: { Authorization: `Bearer ${getToken()}` },
-  });
-  if (!response.ok)
-    throw new ApiError(response.status, `下载失败 (${response.status})`);
-  return response.blob();
-}

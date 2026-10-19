@@ -21,7 +21,6 @@ const taskTwoRecords = Array.from({ length: 21 }, (_, index) => ({
   error: index === 0 ? undefined : "归档缺少可用片段", downloadAvailable: false,
 }));
 let historyRequests = 0;
-let browserTickets = 0;
 let delayedRefresh = false;
 let delayedStarted;
 let releaseDelayed;
@@ -52,11 +51,8 @@ await context.route("**/api/v1/**", async route => {
       : { enabled: false, status: "DISABLED", totalFiles: 0, coveredFiles: 0, coverageComplete: false, latestIndexedHour: null, contiguousCoveredThrough: null, truncated: false, fallback: "RAW_SCAN" });
   }
   if (method === "GET" && /^\/api\/v1\/tasks\/[^/]+\/(log-hours|log-days)$/.test(path)) return json(route, path.endsWith("log-days") ? { days: [] } : page([]));
-  if (method === "POST" && /^\/api\/v1\/downloads\/[^/]+\/browser-session$/.test(path)) {
-    browserTickets += 1;
-    assert.equal(path, "/api/v1/downloads/ready-download/browser-session", "只能为成功且未过期的已有制品签发下载票据");
-    return json(route, { url: "data:application/octet-stream;base64,AA==" });
-  }
+  if (method === "GET" && /^\/api\/v1\/downloads\/[^/]+\/content$/.test(path)) return route.fulfill({ status: 200, headers: { "content-type": "application/gzip", "content-disposition": "attachment; filename=ready.tar.gz" }, body: "fixture" });
+  if (method === "GET" && path === "/api/v1/common-commands") return json(route, page([]));
   if (method === "GET" && path.startsWith("/api/v1/tasks/")) return json(route, tasks.find(task => path.endsWith(task.id)) ?? tasks[0]);
   if (method === "GET" && path === "/api/v1/resources") return json(route, page([]));
   if (method === "GET" && path === "/api/v1/command-templates") return json(route, page([]));
@@ -90,7 +86,8 @@ try {
   assert.equal(await expiredButton.isDisabled(), true, "过期制品必须禁用重复下载");
   await pageUi.getByLabel("重新下载 ready-download").click();
   await pageUi.waitForFunction(() => true);
-  assert.equal(browserTickets, 1, "重复下载既有制品只能申请一次票据，不得提交新作业");
+  // 归档内容链接是公开附件地址，点击不能先请求短期浏览器票据或重建作业。
+  assert.equal(await pageUi.evaluate(() => performance.getEntriesByType("resource").some(entry => entry.name.includes("browser-session"))), false, "重复下载不得请求浏览器票据");
   assert.equal(historyRequests, 1, "初始记录页只读取一次历史");
   await pageUi.screenshot({ path: "output/playwright/download-history-1440.png", fullPage: true });
   await pageUi.getByRole("tab", { name: "小时归档与检索", exact: true }).click();
@@ -125,7 +122,7 @@ try {
   assert.equal(await pageUi.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, "下载记录窄屏不得横向溢出");
   assert.ok(historyRequests >= 4, "刷新、切换任务与分页必须分别读取服务端历史");
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: true, historyRequests, browserTickets, screenshots: "output/playwright/download-history-{1440,390}.png" }));
+  console.log(JSON.stringify({ passed: true, historyRequests, screenshots: "output/playwright/download-history-{1440,390}.png" }));
 } finally {
   await browser.close();
 }

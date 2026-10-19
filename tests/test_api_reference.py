@@ -266,8 +266,8 @@ def test_reference_documents_actual_session_and_download_authentication_paths(cl
     assert me["headers"] == {"Cookie": "camera_session=<登录会话Cookie>"}
 
     content = operations["GET /api/v1/downloads/{identifier}/content"]
-    assert content["permission"] == "logs:download"
-    assert "download_access" in content["headers"]["Authorization"]
+    assert "公开附件" in content["permission"]
+    assert "Authorization" not in content["headers"]
 
     share_targets = operations["GET /api/v1/users/share-targets"]
     assert share_targets["permission"] == "templates:read"
@@ -335,7 +335,7 @@ def test_reference_coredumps_describe_binary_downloads_and_real_permissions(clie
     default_access = next(item["text"] for item in reference["guides"] if item["title"] == "Coredump默认访问权限")
     assert "默认允许Coredump查询、导出和下载" in default_access
     assert "logs:read" in default_access and "logs:download" in default_access
-    assert "来源IP策略" in default_access and "绑定用户禁用" in default_access
+    assert "来源IP策略" in default_access and "无需登录" in default_access
     operations = {item["id"]: item for item in reference["operations"]}
     listing = operations["GET /api/v1/resources/{resource_id}/coredumps"]
     assert listing["group"] == "Coredump文件"
@@ -352,8 +352,8 @@ def test_reference_coredumps_describe_binary_downloads_and_real_permissions(clie
     assert "Idempotency-Key" in create["headers"]
     for route in ("coredumps", "coredump-exports"):
         content = operations[f"GET /api/v1/{route}/{{identifier}}/content"]
-        assert "logs:download" in content["permission"]
-        assert "download_access" in content["headers"]["Authorization"]
+        assert "公开附件" in content["permission"]
+        assert "Authorization" not in content["headers"]
         assert "二进制" in content["responseExample"]
     guides = "\n".join(item["text"] for item in reference["guides"])
     for text in ("WAITING_DEVICE", "新认证", "coredump_flag.cdf", "首次扫描观测时间", "sourceState", "设备时间影响"):

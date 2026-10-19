@@ -23,7 +23,6 @@ from camera_logs.common.presentation_time import utc_iso
 from camera_logs.common.security import actor, authenticate, authorize
 from camera_logs.common.websocket_logging import bind_websocket_actor
 from camera_logs.logs.download_availability import download_available
-from camera_logs.logs.download_sessions import download_actor
 from camera_logs.logs.gap_catalog import catalog_cursor_page, catalog_gap_fragments
 from camera_logs.logs.hour_catalog import summarize_hours
 from camera_logs.logs.job_submission import cancel_job, submit_job
@@ -273,15 +272,15 @@ def install_log_routes(app):
                 "status": doc["status"], "truncated": doc.get("truncated", False)}
 
     @app.get("/api/v1/downloads/{identifier}/content")
-    async def download_content(identifier: str, request: Request, user: Annotated[dict, Depends(download_actor)]):
+    async def download_content(identifier: str, request: Request):
+        """已记录下载制品作为缺陷附件公开读取，不依赖用户或短期票据。"""
         doc = await repo().get("jobs", identifier)
-        authorize(user, "logs:download", doc["taskId"])
         if doc["status"] != "SUCCEEDED":
             raise HTTPException(409, "导出尚未完成")
         if not download_available(doc):
             raise HTTPException(410, "下载制品已过期或已清理")
-        await repo().audit(user["id"], "download_content", identifier)
-        return await proxy_file(repo(), doc["nodeId"], f"/internal/downloads/{identifier}", request.headers.get("range"))
+        await repo().audit("anonymous", "download_content", identifier)
+        return await proxy_file(repo(), doc["nodeId"], f"/internal/downloads/{identifier}", request.headers.get("range"), request.headers.get("if-range"))
 
     @app.delete("/api/v1/downloads/{identifier}", status_code=204)
     @app.delete("/api/v1/log-searches/{identifier}", status_code=204)

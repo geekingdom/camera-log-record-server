@@ -51,6 +51,7 @@ Coredump 每个已登记文件版本只生成一次 `COREDUMP_DISCOVERED`，记�
 | `jobs`、下载/快照 reservation 与 claim | 搜索、日志下载和 coredump 导出；租约续期与物理临时文件协作 | node/status/lease、创建时间及 token 精确索引；任务下载历史使用`taskId,kind,createdAt,id`倒序索引 | 临时会话和部分导出记录已有 TTL；`jobs` 本体保留 | 成功日志下载在制品创建完成时快照当时`retentionDays`，写入`artifactCreatedAt`、`artifactRetentionDays`和`expiresAt`；后续设置变更不追溯。到期后先等待读者租约结束并回收物理制品，历史作业行保留。TTL只能清理无业务依赖的临时令牌，不能替代物理文件回收 |
 | `coredump_files` | NFS 扫描发现、稳定性状态转换、快照读者与导出状态 | 资源接收时间、节点状态、来源版本和快照 token 索引 | 目录元数据跟随 coredump 文件保留，当前不设 TTL | 先完成源文件、冻结副本、活动下载和导出引用的原子核验；物理文件成功删除后才可删除目录元数据，失败时保留可排障状态 |
 | `request_events` | 每个 HTTP 请求的脱敏观测记录 | route/status/task/clientIp/requestId 与时间索引 | 已启用固定30天 TTL | 不保存请求正文、密码、令牌或设备输出；TTL 有延迟，查询仍按时间范围限制 |
+| `common_commands` | 管理员创建、编辑、禁用或删除全局手工命令提示项；不是设备采集、执行历史或日志写入流程 | `id`唯一；`command`全局唯一；普通用户默认列表使用`enabled,command,id`，管理员完整表使用`command,id` | 配置数据不设 TTL；删除后仅保留审计事件，禁用项保留以便管理员恢复或明确删除 | 增长上界取决于管理员配置频率，不随设备数、日志行数或手工命令发送次数增长。记录仅保存单行命令、说明、开关、版本及时间，不保存执行输出、密码或设备日志。创建使用7天幂等映射，编辑/禁用/删除使用版本CAS并和审计同事务提交。真实 Mongo Explain 必须确认两种默认列表均为IXSCAN且无阻塞排序；见`verify_common_commands.py`。 |
 
 ### 高频分桶规则
 

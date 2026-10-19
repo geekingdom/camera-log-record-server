@@ -75,6 +75,7 @@ await context.route("**/api/v1/**", async route => {
     await new Promise(resolve => { releaseDisplaySettings = resolve; });
     return json(route, { liveLogBufferMiB: 1 });
   }
+  if (pathname === "/api/v1/common-commands") return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (["/api/v1/service-tokens", "/api/v1/audit-events", "/api/v1/runtime-events"].includes(pathname))
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (pathname === `/api/v1/tasks/${primaryTask.id}`) return json(route, primaryTask);

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 下载历史只读取当前任务的已提交作业；服务端决定制品能否复用，页面不会重新创建作业。
 import { onBeforeUnmount, ref, watch } from "vue";
-import { Download, RefreshCw } from "lucide-vue-next";
+import { Copy, Download, RefreshCw } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import type { DownloadHistoryItem } from "../../shared/types";
@@ -36,6 +36,14 @@ function dateTime(value?: string) {
 }
 function bytes(value?: number) { return formatDashboardBytes(value); }
 function failure(record: DownloadHistoryItem) { return record.error || "-"; }
+async function copyLink(record: DownloadHistoryItem) {
+  const url = new URL(api.downloadContentUrl(record.id), location.origin).href;
+  try { await navigator.clipboard.writeText(url); ElMessage.success("下载链接已复制"); }
+  catch {
+    const input = document.createElement("textarea"); input.value = url; document.body.append(input); input.select();
+    const copied = document.execCommand("copy"); input.remove(); if (copied) ElMessage.success("下载链接已复制"); else ElMessage.error("复制下载链接失败");
+  }
+}
 
 // 翻页、刷新与切换任务均推进请求代次，迟到响应不能覆盖当前任务的列表。
 async function load() {
@@ -66,9 +74,8 @@ async function download(record: DownloadHistoryItem) {
   if (!record.downloadAvailable || downloading.value) return;
   downloading.value = record.id;
   try {
-    const authorization = await api.browserDownload(record.id);
     const link = document.createElement("a");
-    link.href = authorization.url;
+    link.href = api.downloadContentUrl(record.id);
     link.download = record.filename || `${record.id}.tar.gz`;
     link.click();
   } catch (error) {
@@ -104,7 +111,7 @@ onBeforeUnmount(() => { workspaceGeneration++; requestGeneration++; });
         <el-table-column label="制品大小" min-width="105"><template #default="{ row }">{{ bytes(row.bytes) }}</template></el-table-column>
         <el-table-column label="到期时间（北京时间）" min-width="180"><template #default="{ row }">{{ dateTime(row.expiresAt) }}</template></el-table-column>
         <el-table-column label="说明" min-width="150"><template #default="{ row }">{{ row.downloadAvailable ? "制品可重新下载" : row.status === "SUCCEEDED" ? "制品已过期或已清理" : failure(row) }}</template></el-table-column>
-        <el-table-column label="操作" width="84" fixed="right"><template #default="{ row }"><el-tooltip :content="row.downloadAvailable ? '重新下载既有制品' : row.status === 'SUCCEEDED' ? '制品已过期，无法下载' : '作业尚未生成可下载制品'"><el-button text :icon="Download" :loading="downloading === row.id" :disabled="!row.downloadAvailable || Boolean(downloading)" :aria-label="`重新下载 ${row.id}`" @click="download(row)" /></el-tooltip></template></el-table-column>
+        <el-table-column label="操作" width="118" fixed="right"><template #default="{ row }"><el-tooltip :content="row.downloadAvailable ? '重新下载既有制品' : row.status === 'SUCCEEDED' ? '制品已过期，无法下载' : '作业尚未生成可下载制品'"><el-button text :icon="Download" :loading="downloading === row.id" :disabled="!row.downloadAvailable || Boolean(downloading)" :aria-label="`重新下载 ${row.id}`" @click="download(row)" /></el-tooltip><el-tooltip content="复制下载链接"><el-button text :icon="Copy" :disabled="!row.downloadAvailable" :aria-label="`复制下载链接 ${row.id}`" @click="copyLink(row)" /></el-tooltip></template></el-table-column>
       </el-table>
     </div>
     <div class="download-history-footer"><span>{{ total }} 条下载记录</span><el-pagination v-if="total > pageSize" background layout="prev, pager, next" :current-page="page" :page-size="pageSize" :total="total" @current-change="changePage" /></div>

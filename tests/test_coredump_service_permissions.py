@@ -32,7 +32,7 @@ def _create_user_and_token(client: TestClient, username: str) -> tuple[dict, dic
 
 
 def test_service_token_uses_default_coredump_permissions_and_obeys_live_revocation(tmp_path, monkeypatch):
-    """普通第三方可读共享 core、创建自己的导出；实时收窄后既有票据也必须失效。"""
+    """普通第三方可管理自己的导出；内容附件在账号和IP权限变化后仍可公开下载。"""
     async def fake_proxy(_repo, _node_id, _path, range_header=None, _if_range=None):
         """隔离节点 HTTP，仅断言内容路由已收到完整或 Range 下载请求。"""
         if range_header:
@@ -77,7 +77,7 @@ def test_service_token_uses_default_coredump_permissions_and_obeys_live_revocati
         })
         assert client.get("/api/v1/coredump-exports/other-export", headers=headers).status_code == 403
         assert client.post("/api/v1/coredump-exports/other-export/browser-session", headers=headers).status_code == 403
-        assert client.get("/api/v1/coredump-exports/other-export/content", headers=headers).status_code == 403
+        assert client.get("/api/v1/coredump-exports/other-export/content", headers=headers).status_code == 200
 
         # 服务集成直接使用 Bearer，不依赖浏览器 Cookie 或额外登录。
         for path in ("/api/v1/coredumps/shared-core/content", f"/api/v1/coredump-exports/{export_id}/content"):
@@ -102,12 +102,12 @@ def test_service_token_uses_default_coredump_permissions_and_obeys_live_revocati
             "rules": [{"label": "只读任务", "network": "198.51.100.0/24", "scopes": ["tasks:read"]}],
         })
         assert client.get("/api/v1/resources/shared-camera/coredumps", headers=headers).status_code == 403
-        assert client.get(core_ticket.json()["url"]).status_code == 403
+        assert client.get(core_ticket.json()["url"]).status_code == 200
 
         client.portal.call(repo.db.ip_policy.update_one, {"id": "platform-ip-policy"}, {"$set": {"enabled": False}})
         client.portal.call(repo.db.users.update_one, {"id": user["id"]}, {"$set": {"enabled": False}})
         assert client.get("/api/v1/resources/shared-camera/coredumps", headers=headers).status_code == 401
-        assert client.get(export_ticket.json()["url"]).status_code == 401
+        assert client.get(export_ticket.json()["url"]).status_code == 200
 
         client.portal.call(repo.db.users.update_one, {"id": user["id"]}, {"$set": {"enabled": True, "deletedAt": now()}})
         assert client.get("/api/v1/resources/shared-camera/coredumps", headers=headers).status_code == 401

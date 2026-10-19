@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 资源级 coredump 文件页：冻结前不下载，批量导出始终等待服务端作业完成。
 import { onBeforeUnmount, ref, watch } from "vue";
-import { Download, RefreshCw, X } from "lucide-vue-next";
+import { Copy, Download, RefreshCw, X } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { api } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
@@ -44,6 +44,14 @@ function navigateDownload(url: string, filename: string) {
   const link = document.createElement("a");
   link.href = url; link.download = filename; link.click();
 }
+async function copyLink(file: CoredumpFile) {
+  const url = new URL(api.coredumpDownloadUrl(file.id), location.origin).href;
+  try { await navigator.clipboard.writeText(url); ElMessage.success("下载链接已复制"); }
+  catch {
+    const input = document.createElement("textarea"); input.value = url; document.body.append(input); input.select();
+    const copied = document.execCommand("copy"); input.remove(); if (copied) ElMessage.success("下载链接已复制"); else ElMessage.error("复制下载链接失败");
+  }
+}
 function fail(error: unknown) { ElMessage.error(error instanceof Error ? error.message : "操作失败"); }
 function currentLifecycle(generation: number, resourceId: string) {
   return generation === lifecycleGeneration && open.value && props.resource?.id === resourceId;
@@ -71,9 +79,8 @@ async function download(file: CoredumpFile) {
   const lifecycle = lifecycleGeneration, resourceId = props.resource?.id;
   if (!resourceId) return;
   try {
-    const ticket = await api.coredumpBrowserDownload(file.id);
     if (!currentLifecycle(lifecycle, resourceId)) return;
-    navigateDownload(ticket.url, file.name);
+    navigateDownload(api.coredumpDownloadUrl(file.id), file.name);
   }
   catch (error) { if (currentLifecycle(lifecycle, resourceId)) fail(error); }
 }
@@ -102,9 +109,8 @@ async function exportFiles() {
     const finished = await pollExport(job.id, lifecycle, resourceId);
     if (!currentLifecycle(lifecycle, resourceId) || finished.status !== "SUCCEEDED") return;
     const filename = finished.filename || `${job.id}.zip`;
-    const ticket = await api.coredumpBrowserDownload(job.id, true);
     if (!currentLifecycle(lifecycle, resourceId)) return;
-    navigateDownload(ticket.url, filename);
+    navigateDownload(api.coredumpDownloadUrl(job.id, true), filename);
     exportProgress.value = finished.bytes === undefined ? "" : `${finished.bytes.toLocaleString("zh-CN")} 字节`;
   } catch (error) { if (currentLifecycle(lifecycle, resourceId)) fail(error); }
   finally { if (currentLifecycle(lifecycle, resourceId)) { exporting.value = false; activeExport = undefined; } }
@@ -151,7 +157,7 @@ onBeforeUnmount(() => { clearInterval(refreshTimer); lifecycleGeneration++; acti
       <el-table-column label="文件修改时间（北京时间）" min-width="210"><template #header><el-tooltip content="NFS 文件的最后修改时间。传输过程中会更新，也可能由设备设置，因此可能晚于首次发现时间。"><span>文件修改时间（北京时间）</span></el-tooltip></template><template #default="{ row }">{{ time(row.sourceModifiedAt) }}</template></el-table-column>
       <el-table-column label="大小" width="130" align="right"><template #default="{ row }">{{ bytes(row.size) }} 字节</template></el-table-column>
       <el-table-column label="状态" width="145"><template #default="{ row }"><el-tooltip content="文件已稳定表示连续扫描至少10秒未发现变化，不是设备发送的完成确认；导出时仍会校验并创建固定副本。"><el-tag :type="row.sourceState === 'STABLE' && row.status === 'RECEIVING' ? 'success' : statusTone(row.status)">{{ coredumpFileStatus(row) }}</el-tag></el-tooltip></template></el-table-column>
-      <el-table-column label="操作" width="92" fixed="right"><template #default="{ row }"><el-tooltip :disabled="row.status === 'FROZEN'" :content="row.status === 'FROZEN' ? '' : '文件冻结后才能下载'"><el-button text :icon="Download" aria-label="下载 coredump 文件" :disabled="row.status !== 'FROZEN'" @click="download(row)" /></el-tooltip></template></el-table-column>
+      <el-table-column label="操作" width="118" fixed="right"><template #default="{ row }"><el-tooltip :disabled="row.status === 'FROZEN'" :content="row.status === 'FROZEN' ? '' : '文件冻结后才能下载'"><el-button text :icon="Download" aria-label="下载 coredump 文件" :disabled="row.status !== 'FROZEN'" @click="download(row)" /></el-tooltip><el-tooltip content="复制下载链接"><el-button text :icon="Copy" :aria-label="`复制 coredump 下载链接 ${row.id}`" :disabled="row.status !== 'FROZEN'" @click="copyLink(row)" /></el-tooltip></template></el-table-column>
     </el-table>
     <el-pagination v-model:current-page="page" :page-size="50" :total="total" layout="total, prev, pager, next" />
     <template #footer><el-button @click="open = false">关闭</el-button></template>

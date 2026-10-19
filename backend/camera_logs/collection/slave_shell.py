@@ -15,6 +15,17 @@ _DENIED = re.compile(rb"permission denied|authentication failed|password:\s*$", 
 _INET = re.compile(rb"(?:^|[\r\n\t ])inet (?:addr:)?(\d{1,3}(?:\.\d{1,3}){3})(?=[\r\n\t ]|$)")
 
 
+def matches_slave_identity(task, output: bytes, *, target: str | None = None) -> bool:
+    """仅接受目标从机地址且拒绝外层主机地址，供首次握手和运行中巡检共用。"""
+    expected_target = target or str(task.get("sshTarget") or "")
+    address = SLAVE_ADDRESSES.get(expected_target)
+    if address is None:
+        return False
+    observed = set(_INET.findall(output))
+    external = str(task.get("ip") or "").encode()
+    return address.encode() in observed and (not external or external not in observed)
+
+
 class SlaveLoginError(ConnectionError):
     """从机握手未确认；不得进入初始化或把外层主机输出保存为从机日志。"""
 
@@ -138,9 +149,7 @@ class ShellBootstrap:
         self.dialogue.feed(self.buffer)
         await self.ensure_ash(verify_current_mode=True)
         output, status = await self.command("ifconfig")
-        observed = set(_INET.findall(output))
-        external = str(self.task.get("ip", "")).encode()
-        if status != 0 or address.encode() not in observed or (external and external in observed):
+        if status != 0 or not matches_slave_identity(self.task, output, target=target):
             raise SlaveLoginError("从机接口地址未匹配指定目标")
         # 所有管理握手字节均已在 buffer 中消费；只有完整验证后才交给采集器。
         self.pending = b""

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 管理员编辑资源监控规则；草稿与已保存版本隔离，提交前二次确认。
-import { ref, watch } from "vue";
+import { nextTick, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { Cpu, Plus, Save, Trash2 } from "lucide-vue-next";
 import { idempotencyKey } from "../../shared/api";
@@ -12,16 +12,34 @@ const emit = defineEmits<{ saved: [settings: PlatformSettings] }>();
 const draft = ref<ResourceMonitorConfig>();
 const saving = ref(false);
 const revision = ref(0);
+const openItems = ref<string[]>([]);
+const openProcessRules = ref<string[]>([]);
 watch(() => props.settings, value => {
   revision.value += 1;
   draft.value = value?.resourceMonitor ? JSON.parse(JSON.stringify(value.resourceMonitor)) : undefined;
 }, { immediate: true });
 
 function addItem() {
-  draft.value?.items.push({ id: idempotencyKey(), name: "", command: "", pattern: "", unit: "KB", enabled: true });
+  const item = { id: idempotencyKey(), name: "", command: "", pattern: "", unit: "KB" as const, enabled: true };
+  draft.value?.items.push(item);
+  openItems.value = [...openItems.value, item.id];
+  void revealRule(`monitor-item-${item.id}`);
 }
 function addProcess() {
-  draft.value?.processRules.push({ id: idempotencyKey(), name: "", pattern: "", nameGroup: null, enabled: true });
+  const rule = { id: idempotencyKey(), name: "", pattern: "", nameGroup: null, enabled: true };
+  draft.value?.processRules.push(rule);
+  openProcessRules.value = [...openProcessRules.value, rule.id];
+  void revealRule(`monitor-process-${rule.id}`);
+}
+async function revealRule(id: string) {
+  await nextTick();
+  // Element Plus 折叠动画结束后内容才有稳定高度；随后立即定位，避免平滑滚动仍在途中。
+  await new Promise<void>(resolve => window.setTimeout(resolve, 320));
+  const rule = document.getElementById(id);
+  if (!rule || rule.getClientRects().length === 0) return;
+  const input = rule.querySelector(".el-collapse-item__content input") as HTMLInputElement | null;
+  input?.scrollIntoView({ behavior: "auto", block: "center" });
+  input?.focus({ preventScroll: true });
 }
 async function removeRule(kind: "items" | "processRules", index: number) {
   if (!draft.value || saving.value) return;
@@ -66,33 +84,33 @@ async function save() {
         <el-form-item label="指标保留天数"><el-input-number v-model="draft.retentionDays" :min="1" :max="90" :precision="0" aria-label="指标保留天数" /></el-form-item>
       </div>
       <div class="monitor-rule-heading"><h4>系统指标</h4><el-button :icon="Plus" :disabled="draft.items.length >= 16" @click="addItem">新增指标</el-button></div>
-      <div class="monitor-rule-list">
-        <div v-for="(item, index) in draft.items" :key="item.id" class="monitor-rule">
-          <div class="monitor-rule-title"><el-switch v-model="item.enabled" :aria-label="`启用指标 ${item.name || index + 1}`" /><strong>{{ item.name || `指标 ${index + 1}` }}</strong><el-tooltip content="删除指标"><el-button text type="danger" :icon="Trash2" :aria-label="`删除指标 ${index + 1}`" @click="removeRule('items', index)" /></el-tooltip></div>
+      <el-collapse v-model="openItems" class="monitor-rule-list">
+        <el-collapse-item v-for="(item, index) in draft.items" :id="`monitor-item-${item.id}`" :key="item.id" :name="item.id" class="monitor-rule">
+          <template #title><div class="monitor-rule-title"><el-switch v-model="item.enabled" :aria-label="`启用指标 ${item.name || index + 1}`" @click.stop /><strong>{{ item.name || `指标 ${index + 1}` }}</strong><el-tag size="small" type="info">{{ item.unit }}</el-tag><el-tooltip content="删除指标"><el-button text type="danger" :icon="Trash2" :aria-label="`删除指标 ${index + 1}`" @click.stop="removeRule('items', index)" /></el-tooltip></div></template>
           <div class="monitor-rule-grid">
             <el-form-item label="指标名称"><el-input v-model="item.name" maxlength="96" :aria-label="`指标名称 ${index + 1}`" /></el-form-item>
             <el-form-item label="单位"><el-select v-model="item.unit" :aria-label="`指标单位 ${index + 1}`"><el-option label="KB" value="KB" /><el-option label="%" value="%" /></el-select></el-form-item>
             <el-form-item label="采集命令" class="wide"><el-input v-model="item.command" maxlength="2048" :aria-label="`采集命令 ${index + 1}`" /></el-form-item>
             <el-form-item label="数值正则（第 1 捕获组）" class="wide"><el-input v-model="item.pattern" maxlength="512" :aria-label="`数值正则 ${index + 1}`" /></el-form-item>
           </div>
-        </div>
-      </div>
+        </el-collapse-item>
+      </el-collapse>
       <div class="monitor-rule-heading"><h4>进程内存</h4><el-button :icon="Plus" :disabled="draft.processRules.length >= 8" @click="addProcess">新增进程规则</el-button></div>
       <div class="monitor-rule-grid">
         <el-form-item label="进程列表命令" class="wide"><el-input v-model="draft.processDiscoveryCommand" maxlength="2048" aria-label="进程列表命令" /></el-form-item>
         <el-form-item label="进程状态命令（{pid} 为进程 ID）" class="wide"><el-input v-model="draft.processStatusCommand" maxlength="2048" aria-label="进程状态命令" /></el-form-item>
         <el-form-item label="进程内存数值正则（第 1 捕获组）" class="wide"><el-input v-model="draft.processValuePattern" maxlength="512" aria-label="进程内存数值正则" /></el-form-item>
       </div>
-      <div class="monitor-rule-list">
-        <div v-for="(rule, index) in draft.processRules" :key="rule.id" class="monitor-rule">
-          <div class="monitor-rule-title"><el-switch v-model="rule.enabled" :aria-label="`启用进程规则 ${index + 1}`" /><strong>{{ rule.name || `进程规则 ${index + 1}` }}</strong><el-tooltip content="删除进程规则"><el-button text type="danger" :icon="Trash2" :aria-label="`删除进程规则 ${index + 1}`" @click="removeRule('processRules', index)" /></el-tooltip></div>
+      <el-collapse v-model="openProcessRules" class="monitor-rule-list">
+        <el-collapse-item v-for="(rule, index) in draft.processRules" :id="`monitor-process-${rule.id}`" :key="rule.id" :name="rule.id" class="monitor-rule">
+          <template #title><div class="monitor-rule-title"><el-switch v-model="rule.enabled" :aria-label="`启用进程规则 ${index + 1}`" @click.stop /><strong>{{ rule.name || `进程规则 ${index + 1}` }}</strong><el-tooltip content="删除进程规则"><el-button text type="danger" :icon="Trash2" :aria-label="`删除进程规则 ${index + 1}`" @click.stop="removeRule('processRules', index)" /></el-tooltip></div></template>
           <div class="monitor-rule-grid">
             <el-form-item label="进程指标名称"><el-input v-model="rule.name" maxlength="96" :aria-label="`进程指标名称 ${index + 1}`" /></el-form-item>
             <el-form-item label="动态名称捕获组（可空）"><el-input-number v-model="rule.nameGroup" :min="1" :max="16" :precision="0" :aria-label="`动态名称捕获组 ${index + 1}`" /></el-form-item>
             <el-form-item label="进程命令匹配正则" class="wide"><el-input v-model="rule.pattern" maxlength="512" :aria-label="`进程匹配正则 ${index + 1}`" /></el-form-item>
           </div>
-        </div>
-      </div>
+        </el-collapse-item>
+      </el-collapse>
     </el-form>
   </section>
 </template>
@@ -104,8 +122,8 @@ async function save() {
 .monitor-rule-heading { margin: 20px 0 12px; }.monitor-rule-heading h4 { margin: 0; font-size: 14px; }
 .monitor-base-grid, .monitor-rule-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(140px, 1fr); gap: 0 16px; }
 .monitor-base-grid { max-width: 680px; margin-top: 20px; }.field-unit { margin-left: 8px; }
-.monitor-rule-list { display: grid; gap: 12px; }.monitor-rule { min-width: 0; border: 1px solid #dce5e5; border-radius: 6px; padding: 12px 16px 0; }
-.monitor-rule-title { justify-content: flex-start; margin-bottom: 12px; }.monitor-rule-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.monitor-rule-list { border-top: 1px solid #dce5e5; }.monitor-rule { min-width: 0; border: 1px solid #dce5e5; border-top: 0; padding: 0 16px; }.monitor-rule :deep(.el-collapse-item__header) { height: 46px; line-height: normal; }.monitor-rule :deep(.el-collapse-item__wrap) { border-bottom: 0; }.monitor-rule :deep(.el-collapse-item__content) { padding-bottom: 0; }
+.monitor-rule-title { width: 100%; justify-content: flex-start; gap: 10px; padding-right: 8px; }.monitor-rule-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
 .wide { grid-column: 1 / -1; }.monitor-rules-form :deep(.el-input__inner) { font-family: ui-monospace, monospace; }
 @media (max-width: 620px) { .monitor-settings-heading { align-items: flex-start; flex-direction: column; }.monitor-base-grid, .monitor-rule-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

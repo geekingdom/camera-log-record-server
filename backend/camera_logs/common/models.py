@@ -48,6 +48,59 @@ class InitialCommand(Model):
         return value
 
 
+class CommonCommandCreate(Model):
+    """管理员维护的全局手工命令提示项，和任务模板保持独立生命周期。"""
+
+    command: str = Field(min_length=1, max_length=8192)
+    description: str = Field(default="", max_length=512)
+    enabled: bool = True
+
+    @field_validator("command")
+    @classmethod
+    def normalize_command(cls, value):
+        """快捷命令必须为非空单行，并统一首尾空白以保证全局唯一键稳定。"""
+        value = value.strip()
+        if not value or any(char in value for char in ("\r", "\n", "\x00")):
+            raise ValueError("命令必须为非空单行文本")
+        return value
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value):
+        """说明只用于补全提示，移除无意义的首尾空白但允许为空。"""
+        if "\x00" in value or "\r" in value or "\n" in value:
+            raise ValueError("命令描述必须为单行文本")
+        return value.strip()
+
+
+class CommonCommandPatch(Model):
+    """以乐观锁局部修改全局快捷命令，禁用也是一次可审计的编辑。"""
+
+    version: int = Field(ge=1)
+    command: str | None = Field(default=None, min_length=1, max_length=8192)
+    description: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+
+    @field_validator("command")
+    @classmethod
+    def normalize_command(cls, value):
+        """编辑时保持与创建相同的单行和唯一化规则。"""
+        return CommonCommandCreate(command=value).command if value is not None else None
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value):
+        """编辑说明仍不接受控制字符，避免提示列表出现多行内容。"""
+        return CommonCommandCreate(command="command", description=value).description if value is not None else None
+
+    @model_validator(mode="after")
+    def has_changes(self):
+        """空 PATCH 没有业务含义，提前拒绝避免无效版本递增和审计。"""
+        if self.command is None and self.description is None and self.enabled is None:
+            raise ValueError("至少需要修改命令、描述或启用状态之一")
+        return self
+
+
 class ScheduledCommand(InitialCommand):
     """在基础命令字段上增加计划任务标识、执行次数和间隔。"""
     id: str = Field(default_factory=new_id, max_length=64)

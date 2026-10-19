@@ -5,7 +5,7 @@ import { AArrowDown, AArrowUp, LocateFixed, Pause, Play, Send, Trash2, FileSearc
 import { ElMessage, ElNotification } from "element-plus";
 import "element-plus/es/components/notification/style/css";
 import { api, getToken } from "../../shared/api";
-import { settingsApi } from "../settings/api";
+import { settingsApi, type CommonCommand } from "../settings/api";
 import type { Task } from "../../shared/types";
 import {
   LiveLogBuffer,
@@ -18,7 +18,7 @@ import LiveLogRanges from "./LiveLogRanges.vue";
 import LogFindBar from "./LogFindBar.vue";
 import LogText from "./LogText.vue";
 import { findTextMatches } from "./logText";
-import { appendCommandHistory, commandSuggestions, readCommandHistory, writeCommandHistory } from "./liveCommandHistory";
+import { appendCommandHistory, commandSuggestionItems, readCommandHistory, writeCommandHistory } from "./liveCommandHistory";
 
 const props = defineProps<{ taskId: string; userId?: string; canSend?: boolean }>();
 const emit = defineEmits<{ history: [] }>();
@@ -60,7 +60,9 @@ async function readTaskState(current: number) {
   }
 }
 const command = ref("");
+const commandInput = ref<{ $el?: HTMLElement }>();
 const commandHistory = ref<string[]>([]);
+const commonCommands = ref<CommonCommand[]>([]);
 const commandHistoryIndex = ref(-1);
 const commandDraft = ref("");
 const sending = ref(false);
@@ -104,7 +106,7 @@ const matches = computed(() => {
 });
 const matchesTruncated = computed(() => matches.value.length >= 1000);
 const activeMatch = computed(() => matches.value[activeMatchIndex.value]);
-const commandCandidates = computed(() => commandSuggestions(commandHistory.value, command.value));
+const commandCandidates = computed(() => commandSuggestionItems(commandHistory.value, command.value, commonCommands.value));
 const topSpacer = computed(() => ({
   height: String(first.value * rowHeight) + "px",
 }));
@@ -149,6 +151,27 @@ function startDisplaySettingsRefresh() {
   displaySettingsGeneration += 1;
   window.clearTimeout(displaySettingsTimer);
   void refreshDisplaySettings(displaySettingsGeneration);
+}
+let commonCommandsGeneration = 0;
+async function loadCommonCommands() {
+  const current = ++commonCommandsGeneration;
+  try {
+    const first = await settingsApi.commonCommands();
+    if (current !== commonCommandsGeneration) return;
+    const pages = Array.from(
+      { length: Math.ceil(first.total / first.pageSize) - 1 },
+      (_, index) => settingsApi.commonCommands(index + 2, first.pageSize),
+    );
+    const rest = await Promise.all(pages);
+    // 多页读取期间焦点或任务切换会启动新代次，旧分页不得重新加入已禁用命令。
+    if (current !== commonCommandsGeneration) return;
+    commonCommands.value = [...first.items, ...rest.flatMap(result => result.items)];
+  }
+  catch { if (current === commonCommandsGeneration) commonCommands.value = []; }
+}
+function selectCommandCandidate(value: string) {
+  command.value = value; commandHistoryIndex.value = -1;
+  void nextTick(() => commandInput.value?.$el?.querySelector("input")?.focus());
 }
 
 // 每 100ms 批量复制一次数组，避免高频帧逐条触发虚拟列表重算。
@@ -304,6 +327,7 @@ function onCommandKeydown(event: KeyboardEvent) {
 }
 watch(() => props.taskId, connect, { immediate: true });
 watch(() => props.taskId, startDisplaySettingsRefresh, { immediate: true });
+watch(() => props.taskId, () => void loadCommonCommands(), { immediate: true });
 watch(() => props.taskId, () => {
   debugNotice?.close();
   debugNotice = undefined;
@@ -335,7 +359,7 @@ watch(consoleRef, (current, previous) => {
   if (previous) resize.unobserve(previous);
   if (current) resize.observe(current);
 });
-onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGeneration++; displaySettingsGeneration++; clearTimeout(stateTimer); clearTimeout(displaySettingsTimer); resize.disconnect(); close(); });
+onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGeneration++; commonCommandsGeneration++; displaySettingsGeneration++; clearTimeout(stateTimer); clearTimeout(displaySettingsTimer); resize.disconnect(); close(); });
 </script>
 <template>
   <section class="form-section runtime runtime-terminal">
@@ -393,9 +417,9 @@ onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGenerati
     </div>
     <div class="manual-command">
       <div class="command-entry">
-        <el-input v-model="command" :disabled="!props.canSend || sending" placeholder="输入手工命令" aria-label="输入手工命令" @input="commandHistoryIndex = -1" @compositionstart="composing = true" @compositionend="composing = false" @keydown="onCommandKeydown" />
+        <el-input ref="commandInput" v-model="command" :disabled="!props.canSend || sending" placeholder="输入手工命令" aria-label="输入手工命令" @focus="loadCommonCommands" @input="commandHistoryIndex = -1" @compositionstart="composing = true" @compositionend="composing = false" @keydown="onCommandKeydown" />
         <div v-if="command.trim() && commandCandidates.length" class="command-suggestions" role="listbox">
-          <button v-for="item in commandCandidates" :key="item" type="button" role="option" @mousedown.prevent="command = item; commandHistoryIndex = -1">{{ item }}</button>
+          <button v-for="item in commandCandidates" :key="item.command" type="button" role="option" @click="selectCommandCandidate(item.command)"><span>{{ item.command }}</span><small v-if="item.description">{{ item.description }}</small></button>
         </div>
       </div>
       <el-button v-if="props.canSend" type="primary" :icon="Send" :loading="sending" :disabled="sending || !command.trim() || (taskState?.commandBlocked && command.trim() !== 'debug')" @click="send">发送</el-button>
@@ -414,7 +438,7 @@ onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGenerati
 .manual-command { flex: 0 0 auto; align-items: flex-start; min-width: 0; }
 .command-entry { position: relative; flex: 1; min-width: 0; }
 .command-suggestions { position: relative; margin-top: 2px; max-height: 120px; overflow: auto; border: 1px solid #3c5148; background: #17221e; }
-.command-suggestions button { display: block; width: 100%; padding: 5px 8px; border: 0; background: transparent; color: #d6e6de; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: left; }
+.command-suggestions button { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; width: 100%; padding: 5px 8px; border: 0; background: transparent; color: #d6e6de; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: left; }.command-suggestions span, .command-suggestions small { min-width: 0; overflow-wrap: anywhere; }.command-suggestions small { color: #9dafa8; font: 12px system-ui, sans-serif; }
 .command-suggestions button:hover, .command-suggestions button:focus-visible { background: #294237; outline: none; }
 .log-tools { flex-wrap: wrap; }
 .log-tools .el-button + .el-button { margin-left: 0; }

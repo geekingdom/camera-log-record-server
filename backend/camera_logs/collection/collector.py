@@ -29,6 +29,7 @@ from .output_recovery import OutputRecovery, OutputRecoveryCommandSkipped, suppo
 from .psh_dialogue import PshSwitchError
 from .scheduled_supervision import supervise_scheduled
 from .shell_keepalive import ShellKeepalive
+from .slave_identity import is_slave_ssh_task, run_slave_identity_probe
 
 _SHELL_KEEPALIVE_SECONDS = 60
 _OUTPUT_CLOSE_TIMEOUT_SECONDS = 2
@@ -84,6 +85,7 @@ class Collector:
         self._reader: asyncio.Task[None] | None = None
         self._scheduled: list[asyncio.Task[None]] = []
         self._shell_keepalive: asyncio.Task[None] | None = None
+        self._slave_identity_check: asyncio.Task[None] | None = None
         self._coredump_monitor: asyncio.Task[None] | None = None
         self._coredump_cleanup: Any | None = None
         self._coredump_report: Callback | None = None
@@ -169,6 +171,7 @@ class Collector:
             for position, item in enumerate(self.task.get("scheduledCommands", [])):
                 self._scheduled.append(asyncio.create_task(supervise_scheduled(self, position, item)))
             self._start_shell_keepalive()
+            self._start_slave_identity_check()
         except BaseException:
             # 初始化失败时本实例已经拥有连接和后台协程，必须立即进入同一关闭路径。
             await self.stop()
@@ -302,6 +305,19 @@ class Collector:
             if task is not asyncio.current_task():
                 await asyncio.gather(task, return_exceptions=True)
 
+    def _start_slave_identity_check(self) -> None:
+        """从机每分钟复用当前会话核对 ifconfig，禁止另建连接或接收器。"""
+        if is_slave_ssh_task(self.task) and self._slave_identity_check is None:
+            self._slave_identity_check = asyncio.create_task(run_slave_identity_probe(self))
+
+    async def _stop_slave_identity_check(self) -> None:
+        """关闭会话时取消身份巡检，避免连接回收后遗留排队 shell 输入。"""
+        task, self._slave_identity_check = self._slave_identity_check, None
+        if task:
+            task.cancel()
+            if task is not asyncio.current_task():
+                await asyncio.gather(task, return_exceptions=True)
+
     def command_status(self, command_id: str) -> str | None:
         return self._command_status.get(command_id)
 
@@ -363,6 +379,7 @@ class Collector:
             getattr(self._connection, "bootstrap_verified", False) is True
             and getattr(self._connection, "verified_shell_mode", None) == "ASH"
             and getattr(self._connection, "verified_target", None) == self.task.get("sshTarget")
+            and not getattr(self._connection, "identity_lost", False)
         )
 
     def _guard_output_recovery(self) -> None:
@@ -607,6 +624,7 @@ class Collector:
                 for task in self._scheduled:
                     task.cancel()
                 await self._stop_shell_keepalive()
+                await self._stop_slave_identity_check()
                 if self._sender and self._sender is not asyncio.current_task():
                     self._commands.fail_queued(ConnectionError("connection closed before command dispatch"))
                     self._sender.cancel()
@@ -700,6 +718,7 @@ class Collector:
         for task in self._scheduled:
             task.cancel()
         await self._stop_shell_keepalive()
+        await self._stop_slave_identity_check()
         try:
             await self._output_recovery.stop()
             await self.stop_coredump_monitor()

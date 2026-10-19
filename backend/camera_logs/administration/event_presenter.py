@@ -15,6 +15,8 @@ ACTION_SUMMARIES = {
     "create_resource": "创建设备资源", "edit_resource": "修改设备资源",
     "delete_resource": "删除设备资源", "create_template": "创建命令模板",
     "edit_template": "修改命令模板", "delete_template": "删除命令模板",
+    "create_common_command": "创建常用命令", "update_common_command": "修改常用命令",
+    "delete_common_command": "删除常用命令",
     "create_token": "创建服务令牌", "revoke_token": "撤销服务令牌",
     "update_token": "编辑服务账号", "reveal_token": "查看服务账号口令", "rotate_token": "重新生成服务账号口令",
     "reveal_resource_credential": "查看设备资源登录凭据",

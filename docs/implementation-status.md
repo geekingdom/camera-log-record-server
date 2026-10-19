@@ -1,5 +1,14 @@
 # 当前状态总表
 
+| 当前需求（2026-10-19，本机验证完成，等待本次提交CI） | 实现位置 | 验证证据 | 未完成与下一步 |
+| --- | --- | --- | --- |
+| 从机每60秒ifconfig身份巡检，不符关闭并重新切换 | `collection/slave_identity.py`、`collector.py`、`slave_shell.py` | 正常/异常IP、旧输出隔离、LF/CRLF分包、停止取消、单队列及Runtime重连专项129项，真实AsyncSSH重连通过 | 实体设备部署后观察；周期巡检不能追溯恢复旧的混入日志 |
+| 资源监控折叠及新增项自动定位 | `ResourceMonitorSettings.vue` | 正式浏览器1440/390折叠、聚焦视口、保存及跨模块草稿通过 | 前端198项及构建通过，待部署 |
+| 管理员常用命令表格及全员工作台补全 | `commands/common.py`、`CommonCommandsSettings.vue`、`LiveLogs.vue` | 幂等/版本/权限回归；真实Mongo事务及两种默认列表Explain各100返回/100键/100文档通过 | 分页/编辑/补全迟到响应回归通过，待部署 |
+| Coredump和下载记录归档公开附件链接，API文档同步 | `logs/api.py`、`coredumps/api.py`、`common/public_downloads.py`、`reference`及下载UI | 匿名/失效令牌/IP策略/过期回归；真实无Cookie Range206及16字节通过；96操作API文档1440/390/320通过 | 文件状态及保留期继续有效；尚未部署；提交推送后等待本轮完整CI |
+
+本轮后端全量1963项通过，后续公开下载专项16项、API/常用命令32项通过；前端198项及构建通过。最终证据与边界见[配置与公开附件记录](history/2026-10-19-settings-commands-public-downloads.md)及[从机身份巡检](history/2026-10-19-slave-identity-probe.md)。
+
 | 当前需求（2026-10-16，进行中） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | outputClose收尾与logread超限恢复、ES独立旁路索引、Top10、下载历史及独立制品保留 | `collection`、新`indexing`、`logs`与前端工作台 | 真实ES故障/重放/缺块/归档重建、Mongo Explain与租约CAS通过；PSH安全通道拒绝不终止采集回归通过；前端197项/构建/全套浏览器通过 | 共享归档一次逻辑限速读取及真实runner补建/删除验证通过；后端1945项、最终98项专项、Ruff通过；源码05f90be九项CI38878143703全部成功；见`docs/history/2026-10-16-indexing-downloads.md` |

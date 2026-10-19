@@ -289,6 +289,15 @@ try {
   await page.getByRole("button", { name: "下载选中小时", exact: true }).click();
   const download = await downloadPromise;
   await download.saveAs(`${screenshots}/${download.suggestedFilename()}`);
+  // 缺陷附件在全新无Cookie上下文中仍应能下载，且Range不能被平台登录校验拦截。
+  const anonymous = await browser.newContext();
+  try {
+    const response = await anonymous.request.get(download.url(), { headers: { Range: "bytes=0-15" } });
+    if (response.status() !== 206 || (await response.body()).length !== 16)
+      throw new Error(`匿名附件Range下载失败：HTTP ${response.status()}`);
+    console.log(JSON.stringify({ publicAttachmentRange: true, bytes: 16 }));
+  } finally { await anonymous.close(); }
+
   await page.setViewportSize({ width: 390, height: 844 });
   await assertMobileDrawer("小时归档");
   await page.screenshot({

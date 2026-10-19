@@ -88,11 +88,22 @@ try {
     await retention.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `output/playwright/record-retention-${width}.png`, fullPage: false });
     await modules.getByText("资源监控", { exact: true }).click();
+    await settings.getByText("MemAvailable", { exact: true }).waitFor();
+    assert.equal(await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).count(), 0,
+      "系统指标默认应折叠，避免配置页被详细规则撑长");
+    await settings.getByText("MemAvailable", { exact: true }).click();
     await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).waitFor();
     assert.equal(await settings.getByRole("textbox", { name: "采集命令 1", exact: true }).inputValue(), config.items[0].command);
     assert.equal(await settings.getByRole("textbox", { name: "数值正则 1", exact: true }).inputValue(), config.items[0].pattern);
     await settings.getByRole("button", { name: "新增指标", exact: true }).click();
-    await settings.getByRole("textbox", { name: "指标名称 2", exact: true }).fill("Slab");
+    const newName = settings.getByRole("textbox", { name: "指标名称 2", exact: true });
+    await newName.waitFor();
+    await page.waitForTimeout(400);
+    assert.equal(await newName.evaluate(element => document.activeElement === element), true,
+      "新增指标应展开并聚焦，不能要求管理员手动滚动定位");
+    const newBox = await newName.boundingBox();
+    assert.ok(newBox && newBox.y >= 0 && newBox.y + newBox.height <= 900, `新增指标输入应在当前视口可见: ${JSON.stringify(newBox)}`);
+    await newName.fill("Slab");
     await settings.getByRole("textbox", { name: "采集命令 2", exact: true }).fill("cat /proc/meminfo");
     await settings.getByRole("textbox", { name: "数值正则 2", exact: true }).fill("Slab:\\s*(\\d+) kB");
     await modules.getByText("记录保留", { exact: true }).click();

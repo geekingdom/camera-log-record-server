@@ -2,6 +2,12 @@
 const HISTORY_LIMIT = 100;
 const SUGGESTION_LIMIT = 12;
 
+export interface CommandSuggestion {
+  command: string;
+  description: string;
+  source: "common" | "history";
+}
+
 /** 为用户和任务建立无法彼此复用的 sessionStorage 名称。 */
 export function commandHistoryKey(userId: string | undefined, taskId: string): string {
   return `camera-log.live-command-history:${encodeURIComponent(userId || "anonymous")}:${encodeURIComponent(taskId)}`;
@@ -19,6 +25,32 @@ export function commandSuggestions(history: string[], input: string): string[] {
   const needle = input.trim().toLocaleLowerCase();
   if (!needle) return history.slice(0, SUGGESTION_LIMIT);
   return history.filter(item => item.toLocaleLowerCase().includes(needle)).slice(0, SUGGESTION_LIMIT);
+}
+
+/** 常用命令优先于个人历史；同一命令只保留管理员配置的描述，避免重复候选。 */
+export function commandSuggestionItems(
+  history: string[],
+  input: string,
+  common: Array<Pick<CommandSuggestion, "command" | "description">>,
+): CommandSuggestion[] {
+  const needle = input.trim().toLocaleLowerCase();
+  const matches = (value: string) => !needle || value.toLocaleLowerCase().includes(needle);
+  const result: CommandSuggestion[] = [];
+  const seen = new Set<string>();
+  for (const item of common) {
+    const command = item.command.trim();
+    if (!command || !matches(command) || seen.has(command)) continue;
+    seen.add(command);
+    result.push({ command, description: item.description, source: "common" });
+    if (result.length === SUGGESTION_LIMIT) return result;
+  }
+  for (const command of history) {
+    if (!matches(command) || seen.has(command)) continue;
+    seen.add(command);
+    result.push({ command, description: "", source: "history" });
+    if (result.length === SUGGESTION_LIMIT) break;
+  }
+  return result;
 }
 
 /** 存储不可用或被损坏时安全回退到空历史，不能借用其它用户的数据。 */

@@ -41,6 +41,7 @@ try {
       } });
     }
     if (path === "/api/v1/display-settings") return json({ liveLogBufferMiB: 10 });
+    if (path === "/api/v1/common-commands") return json({ items: [], total: 0, page: 1, pageSize: 100 });
     if (path === "/api/v1/tasks") return json({ items: tasks, total: 2, page: 1, pageSize: 20 });
     if (["/api/v1/resources", "/api/v1/command-templates", "/api/v1/nodes", "/api/v1/users/creators"].includes(path)) {
       const items = path === "/api/v1/resources"

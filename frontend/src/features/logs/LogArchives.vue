@@ -122,10 +122,9 @@ async function download() {
     if (current !== jobGeneration) return;
     runningJob = { id: job.id, kind: "downloads" };
     const finished = await poll(job.id, "downloads", current);
-    const authorization = await api.browserDownload(job.id);
     if (current !== jobGeneration) return;
     const link = document.createElement("a");
-    link.href = authorization.url;
+    link.href = api.downloadContentUrl(job.id);
     link.download =
       "filename" in finished && finished.filename
         ? finished.filename

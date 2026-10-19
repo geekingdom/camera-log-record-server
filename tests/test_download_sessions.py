@@ -101,8 +101,8 @@ def test_cookie_download_is_scoped_revocable_and_expires(client):  # noqa: F811
         assert browser.get(result.json()["url"]).status_code == 401
 
 
-def test_login_cookie_download_is_revoked_by_ip_scope_and_account_disable(tmp_path, monkeypatch):
-    """正式下载路由接受登录会话，且策略收窄或停用账号后立即拒绝同一 Cookie。"""
+def test_public_attachment_survives_ip_scope_and_account_disable(tmp_path, monkeypatch):
+    """已生成附件公开访问，策略收窄或停用账号不影响缺陷附件链接。"""
     from camera_logs.common.config import Settings
     from camera_logs.common.database import now
     from camera_logs.main import create_app
@@ -150,7 +150,7 @@ def test_login_cookie_download_is_revoked_by_ip_scope_and_account_disable(tmp_pa
             "rules": [{"label": "office", "network": "198.51.100.0/24", "scopes": ["admin"]}],
         })
         assert policy.status_code == 200, policy.text
-        assert browser.get(ticket.json()["url"]).status_code == 403
+        assert browser.get(ticket.json()["url"]).status_code == 200
 
         disabled = browser.patch("/api/v1/admin/ip-policy", headers={
             "Authorization": "Bearer download-policy-bootstrap",
@@ -160,7 +160,7 @@ def test_login_cookie_download_is_revoked_by_ip_scope_and_account_disable(tmp_pa
             "Authorization": "Bearer download-policy-bootstrap",
         })
         assert deleted.status_code == 204, deleted.text
-        assert browser.get(ticket.json()["url"]).status_code == 401
+        assert browser.get(ticket.json()["url"]).status_code == 200
 
 
 def test_coredump_browser_ticket_is_path_scoped_and_downloads_natively(client, monkeypatch):  # noqa: F811
@@ -182,5 +182,5 @@ def test_coredump_browser_ticket_is_path_scoped_and_downloads_natively(client, m
     assert "HttpOnly" in ticket.headers["set-cookie"]
     client.headers.pop("Authorization", None)
     assert client.get(ticket.json()["url"]).json() == {"download": "coredump"}
-    # Cookie Path 不匹配时不会发送，且已移除 Bearer，另一对象必须无法借用票据。
-    assert client.get("/api/v1/coredump-exports/other/content").status_code == 401
+    # 不存在的公开附件返回404，不要求先取得登录身份。
+    assert client.get("/api/v1/coredump-exports/other/content").status_code == 404

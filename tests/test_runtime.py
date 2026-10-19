@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -165,6 +166,73 @@ def test_slave_connection_failure_uses_fixed_ten_second_retry(tmp_path):
         finally:
             await runtime.stop()
 
+    asyncio.run(scenario())
+
+
+def test_slave_identity_probe_closure_reconnects_the_runtime(tmp_path, monkeypatch):
+    """巡检确认当前为主机 shell 后，Collector 收尾必须驱动原从机运行重建下一会话。"""
+    class Connection:
+        bootstrap_verified = True
+        verified_shell_mode = "ASH"
+        verified_target = "SLAVE_1"
+
+        def __init__(self, address):
+            self.address = address
+            self.received = asyncio.Queue()
+            self.closed = False
+
+        async def read(self, _size=65536):
+            return await self.received.get()
+
+        async def write(self, data):
+            if not data.startswith(b"(printf "):
+                return
+            start = re.search(rb"(__CAMERA_LOGS_SLAVE_IDENTITY_[0-9a-f]+__)", data).group(1)
+            end = re.search(rb"(__CAMERA_LOGS_METRIC_[0-9a-f]+__):%s", data).group(1)
+            await self.received.put(b"\n" + start + b"\neth0\n inet addr:" + self.address.encode()
+                                    + b"\n\n" + end + b":0\n")
+
+        async def close(self):
+            self.closed = True
+            await self.received.put(b"")
+
+    async def scenario():
+        settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                            node_id="node-a", start_background=False)
+        repo = Repository(AsyncMongoMockClient().camera_logs, settings)
+        await repo.initialize()
+        task = {
+            "id": "probe-reconnect", "runId": "run", "nodeId": "node-a", "generation": 1,
+            "resourceId": "camera", "protocol": "SSH", "sshTarget": "SLAVE_1",
+            "desiredState": "RUNNING", "status": "PENDING", "passwordEncrypted": repo.encrypt(""),
+            "storageIdentity": "synthetic-slave", "ip": "10.41.203.35",
+            "initialCommands": [], "scheduledCommands": [], "logIdleTimeoutSeconds": 60,
+        }
+        await repo.db.tasks.insert_one(dict(task))
+        connections, second_started = [], asyncio.Event()
+
+        async def factory(_config):
+            address = "10.41.203.35" if not connections else "192.168.253.164"
+            connection = Connection(address)
+            connections.append(connection)
+            if len(connections) == 2:
+                second_started.set()
+            return connection
+
+        runtime = SessionRuntime(repo, task, factory)
+
+        async def no_wait(_seconds):
+            return None
+
+        runtime._wait_reconnect = no_wait
+        try:
+            await asyncio.wait_for(second_started.wait(), 1)
+            assert connections[0].closed
+            assert not connections[1].closed
+        finally:
+            await runtime.stop()
+
+    monkeypatch.setattr("camera_logs.collection.slave_identity.SLAVE_IDENTITY_CHECK_SECONDS", .01)
     asyncio.run(scenario())
 
 

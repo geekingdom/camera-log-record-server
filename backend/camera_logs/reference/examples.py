@@ -16,6 +16,8 @@ TEMPLATE = {"id": "template-example", "name": "日志模板", "description": "�
             "sharedWithAll": False, "initialCommands": [{"command": "ls"}], "scheduledCommands": []}
 JOB = {"id": "job-example", "taskId": "task-example", "kind": "DOWNLOAD", "status": "QUEUED", "progress": 0}
 COMMAND = {"id": "command-example", "taskId": "task-example", "kind": "MANUAL", "command": "ls", "status": "QUEUED"}
+COMMON_COMMAND = {"id": "common-command-example", "command": "ifconfig", "description": "查看网络地址",
+                  "enabled": True, "version": 1, "createdAt": STAMP, "updatedAt": STAMP}
 NODE = {"id": "collector-01", "url": "http://192.0.2.20:18081", "capacity": 100, "accepting": True,
         "isGeneralNode": True, "resourceNetworks": [], "writeLatencyLimitMs": 200,
         "performance": {"mode": "AUTO", "bufferMiB": 64, "writeConcurrency": 4, "batchKiB": 256,
@@ -90,6 +92,8 @@ def request_example(schema, schemas):
         return {"version": 1, "writeLatencyLimitMs": 500,
                 "performance": {"mode": "MANUAL", "bufferMiB": 128, "writeConcurrency": 6,
                                 "batchKiB": 512, "flushIntervalMs": 80, "readMiBPerSecond": 75}}
+    if name == "CommonCommandPatch":
+        return {"version": 1, "description": "查看网络地址与接口状态", "enabled": True}
     return schema_example(schema, schemas)
 
 
@@ -194,6 +198,8 @@ def response_example(path, method, status):
         return {"scopes": [{"value": "tasks:read", "label": "查看设备与任务"}]}
     if path.endswith("/users/share-targets"):
         return page({"id": "shared-user-example", "username": "shared-user", "displayName": "可共享用户"})
+    if "/common-commands" in path:
+        return page(COMMON_COMMAND) if method == "GET" else COMMON_COMMAND
     if "/commands" in path:
         return COMMAND
     if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume", "restart")) or "/operations/" in path:

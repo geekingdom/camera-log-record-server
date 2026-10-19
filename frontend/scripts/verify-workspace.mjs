@@ -16,6 +16,7 @@ const scripts = [
   "browser_live_terminal_workbench", "browser_archive_viewer", "browser_live_ranges", "browser_resource_metrics",
   "browser_archive_date_picker", "browser_download_history",
   "browser_resource_monitor_settings",
+  "browser_common_commands",
   "browser_node_performance_policy",
   "browser_ssh_target_editor",
   "browser_resource_manual_authentication",

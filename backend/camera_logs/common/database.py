@@ -73,6 +73,7 @@ class Repository:
             "templates",
             "operations",
             "commands",
+            "common_commands",
             "nodes",
             "node_configs",
             "platform_settings",
@@ -102,6 +103,16 @@ class Repository:
             except OperationFailure as error:
                 if error.code != 27:
                     raise
+        # 全局快捷命令按文本唯一，普通用户读取只扫描启用记录并按命令稳定排序。
+        await self.db.common_commands.create_index("command", unique=True)
+        await self.db.common_commands.create_index(
+            [("enabled", 1), ("command", 1), ("id", 1)],
+            name="common_commands_enabled_command",
+        )
+        await self.db.common_commands.create_index(
+            [("command", 1), ("id", 1)],
+            name="common_commands_command",
+        )
         await self.db.idempotency.create_index([("actor", 1), ("key", 1)], unique=True)
         await self.db.idempotency.create_index("expiresAt", expireAfterSeconds=0)
         # 每个任务只保留一个活动运行锁；不同任务可以使用同一设备端点。

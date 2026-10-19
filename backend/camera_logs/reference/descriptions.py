@@ -27,13 +27,13 @@ FIELD_DESCRIPTIONS = {
     "clearPassword": "编辑任务时是否明确清除已保存的设备登录密码。",
     "clusterCapacity": "平台允许同时运行的全部采集任务总上限。",
     "liveLogBufferMiB": "实时日志页面在浏览器内存中保留的最大数据量，单位MiB，整数1至100，默认10。",
-    "command": "发送给设备的一条单行命令正文。",
+    "command": "发送给设备的一条单行命令正文，或管理员维护的全局快捷命令正文。",
     "confirmIsolation": "是否确认旧运行实例已完成外部隔离，仅管理员可设为 true。",
     "confirmation": "执行节点隔离确认时必须填写的固定确认词。",
     "ctx": "校验失败的补充上下文，仅在错误响应中出现。",
     "currentPassword": "当前登录账户的原密码，用于验证本人改密请求。",
     "delaySeconds": "命令写入连接后额外等待的秒数。",
-    "description": "资源、任务或命令模板的补充业务说明。",
+    "description": "资源、任务、命令模板或常用命令的补充业务说明。",
     "detail": "错误响应中的具体错误详情或详情列表。",
     "displayName": "平台账户在界面和审计记录中显示的名称。",
     "enableCoredumpMonitor": "海康设备资源是否启用 Coredump NFS 监控；仅有正在采集的 SSH 或 Telnet 设备任务时执行。",
@@ -48,7 +48,7 @@ FIELD_DESCRIPTIONS = {
     "processStatusCommand": "读取进程状态的命令模板，唯一的 {pid} 将替换为已验证的正整数进程 ID。",
     "processValuePattern": "从进程状态响应中提取内存值的正则，第一个捕获组为 KB 数值。",
     "nameGroup": "可选的进程正则捕获组编号，用于生成动态进程名称；为空时使用规则名称。",
-    "enabled": "账户或来源 IP 白名单策略是否启用。",
+    "enabled": "账户、来源 IP 白名单策略或常用命令是否启用。禁用的常用命令不再向普通用户补全列表返回。",
     "encoding": "接收设备输出时采用的字符编码名称。",
     "end": "时间范围结束时间，采用带时区 ISO 8601，且不包含该时刻。",
     "evidence": "确认旧实例隔离所依据的工单、操作记录或其他可核验证据。",
@@ -88,7 +88,7 @@ FIELD_DESCRIPTIONS = {
     "scheduledCommands": "按各自次数和间隔独立执行的定时命令配置列表。",
     "scopes": "账户或 IP 规则被授予的平台权限标识列表。",
     "serialServerResourceId": "Telnet 串口任务可选关联的已登记串口服务器资源标识。",
-    "sshTarget": "SSH 日志采集目标：HOST 为默认主机；SLAVE_1、SLAVE_2、SLAVE_3 分别为指定从机。从机独立确认协议模式和目标身份，只采集从机输出；仅 SSH 可选择从机。",
+    "sshTarget": "SSH 日志采集目标：HOST 为默认主机；SLAVE_1、SLAVE_2、SLAVE_3 分别为指定从机。从机独立确认协议模式和目标身份；运行期间每60秒复用采集连接执行ifconfig，身份不匹配或无法确认时关闭连接并重新切换；不消耗用户定时命令预算。仅 SSH 可选择从机。",
     "sharedWith": "可读取此命令模板的指定有效用户标识列表。",
     "sharedWithAll": "是否将模板共享给全部有效平台用户，仅管理员可启用。",
     "sourceTemplateId": "创建或编辑任务时复制命令配置的来源模板标识。",
@@ -106,6 +106,9 @@ FIELD_DESCRIPTIONS = {
 
 # 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
 OPERATION_DESCRIPTIONS = {
+    ("GET", "/api/v1/downloads/{identifier}/content"): "公开下载已生成日志归档，无需登录、Token、票据或来源IP授权。支持Range与If-Range；未完成返回409，已过期或清理返回410。",
+    ("GET", "/api/v1/coredumps/{identifier}/content"): "公开下载已固定版本的Coredump文件，无需登录、Token、票据或来源IP授权。支持Range与If-Range；未冻结或固定副本已过期时返回409，需要先由平台用户创建导出。",
+    ("GET", "/api/v1/coredump-exports/{identifier}/content"): "公开下载已生成Coredump导出，无需创建者权限、登录、Token、票据或来源IP授权。支持Range与If-Range；未完成或已到期返回409。",
     ("POST", "/api/v1/log-searches"): (
         "创建历史检索作业，冻结指定任务和时间范围内的文件清单后异步扫描。"
         "需要logs:read和Idempotency-Key；创建响应仅表示作业已受理，随后查询状态并分页读取结果。"
@@ -191,6 +194,7 @@ PARAMETER_DESCRIPTIONS = {
     "object": "按运行事件对象的资源、任务、节点或核心转储文件名称、IP 或标识进行字面子串筛选。",
     "page": "从 1 开始的分页页码。",
     "pageSize": "每页返回的记录数，受接口允许的最大值限制。",
+    "query": "按命令或描述进行不区分大小写的字面子串筛选。",
     "receivedFrom": "仅返回服务器首次接收时间不早于该时刻的 Coredump 文件。",
     "receivedTo": "仅返回服务器首次接收时间早于该时刻的 Coredump 文件。",
     "requestId": "按平台分配的请求追踪编号筛选审计或请求记录。",

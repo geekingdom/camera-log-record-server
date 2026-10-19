@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendCommandHistory, commandHistoryKey, commandSuggestions } from "./liveCommandHistory";
+import { appendCommandHistory, commandHistoryKey, commandSuggestionItems, commandSuggestions } from "./liveCommandHistory";
 
 describe("实时命令历史", () => {
   it("以用户和任务共同隔离存储键", () => {
@@ -19,6 +19,20 @@ describe("实时命令历史", () => {
   it("按输入内容给出有界的字面候选", () => {
     expect(commandSuggestions(["outputOpen", "outputClose", "prtHardInfo"], "out")).toEqual([
       "outputOpen", "outputClose",
+    ]);
+  });
+
+  it("将管理员启用的常用命令置于个人历史之前，并按命令去重", () => {
+    expect(commandSuggestionItems(
+      ["outputClose", "logread -f"],
+      "out",
+      [
+        { command: "outputOpen", description: "打开输出" },
+        { command: "outputClose", description: "关闭输出" },
+      ],
+    )).toEqual([
+      { command: "outputOpen", description: "打开输出", source: "common" },
+      { command: "outputClose", description: "关闭输出", source: "common" },
     ]);
   });
 });

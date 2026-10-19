@@ -11,7 +11,7 @@ from camera_logs.common.security import actor, authorize
 from camera_logs.coredumps.models import CoredumpExportCreate
 from camera_logs.coredumps.presence import visible_coredump_query
 from camera_logs.logs.api import proxy_file
-from camera_logs.logs.download_sessions import download_actor_for, issue_download_ticket
+from camera_logs.logs.download_sessions import issue_download_ticket
 
 
 def _view(document: dict[str, Any]) -> dict[str, Any]:
@@ -42,8 +42,6 @@ async def _resource(repo, user, identifier: str) -> dict[str, Any]:
 def install_coredump_routes(app):
     """安装平台 coredump 路由，下载鉴权、审计和节点代理均沿用日志约束。"""
     User = Annotated[dict, Depends(actor)]
-    CoredumpDownloadUser = Annotated[dict, Depends(download_actor_for("coredump"))]
-    CoredumpExportDownloadUser = Annotated[dict, Depends(download_actor_for("coredump_export"))]
     def repo():
         return app.state.repo
 
@@ -147,25 +145,23 @@ def install_coredump_routes(app):
         await audited_mutation(repo(), user["id"], "cancel_coredump_export", identifier, cancel)
 
     @app.get("/api/v1/coredump-exports/{identifier}/content")
-    async def export_content(identifier: str, request: Request, user: CoredumpExportDownloadUser):
+    async def export_content(identifier: str, request: Request):
+        """公开读取已生成导出，附件访问不受创建者和账号状态限制。"""
         document = await repo().get("coredump_exports", identifier)
-        authorize(user, "logs:download")
-        if document["actor"] != user["id"] and not user.get("isAdmin"):
-            raise HTTPException(403, "仅创建者可下载导出")
         if document.get("status") != "SUCCEEDED" or _expired(document.get("expiresAt")):
             raise HTTPException(409, "coredump 导出尚未完成")
-        await repo().audit(user["id"], "download_coredump_export", identifier)
+        await repo().audit("anonymous", "download_coredump_export", identifier)
         return await proxy_file(repo(), document["coordinatorNodeId"], f"/internal/coredump-exports/{identifier}/content",
                                 request.headers.get("range"), request.headers.get("if-range"))
 
     @app.get("/api/v1/coredumps/{identifier}/content")
-    async def coredump_content(identifier: str, request: Request, user: CoredumpDownloadUser):
+    async def coredump_content(identifier: str, request: Request):
         """单文件仅代理固定版本，Range/If-Range 交由持有副本的节点处理。"""
         document = await repo().get("coredump_files", identifier)
-        await _resource(repo(), user, document["resourceId"])
-        authorize(user, "logs:download")
+        if _expired(document.get("expiresAt")):
+            raise HTTPException(409, "coredump 固定副本已过期，请重新创建导出")
         if document.get("status") != "FROZEN" or not document.get("snapshot"):
             raise HTTPException(409, "coredump 尚未冻结，请创建导出以固定当前版本")
-        await repo().audit(user["id"], "download_coredump", identifier)
+        await repo().audit("anonymous", "download_coredump", identifier)
         return await proxy_file(repo(), document["nodeId"], f"/internal/coredumps/{identifier}/content",
                                 request.headers.get("range"), request.headers.get("if-range"))

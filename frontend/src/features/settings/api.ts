@@ -52,6 +52,17 @@ export interface DisplaySettings {
   liveLogBufferMiB: number;
 }
 
+/** 管理员维护的共享命令；普通用户接口只会返回启用项。 */
+export interface CommonCommand {
+  id: string;
+  command: string;
+  description: string;
+  enabled: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** 节点采集性能策略；AUTO 的数值是节点自动调节时可使用的资源上限。 */
 export interface PerformancePolicy {
   mode: "AUTO" | "MANUAL";
@@ -134,4 +145,16 @@ export const settingsApi = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(body),
     }),
+  commonCommands: (page = 1, pageSize = 100) => request<{ items: CommonCommand[]; total: number; page: number; pageSize: number }>(`/common-commands?page=${page}&pageSize=${pageSize}`),
+  adminCommonCommands: (page = 1, pageSize = 100) => request<{ items: CommonCommand[]; total: number; page: number; pageSize: number }>(`/admin/common-commands?page=${page}&pageSize=${pageSize}`),
+  createCommonCommand: (body: Pick<CommonCommand, "command" | "description" | "enabled">) =>
+    request<CommonCommand>("/admin/common-commands", {
+      method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: JSON.stringify(body),
+    }),
+  updateCommonCommand: (id: string, body: Partial<Pick<CommonCommand, "command" | "description" | "enabled">> & Pick<CommonCommand, "version">) =>
+    request<CommonCommand>(`/admin/common-commands/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: { "Idempotency-Key": idempotencyKey() }, body: JSON.stringify(body),
+    }),
+  deleteCommonCommand: (id: string, version: number) =>
+    request<void>(`/admin/common-commands/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
 };

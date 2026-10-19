@@ -22,11 +22,9 @@ const files = {
     receivedAt: "2026-09-10T02:00:00+00:00", status: "FROZEN", version: 1 }],
 };
 let exportNumber = 0;
-const calls = { list: [], cancel: [], ticket: [], content: [] };
+const calls = { list: [], cancel: [], content: [] };
 const cancelledExports = new Set();
-let singleTicketStarted, releaseSingleTicket, exportThreeStarted, releaseExportThree;
-const singleTicketPending = new Promise(resolve => { singleTicketStarted = resolve; });
-const singleTicketRelease = new Promise(resolve => { releaseSingleTicket = resolve; });
+let exportThreeStarted, releaseExportThree;
 const exportThreePending = new Promise(resolve => { exportThreeStarted = resolve; });
 const exportThreeRelease = new Promise(resolve => { releaseExportThree = resolve; });
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
@@ -72,15 +70,6 @@ await page.route("**/api/v1/**", async route => {
   if (pathname === "/api/v1/coredump-exports" && request.method() === "POST") {
     exportNumber += 1;
     return json(route, { id: `export-${exportNumber}`, status: "QUEUED", kind: "COREDUMP_EXPORT" }, 202);
-  }
-  if (pathname.startsWith("/api/v1/coredump-exports/") && pathname.endsWith("/browser-session")) {
-    const id = pathname.split("/")[4]; calls.ticket.push(id);
-    return json(route, { url: `/api/v1/coredump-exports/${id}/content` }, 200, { "set-cookie": "download_access=mock; HttpOnly; Path=/api/v1/coredump-exports/" });
-  }
-  if (pathname.startsWith("/api/v1/coredumps/") && pathname.endsWith("/browser-session")) {
-    const id = pathname.split("/")[4]; calls.ticket.push(id);
-    singleTicketStarted(); await singleTicketRelease;
-    return json(route, { url: `/api/v1/coredumps/${id}/content` });
   }
   if (pathname.includes("/content")) {
     calls.content.push(pathname);
@@ -135,8 +124,7 @@ const nativeDownload = page.waitForEvent("download");
 await drawer.getByRole("button", { name: "导出所选", exact: true }).click();
 await page.getByRole("dialog", { name: "确认导出 coredump", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
 const downloaded = await nativeDownload;
-if (!calls.ticket.includes("export-2")) throw new Error("成功导出未请求浏览器下载票据");
-if (!downloaded.url().includes("/api/v1/coredump-exports/export-2/content")) throw new Error("成功导出未导航到浏览器下载票据地址");
+if (!downloaded.url().includes("/api/v1/coredump-exports/export-2/content")) throw new Error("成功导出未导航到公开内容地址");
 await page.getByRole("dialog", { name: "确认导出 coredump", exact: true }).waitFor({ state: "hidden" });
 await drawer.getByText("导出完成", { exact: false }).waitFor();
 await page.waitForTimeout(1000);
@@ -151,21 +139,17 @@ if (!mobileStatuses.every(tag => tag.box.x >= 0 && tag.box.x + tag.box.width <= 
 }
 console.log(`移动端状态标签：${JSON.stringify(mobileStatuses)}`);
 await page.screenshot({ path: `${screenshots}/coredump-mobile-status.png`, fullPage: true });
-// 单文件票据和轮询中的旧导出在关闭并切换资源后返回，均不能触发下载。
+// 轮询中的旧导出在关闭并切换资源后返回，不能触发下载。
 const downloadsBeforeSwitch = downloads.length;
-const singleClick = frozenRow.getByLabel("下载 coredump 文件").click();
-await singleTicketPending;
 await drawer.getByRole("button", { name: "导出所选", exact: true }).click();
 await page.getByRole("dialog", { name: "确认导出 coredump", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
 await exportThreePending;
 await drawer.getByRole("button", { name: "关闭", exact: true }).click();
 await page.getByLabel("查看 coredump 文件").nth(1).click();
 await page.getByRole("dialog", { name: /验收网络设备 B.*Coredump 文件/ }).waitFor();
-releaseSingleTicket(); releaseExportThree();
-await singleClick;
+releaseExportThree();
 await page.waitForTimeout(500);
-if (calls.ticket.includes("export-3")) throw new Error("切换资源后旧导出仍触发下载票据");
-if (downloads.length !== downloadsBeforeSwitch) throw new Error(`切换资源后旧单文件或导出仍触发原生下载：${downloads.join(", ")}`);
+if (downloads.length !== downloadsBeforeSwitch) throw new Error(`切换资源后旧导出仍触发原生下载：${downloads.join(", ")}`);
 if (!calls.list.some(call => call.resourceId === "camera-b")) throw new Error("切换资源未读取新 coredump 目录");
 await browser.close();
 console.log(`coredump UI 验收通过，截图：${screenshots}/coredump-desktop.png 与 ${screenshots}/coredump-mobile.png`);

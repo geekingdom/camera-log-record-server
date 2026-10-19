@@ -39,14 +39,9 @@ describe("HTTP环境幂等键", () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ fileIds: ["file-1", "file-2"] });
     expect(new Headers(fetch.mock.calls[1][1].headers).get("Idempotency-Key")).toBe("coredump-key");
   });
-  it("coredump 下载票据交给同源浏览器导航，不读取完整二进制响应", async () => {
-    vi.stubGlobal("sessionStorage", { getItem: () => null });
-    const fetch = vi.fn().mockResolvedValue(new Response('{"url":"/api/v1/coredumps/file-1/content"}', { status: 200 }));
-    vi.stubGlobal("fetch", fetch);
-
-    await api.coredumpBrowserDownload("file-1");
-
-    expect(fetch.mock.calls[0][0]).toBe("/api/v1/coredumps/file-1/browser-session");
-    expect(fetch.mock.calls[0][1].method).toBe("POST");
+  it("公开归档和 coredump 内容 URL 仅编码标识，不申请短期浏览器票据", () => {
+    expect(api.downloadContentUrl("job / 1")).toBe("/api/v1/downloads/job%20%2F%201/content");
+    expect(api.coredumpDownloadUrl("file / 1")).toBe("/api/v1/coredumps/file%20%2F%201/content");
+    expect(api.coredumpDownloadUrl("export / 1", true)).toBe("/api/v1/coredump-exports/export%20%2F%201/content");
   });
 });

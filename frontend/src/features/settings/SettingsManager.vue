@@ -11,6 +11,7 @@ import { formatWriteLatencyLimit } from "../../shared/nodeWriteLatency";
 import ResourceMonitorSettings from "./ResourceMonitorSettings.vue";
 import RecordRetentionSettings from "./RecordRetentionSettings.vue";
 import NodePerformancePolicy from "./NodePerformancePolicy.vue";
+import CommonCommandsSettings from "./CommonCommandsSettings.vue";
 
 const DEFAULT_PERFORMANCE_POLICY: PerformancePolicy = {
   mode: "AUTO", bufferMiB: 64, writeConcurrency: 4, batchKiB: 256, flushIntervalMs: 100, readMiBPerSecond: 50,
@@ -183,6 +184,7 @@ onMounted(() => void load());
           <el-radio-button value="nodes"><ServerCog :size="15" />节点准入</el-radio-button>
           <el-radio-button value="monitor"><Gauge :size="15" />资源监控</el-radio-button>
           <el-radio-button value="records"><Database :size="15" />记录保留</el-radio-button>
+          <el-radio-button value="commands"><Settings2 :size="15" />常用命令</el-radio-button>
         </el-radio-group>
       </nav>
       <section v-show="activeModule === 'platform'" class="settings-module" v-loading="loading">
@@ -224,6 +226,7 @@ onMounted(() => void load());
       </section>
       <section v-show="activeModule === 'monitor'" class="settings-module"><ResourceMonitorSettings :settings="settings" :loading="loading" @saved="settings = $event" /></section>
       <section v-show="activeModule === 'records'" class="settings-module"><RecordRetentionSettings :settings="settings" :loading="loading" @saved="settings = $event" /></section>
+      <section v-if="activeModule === 'commands'" class="settings-module"><CommonCommandsSettings /></section>
     </template>
     <el-dialog v-model="nodeDialog" :title="editingNode ? '编辑节点配置' : '登记节点'" width="min(560px, 94vw)" class="node-config-dialog" destroy-on-close @closed="nodeDialogGeneration += 1">
       <el-form label-position="top"><el-form-item label="节点 ID" required><el-input v-model="nodeForm.id" maxlength="128" :disabled="Boolean(editingNode)" /></el-form-item><el-form-item label="Worker 服务地址" required><el-input v-model="nodeForm.url" :disabled="Boolean(editingNode)" placeholder="http://worker:8001" /><p class="node-help">HTTP / HTTPS，须与节点上报地址一致且后端可达。</p></el-form-item><el-form-item label="最大并发任务数"><el-input-number v-model="nodeForm.capacity" :min="1" :max="MAX_NODE_CAPACITY" controls-position="right" aria-label="节点最大并发任务数" /><p class="node-help">登记配置是运行时权威；仅未登记节点使用 Worker 的 NODE_CAPACITY 作为默认容量。</p></el-form-item><el-form-item label="接受新任务"><el-switch v-model="nodeForm.accepting" /></el-form-item></el-form>

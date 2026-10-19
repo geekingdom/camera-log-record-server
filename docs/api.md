@@ -2,13 +2,13 @@
 
 管理员节点隔离确认接口 `POST /api/v1/nodes/{id}/confirm-isolation` 使用副本集事务提交节点、任务及审计变更。仍有新鲜心跳返回 409；数据库事务失败返回 503，客户端应先查询节点状态再重试。操作者必须先确认外部基础设施隔离，接口不会执行物理隔离。恢复运行的任务保留原运行和命令预算，暂停任务保持暂停；配置编辑引起的重启使用新运行。未知发送结果不会自动重发。
 
-公开业务接口以 `/api/v1` 开头。控制台使用登录后签发的 HttpOnly Cookie，第三方使用 Bearer Token：
+公开业务接口以 `/api/v1` 开头。除三类附件内容下载接口外，控制台使用登录后签发的 HttpOnly Cookie，第三方使用 Bearer Token：
 
 ```http
 Authorization: Bearer <access-token>
 ```
 
-创建设备资源、任务、模板、手动命令、搜索和下载作业要求 `Idempotency-Key`；编辑使用版本号，启停接口按期望状态幂等处理。以下值均为示例，不能作为真实凭据使用。
+创建设备资源、任务、模板、管理员常用命令、手动命令、搜索和下载作业要求 `Idempotency-Key`；编辑使用版本号，启停接口按期望状态幂等处理。以下值均为示例，不能作为真实凭据使用。
 
 ## 登录与会话
 
@@ -35,7 +35,7 @@ export CAMERA_LOGS_TOKEN='你的服务账号令牌'
 python example.py
 ```
 
-上述环境变量写法适用于 macOS/Linux；Windows PowerShell 使用 `$env:CAMERA_LOGS_BASE_URL='http://你的平台地址:端口'`，其他变量同理。服务地址不包含 `/api/v1` 后缀。每段源码顶部列出本例需要的变量；登录、当前会话、改密和退出示例使用 `CAMERA_LOGS_USERNAME`、`CAMERA_LOGS_PASSWORD` 建立 Cookie 会话，不以服务令牌替代登录。源码中的任务/资源/文件 ID、版本号、设备地址、时间范围和业务内容仍需按实际对象修改；编辑、删除时先查询当前 `version`。
+上述环境变量写法适用于 macOS/Linux；Windows PowerShell 使用 `$env:CAMERA_LOGS_BASE_URL='http://你的平台地址:端口'`，其他变量同理。服务地址不包含 `/api/v1` 后缀。三类附件内容下载的Python示例无需 `CAMERA_LOGS_TOKEN`。每段源码顶部列出本例需要的变量；登录、当前会话、改密和退出示例使用 `CAMERA_LOGS_USERNAME`、`CAMERA_LOGS_PASSWORD` 建立 Cookie 会话，不以服务令牌替代登录。源码中的任务/资源/文件 ID、版本号、设备地址、时间范围和业务内容仍需按实际对象修改；编辑、删除时先查询当前 `version`。
 
 创建类示例要求设置 `CAMERA_LOGS_IDEMPOTENCY_KEY`：同一次业务请求的未知结果重试保留同一键和正文，新业务操作使用新键。下载和检索的创建接口返回异步作业，需先查询作业状态，成功后再调用内容或结果接口，不能把创建响应当成文件。文件示例使用流式写入，下载完成后才将 `.partial` 重命名；实时日志示例通过首帧认证并记录续传游标。调用错误通过 HTTP 状态异常暴露；示例不会自动重试写操作。
 
@@ -64,7 +64,7 @@ Authorization: Bearer <SERVICE_TOKEN>
 
 每项资源及单资源详情均包含 `tasks` 摘要（任务 ID、名称、协议、目标、当前与期望状态、资源关联）、`taskCount`、`activeTaskCount`、`tasksTruncated` 和 `tasksUrl`。摘要默认最多 100 条，`taskLimit` 可设 1 至 500；截断时通过 `tasksUrl` 继续分页。具备 `tasks:read` 的有效用户可读取全部资源与任务，不含设备密码；不再使用资源或任务 ID 白名单限制可见性。
 
-按任务 ID 的启动、停止、暂停、恢复、实时订阅、命令与下载接口见下文。SSH 和 Telnet 设备支持暂停/恢复，Telnet 串口不支持。
+按任务 ID 的启动、停止、暂停、恢复、实时订阅、命令与下载接口见下文。SSH 和 Telnet 设备支持暂停/恢复，Telnet 串口不支持。SSH从机任务首次切换后会每60秒复用同一采集会话和命令队列执行 `ifconfig`，校验目标从机IP并排除外层主机IP；身份不符、命令失败或超时会关闭当前连接，沿既有从机重连流程重新登录、切换并验证。不占用用户定时命令次数，暂停和停止会取消巡检。
 
 ## 无关键词时间查询
 
@@ -187,6 +187,8 @@ POST /api/v1/tasks/{taskId}/resume
 `GET /api/v1/tasks/{taskId}/command-executions` 支持 `commandId` 按定时配置筛选、`kind=MANUAL|SCHEDULED` 按来源筛选及 `page/pageSize` 分页。记录的 `command`、`totalExecutions`、`intervalSeconds` 是发送预留时的配置快照，`attempt` 是本运行第几次占用发送预算。响应额外提供当前 `runId` 和 `scheduledCommands`，每项包含配置 ID、正文、总次数、间隔及当前运行 `attempts`；不会按相同正文合并。`commandSource=SNAPSHOT` 表示保存的正文，`CURRENT_CONFIGURATION` 表示旧记录依精确配置 ID 恢复，`UNAVAILABLE` 表示已无法还原。任务编辑会重新生成定时配置 ID，不能用编辑后的命令猜测已删除配置的历史正文。发送次数不等同于设备执行成功次数。
 
 `POST /api/v1/command-templates` 创建命令模板，`GET/PATCH/DELETE /api/v1/command-templates/{templateId}` 管理模板。向正在采集的任务发送手动命令：
+
+管理员维护的全局常用命令与任务模板相互独立：`GET /api/v1/common-commands?page=1&pageSize=100&query=关键字` 对所有已登录用户返回启用项，供日志工作台输入手工命令时做快捷补全；`query` 对命令和描述作不区分大小写的字面筛选。普通用户不能读取禁用项，也不能编辑此列表。管理员通过 `GET/POST /api/v1/admin/common-commands` 查看和创建完整表格，通过 `PATCH /api/v1/admin/common-commands/{id}` 携带 `version` 修改命令、描述或 `enabled`，将 `enabled=false` 即为禁用；`DELETE /api/v1/admin/common-commands/{id}?version=当前版本` 删除。创建需要 `Idempotency-Key`，同键同正文重试返回原记录，命令正文全局唯一，冲突或陈旧版本返回 409。所有创建、编辑、禁用与删除均写入审计；常用命令仅提供输入提示，不会绕过任务所有权、`commands:send`、会话状态或手动命令队列校验。
 
 模板创建者由服务端写入，客户端不能提交 `createdBy` 或 `createdByName`。创建者、`sharedWith` 中存在且启用、未删除的用户，以及 `sharedWithAll=true` 时的全部有效用户可读取模板；管理员可读取所有模板。只有创建者或管理员可编辑、删除模板。`sharedWithAll` 仅管理员可设置，模板名称在同一创建者范围内唯一。可通过 `GET /api/v1/users/share-targets?page=1&pageSize=20` 查询共享对象，该接口要求 `templates:read`，每项仅返回 `id`、`username` 和 `displayName`。
 
@@ -365,13 +367,13 @@ Content-Type: application/json
 
 下载和搜索作业从 `progress=0` 开始，按冻结片段的字节权重推进；运行中最大为 99，只有 `status=SUCCEEDED` 时才写入 100。失败、过期或取消的作业不会被显示为完成。下载最多选择 168 个小时，预计归档大小超过 20 GB 会被拒绝；节点临时导出空间上限为 100 GB，成功产物和下载保护最长保留 24 小时。多片段导出使用 ZIP STORE；`allowPartial=false` 时任一不可用片段会拒绝或失败，设为 `true` 时结果清单会明确列出 `missing`。
 
-浏览器原生下载可先创建短期会话：
+旧客户端兼容下载会话（新客户端无需调用）：
 
 ```http
 POST /api/v1/downloads/{jobId}/browser-session
 ```
 
-响应返回同源 `url`，同时设置仅对该下载路径生效的 5 分钟 HttpOnly cookie。浏览器随后访问返回 URL；脚本客户端仍可带 Bearer Token 调用 content 接口。
+该接口为旧客户端保留，返回同源 `url` 和兼容Cookie；新客户端直接访问内容URL，无需先创建票据。`GET /api/v1/downloads/{jobId}/content`、`GET /api/v1/coredumps/{id}/content`、`GET /api/v1/coredump-exports/{id}/content` 均为公开附件链接，不检查登录、令牌、创建者权限或平台来源IP策略。可直接粘贴到缺陷管理系统，支持Range/If-Range和原生流式下载。文件必须已经生成或固定，且仍在保留期内；免身份校验不会延长文件保留期。列表、创建、取消与原始分卷接口继续使用原权限。
 
 票据摘要与授权审计在同一数据库事务提交，确认成功后才设置 Cookie。提交确认丢失时仅从多数确认的主库查询本次固定票据；无法确认则返回503且不设置 Cookie，可重新申请。请求取消不会吞掉取消异常。数据库不保存票据明文；整个HTTP响应丢失后重新申请可能产生另一张独立短期票据，旧票据自然到期。
 
