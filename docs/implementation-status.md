@@ -1,11 +1,13 @@
 # 当前状态总表
 
-| 当前需求（2026-10-19，本机验证完成，等待本次提交CI） | 实现位置 | 验证证据 | 未完成与下一步 |
+| 当前需求（2026-10-19，功能提交完整CI通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 从机每60秒ifconfig身份巡检，不符关闭并重新切换 | `collection/slave_identity.py`、`collector.py`、`slave_shell.py` | 正常/异常IP、旧输出隔离、LF/CRLF分包、停止取消、单队列及Runtime重连专项129项，真实AsyncSSH重连通过 | 实体设备部署后观察；周期巡检不能追溯恢复旧的混入日志 |
 | 资源监控折叠及新增项自动定位 | `ResourceMonitorSettings.vue` | 正式浏览器1440/390折叠、聚焦视口、保存及跨模块草稿通过 | 前端198项及构建通过，待部署 |
 | 管理员常用命令表格及全员工作台补全 | `commands/common.py`、`CommonCommandsSettings.vue`、`LiveLogs.vue` | 幂等/版本/权限回归；真实Mongo事务及两种默认列表Explain各100返回/100键/100文档通过 | 分页/编辑/补全迟到响应回归通过，待部署 |
-| Coredump和下载记录归档公开附件链接，API文档同步 | `logs/api.py`、`coredumps/api.py`、`common/public_downloads.py`、`reference`及下载UI | 匿名/失效令牌/IP策略/过期回归；真实无Cookie Range206及16字节通过；96操作API文档1440/390/320通过 | 文件状态及保留期继续有效；尚未部署；提交推送后等待本轮完整CI |
+| Coredump和下载记录归档公开附件链接，API文档同步 | `logs/api.py`、`coredumps/api.py`、`common/public_downloads.py`、`reference`及下载UI | 匿名/失效令牌/IP策略/过期回归；真实无Cookie Range206及16字节通过；96操作API文档1440/390/320通过 | 文件状态及保留期继续有效；功能提交6ba57ce九项CI全部通过；公司实体设备待部署观察 |
+
+功能提交`6ba57ce`的[CI39192878168](https://github.com/geekingdom/camera-log-record-server/actions/runs/39192878168)九项全部成功，包含后端、前端、跨Worker、三种部署、NFS、Elasticsearch及提交规范。验收记录提交后仍须等待该提交CI结束；不以本机验证或推送成功替代完整交付。
 
 本轮后端全量1963项通过，后续公开下载专项16项、API/常用命令32项通过；前端198项及构建通过。最终证据与边界见[配置与公开附件记录](history/2026-10-19-settings-commands-public-downloads.md)及[从机身份巡检](history/2026-10-19-slave-identity-probe.md)。
 
