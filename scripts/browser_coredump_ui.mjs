@@ -29,6 +29,7 @@ const exportThreePending = new Promise(resolve => { exportThreeStarted = resolve
 const exportThreeRelease = new Promise(resolve => { releaseExportThree = resolve; });
 const browser = await chromium.launch({ headless: true, channel: "chrome" });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
+await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: baseUrl.replace(/\/$/, "") });
 const page = await context.newPage();
 page.setDefaultTimeout(8000);
 const downloads = [];
@@ -113,6 +114,23 @@ await frozenRow.locator(".el-checkbox").first().click();
 files["camera-a"][1].sourceState = "STABLE";
 await drawer.getByText("文件已稳定", { exact: true }).waitFor({ timeout: 9000 });
 if (!(await frozenRow.locator('input[type="checkbox"]').isChecked())) throw new Error("自动刷新清除了文件选择");
+// 稳定但未冻结的单文件直接下载和复制公开链接，不得创建导出作业。
+const stableRow = drawer.getByRole("row").filter({ hasText: "core-receiving.bin" });
+const exportsBeforeStableDownload = exportNumber;
+const directDownload = page.waitForEvent("download");
+await stableRow.getByRole("button", { name: "下载 coredump 文件", exact: true }).click();
+const directDownloaded = await directDownload;
+if (!directDownloaded.url().includes("/api/v1/coredumps/core-receiving/content")) {
+  throw new Error(`稳定文件未使用直连内容 URL：${directDownloaded.url()}`);
+}
+if (exportNumber !== exportsBeforeStableDownload) throw new Error("稳定文件直连下载错误创建了导出作业");
+await stableRow.getByRole("button", { name: "复制 coredump 下载链接 core-receiving", exact: false }).click();
+const copiedDirectUrl = await page.evaluate(() => navigator.clipboard.readText());
+if (!copiedDirectUrl.endsWith("/api/v1/coredumps/core-receiving/content")) {
+  throw new Error(`稳定文件复制链接不是公开内容地址：${copiedDirectUrl}`);
+}
+if (exportNumber !== exportsBeforeStableDownload) throw new Error("稳定文件复制链接错误创建了导出作业");
+await page.screenshot({ path: `${screenshots}/coredump-desktop-stable-direct.png`, fullPage: true });
 await drawer.getByRole("button", { name: "导出所选", exact: true }).click();
 await page.getByRole("dialog", { name: "确认导出 coredump", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
 await drawer.getByRole("button", { name: "取消导出", exact: true }).click();

@@ -376,3 +376,24 @@ def test_operation_names_distinguish_lists_details_states_and_downloads():
         assert operation_title(*key) == title
     for route, identifier in (('tasks', 'task_id'), ('resources', 'identifier'), ('command-templates', 'identifier')):
         assert operation_title('GET', f'/api/v1/{route}') != operation_title('GET', f'/api/v1/{route}/{{{identifier}}}')
+
+
+def test_time_inputs_and_hour_range_download_are_documented_without_required_offset(client):
+    """输入示例直接使用北京时间，下载范围合同和稳定源直链在目录明确可见。"""
+    from datetime import datetime
+
+    reference = client.get("/api/v1/api-reference").json()
+    operations = {item["id"]: item for item in reference["operations"]}
+    for operation in operations.values():
+        for parameter in operation["parameters"]:
+            if parameter["name"] in {"start", "end", "receivedFrom", "receivedTo"}:
+                assert datetime.fromisoformat(parameter["example"]).tzinfo is None
+                assert "北京时间" in parameter["description"]
+    for name in ("POST /api/v1/log-searches", "POST /api/v1/downloads"):
+        example = operations[name]["requestExample"]
+        assert datetime.fromisoformat(example["start"]).tzinfo is None
+        assert datetime.fromisoformat(example["end"]).tzinfo is None
+    download = operations["POST /api/v1/downloads"]
+    assert "hourIds" in download["description"] and "向上取整" in download["description"]
+    core = operations["GET /api/v1/coredumps/{identifier}/content"]
+    assert "稳定" in core["description"] and "无需先导出" in core["description"]

@@ -1,13 +1,14 @@
 """提供设备资源的认证预览、保存和受限读取接口。"""
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request, Response
 from pydantic import IPvAnyAddress
 from pymongo import ReturnDocument
 
+from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize, authorize_owner
@@ -204,12 +205,11 @@ def install_resource_routes(app, repo, listing):
             if not start or not end:
                 raise HTTPException(422, "开始和结束时间必须同时提供")
             try:
-                lower, upper = datetime.fromisoformat(start), datetime.fromisoformat(end)
+                lower, upper = parse_api_datetime(start), parse_api_datetime(end)
             except ValueError as error:
                 raise HTTPException(422, "时间必须使用 ISO 8601") from error
-            if lower.tzinfo is None or upper.tzinfo is None or upper <= lower:
-                raise HTTPException(422, "时间范围必须带时区且结束晚于开始")
-            lower, upper = lower.astimezone(UTC), upper.astimezone(UTC)
+            if upper <= lower:
+                raise HTTPException(422, "时间范围结束必须晚于开始")
             # 聚合记录覆盖 [createdAt, latestAt] 区间；区间与查询范围相交即返回。
             # 历史未迁移记录没有 latestAt，按单次 createdAt 作为结束时间回退。
             query = {"$and": [query, {"createdAt": {"$lt": upper}}, {"$or": [

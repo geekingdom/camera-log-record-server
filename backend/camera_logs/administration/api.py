@@ -1,6 +1,6 @@
 """提供运行指标、受限审计查询和经人工确认的旧节点隔离接口。"""
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import Depends, HTTPException, Query, Request
@@ -17,6 +17,7 @@ from camera_logs.administration.event_queries import (
     runtime_event_page,
 )
 from camera_logs.administration.isolation import confirm_node_isolation
+from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.database import public
 from camera_logs.common.observability import redact
 from camera_logs.common.security import actor, authorize
@@ -33,18 +34,15 @@ EventOutcome = Literal["PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]
 
 
 def _utc_range(start: str | None, end: str | None) -> dict[str, datetime]:
-    """解析管理查询时间范围，拒绝无时区、反向和过宽条件以控制扫描范围。"""
+    """解析管理查询时间范围；无时区输入按上海墙钟时间解释。"""
     if start is None and end is None:
         return {}
     if start is None or end is None:
         raise HTTPException(422, "开始和结束时间必须同时提供")
     try:
-        lower, upper = datetime.fromisoformat(start), datetime.fromisoformat(end)
+        lower, upper = parse_api_datetime(start), parse_api_datetime(end)
     except ValueError as exc:
-        raise HTTPException(422, "时间必须使用带时区的 ISO 8601 格式") from exc
-    if lower.tzinfo is None or upper.tzinfo is None:
-        raise HTTPException(422, "时间必须显式包含 UTC 时区或偏移")
-    lower, upper = lower.astimezone(UTC), upper.astimezone(UTC)
+        raise HTTPException(422, "时间必须使用有效 ISO 8601 日期时间格式") from exc
     if upper <= lower or upper - lower > timedelta(days=31):
         raise HTTPException(422, "时间范围必须大于零且不超过31天")
     return {"$gte": lower, "$lt": upper}

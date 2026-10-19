@@ -69,7 +69,7 @@ def _parameter_value(parameter: Mapping[str, Any]) -> Any:
     if pattern == r"^\d{4}-\d{2}-\d{2}$":
         return "2026-09-09"
     if schema.get("format") == "date-time":
-        return "2026-09-09T18:00:00+08:00"
+        return "2026-09-09T18:00:00"
     if schema.get("format") == "date":
         return "2026-09-09"
     return parameter.get("example")

@@ -85,6 +85,26 @@ async def main():
                 assert all(response.status_code == 204 for response in responses)
                 assert await db.audit.count_documents({"action": "cancel_download", "targetId": identifier}) == 1
 
+                # 范围下载在真实事务中覆盖四个小时，等价hourIds重放不重复保护或审计。
+                await db.tasks.insert_one({"id": "range", "name": "北京时间范围", "ip": "192.0.2.2"})
+                hours = [f"2026-10-19T{hour:02d}:00:00+00:00" for hour in range(4, 8)]
+                await db.files.insert_many([
+                    {"id": f"range-{index}", "taskId": "range", "nodeId": "node", "status": "READY",
+                     "hour": hour, "bytes": 10} for index, hour in enumerate(hours)
+                ])
+                range_body = {"taskId": "range", "start": "2026-10-19T12:18:41", "end": "2026-10-19T15:10:08"}
+                range_response = await client.post("/api/v1/downloads", json=range_body,
+                                                   headers={"Idempotency-Key": "range"})
+                assert range_response.status_code == 202, range_response.text
+                range_id = range_response.json()["id"]
+                range_job = await db.jobs.find_one({"id": range_id})
+                assert range_job["hourIds"] == hours and len(range_job["files"]) == 4
+                replay_range = await client.post("/api/v1/downloads", json={"taskId": "range", "hourIds": hours},
+                                                 headers={"Idempotency-Key": "range"})
+                assert replay_range.status_code == 202 and replay_range.json()["id"] == range_id
+                assert await db.audit.count_documents({"action": "DOWNLOAD", "targetId": range_id}) == 1
+                assert await db.files.count_documents({"taskId": "range", "retainUntil": {"$exists": True}}) == 4
+
                 await seed("lost-ack")
                 transaction = audited_mutations.mutation_transaction
                 async def lost_ack(repo, callback):
@@ -110,7 +130,7 @@ async def main():
         temporary.cleanup()
         assert not path.exists()
     print(json.dumps({"passed": True, "protectionAndAuditRollback": True, "concurrentReplay": True,
-                      "cancelAtomic": True, "unknownCommitReadOnly": True, "temporaryDataRemoved": True}))
+                      "shanghaiRangeAndHourIdsReplay": True, "cancelAtomic": True, "unknownCommitReadOnly": True, "temporaryDataRemoved": True}))
 
 
 if __name__ == "__main__":

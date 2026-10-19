@@ -53,7 +53,7 @@ def test_time_query_api_reads_archived_member_and_preserves_bytes(client, tmp_pa
         "archiveMember": "part-000001.log",
     })
     response = client.post("/api/v1/log-searches", headers={"Idempotency-Key": "range-query"}, json={
-        "taskId": "range-task", "start": stamp, "end": "2026-09-09T11:00:00+00:00",
+        "taskId": "range-task", "start": "2026-09-09T18:00:00", "end": "2026-09-09T19:00:00",
     })
     assert response.status_code == 202, response.text
     identifier = response.json()["id"]

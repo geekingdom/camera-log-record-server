@@ -339,10 +339,13 @@ def test_normalized_runtime_page_does_not_aggregate(client, monkeypatch):
     assert response.json()["items"][0]["id"] == "normalized"
 
 
-def test_admin_event_queries_reject_naive_or_excessive_time_ranges_and_non_admin(client):
-    """筛选时间必须显式 UTC 偏移且上限受控，非管理员得到明确 403。"""
+def test_admin_event_queries_reject_invalid_or_excessive_time_ranges_and_non_admin(client):
+    """无时区时间按上海墙钟解释，非法或过宽范围仍须拒绝，非管理员得到 403。"""
     assert client.get("/api/v1/audit-events", params={
         "start": "2026-09-08T00:00:00", "end": "2026-09-08T01:00:00+00:00",
+    }).status_code == 200
+    assert client.get("/api/v1/audit-events", params={
+        "start": "2026-09-08", "end": "2026-09-08T01:00:00",
     }).status_code == 422
     assert client.get("/api/v1/runtime-events", params={
         "start": "2026-08-01T00:00:00+00:00", "end": "2026-09-08T00:00:00+00:00",

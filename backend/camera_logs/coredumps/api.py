@@ -1,10 +1,11 @@
-"""平台 coredump 目录、冻结与下载 API；NFS 原文件从不经此层返回。"""
+"""平台 coredump 目录、冻结与下载 API；NFS 源文件仅由持有节点安全流式读取。"""
 
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Query, Request, Response
 
+from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.security import actor, authorize
@@ -28,6 +29,15 @@ def _expired(value: datetime | None) -> bool:
     if value is None:
         return False
     return value.replace(tzinfo=UTC) <= now() if value.tzinfo is None else value.astimezone(UTC) <= now()
+
+
+def _direct_source_available(document: dict[str, Any]) -> bool:
+    """仅将最近扫描确认稳定且仍存在的源版本作为无需副本的下载候选。"""
+    return (
+        document.get("sourceState") == "STABLE"
+        and document.get("sourcePresent") is True
+        and bool(document.get("source"))
+    )
 
 
 async def _resource(repo, user, identifier: str) -> dict[str, Any]:
@@ -56,14 +66,10 @@ def install_coredump_routes(app):
             import re
             query["name"] = {"$regex": re.escape(name), "$options": "i"}
         try:
-            start_value = datetime.fromisoformat(receivedFrom) if receivedFrom else None
-            end_value = datetime.fromisoformat(receivedTo) if receivedTo else None
-            if (start_value and start_value.tzinfo is None) or (end_value and end_value.tzinfo is None):
-                raise ValueError()
-            start = start_value.astimezone(UTC) if start_value else None
-            end = end_value.astimezone(UTC) if end_value else None
+            start = parse_api_datetime(receivedFrom) if receivedFrom else None
+            end = parse_api_datetime(receivedTo) if receivedTo else None
         except ValueError as error:
-            raise HTTPException(422, "首次发现时间必须包含时区") from error
+            raise HTTPException(422, "首次发现时间必须是有效 ISO 8601 日期时间") from error
         if start and end and start > end:
             raise HTTPException(422, "首次发现时间范围无效")
         if start or end:
@@ -125,8 +131,9 @@ def install_coredump_routes(app):
         document = await repo().get("coredump_files", identifier)
         await _resource(repo(), user, document["resourceId"])
         authorize(user, "logs:download")
-        if document.get("status") != "FROZEN" or not document.get("snapshot"):
-            raise HTTPException(409, "coredump 尚未冻结")
+        frozen = document.get("status") == "FROZEN" and document.get("snapshot") and not _expired(document.get("expiresAt"))
+        if not (frozen or _direct_source_available(document)):
+            raise HTTPException(409, "coredump 文件尚未稳定")
         token = await issue_download_ticket(repo(), user, identifier, target_type="coredump")
         path = f"/api/v1/coredumps/{identifier}/content"
         response.set_cookie("download_access", token, httponly=True, samesite="strict", secure=request.url.scheme == "https",
@@ -156,12 +163,16 @@ def install_coredump_routes(app):
 
     @app.get("/api/v1/coredumps/{identifier}/content")
     async def coredump_content(identifier: str, request: Request):
-        """单文件仅代理固定版本，Range/If-Range 交由持有副本的节点处理。"""
+        """代理冻结副本或已稳定源版本，Range/If-Range 交由持有源的节点处理。"""
         document = await repo().get("coredump_files", identifier)
-        if _expired(document.get("expiresAt")):
+        frozen = document.get("status") == "FROZEN" and document.get("snapshot")
+        direct_source = _direct_source_available(document)
+        if frozen and _expired(document.get("expiresAt")) and not direct_source:
             raise HTTPException(409, "coredump 固定副本已过期，请重新创建导出")
-        if document.get("status") != "FROZEN" or not document.get("snapshot"):
-            raise HTTPException(409, "coredump 尚未冻结，请创建导出以固定当前版本")
+        if not frozen and not direct_source:
+            raise HTTPException(409, "coredump 文件尚未稳定")
         await repo().audit("anonymous", "download_coredump", identifier)
-        return await proxy_file(repo(), document["nodeId"], f"/internal/coredumps/{identifier}/content",
+        source = direct_source and (not frozen or _expired(document.get("expiresAt")))
+        suffix = "?source=1" if source else ""
+        return await proxy_file(repo(), document["nodeId"], f"/internal/coredumps/{identifier}/content{suffix}",
                                 request.headers.get("range"), request.headers.get("if-range"))

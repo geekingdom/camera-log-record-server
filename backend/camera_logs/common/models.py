@@ -213,10 +213,23 @@ class TemplatePatch(TemplateCreate):
 
 
 class DownloadCreate(Model):
-    """请求为指定任务和小时分片创建可下载日志会话。"""
+    """请求为指定任务和小时分片或上海时间范围创建可下载日志会话。"""
     taskId: str
-    hourIds: list[str] = Field(min_length=1, max_length=168)
+    hourIds: list[str] | None = Field(default=None, min_length=1, max_length=168)
+    start: str | None = None
+    end: str | None = None
     allowPartial: bool = False
+
+    @model_validator(mode="after")
+    def selected_hours_or_range(self):
+        """下载只能按明确小时或完整时间范围二选一，避免缺口语义不确定。"""
+        has_hours = self.hourIds is not None
+        has_range = self.start is not None or self.end is not None
+        if has_hours == has_range:
+            raise ValueError("必须且只能提供 hourIds 或完整的 start/end 时间范围")
+        if has_range and (self.start is None or self.end is None):
+            raise ValueError("start 和 end 必须同时提供")
+        return self
 
 
 class SearchCreate(Model):

@@ -7,22 +7,20 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
 
+from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.security import actor, authorize
 from camera_logs.resource_metrics.models import parse_monitor_config
 from camera_logs.resource_metrics.store import ResourceMetricStore
 
 
 def _time(value: str | None, fallback: datetime) -> datetime:
-    """只接受带时区 ISO 时间，避免浏览器本地时区改变历史范围。"""
+    """接受 ISO 时间；无时区输入按上海墙钟时间解释为 UTC 绝对时刻。"""
     if value is None:
         return fallback
     try:
-        parsed = datetime.fromisoformat(value)
+        return parse_api_datetime(value)
     except ValueError as error:
-        raise HTTPException(422, "时间必须为带时区的 ISO 8601 格式") from error
-    if parsed.tzinfo is None:
-        raise HTTPException(422, "时间必须包含时区")
-    return parsed.astimezone(UTC)
+        raise HTTPException(422, "时间必须为有效 ISO 8601 日期时间") from error
 
 
 def _public_config(config: dict, version: int) -> dict:

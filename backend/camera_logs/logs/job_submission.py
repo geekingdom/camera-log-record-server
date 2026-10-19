@@ -6,9 +6,10 @@ from fastapi import HTTPException
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from camera_logs.common import audited_mutations
+from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.database import now, public
 from camera_logs.common.models import new_id
-from camera_logs.common.presentation_time import utc_iso
+from camera_logs.common.presentation_time import SHANGHAI, utc_iso
 from camera_logs.logs.order import ordered_files
 
 
@@ -36,6 +37,38 @@ def _canonical_hour_ids(hour_ids):
     return values
 
 
+def _range_hour_ids(start, end):
+    """把半开时间范围转换为其覆盖的上海逻辑小时，结束整点不额外取下一小时。"""
+    try:
+        start_at, end_at = parse_api_datetime(start), parse_api_datetime(end)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(422, "时间范围必须是 ISO 8601 日期时间") from error
+    if end_at <= start_at:
+        raise HTTPException(422, "结束时间必须晚于开始时间")
+    try:
+        first = start_at.astimezone(SHANGHAI).replace(minute=0, second=0, microsecond=0)
+        end_local = end_at.astimezone(SHANGHAI)
+        last = end_local.replace(minute=0, second=0, microsecond=0)
+        if end_local != last:
+            last += timedelta(hours=1)
+    except OverflowError as error:
+        raise HTTPException(422, "时间范围超出可下载的小时上限") from error
+    hour_count = (last - first) // timedelta(hours=1)
+    if hour_count > 168:
+        raise HTTPException(422, "单次最多下载168小时，请缩小时间范围")
+    hours = []
+    while first < last:
+        hours.append(utc_iso(first))
+        first += timedelta(hours=1)
+    return hours
+
+
+def _normalized_download_body(body):
+    """在副本中统一范围和历史小时输入，避免调用方对象被幂等重试路径重复改写。"""
+    hour_ids = _range_hour_ids(body.start, body.end) if body.hourIds is None else _canonical_hour_ids(body.hourIds)
+    return body.model_copy(update={"hourIds": hour_ids, "start": None, "end": None})
+
+
 def _file_query(body, kind, timestamp):
     """固定本次请求的默认搜索范围，事务重试不能让默认时间窗口漂移。"""
     query = {"taskId": body.taskId, "status": {"$ne": "DELETED"}}
@@ -43,13 +76,12 @@ def _file_query(body, kind, timestamp):
         query["hour"] = {"$in": body.hourIds}
         return query, {}
     try:
-        end = datetime.fromisoformat(body.end) if body.end else timestamp
-        start = datetime.fromisoformat(body.start) if body.start else end - timedelta(hours=1)
-        if start.tzinfo is None or end.tzinfo is None or not timedelta(0) < end - start <= timedelta(hours=24):
+        end = parse_api_datetime(body.end) if body.end else timestamp
+        start = parse_api_datetime(body.start) if body.start else end - timedelta(hours=1)
+        if not timedelta(0) < end - start <= timedelta(hours=24):
             raise ValueError()
     except ValueError as error:
-        raise HTTPException(422, "时间范围须包含时区且不超过24小时") from error
-    start, end = start.astimezone(timestamp.tzinfo), end.astimezone(timestamp.tzinfo)
+        raise HTTPException(422, "时间范围必须是 ISO 8601 日期时间且不超过24小时") from error
     # 目录 hour 始终是 UTC 文本键，不能把上海显示偏移量写入字符串范围比较。
     query["hour"] = {"$gte": utc_iso(start.replace(minute=0, second=0, microsecond=0)), "$lte": utc_iso(end)}
     return query, {"start": start.isoformat(), "end": end.isoformat()}
@@ -76,8 +108,11 @@ async def submit_job(repo, actor_id, key, body, kind):
     if not key or len(key) > 128:
         raise HTTPException(422, "必须提供不超过128字符的 Idempotency-Key")
     if kind == "DOWNLOAD":
-        body.hourIds = _canonical_hour_ids(body.hourIds)
-    digest = audited_mutations.request_digest(kind, body.model_dump())
+        body = _normalized_download_body(body)
+    # 排除新增范围字段的空值，确保旧 hourIds 请求仍命中升级前的幂等映射；
+    # 搜索模型的序列化未改变，继续保留其原有摘要结构。
+    payload = body.model_dump(exclude_none=True) if kind == "DOWNLOAD" else body.model_dump()
+    digest = audited_mutations.request_digest(kind, payload)
     database = audited_mutations._majority_primary_database(repo)
     previous = await _confirmed(database, actor_id, key, digest)
     if previous is not None:

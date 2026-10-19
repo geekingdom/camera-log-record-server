@@ -33,8 +33,11 @@ def _create_user_and_token(client: TestClient, username: str) -> tuple[dict, dic
 
 def test_service_token_uses_default_coredump_permissions_and_obeys_live_revocation(tmp_path, monkeypatch):
     """普通第三方可管理自己的导出；内容附件在账号和IP权限变化后仍可公开下载。"""
+    proxied_paths = []
+
     async def fake_proxy(_repo, _node_id, _path, range_header=None, _if_range=None):
         """隔离节点 HTTP，仅断言内容路由已收到完整或 Range 下载请求。"""
+        proxied_paths.append(_path)
         if range_header:
             return Response(b"range", status_code=206, headers={"Content-Range": "bytes 1-5/6"})
         return Response(b"complete")
@@ -57,12 +60,23 @@ def test_service_token_uses_default_coredump_permissions_and_obeys_live_revocati
             "size": 6, "version": 1, "receivedAt": now(), "status": "FROZEN",
             "source": {"size": 6}, "snapshot": {"path": "/private/core.gz"},
         })
+        client.portal.call(repo.db.coredump_files.insert_one, {
+            "id": "stable-core", "resourceId": "shared-camera", "nodeId": "node-a", "name": "stable-core.gz",
+            "size": 6, "version": 1, "receivedAt": now(), "status": "RECEIVING", "sourcePresent": True,
+            "sourceState": "STABLE", "source": {"size": 6},
+        })
+        client.portal.call(repo.db.coredump_files.insert_one, {
+            "id": "expired-core", "resourceId": "shared-camera", "nodeId": "node-a", "name": "expired-core.gz",
+            "size": 6, "version": 1, "receivedAt": now(), "status": "FROZEN", "sourcePresent": True,
+            "sourceState": "STABLE", "source": {"size": 6}, "snapshot": {"path": "/private/expired.gz"},
+            "expiresAt": now() - timedelta(seconds=1),
+        })
         user, token = _create_user_and_token(client, "coredump-default-token")
         headers = {"Authorization": "Bearer " + token["token"], "Idempotency-Key": "third-party-coredump-export"}
 
         listed = client.get("/api/v1/resources/shared-camera/coredumps", headers=headers)
         assert listed.status_code == 200, listed.text
-        assert [item["id"] for item in listed.json()["items"]] == ["shared-core"]
+        assert {item["id"] for item in listed.json()["items"]} == {"shared-core", "stable-core", "expired-core"}
 
         created = client.post("/api/v1/coredump-exports", headers=headers, json={"fileIds": ["shared-core"]})
         assert created.status_code == 202, created.text
@@ -85,6 +99,19 @@ def test_service_token_uses_default_coredump_permissions_and_obeys_live_revocati
             assert full.status_code == 200 and full.content == b"complete"
             ranged = client.get(path, headers=headers | {"Range": "bytes=1-5"})
             assert ranged.status_code == 206 and ranged.headers["Content-Range"] == "bytes 1-5/6"
+
+        # 已稳定源文件不要求创建导出或冻结副本，公开 URL 可直接按 catalog ID 下载。
+        stable = client.get("/api/v1/coredumps/stable-core/content", headers=headers | {"Range": "bytes=1-5"})
+        assert stable.status_code == 206 and stable.headers["Content-Range"] == "bytes 1-5/6"
+        expired = client.get("/api/v1/coredumps/expired-core/content", headers=headers)
+        assert expired.status_code == 200
+        assert proxied_paths[-1] == "/internal/coredumps/expired-core/content?source=1"
+
+        assert client.post("/api/v1/coredumps/expired-core/browser-session", headers=headers).status_code == 200
+        client.portal.call(repo.db.coredump_files.update_one, {"id": "expired-core"},
+                           {"$set": {"sourcePresent": False}})
+        assert client.post("/api/v1/coredumps/expired-core/browser-session", headers=headers).status_code == 409
+        assert client.get("/api/v1/coredumps/expired-core/content", headers=headers).status_code == 409
 
         client.headers.pop("Authorization")
         core_ticket = client.post("/api/v1/coredumps/shared-core/browser-session", headers=headers)

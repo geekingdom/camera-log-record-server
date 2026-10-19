@@ -1,5 +1,6 @@
 """接口文档的合成请求与响应示例；禁止读取实际账号、设备或运行配置。"""
 
+LOCAL_STAMP = "2026-09-09T18:00:00"
 STAMP = "2026-09-09T18:00:00+08:00"
 TASK = {"id": "task-example", "resourceId": "resource-example", "name": "大厅日志", "protocol": "SSH", "sshTarget": "HOST",
         "ip": "192.0.2.10", "port": 22, "status": "STOPPED", "desiredState": "STOPPED",
@@ -42,6 +43,10 @@ def schema_example(schema, schemas, name="", depth=0):
         return None
     if "$ref" in schema:
         return schema_example(schemas[schema["$ref"].split("/")[-1]], schemas, name, depth + 1)
+    if name in {"start", "receivedFrom"}:
+        return LOCAL_STAMP
+    if name in {"end", "receivedTo"}:
+        return "2026-09-09T19:00:00"
     if name in VALUES:
         return VALUES[name]
     if "default" in schema:
@@ -65,7 +70,7 @@ def schema_example(schema, schemas, name="", depth=0):
     if schema.get("type") in ("integer", "number"):
         return max(1, schema.get("minimum", 1), schema.get("exclusiveMinimum", 0) + 1)
     if schema.get("format") in ("date-time", "date"):
-        return STAMP if schema["format"] == "date-time" else "2026-09-09"
+        return LOCAL_STAMP if schema["format"] == "date-time" else "2026-09-09"
     return "example"
 
 
@@ -81,9 +86,9 @@ def request_example(schema, schemas):
     if name == "BlockedRestart":
         return {"confirmIsolation": False}
     if name == "SearchCreate":
-        return {"taskId": "task-example", "start": STAMP, "end": "2026-09-09T19:00:00+08:00", "keyword": ""}
+        return {"taskId": "task-example", "start": LOCAL_STAMP, "end": "2026-09-09T19:00:00", "keyword": ""}
     if name == "DownloadCreate":
-        return {"taskId": "task-example", "hourIds": [STAMP], "allowPartial": False}
+        return {"taskId": "task-example", "start": "2026-10-19T12:18:41", "end": "2026-10-19T15:10:08", "allowPartial": False}
     if name == "CoredumpExportCreate":
         return {"fileIds": ["coredump-example"]}
     if name == "TaskPatch":

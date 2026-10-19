@@ -10,6 +10,10 @@ Authorization: Bearer <access-token>
 
 创建设备资源、任务、模板、管理员常用命令、手动命令、搜索和下载作业要求 `Idempotency-Key`；编辑使用版本号，启停接口按期望状态幂等处理。以下值均为示例，不能作为真实凭据使用。
 
+## 时间参数约定
+
+所有公开接口的日期时间入参均可直接传 `2026-10-19T12:00:00`，未带时区时统一解释为北京时间（Asia/Shanghai），无需添加 `+08:00`。兼容已有显式偏移或 `Z` 的调用；内部存储仍为UTC，响应时间仍保留上海时区偏移。日期参数继续使用 `YYYY-MM-DD`，小时目录标识和分页游标按接口返回值原样传递。
+
 ## 登录与会话
 
 `POST /api/v1/auth/login` 接收 `username`、`password`；`GET /api/v1/auth/me` 查询当前登录身份；`POST /api/v1/auth/logout` 退出；`POST /api/v1/auth/password` 接收 `currentPassword`、`newPassword`。浏览器写请求需 `X-Requested-With: XMLHttpRequest` 且来源匹配。登录路由不要求既有身份，但受客户端 IP 策略和登录频率限制。内置管理员首次登录需改密。
@@ -74,7 +78,7 @@ Authorization: Bearer <SERVICE_TOKEN>
 Idempotency-Key: range-query-example-001
 Content-Type: application/json
 
-{"taskId":"task-example","start":"2026-09-09T10:00:00+08:00","end":"2026-09-09T11:00:00+08:00"}
+{"taskId":"task-example","start":"2026-09-09T10:00:00","end":"2026-09-09T11:00:00"}
 ```
 
 省略 `keyword` 或传空字符串时，按接收块索引的 `[start,end)` 查询，最多 24 小时；时间不从设备正文推断。查询为异步作业，先获取状态，再调用 `/log-searches/{id}/results?page=1&pageSize=100`。结果示例：
@@ -178,7 +182,7 @@ POST /api/v1/tasks/{taskId}/resume
 
 ## 设备认证记录
 
-`GET /api/v1/resources/{resourceId}/authentication-records` 使用 `tasks:read` 权限。可同时传 `result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR`、`start/end` 带时区 ISO 8601 时间范围及 `identityChanged=true|false`；省略对应参数表示不限制该条件，时间范围为左闭右开。响应按 `createdAt,id` 稳定倒序：界面与兼容调用继续使用 `items/total/page/pageSize`，长期历史调用可先传空 `cursor=`，之后传上一页返回的 `nextCursor`，游标路径返回 `hasMore` 且不执行全量计数，响应中的 `total` 为 `null`。游标不能和大于 1 的 `page` 同时使用。每项含认证时间、触发来源、结果和型号/序列号前后值；首次认证 `initialAuthentication=true` 且不计为设备更换，认证失败不修改身份。软删除不删除认证记录；部署前未保存的逐次认证结果不推测补造。
+`GET /api/v1/resources/{resourceId}/authentication-records` 使用 `tasks:read` 权限。可同时传 `result=SUCCESS|AUTH_FAILED|OFFLINE|ERROR`、`start/end` ISO 8601 时间范围（不带时区按北京时间解释）及 `identityChanged=true|false`；省略对应参数表示不限制该条件，时间范围为左闭右开。响应按 `createdAt,id` 稳定倒序：界面与兼容调用继续使用 `items/total/page/pageSize`，长期历史调用可先传空 `cursor=`，之后传上一页返回的 `nextCursor`，游标路径返回 `hasMore` 且不执行全量计数，响应中的 `total` 为 `null`。游标不能和大于 1 的 `page` 同时使用。每项含认证时间、触发来源、结果和型号/序列号前后值；首次认证 `initialAuthentication=true` 且不计为设备更换，认证失败不修改身份。软删除不删除认证记录；部署前未保存的逐次认证结果不推测补造。
 
 同一 UTC 日内连续、身份未变化且结果相同的**周期**认证会合并为一条，适用于 `SUCCESS`、`AUTH_FAILED`、`OFFLINE` 和 `ERROR`；`createdAt` 是首次观测、`latestAt` 是最近观测、`occurrenceCount` 是次数。结果变化、身份变化、首次认证、创建、编辑和人工认证均建立新的记录边界。周期认证得到 HTTP 401 后会锁存 `authRejectedAt` 并记录 `AUTH_FAILED`；后续 `OFFLINE` 或 `ERROR` 不会把它覆盖为凭据已恢复。该锁存不是永久的 `healthStatus=AUTH_FAILED`：得到 `SUCCESS` 的周期认证或人工认证都会清除它。成功认证只会为带有 `OFFLINE` 或 `AUTH_FAILED` 系统停止标记、且仍处于 `STOPPED` 的网络任务授权恢复，再由调度周期消费；持续输出的已领取会话不会因后台认证失败被抢停，需连接断开或连续 10 秒无输出才由本机收尾。用户停止或暂停的任务没有可消费的系统恢复标记，不会被自动重启，Telnet 串口不参与设备 HTTP 认证门控。
 
@@ -298,7 +302,7 @@ GET /api/v1/runtime-events?cursor=&pageSize=50&type=COREDUMP_MOUNT
 
 请求事件记录 `/api/v1/` 下的所有 HTTP 请求，包括成功的 `GET`/`HEAD` 查询和下载；健康检查不在该路径下，不进入该集合。请求成功发送完毕时，HTTP 202 为 `PENDING`，其他 2xx 为 `SUCCEEDED`，4xx/5xx 为 `FAILED`；响应未完整发送时为 `UNKNOWN`。数据库持久化最多等待 0.2 秒，失败不改变原请求结果；已取消请求不会在清理阶段等待写入。因此数据库异常时，可查询的请求事件可能缺失，不能把它视为所有故障请求均可靠落库的保证。事件不保存 query、header、请求/响应 body 或设备日志正文，失败原因仅来自已脱敏的安全错误文本。`request_events` 以 `createdAt` 建立 30 天 TTL，另建 `requestId` 和 `(taskId, createdAt)` 索引；该 TTL 不作用于设备日志、下载或归档。
 
-时间范围必须成对提供、带 UTC 时区或偏移、长度大于零且不超过 31 天。旧的连接缺口事件使用 `detectedAt`，接口会按其发生时间稳定排序，并返回统一的 `createdAt` 供显示。上述事件接口不读取设备日志正文或口令。
+时间范围必须成对提供、不带时区时按北京时间解释、长度大于零且不超过 31 天。旧的连接缺口事件使用 `detectedAt`，接口会按其发生时间稳定排序，并返回统一的 `createdAt` 供显示。上述事件接口不读取设备日志正文或口令。
 
 ## 日志与导出
 
@@ -355,6 +359,14 @@ Content-Type: application/json
 {"taskId":"task-example","hourIds":["2026-09-08T08:00:00+08:00"],"allowPartial":false}
 ```
 
+也可按北京时间范围创建同类作业，与 `hourIds` 二选一：
+
+```json
+{"taskId":"task-example","start":"2026-10-19T12:18:41","end":"2026-10-19T15:10:08","allowPartial":false}
+```
+
+该请求覆盖北京时间 `[2026-10-19T12:00:00, 2026-10-19T16:00:00)` 的四个小时，生成一个下载制品。开始时间向下取整，结束时间向上取整；结束恰为整点时不多取下一小时。必须同时提供起止时间且结束晚于开始，扩展后最多168小时。小时缺失时仍遵守 `allowPartial`，不会静默忽略缺失小时。
+
 使用 `GET /api/v1/downloads/{jobId}` 查询状态；成功后从 `GET /api/v1/downloads/{jobId}/content` 下载，客户端可发送标准 `Range` 头继续未完成下载。`DELETE /api/v1/downloads/{jobId}` 取消队列或运行中的下载。
 
 `GET /api/v1/tasks/{taskId}/downloads?page=1&pageSize=20` 使用 `logs:download` 分页读取该任务的下载历史。每项给出作业状态和 `downloadAvailable`，后者仅表示当前制品仍可下载；历史列表不返回节点路径、写入租约或日志正文。
@@ -384,7 +396,7 @@ POST /api/v1/log-searches
 Idempotency-Key: c7a96caa-c5e1-467e-a2cc-b8776c8b4e5c
 Content-Type: application/json
 
-{"taskId":"task-example","keyword":"ERROR","start":"2026-09-08T08:00:00+08:00","end":"2026-09-08T09:00:00+08:00"}
+{"taskId":"task-example","keyword":"ERROR","start":"2026-09-08T08:00:00","end":"2026-09-08T09:00:00"}
 ```
 
 创建历史检索作业后，先用 `GET /api/v1/log-searches/{jobId}?includeResults=false` 查询作业状态，再用 `GET /api/v1/log-searches/{jobId}/results?page=1&pageSize=100` 分页读取已确认结果；`DELETE /api/v1/log-searches/{jobId}` 取消本人作业，取消他人作业需要管理员。非空关键词的结果按完整匹配行返回，不含相邻行和行尾换行符；同一逻辑行多个命中只返回一项。
@@ -401,7 +413,7 @@ Content-Type: application/json
 
 日志搜索和下载作业的执行者失联且租约到期后，状态查询返回 `status=FAILED`、`error=WORKER_EXECUTION_LOST` 和中文 `errorMessage`。服务不会自动重做不确定的文件操作，调用方可使用新的幂等键重新提交；原幂等键仍返回原作业。旧执行租约、令牌和实例ID不公开。该行为只适用于带执行租约的日志作业，详情见[作业恢复说明](log-job-recovery.md)。
 
-`GET /api/v1/tasks/{taskId}/search-index-status?start=<带时区ISO8601>&end=<带时区ISO8601>` 使用 `logs:read` 查询历史检索候选索引的覆盖情况；省略时间范围时沿用服务端默认查询范围。响应包含 `enabled`、`status`、`totalFiles`、`coveredFiles`、`coverageComplete`、`latestIndexedHour`、`contiguousCoveredThrough`、`truncated` 和 `fallback`。`fallback=RAW_SCAN` 或 `coverageComplete=false` 表示本次检索需要扫描对应原始日志，索引只用于跳过不可能命中的分卷，不改变最终字节确认结果。
+`GET /api/v1/tasks/{taskId}/search-index-status?start=<ISO8601北京时间>&end=<ISO8601北京时间>` 使用 `logs:read` 查询历史检索候选索引的覆盖情况；省略时间范围时沿用服务端默认查询范围。响应包含 `enabled`、`status`、`totalFiles`、`coveredFiles`、`coverageComplete`、`latestIndexedHour`、`contiguousCoveredThrough`、`truncated` 和 `fallback`。`fallback=RAW_SCAN` 或 `coverageComplete=false` 表示本次检索需要扫描对应原始日志，索引只用于跳过不可能命中的分卷，不改变最终字节确认结果。
 
 ## 错误格式
 
@@ -414,3 +426,7 @@ Content-Type: application/json
 ```
 
 保留响应头 `X-Request-ID`，便于与服务端日志关联。`401` 表示令牌无效，`403` 表示缺少权限，`409` 通常表示幂等键冲突、版本冲突或资源尚未就绪。
+
+## 稳定 Coredump 按文件 ID 下载
+
+查询 `GET /api/v1/resources/{resourceId}/coredumps` 获取文件列表，可使用 `receivedFrom=2026-10-19T12:00:00`、`receivedTo=2026-10-19T16:00:00` 筛选北京时间范围。文件显示“文件已稳定”（`sourceState=STABLE`）后，直接使用其 `id` 访问 `GET /api/v1/coredumps/{id}/content`，无需先创建导出作业。该内容链接无需登录或Token，支持Range与If-Range，适合缺陷附件分享。有效冻结副本保持兼容；多文件打包仍可使用Coredump导出作业。稳定观测后源文件仍可能被设备改写，下载入口须确认当前源版本可用，不将未稳定或已变化的文件作为稳定内容提供。

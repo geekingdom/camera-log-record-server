@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import os
 import uuid
@@ -62,6 +63,23 @@ def _read_watermark(runtime: Any, file: dict[str, Any]) -> int | None:
     return max(registered or 0, confirmed) if confirmed is not None else registered
 
 
+def _matches_coredump_source(info: os.stat_result, source: dict[str, Any]) -> bool:
+    """打开后再次核对扫描版本，避免目录项替换或传输恢复时读取另一版本。"""
+    return all(
+        getattr(info, attribute) == source.get(key)
+        for attribute, key in (
+            ("st_dev", "device"), ("st_ino", "inode"), ("st_size", "size"),
+            ("st_mtime_ns", "mtimeNs"), ("st_ctime_ns", "ctimeNs"),
+        )
+    )
+
+
+def _coredump_source_etag(source: dict[str, Any]) -> str:
+    """扫描版本字段决定稳定源 ETag；任何已登记版本变化都会生成新校验器。"""
+    fingerprint = "\x00".join(str(source.get(key, "")) for key in ("device", "inode", "size", "mtimeNs", "ctimeNs"))
+    return f'"{hashlib.sha256(fingerprint.encode()).hexdigest()}"'
+
+
 async def _limited_response(
     reads: FileReads,
     downloads: Any,
@@ -72,12 +90,28 @@ async def _limited_response(
     etag: str | None = None,
     on_close: Callable[[], Awaitable[None]] | None = None,
     before_read: Callable[[], None] | None = None,
+    descriptor: int | None = None,
+    size: int | None = None,
+    expected_source: dict[str, Any] | None = None,
 ):
     """以有界读取池和全局读预算流式提供固定文件，断流 finally 必定关闭 fd。"""
-    try:
-        size = (await reads.run(path.stat)).st_size
-    except FileNotFoundError as error:
-        raise HTTPException(404, "冻结副本已过期") from error
+    async def discard_preopened() -> None:
+        """建立响应前失败时归还调用方交接的源描述符。"""
+        nonlocal descriptor
+        if descriptor is not None:
+            await reads.run(os.close, descriptor)
+            descriptor = None
+        if on_close is not None:
+            await on_close()
+
+    if descriptor is None:
+        try:
+            size = (await reads.run(path.stat)).st_size
+        except FileNotFoundError as error:
+            raise HTTPException(404, "冻结副本已过期") from error
+    elif size is None:
+        await discard_preopened()
+        raise ValueError("预打开文件必须提供固定长度")
     start, end = 0, size - 1
     range_header = request.headers.get("range", "")
     if request.headers.get("if-range") not in (None, etag):
@@ -102,12 +136,17 @@ async def _limited_response(
                 raise ValueError
             end = min(end, size - 1)
         except (ValueError, OverflowError):
+            await discard_preopened()
             raise HTTPException(416, "Range 不可用", headers={"Content-Range": f"bytes */{size}"}) from None
     remaining = end - start + 1
-    await downloads.acquire()
-    descriptor = None
     try:
-        descriptor = await reads.run(os.open, path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        await downloads.acquire()
+    except BaseException:
+        await discard_preopened()
+        raise
+    try:
+        if descriptor is None:
+            descriptor = await reads.run(os.open, path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         await reads.run(os.lseek, descriptor, start, os.SEEK_SET)
     except BaseException:
         if descriptor is not None:
@@ -130,7 +169,11 @@ async def _limited_response(
                 if on_close is not None:
                     await on_close()
     def read_chunk():
+        if expected_source is not None and not _matches_coredump_source(os.fstat(descriptor), expected_source):
+            raise RuntimeError("coredump 源版本已变化")
         data = os.read(descriptor, min(262144, remaining))
+        if expected_source is not None and not _matches_coredump_source(os.fstat(descriptor), expected_source):
+            raise RuntimeError("coredump 源版本已变化")
         read_limiter.consume(len(data))
         return data
     async def chunks():
@@ -250,7 +293,7 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
 
     @app.post("/internal/coredumps/{identifier}/freeze")
     async def freeze_coredump(identifier: str, _: None = Depends(internal)):
-        """节点按当前登记版本创建不可变副本；源文件从不直接暴露下载。"""
+        """节点按当前登记版本创建不可变副本；稳定源下载另有安全描述符读取路径。"""
         from camera_logs.coredumps.snapshots import freeze
 
         document = await repo.db.coredump_files.find_one({"id": identifier, "nodeId": repo.settings.node_id})
@@ -271,12 +314,61 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
         request: Request,
         _: None = Depends(internal),
         parent_reader: str | None = Header(default=None, alias="X-Coredump-Reader"),
+        source: bool = Query(default=False),
     ):
-        """只响应节点已发布的固定副本；If-Range 不匹配时返回完整固定版本。"""
+        """响应已发布副本或稳定源；副本租约与源文件安全描述符路径彼此独立。"""
+        from camera_logs.coredumps.safety import open_source
         from camera_logs.coredumps.snapshot_readers import SnapshotReader
 
         document = await repo.db.coredump_files.find_one({"id": identifier, "nodeId": repo.settings.node_id})
         snapshot = document.get("snapshot") if document else None
+        stable_source = (
+            document
+            and document.get("sourceState") == "STABLE"
+            and document.get("sourcePresent") is True
+            and bool(document.get("source"))
+        )
+        if source:
+            if not stable_source:
+                raise HTTPException(409, "coredump 文件尚未稳定")
+            descriptor: int | None = None
+            try:
+                descriptor = await reads.run(open_source, repo.settings, document["deviceIp"], document["name"])
+                info = await reads.run(os.fstat, descriptor)
+                if not _matches_coredump_source(info, document["source"]):
+                    raise RuntimeError("coredump 源版本已变化")
+                current = await repo.db.coredump_files.find_one({
+                    "id": identifier,
+                    "nodeId": repo.settings.node_id,
+                    "sourceState": "STABLE",
+                    "sourcePresent": True,
+                    "source": document["source"],
+                })
+                if current is None:
+                    raise RuntimeError("coredump 稳定状态已失效")
+                try:
+                    response = await _limited_response(
+                        reads,
+                        downloads,
+                        Path(document["name"]),
+                        request,
+                        filename=document["name"],
+                        etag=_coredump_source_etag(document["source"]),
+                        descriptor=descriptor,
+                        size=info.st_size,
+                        expected_source=document["source"],
+                    )
+                except BaseException:
+                    # _limited_response 在响应尚未创建时已回收预打开 fd。
+                    descriptor = None
+                    raise
+                descriptor = None
+                return response
+            except (FileNotFoundError, PermissionError, RuntimeError, ValueError):
+                raise HTTPException(409, "coredump 源文件已变化或不可读取") from None
+            finally:
+                if descriptor is not None:
+                    await reads.run(os.close, descriptor)
         retiring_with_parent = document and document.get("status") == "RETIRING" and parent_reader
         if not snapshot or (document.get("status") != "FROZEN" and not retiring_with_parent):
             raise HTTPException(409, "coredump 尚未冻结")
@@ -303,6 +395,7 @@ def install_node_routes(app: Any, repo: Any, runtime: Any) -> FileReads:
         except BaseException:
             await reader.close()
             raise
+
 
     @app.get("/internal/coredump-exports/{identifier}/content")
     async def coredump_export_content(identifier: str, request: Request, _: None = Depends(internal)):

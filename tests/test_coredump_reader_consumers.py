@@ -2,11 +2,13 @@
 
 import asyncio
 import hashlib
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from camera_logs.coredumps import jobs
+from camera_logs.coredumps.safety import open_source
 from camera_logs.coredumps.snapshot_lifecycle import reconcile_snapshots, release_snapshot
 from camera_logs.coredumps.snapshot_readers import SnapshotReader
 from camera_logs.coredumps.snapshots import freeze
@@ -215,4 +217,96 @@ async def test_retiring_node_content_allows_only_valid_parent_reader_and_release
         assert not snapshot_path.exists()
         assert source_path.read_bytes() == b"retiring snapshot payload"
     finally:
+        await reads.close()
+
+
+async def test_node_content_reads_stable_source_by_safe_descriptor_and_preserves_range(tmp_path):
+    """稳定源不创建副本也可下载，打开描述符后按登记版本和固定长度提供 Range。"""
+    import httpx
+
+    repo = await repository(tmp_path)
+    repo.settings.internal_token = "internal-test-token"
+    entry = await _catalog(repo, "192.0.2.121", "stable.core", b"stable source payload")
+    await repo.db.coredump_files.update_one(
+        {"id": entry["id"]}, {"$set": {"sourceState": "STABLE", "sourcePresent": True}},
+    )
+    app = FastAPI()
+    reads = install_node_routes(app, repo, SimpleNamespace(log_root=repo.settings.log_root, active={}))
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": "Bearer internal-test-token", "Range": "bytes=7-12"}
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://node") as client:
+            response = await client.get(f"/internal/coredumps/{entry['id']}/content?source=1", headers=headers)
+            matched = await client.get(
+                f"/internal/coredumps/{entry['id']}/content?source=1",
+                headers=headers | {"If-Range": response.headers["etag"]},
+            )
+            unmatched = await client.get(
+                f"/internal/coredumps/{entry['id']}/content?source=1",
+                headers=headers | {"If-Range": '"old-version"'},
+            )
+        assert response.status_code == 206
+        assert response.headers["Content-Range"] == "bytes 7-12/21"
+        assert response.headers["etag"]
+        assert response.content == b"source"
+        assert matched.status_code == 206 and matched.content == b"source"
+        assert unmatched.status_code == 200 and unmatched.content == b"stable source payload"
+        current = await repo.db.coredump_files.find_one({"id": entry["id"]})
+        assert "snapshot" not in current and not current.get("snapshotReaders")
+    finally:
+        await reads.close()
+
+
+async def test_node_stable_source_rejects_invalid_range_without_losing_next_download(tmp_path):
+    """预打开的稳定源在 Range 校验失败后关闭，后续请求仍可重新安全读取。"""
+    import httpx
+
+    repo = await repository(tmp_path)
+    repo.settings.internal_token = "internal-test-token"
+    entry = await _catalog(repo, "192.0.2.122", "stable.core", b"stable source payload")
+    await repo.db.coredump_files.update_one(
+        {"id": entry["id"]}, {"$set": {"sourceState": "STABLE", "sourcePresent": True}},
+    )
+    app = FastAPI()
+    reads = install_node_routes(app, repo, SimpleNamespace(log_root=repo.settings.log_root, active={}))
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": "Bearer internal-test-token"}
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://node") as client:
+            invalid = await client.get(f"/internal/coredumps/{entry['id']}/content?source=1", headers=headers | {"Range": "bytes=999-"})
+            valid = await client.get(f"/internal/coredumps/{entry['id']}/content?source=1", headers=headers)
+        assert invalid.status_code == 416
+        assert valid.status_code == 200 and valid.content == b"stable source payload"
+    finally:
+        await reads.close()
+
+
+async def test_stable_source_stops_before_emitting_chunk_changed_during_read(tmp_path, monkeypatch):
+    """源在单块 read 后变化时，前后 fstat 检查会中止正文并回收描述符。"""
+    from camera_logs.node import files as node_files
+
+    repo = await repository(tmp_path)
+    entry = await _catalog(repo, "192.0.2.123", "stable.core", b"stable source payload")
+    source = repo.settings.nfs_root / "192.0.2.123" / "stable.core"
+    reads, descriptor = FileReads(), None
+    original_read = node_files.os.read
+
+    def mutate_after_read(fd, amount):
+        data = original_read(fd, amount)
+        source.write_bytes(b"changed after descriptor was opened")
+        return data
+
+    monkeypatch.setattr(node_files.os, "read", mutate_after_read)
+    try:
+        descriptor = await reads.run(open_source, repo.settings, entry["deviceIp"], entry["name"])
+        response = await _limited_response(
+            reads, asyncio.Semaphore(1), source, request(), filename=entry["name"],
+            descriptor=descriptor, size=entry["source"]["size"], expected_source=entry["source"],
+        )
+        descriptor = None
+        with pytest.raises(RuntimeError, match="源版本已变化"):
+            _ = [chunk async for chunk in response.body_iterator]
+    finally:
+        if descriptor is not None:
+            await reads.run(os.close, descriptor)
         await reads.close()
