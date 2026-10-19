@@ -20,7 +20,7 @@
 - 旧版浏览器下载会话与内容路由统一副本到期/稳定源回退条件，6项回归通过；本轮临时服务、隔离Mongo及模拟数据已回收。
 - 独立审查补强范围生成前限额、旧下载和搜索幂等摘要、极端日期422以及源文件每块读前后版本核对和If-Range。
 
-未连接公司实体设备；源文件的稳定状态是服务端观测，读取中设备再次改写会中止响应。文件源被移除且无有效副本时，原链接不再可读。远端CI等待本次提交后确认。
+未连接公司实体设备；源文件的稳定状态是服务端观测，读取中设备再次改写会中止响应。文件源被移除且无有效副本时，原链接不再可读。功能提交`e8089c8`已推送main，[CI39254595665](https://github.com/geekingdom/camera-log-record-server/actions/runs/39254595665)九项全部成功，包含backend、frontend、container-smoke、component-smoke、native-smoke、cross-worker-read、nfs-smoke、elasticsearch-sidecar和commit-messages。
 
 ## 交付要求
 

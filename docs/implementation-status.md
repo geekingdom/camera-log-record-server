@@ -1,10 +1,12 @@
 # 当前状态总表
 
-| 当前需求（2026-10-19，稳定Core直链与时间入参优化，本机验证完成，待CI） | 实现位置 | 验证证据 | 未完成与下一步 |
+| 当前需求（2026-10-19，稳定Core直链与时间入参优化，功能提交完整CI通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 文件已稳定的Coredump按ID直接公开下载，无需先导出 | `coredumps`、前端Coredump列表 | 直链/过期回退/Range与If-Range/变更中止通过；桌面移动下载和复制不创建导出 | 完整CI待推送验收 |
-| API时间入参无需时区，默认北京时间 | 共享时间解析、查询接口、`reference` | 各时间入口回归通过，API文档1440/390/320通过 | 内部UTC及响应兼容；完整CI待验收 |
-| 下载作业兼容hourIds并支持start/end覆盖小时范围 | `DownloadCreate`、`logs/job_submission.py` | 真实Mongo四小时范围、等价hourIds重放与事务通过 | 极值/168小时/缺失回归通过，待完整CI |
+| 文件已稳定的Coredump按ID直接公开下载，无需先导出 | `coredumps`、前端Coredump列表 | 直链/过期回退/Range与If-Range/变更中止通过；桌面移动下载和复制不创建导出 | 功能提交e8089c8九项CI通过，待部署 |
+| API时间入参无需时区，默认北京时间 | 共享时间解析、查询接口、`reference` | 各时间入口回归通过，API文档1440/390/320通过 | 内部UTC及响应兼容；九项CI通过 |
+| 下载作业兼容hourIds并支持start/end覆盖小时范围 | `DownloadCreate`、`logs/job_submission.py` | 真实Mongo四小时范围、等价hourIds重放与事务通过 | 极值/168小时/缺失回归通过，九项CI通过 |
+
+功能提交`e8089c8`的[CI39254595665](https://github.com/geekingdom/camera-log-record-server/actions/runs/39254595665)九项全部成功，包含完整前端浏览器与真实容器事务/下载链路。验收记录提交的检查继续在交付前确认，生产环境未部署。
 
 本轮后端全量1988项通过，随后53项专项通过；前端198项和构建、Ruff通过，真实隔离Worker/WS/归档下载通过。详见[本轮记录](history/2026-10-19-stable-core-time-inputs.md)。
 
