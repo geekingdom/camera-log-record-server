@@ -52,6 +52,8 @@ def public(document):
             "resourceMonitorLeaseRunId",
             "resourceMonitorLeaseGeneration",
             "resourceMonitorLeaseNodeId",
+            "resumeClaimToken",
+            "resumeClaimExpires",
             "outputRecoveryLeases",
             "slaveSshBootstrap",
         }

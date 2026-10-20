@@ -24,7 +24,9 @@ API响应字段由实际路由返回合同维护，包含嵌套数组、状态�
 
 - 任务页面桌面1440与移动390浏览器通过：创建人独立列、取消与确认删除、默认隐藏、包含删除重新显示、不可再编辑或启动，无页面溢出。
 - 真实隔离API/Worker/WebSocket/小时下载通过；仅删除本脚本创建合成任务后，Worker完成停止并释放节点归属，旧匿名下载URL仍206返回原16字节。
-- 最终隔离验收随机库 `isolated_browser_smoke_d89d30d09b634faf90ea052c5d5e1cf0` 通过，确认 realWorker、realWebSocket、browserHourDownload 均为 true，四张桌面/移动截图生成；随机库与临时日志目录已删除。
+- 最终隔离验收的工具执行输出确认随机库 `isolated_browser_smoke_d89d30d09b634faf90ea052c5d5e1cf0` 通过：`passed=true`、`realWorker=true`、`realWebSocket=true`、`browserHourDownload=true`，并生成 `live-desktop.png`、`archives-mobile.png`、`logs-workspace-desktop.png`、`archives-workspace-mobile.png`；输出还确认 `temporaryDatabaseDropped=true`、`temporaryLogDirectoryDropped=true`。先前 `/tmp/camera-oct20-real-smoke-dynamic.log` 是失败诊断日志，不作为通过证据；成功子进程临时日志按隔离脚本约定回收。
 - 上述隔离脚本随机数据库与模拟日志已自动回收；其余本轮专项验证继续进行，最终统一回收自建服务。
 
-完整回归、Mongo Explain/事务、最终浏览器与CI结果待收尾记录。
+最终本机后端2057项、Ruff、前端201项与构建通过；真实Mongo任务软删除和常用命令事务、Explain通过。自建服务与随机库按来源清理。
+
+首轮功能提交 `d175482` 的 CI 39422760181 六项成功、三项失败，未视为交付成功。修复节点维护/关闭字段与任务命令领取版本的严格合同遗漏，并更新旧模板导航及批量任务浏览器夹具。修复后全套27项生产浏览器、真实跨Worker SSH恢复通过。额外双节点迁移和单节点回退均保持最大活动连接数1；macOS目录别名按resolve后验证仍不能跨节点或越出根目录。修复提交继续等待完整CI。

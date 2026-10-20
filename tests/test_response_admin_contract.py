@@ -88,12 +88,21 @@ async def test_current_worker_runtime_and_configuration_fields_are_documented(cl
         "performanceStatus": status,
         "accepting": True,
         "diskPercent": 10,
+        "shutdownToken": "contract-instance",
+        "shutdownCompletedAt": now(),
+        "plannedRestartRecoveryVersion": 2,
+        "searchIndexCursor": "2026-10-20T12:00:00",
+        "exportCleanupCursor": {"expiresAt": now(), "id": "contract-export"},
         **latency,
     }
     client.portal.call(client.app.state.repo.db.nodes.insert_one, node)
     response = client.get("/api/v1/nodes")
     assert response.status_code == 200, response.text
     assert_documented(response.json()["items"][0], NODE)
+    documented = response.json()["items"][0]
+    assert documented["shutdownToken"] == "contract-instance"
+    assert documented["plannedRestartRecoveryVersion"] == 2
+    assert documented["exportCleanupCursor"]["id"] == "contract-export"
     config = {"id": node["id"], "url": "http://node", "capacity": 4, "accepting": True, "version": 1}
     assert_documented(_public_node_config(config, node), NODE_CONFIG)
     assert_documented(_public_node_config(config, None), NODE_CONFIG)

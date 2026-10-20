@@ -22,7 +22,8 @@ def test_task_runtime_fields_document_public_recovery_and_health_fixture():
         "runId": "run-old", "sessionId": "session-old", "generation": 4, "storageIdentity": "camera-a",
         "error": "节点失联", "archiveError": "归档延迟", "updatedAt": "2026-10-20T12:00:00+08:00",
         "pausedAt": "2026-10-20T11:00:00+08:00", "restartRequested": False,
-        "controlOperationId": "operation", "controlClaimVersion": 9, "creationOperationId": "created",
+        "controlOperationId": "operation", "controlClaimVersion": 9, "commandClaimVersion": 4,
+        "creationOperationId": "created",
         "operationId": "created", "creationOperationStatus": "PENDING",
         "resumeWaiting": {"operationId": "resume", "pausedRunId": "run-old", "generation": 4,
                           "requestedAt": "2026-10-20T10:00:00+08:00", "waitingReason": "OFFLINE",
@@ -37,7 +38,7 @@ def test_task_runtime_fields_document_public_recovery_and_health_fixture():
         "isolationEvidence": "已关闭旧连接", "recoveryReason": "PLANNED_NODE_RESTART",
         "plannedRestart": True, "plannedRestartNodeId": "node-old", "plannedRestartToken": "restart-token",
         "failoverFenceRetryAt": "2026-10-20T09:05:00+08:00", "failoverConsumeRetryAt": "2026-10-20T09:06:00+08:00",
-        "failoverExcludedNodeId": "node-old", "failoverFromNodeId": "node-old",
+        "failoverExcludedNodeId": "node-old", "failoverFromNodeId": "node-old", "failoverReason": "AUTO_FAILOVER_FENCED",
         "failoverReleasedAt": "2026-10-20T09:07:00+08:00", "failoverOriginalHealthySince": "2026-10-20T09:08:00+08:00",
         "failoverOriginalHealthyObservedAt": "2026-10-20T09:09:00+08:00",
         "deploymentRecovery": {"id": "task", "taskId": "task", "runId": "run-old", "generation": 4, "nodeId": "node-old",
@@ -59,6 +60,13 @@ def test_task_runtime_fields_document_public_recovery_and_health_fixture():
         if key in TASK_RUNTIME_FIELDS:
             _assert_documented(value, TASK_RUNTIME_FIELDS[key], key)
     assert set(TASK_RUNTIME_FIELDS) <= set(exposed)
+
+
+def test_task_runtime_excludes_transient_resume_claim_credentials():
+    """恢复领取令牌仅用于调度 CAS，不能随任务状态返回给 API 调用方。"""
+    exposed = public({"id": "task", "resumeClaimToken": "internal-token", "resumeClaimExpires": "2026-10-20T12:00:00+08:00"})
+
+    assert exposed == {"id": "task"}
 
 
 def test_closed_receipt_identity_fields_allow_legacy_missing_owner_values():

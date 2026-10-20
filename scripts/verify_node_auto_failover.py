@@ -72,6 +72,11 @@ async def wait_node_accepting(database, node_id, accepting=True):
             await asyncio.sleep(.2)
 
 
+def archive_belongs_to_node_root(path, base, node_id):
+    """以真实路径比较归档归属，兼容 macOS /var 与 /private/var 的同一目录表示。"""
+    return Path(path).resolve().is_relative_to((Path(base) / node_id).resolve())
+
+
 async def wait_single_node_fallback(repo, database, task_id, node_id, old_run_id):
     """真实调度循环等待原节点连续健康后回退；不伪造稳定窗口或直接修改任务归属。"""
     try:
@@ -176,7 +181,9 @@ async def single_node_fallback(isapi_test_port=80):
                 await asyncio.wait_for(source.closed.wait(), 15)
                 files = await wait_files(mongo[database], task_id, "failover-a", run_id=second["runId"])
                 new_files = [item for item in files if item["runId"] == second["runId"]]
-                if not old_files or not new_files or any(not Path(item["path"]).is_relative_to(base / "failover-a") for item in files):
+                if not old_files or not new_files or any(
+                    not archive_belongs_to_node_root(item["path"], base, "failover-a") for item in files
+                ):
                     raise RuntimeError("单节点回退归档未按新旧运行完整发布到 A 根目录")
                 print(json.dumps({"passed": True, "mode": "single-node-fallback", "oldRunId": first["runId"],
                                   "newRunId": second["runId"], "peakActiveConnections": source.peak_active,
@@ -314,8 +321,11 @@ async def main(isapi_test_port=80):
                 new_files = await wait_files(mongo[database], task_id, "failover-b")
                 if any(item["runId"] != first["runId"] for item in old_files) or any(item["runId"] != second["runId"] for item in new_files):
                     raise RuntimeError("归档文件运行归属错误")
-                if source.peak_active > 1 or any(not Path(item["path"]).is_relative_to(base / "failover-a") for item in old_files) \
-                        or any(not Path(item["path"]).is_relative_to(base / "failover-b") for item in new_files):
+                if source.peak_active > 1 or any(
+                    not archive_belongs_to_node_root(item["path"], base, "failover-a") for item in old_files
+                ) or any(
+                    not archive_belongs_to_node_root(item["path"], base, "failover-b") for item in new_files
+                ):
                     raise RuntimeError("自动迁移发生重叠连接或归档落入错误节点根目录")
                 print(json.dumps({"passed": True, "oldRunId": first["runId"], "newRunId": second["runId"],
                                   "activeConnections": source.active, "peakActiveConnections": source.peak_active,

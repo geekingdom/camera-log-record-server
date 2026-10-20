@@ -188,6 +188,14 @@ NODE_FIELDS = {
     ),
     "isolated": field("boolean", "是否已有管理员确认的外部隔离，确认后调度不会将新运行分配给该节点。"),
     "shuttingDownAt": field("string", "节点开始优雅关闭的时间；恢复心跳后移除，旧 Worker 可省略。"),
+    "shutdownToken": field("string", "当前受控关闭实例的随机标识；仅与关闭完成时间共同证明计划重启可安全恢复，旧节点可省略或为 null。", nullable=True),
+    "shutdownCompletedAt": field("string", "当前受控关闭已完成全部运行收尾的时间；缺失或 null 不构成恢复旧任务的证明。", nullable=True),
+    "plannedRestartRecoveryVersion": field("integer", "计划重启恢复收据的递增版本；每消费一个精确旧运行时增加，旧节点可省略或为 null。", nullable=True),
+    "searchIndexCursor": field("string", "本节点归档全文候选索引补建的最后目录标识；维护空轮会清除，旧节点可省略或为 null。", nullable=True),
+    "exportCleanupCursor": obj("本节点过期导出清理的稳定续扫书签；空轮复位为 null。", {
+        "expiresAt": field("string", "上次处理导出制品的到期时间，用于按到期时间和标识稳定续扫。"),
+        "id": field("string", "同一到期时间内上次处理导出作业的稳定标识。"),
+    }, ("expiresAt", "id")) | {"nullable": True},
     "deletedAt": field("string", "节点配置删除时间；普通列表排除已删除项。", nullable=True),
     "health": obj(
         "API 评估的健康状态。",

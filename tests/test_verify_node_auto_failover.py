@@ -7,7 +7,18 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from verify_node_auto_failover import wait_node_accepting
+from verify_node_auto_failover import archive_belongs_to_node_root, wait_node_accepting
+
+
+def test_archive_belongs_to_node_root_normalizes_paths_before_checking_membership(tmp_path):
+    """归档根目录判定使用规范路径，且仍拒绝另一个节点或根外文件。"""
+    archive = tmp_path / "failover-a" / "task" / "archive.tar.gz"
+    archive.parent.mkdir(parents=True)
+    archive.touch()
+
+    assert archive_belongs_to_node_root(archive, tmp_path, "failover-a")
+    assert not archive_belongs_to_node_root(archive, tmp_path, "failover-b")
+    assert not archive_belongs_to_node_root(tmp_path / "outside.tar.gz", tmp_path, "failover-a")
 
 
 async def test_wait_node_accepting_waits_for_the_requested_persisted_value():

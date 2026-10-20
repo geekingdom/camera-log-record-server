@@ -71,18 +71,23 @@ async function select(page, name) { await row(page, name).locator(".el-checkbox"
 try {
   await mkdir("output/playwright", { recursive: true });
   const admin = await newPage(true);
-  assert.equal(await admin.page.locator(".table-actions .el-checkbox").locator("input").isChecked(), true, "管理员默认查看全部");
+  assert.equal(await admin.page.getByRole("checkbox", { name: "查看全部", exact: true }).isChecked(), true, "管理员默认查看全部");
   await admin.page.getByRole("combobox", { name: "按创建用户筛选" }).click();
   await admin.page.getByRole("option", { name: /管理员/ }).waitFor();
   await admin.page.keyboard.press("Escape");
-  for (const name of ["可启动任务", "可停止任务", "资源已删除任务"]) {
+  assert.equal(
+    await row(admin.page, "资源已删除任务").locator(".el-checkbox input").isDisabled(),
+    true,
+    "资源已删除任务不得进入批量控制选择",
+  );
+  for (const name of ["可启动任务", "可停止任务"]) {
     await select(admin.page, name);
   }
-  await admin.page.getByRole("button", { name: /批量启动 \(1\/3\)/ }).click();
-  await admin.page.getByText("适用 1 项，跳过 2 项", { exact: false }).waitFor();
+  await admin.page.getByRole("button", { name: /批量启动 \(1\/2\)/ }).click();
+  await admin.page.getByText("适用 1 项，跳过 1 项", { exact: false }).waitFor();
   await admin.page.getByRole("button", { name: "取消", exact: true }).click();
   assert.deepEqual(operations, [], "取消确认不得发送控制请求");
-  await admin.page.getByRole("button", { name: /批量启动 \(1\/3\)/ }).click();
+  await admin.page.getByRole("button", { name: /批量启动 \(1\/2\)/ }).click();
   await admin.page.getByRole("button", { name: "确认", exact: true }).click();
   await admin.page.getByText("已提交 1 项控制请求", { exact: false }).waitFor();
   assert.deepEqual(operations, ["stopped:start"], "启动按冻结顺序发送");
@@ -124,7 +129,7 @@ try {
   await admin.context.close();
 
   const member = await newPage(false);
-  assert.equal(await member.page.locator(".table-actions .el-checkbox").locator("input").isChecked(), false, "普通用户默认只查看本人");
+  assert.equal(await member.page.getByRole("checkbox", { name: "查看全部", exact: true }).isChecked(), false, "普通用户默认只查看本人");
   assert.ok(!operations.some(item => item.startsWith("other:")), "普通用户查询不应包含其他创建者任务");
   await member.context.close();
   assert.deepEqual(errors, [], `浏览器控制台异常：${errors.join("；")}`);

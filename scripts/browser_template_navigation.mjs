@@ -20,7 +20,10 @@ const task = {
 const legacyTemplate = { id: "legacy-template", name: "历史命令模板", description: "缺少共享字段", initialCommands: [], scheduledCommands: [], version: 1 };
 const catalog = {
   version: "fixture", guides: [{ title: "鉴权", text: "浏览器验收夹具" }], schemas: {}, errorExample: { error: { code: "400" } },
-  operations: [{ id: "tasks-list", method: "GET", path: "/api/v1/tasks", title: "查询采集任务", group: "任务", description: "读取任务列表", permission: "tasks:read", headers: {}, parameters: [], requestExample: null, responseStatus: 200, responseExample: { items: [] } }],
+  operations: [{
+    id: "tasks-list", method: "GET", path: "/api/v1/tasks", title: "查询采集任务", group: "任务", description: "读取任务列表", permission: "tasks:read", headers: {}, parameters: [], requestSchema: null, requestExample: null, pythonExample: "requests.get('/api/v1/tasks')", responseStatus: 200, responseExample: { items: [] },
+    responseContract: { kind: "json", description: "任务分页响应。", schema: { type: "object", properties: {} }, conditional: [], errors: [], errorSchema: null },
+  }],
 };
 
 const browser = await chromium.launch({ headless: true, channel: "chrome" });

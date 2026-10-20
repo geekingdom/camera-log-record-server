@@ -186,7 +186,8 @@ def test_paused_stop_repairs_missing_lock_or_run_then_allows_start(client, missi
 def test_resume_paused_ssh_keeps_run_budget_and_unassigned_state(client):
     """恢复仅交给调度器重新领取，保留暂停运行、锁和预算且不在 API 建连。"""
     task = _create_task(client)
-    _set_task(client, task["id"], status="PAUSED", desiredState="PAUSED", nodeId=None, runId="paused-run")
+    _set_task(client, task["id"], status="PAUSED", desiredState="PAUSED", nodeId=None, runId="paused-run",
+              commandClaimVersion=4, failoverReason="AUTO_FAILOVER_FENCED")
     repo = client.app.state.repo
     client.portal.call(repo.db.runs.insert_one, {"id": "paused-run"})
     client.portal.call(repo.db.endpoint_locks.insert_one,
@@ -202,6 +203,8 @@ def test_resume_paused_ssh_keeps_run_budget_and_unassigned_state(client):
     assert (current["status"], current["desiredState"], current["nodeId"], current["runId"]) == (
             "WAITING_DEVICE", "RUNNING", None, "paused-run"
     )
+    assert current["commandClaimVersion"] == 4
+    assert current["failoverReason"] == "AUTO_FAILOVER_FENCED"
     assert client.portal.call(repo.db.endpoint_locks.count_documents, {"taskId": task["id"], "runId": "paused-run"}) == 1
     assert client.portal.call(repo.db.budgets.find_one, {"_id": "paused-run:periodic"})["attempts"] == 2
 
