@@ -2,7 +2,7 @@
 
 | 当前需求（2026-10-20，实现中） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
-| 每个API完整返回字段释义与动态同源生成 | `common/api_contracts`、运行时Pydantic模型、OpenAPI、前端API文档 | 请求中文说明在Field/Query/Path；响应模型同时校验真实返回并生成文档，缺失/空白/仅英文说明拒绝；2057项后端、201项前端通过，98操作三尺寸文档浏览器通过；全局错误、批量认证专用422和WebSocket首帧均使用共享模型。CI `d175482` container-smoke 发现 `GET /api/v1/nodes` 的维护书签、受控关闭和重启恢复字段漏进严格合同；已补 `exportCleanupCursor`、`searchIndexCursor`、`shutdownToken`、`shutdownCompletedAt`、`plannedRestartRecoveryVersion` 的真实路由回归 | 中文语义审查已修正命令等待、Core稳定状态、路径ID与时间边界；真实 Worker 下载、任务软删除真实Mongo及常用命令真实Mongo均通过；节点与任务领取/故障转移合同已补齐；真实SSH跨Worker恢复、双节点迁移和单节点回退通过，27项生产浏览器脚本通过；待推送修复并等待完整CI |
+| 每个API完整返回字段释义与动态同源生成 | `common/api_contracts`、运行时Pydantic模型、OpenAPI、前端API文档 | 请求中文说明在Field/Query/Path；响应模型同时校验真实返回并生成文档，缺失/空白/仅英文说明拒绝；2057项后端、201项前端通过，98操作三尺寸文档浏览器通过；全局错误、批量认证专用422和WebSocket首帧均使用共享模型。CI `d175482` container-smoke 发现 `GET /api/v1/nodes` 的维护书签、受控关闭和重启恢复字段漏进严格合同，已补五项字段及真实路由回归；第二轮 `5ed961b` 又发现任务成功领取写入的 `claimVersion`，现已补为可选公开字段，并由实际领取写入和节点列表路由回归覆盖 | 中文语义审查已修正命令等待、Core稳定状态、路径ID与时间边界；真实 Worker 下载、任务软删除真实Mongo及常用命令真实Mongo均通过；全后端 `db.nodes` 写入路径已复核，除本次 `claimVersion` 外无遗漏公开字段；本地针对性验证后可推送第三轮，尚待完整CI，不将本机结果表述为 container-smoke 已通过 |
 | 任务软删除、资源级联删除、默认隐藏及日志保留 | `tasks`、`resources`、调度与前端任务页 | 179项专项、真实Mongo事务/索引/竞争及隔离Worker关闭与原匿名下载链接206通过 | 最终集成回归与CI |
 | 资源任务数与活跃采集排除软删、任务创建人独立列 | 资源聚合、看板、TaskList | 1440/390任务浏览器与创建人/筛选测试通过 | 最终集成回归与CI |
 | 常用命令分页/查询/状态筛选及批量操作 | `commands`、后台配置 | 事务CAS/逐行审计/幂等、真实Mongo三种列表Explain及基础浏览器通过 | 确认窗口刷新不提交过期选择、描述查询、状态筛选及取消零请求已通过；最终集成与CI |

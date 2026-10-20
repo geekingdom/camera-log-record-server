@@ -169,6 +169,7 @@ NODE_FIELDS = {
     "url": field("string", "Worker 实际公布的服务地址。"),
     "capacity": NODE_CONFIG_FIELDS["capacity"],
     "activeTasks": NODE_CONFIG_FIELDS["activeTasks"],
+    "claimVersion": field("integer", "调度器成功领取任务时递增的节点领取版本；用于诊断并发认领顺序，旧节点可省略或为 null。", nullable=True),
     "accepting": field("boolean", "结合容量、磁盘、延迟与隔离状态计算的实际准入开关。"),
     "inputRateLimitMiB": NODE_CONFIG_FIELDS["inputRateLimitMiB"],
     "writeLatencyLimitMs": NODE_CONFIG_FIELDS["writeLatencyLimitMs"],

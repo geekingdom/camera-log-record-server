@@ -82,6 +82,7 @@ async def test_current_worker_runtime_and_configuration_fields_are_documented(cl
         "url": "http://node",
         "capacity": 4,
         "activeTasks": 0,
+        "claimVersion": 7,
         "heartbeat": now(),
         "telemetryAgeSeconds": 0,
         "telemetry": sample,
@@ -100,6 +101,7 @@ async def test_current_worker_runtime_and_configuration_fields_are_documented(cl
     assert response.status_code == 200, response.text
     assert_documented(response.json()["items"][0], NODE)
     documented = response.json()["items"][0]
+    assert documented["claimVersion"] == 7
     assert documented["shutdownToken"] == "contract-instance"
     assert documented["plannedRestartRecoveryVersion"] == 2
     assert documented["exportCleanupCursor"]["id"] == "contract-export"

@@ -59,3 +59,4 @@ async def test_bad_network_health_allows_serial_claim(tmp_path, health_status):
     assert claimed is not None
     current = await repo.db.tasks.find_one({"id": "serial"})
     assert (current["nodeId"], current["desiredState"]) == ("node", "RUNNING")
+    assert (await repo.db.nodes.find_one({"id": "node"}))["claimVersion"] == 1
