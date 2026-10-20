@@ -3,9 +3,12 @@
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from camera_logs.commands.batch import apply_common_command_batch
+from camera_logs.commands.models import CommonCommandBatchRequest
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.models import CommonCommandCreate, CommonCommandPatch
@@ -33,11 +36,11 @@ def install_common_command_routes(app, repo):
             "pageSize": page_size,
         }
 
-    def filtered_query(query_text: str | None, *, enabled_only: bool) -> dict:
+    def filtered_query(query_text: str | None, *, enabled_only: bool, enabled: bool | None = None) -> dict:
         """全文本前缀提示使用转义正则，避免用户输入改变查询语义。"""
         import re
 
-        query: dict = {"enabled": True} if enabled_only else {}
+        query: dict = {"enabled": True} if enabled_only else ({"enabled": enabled} if enabled is not None else {})
         if query_text:
             expression = {"$regex": re.escape(query_text.strip()), "$options": "i"}
             query["$or"] = [{"command": expression}, {"description": expression}]
@@ -58,12 +61,19 @@ def install_common_command_routes(app, repo):
     async def admin_common_commands(
         user: User,
         page: int = Query(1, ge=1, description="从 1 开始的分页页码。"),
-        pageSize: int = Query(100, ge=1, le=100, description="每页返回的常用命令数量，最大100。"),
+        pageSize: int = Query(20, ge=1, le=100, description="每页返回的常用命令数量，最大100。"),
         query: str | None = Query(default=None, max_length=256, description="按命令或描述进行不区分大小写的字面子串筛选。"),
+        enabled: bool | None = Query(default=None, description="按启用状态筛选；不传返回全部。"),
     ):
         """管理员读取完整表格，包含禁用项以支持恢复或删除。"""
         authorize(user, "admin")
-        return await listing(filtered_query(query, enabled_only=False), page, pageSize)
+        return await listing(filtered_query(query, enabled_only=False, enabled=enabled), page, pageSize)
+
+    @app.post("/api/v1/admin/common-commands/batch")
+    async def batch_common_commands(body: CommonCommandBatchRequest, request: Request, user: User):
+        """按选择快照原子批量启用、禁用或删除，重试不会重复修改。"""
+        authorize(user, "admin")
+        return await apply_common_command_batch(repo(), user["id"], request.headers.get("Idempotency-Key"), body)
 
     @app.post("/api/v1/admin/common-commands", status_code=201)
     async def create_common_command(body: CommonCommandCreate, request: Request, user: User):
@@ -95,7 +105,7 @@ def install_common_command_routes(app, repo):
         return _public_common_command(result)
 
     @app.patch("/api/v1/admin/common-commands/{identifier}")
-    async def update_common_command(identifier: str, body: CommonCommandPatch, user: User):
+    async def update_common_command(identifier: Annotated[str, ApiPath(description='要编辑的常用命令 ID，可由常用命令列表或创建常用命令响应返回。')], body: CommonCommandPatch, user: User):
         """管理员按版本局部编辑命令、说明或启用状态，冲突时要求刷新。"""
         authorize(user, "admin")
 
@@ -122,7 +132,7 @@ def install_common_command_routes(app, repo):
 
     @app.delete("/api/v1/admin/common-commands/{identifier}", status_code=204)
     async def delete_common_command(
-        identifier: str,
+        identifier: Annotated[str, ApiPath(description='要删除的常用命令 ID，可由常用命令列表或创建常用命令响应返回。')],
         user: User,
         version: int = Query(..., ge=1, description="删除前必须提交的当前命令版本号。"),
     ):

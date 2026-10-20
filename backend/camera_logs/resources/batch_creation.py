@@ -6,12 +6,13 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo.read_concern import ReadConcern
 from pymongo.read_preferences import ReadPreference
 
 from camera_logs.common import audited_mutations
+from camera_logs.common.api_contracts.response_schema import batch_authentication_error_schema
+from camera_logs.common.api_errors import api_error_response_for_schema
 from camera_logs.common.database import now, public
 from camera_logs.common.models import new_id
 from camera_logs.common.security import actor, authorize
@@ -100,7 +101,7 @@ def install_batch_creation_route(app, repo):
     """在动态资源 ID 路由前注册静态批量入口，避免被 ``/{identifier}`` 捕获。"""
     User = Annotated[dict, Depends(actor)]
 
-    @app.post("/api/v1/resources/batch", status_code=201)
+    @app.post("/api/v1/resources/batch", status_code=201, description='批量创建1至256个海康网络设备资源，需要resources:create与Idempotency-Key。逐项重新认证，全部成功后原子提交；重复IP、已有资源IP或任一认证失败均不部分创建。同一成功请求使用相同幂等键重试返回原批次；密码不通过创建响应回传。')
     async def create_resources_batch(body: ResourceBatchInput, request: Request, user: User):
         """认证全部成功后原子创建资源、地址占用、初始认证历史和逐资源审计。"""
         authorize(user, "resources:create")
@@ -122,10 +123,11 @@ def install_batch_creation_route(app, repo):
                 action = "authenticate_resource_credentials_rejected" if failure["code"] == "AUTH_FAILED" else \
                     "authenticate_resource_device_error"
                 await repo().audit(user["id"], action, f"ip:{failure['ip']}")
-            return JSONResponse(status_code=422, content={"error": {
-                "code": "BATCH_AUTHENTICATION_FAILED", "message": "批量设备认证失败",
-                "details": {"items": failures}, "requestId": getattr(request.state, "request_id", None),
-            }})
+            return api_error_response_for_schema(
+                422, "BATCH_AUTHENTICATION_FAILED", "批量设备认证失败",
+                getattr(request.state, "request_id", None), batch_authentication_error_schema(),
+                details={"items": failures},
+            )
         actor_name = user.get("displayName") or user.get("username") or user["id"]
         documents = [_resource_document(repo(), new_id(), item, metadata, user["id"], actor_name)
                      for _, item, metadata, _ in checks]

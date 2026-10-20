@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 
 from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.security import actor, authorize
@@ -38,13 +39,13 @@ def install_resource_metric_routes(app) -> None:
 
     @app.get("/api/v1/resources/{resource_id}/resource-metrics")
     async def resource_metrics(
-        resource_id: str,
+        resource_id: Annotated[str, ApiPath(description='路径中指定要查询的设备资源标识。')],
         request: Request,
         user: Annotated[dict, Depends(actor)],
-        start: str | None = None,
-        end: str | None = None,
-        limit: int = Query(200, ge=1, le=2000),
-        cursor: str | None = Query(default=None, max_length=256),
+        start: Annotated[str | None, Query(description='查询范围开始时间，ISO 8601（不带时区按北京时间解释，也兼容显式时区） 且包含该时刻。')] = None,
+        end: Annotated[str | None, Query(description='查询范围结束时间，ISO 8601（不带时区按北京时间解释，也兼容显式时区） 且不包含该时刻。')] = None,
+        limit: int = Query(200, ge=1, le=2000, description='本页最多返回的采样记录数（不是字节数），1 至 2000，默认 200；使用 nextCursor 继续读取。'),
+        cursor: str | None = Query(default=None, max_length=256, description='上页返回的稳定分页游标；管理事件传空字符串开启首屏游标查询，续页使用nextCursor并保持原筛选条件。不能与大于1的page同用。'),
     ):
         """按 UTC 时间范围读取最多31天资源指标；游标避免深页扫描与精确总数。"""
         authorize(user, "tasks:read")

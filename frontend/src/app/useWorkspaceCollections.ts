@@ -10,7 +10,7 @@ interface WorkspaceUser {
 }
 interface WorkspaceApi {
   tasks: (page?: number, pageSize?: number, filters?: {
-    search?: string; status?: string; resourceId?: string; createdBy?: string; sortBy?: string; sortOrder?: "asc" | "desc";
+    search?: string; status?: string; resourceId?: string; createdBy?: string; includeDeleted?: string; sortBy?: string; sortOrder?: "asc" | "desc";
   }) => Promise<Page<Task>>;
   templates: (page?: number, pageSize?: number, filters?: Record<string, string | undefined>) => Promise<Page<Template>>;
   nodes: (page?: number, pageSize?: number) => Promise<Page<Node>>;
@@ -36,6 +36,7 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
   const taskStatus = ref("");
   const taskCreatedBy = ref("");
   const taskShowAll = ref(false);
+  const taskIncludeDeleted = ref(false);
   const taskSortBy = ref<string>();
   const taskSortOrder = ref<"asc" | "desc">();
   const templateCreatedBy = ref("");
@@ -47,7 +48,7 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
 
   const taskSelectionKey = computed(() => [
     page.value, taskSearch.value, taskStatus.value, selectedResource.value?.id ?? "",
-    taskShowAll.value, taskCreatedBy.value, taskSortBy.value ?? "", taskSortOrder.value ?? "", options.user.value?.id ?? "",
+    taskShowAll.value, taskIncludeDeleted.value, taskCreatedBy.value, taskSortBy.value ?? "", taskSortOrder.value ?? "", options.user.value?.id ?? "",
   ].join("\u0000"));
   const templateSelectionKey = computed(() => [
     templatePage.value, templateShowAll.value, templateCreatedBy.value,
@@ -63,6 +64,7 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
       status: taskStatus.value || undefined,
       resourceId: selectedResource.value?.id,
       createdBy: taskShowAll.value ? taskCreatedBy.value || undefined : options.user.value?.id,
+      includeDeleted: taskIncludeDeleted.value ? "true" : undefined,
       sortBy: taskSortBy.value,
       sortOrder: taskSortOrder.value,
     });
@@ -96,6 +98,7 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
   }
   function clear() {
     ++taskGeneration;
+    taskIncludeDeleted.value = false;
     tasks.value = [];
     templates.value = [];
     nodes.value = [];
@@ -111,7 +114,7 @@ export function useWorkspaceCollections(options: WorkspaceCollectionOptions) {
 
   return {
     tasks, templates, nodes, totals, page, pageSize, templatePage,
-    taskSearch, taskStatus, taskCreatedBy, taskShowAll, taskSortBy, taskSortOrder, taskSelectionKey,
+    taskSearch, taskStatus, taskCreatedBy, taskShowAll, taskIncludeDeleted, taskSortBy, taskSortOrder, taskSelectionKey,
     templateCreatedBy, templateShowAll, templateIncludeDeleted, templateSelectionKey,
     selectedResource, lastUpdated, loadTasks, loadTemplates, loadNodes, clear,
   };

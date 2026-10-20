@@ -148,6 +148,14 @@ class Repository:
         await self.db.coredump_exports.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1)])
         await self.db.tasks.create_index([("desiredState", 1), ("nodeId", 1), ("status", 1)])
+        # 默认任务列表和调度候选均排除软删除记录，索引覆盖筛选前缀及稳定列表排序。
+        await self.db.tasks.create_index([("deletedAt", 1), ("createdAt", -1), ("id", 1)],
+                                         name="tasks_visible_created")
+        await self.db.tasks.create_index([("deletedAt", 1), ("desiredState", 1), ("nodeId", 1), ("status", 1)],
+                                         name="tasks_visible_scheduler")
+        # 删除收尾只读取尚待回收连接的软删除任务，避免每个调度周期扫描全部历史任务。
+        await self.db.tasks.create_index([("deletedAt", 1), ("deletionState", 1)],
+                                         name="tasks_deleted_reconcile")
         await self.db.runs.create_index([("nodeId", 1), ("endedAt", 1)])
         await self.db.runs.create_index([("endedAt", 1), ("id", 1)])
         # 部署 prepare/complete 与旧原始日志恢复只扫描带证明的极少数 run，不能扩大普通运行写入索引。

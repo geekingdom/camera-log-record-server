@@ -14,10 +14,13 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Path as ApiPath
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from camera_logs.access_policy.policy import apply_ip_permissions
 from camera_logs.common.database import public
+from camera_logs.common.log_frames import GapFrame, StatusFrame, SubscribeFrame
 from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.presentation_time import utc_iso
 from camera_logs.common.security import actor, authenticate, authorize
@@ -118,8 +121,8 @@ def install_log_routes(app):
         return app.state.repo
 
     @app.get("/api/v1/tasks/{task_id}/log-hours")
-    async def hours(task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(100, ge=1, le=168),
-                    date: Annotated[CalendarDate | None, Query()] = None):
+    async def hours(task_id: Annotated[str, ApiPath(description='路径中指定要查询上海小时归档目录的日志采集任务标识。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(100, ge=1, le=168, description='每页返回的记录数，受接口允许的最大值限制。'),
+                    date: Annotated[CalendarDate | None, Query(description='按 Asia/Shanghai 自然日筛选任务小时归档或作为看板统计截至日。')] = None):
         authorize(user, "logs:read", task_id)
         await repo().get("tasks", task_id)
         query = {"taskId": task_id, "status": {"$ne": "DELETED"}}
@@ -131,7 +134,7 @@ def install_log_routes(app):
         return {"items": values[(page-1)*pageSize:page*pageSize], "total": len(values), "page": page, "pageSize": pageSize}
 
     @app.get("/api/v1/tasks/{task_id}/log-days")
-    async def days(task_id: str, user: User,
+    async def days(task_id: Annotated[str, ApiPath(description='路径中指定要查询可用日志日期的日志采集任务标识。')], user: User,
                    month: Annotated[str, Query(pattern=r"^\d{4}-\d{2}$", description="上海时区月份，格式 YYYY-MM")]):
         """返回指定上海月份内存在有效非空日志的自然日，不读取日志正文或片段元数据。"""
         authorize(user, "logs:read", task_id)
@@ -154,7 +157,7 @@ def install_log_routes(app):
                                 for hour in hours})}
 
     @app.get("/api/v1/log-files/{identifier}/content")
-    async def content(identifier: str, request: Request, response: Response, user: User, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=1, le=262144)):
+    async def content(identifier: Annotated[str, ApiPath(description='路径中指定要读取内容的日志分卷目录标识。')], request: Request, response: Response, user: User, offset: int = Query(0, ge=0, description='从日志文件开头开始读取的字节偏移量。'), limit: int = Query(65536, ge=1, le=262144, description='单次读取日志内容的最大字节数。')):
         started = perf_counter()
         file = await repo().get("files", identifier)
         authorize(user, "logs:read", file["taskId"])
@@ -164,9 +167,9 @@ def install_log_routes(app):
                                   downstream=response)
 
     @app.get("/api/v1/tasks/{task_id}/log-gap-catalog")
-    async def gap_catalog(task_id: str, user: User, beforeFileId: str = Query(min_length=1), beforeOffset: int = Query(ge=0),
-                          beforeSessionId: str = Query(min_length=1), afterFileId: str = Query(min_length=1),
-                          afterOffset: int = Query(ge=0), afterSessionId: str = Query(min_length=1),
+    async def gap_catalog(task_id: Annotated[str, ApiPath(description='路径中指定要查询实时日志缺口目录的日志采集任务标识。')], user: User, beforeFileId: str = Query(min_length=1, description='缺口前最后一个可靠帧所在的日志文件标识。'), beforeOffset: int = Query(ge=0, description='缺口前可靠帧的结束字节偏移，也是待补读的起点。'),
+                          beforeSessionId: str = Query(min_length=1, description='缺口前可靠帧所属采集会话标识，必须与文件目录一致。'), afterFileId: str = Query(min_length=1, description='缺口后第一个可靠帧所在的日志文件标识。'),
+                          afterOffset: int = Query(ge=0, description='缺口后可靠帧的起始字节偏移，不包含该偏移后的已展示内容。'), afterSessionId: str = Query(min_length=1, description='缺口后可靠帧所属采集会话标识，允许与缺口前不同。'),
                           limit: int = Query(50, ge=1, le=100, description="本页最多返回的文件字节范围数，最大100"),
                           cursor: str | None = Query(None, max_length=32, description="上页返回的短游标，有效期一小时；保持原前后锚点，失效后重新定位")):
         """定位实时 gap 两端之间的已保存片段，文件正文仍由逐文件读取接口提供。"""
@@ -208,7 +211,7 @@ def install_log_routes(app):
         return await publish_gap_page(repo(), task_id, page)
 
     @app.get("/api/v1/log-files/{identifier}")
-    async def log_file(identifier: str, user: User):
+    async def log_file(identifier: Annotated[str, ApiPath(description='路径中指定要读取元数据的日志分卷目录标识。')], user: User):
         """读取定位整行所需的安全文件元数据，禁止泄露节点文件系统路径。"""
         file = await repo().get("files", identifier)
         authorize(user, "logs:read", file["taskId"])
@@ -223,17 +226,17 @@ def install_log_routes(app):
         authorize(user, "logs:download" if kind == "DOWNLOAD" else "logs:read", body.taskId)
         return public(await submit_job(repo(), user["id"], request.headers.get("Idempotency-Key"), body, kind))
 
-    @app.post("/api/v1/downloads", status_code=202)
+    @app.post("/api/v1/downloads", status_code=202, description='创建日志下载作业。taskId必填；hourIds与start/end二选一。时间不带时区时按北京时间解释，开始向下取整至小时、结束向上取整至小时（结束恰为整点不扩展）。例如12:18:41至15:10:08覆盖12:00至16:00的四个小时。最多168小时；默认缺片失败，allowPartial=true才允许部分导出。')
     async def download(body: DownloadCreate, request: Request, user: User):
         return await create_job(body, request, user, "DOWNLOAD")
 
-    @app.post("/api/v1/log-searches", status_code=202)
+    @app.post("/api/v1/log-searches", status_code=202, description='创建历史检索作业，冻结指定任务和时间范围内的文件清单后异步扫描。需要logs:read和Idempotency-Key；创建响应仅表示作业已受理，随后查询状态并分页读取结果。')
     async def search(body: SearchCreate, request: Request, user: User):
         return await create_job(body, request, user, "SEARCH")
 
     @app.get("/api/v1/downloads/{identifier}")
-    @app.get("/api/v1/log-searches/{identifier}")
-    async def job(identifier: str, user: User, includeResults: bool = True):
+    @app.get("/api/v1/log-searches/{identifier}", description='查询历史检索作业状态。轮询时可传includeResults=false省略较大的结果和冻结文件目录；RUNNING结果只是已扫描部分，只有SUCCEEDED且truncated=false表示冻结范围扫描完整。')
+    async def job(identifier: Annotated[str, ApiPath(description='路径中指定日志下载作业或日志检索作业的稳定标识。')], user: User, includeResults: Annotated[bool, Query(description='检索作业状态是否包含完整结果和冻结文件清单，默认true兼容原接口；轮询建议false并从results接口分页读取已确认命中。')] = True):
         """查询作业状态；轮询可省略较大的结果正文与冻结文件目录。"""
         if includeResults:
             doc = await repo().get("jobs", identifier)
@@ -244,8 +247,8 @@ def install_log_routes(app):
         authorize(user, "logs:download" if doc["kind"] == "DOWNLOAD" else "logs:read", doc["taskId"])
         return public(doc)
 
-    @app.get("/api/v1/tasks/{task_id}/downloads")
-    async def download_history(task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+    @app.get("/api/v1/tasks/{task_id}/downloads", description='按创建时间倒序分页读取指定任务的日志下载历史，返回作业状态和下载制品当前可用性；不暴露节点路径、写入租约或设备日志正文。')
+    async def download_history(task_id: Annotated[str, ApiPath(description='路径中指定要查询下载历史的日志采集任务标识。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
         """按创建时间稳定倒序列出任务下载历史，历史行不暴露节点路径或写入租约。"""
         authorize(user, "logs:download", task_id)
         await repo().get("tasks", task_id)
@@ -263,16 +266,16 @@ def install_log_routes(app):
             items.append(item)
         return {"items": items, "total": total, "page": page, "pageSize": pageSize}
 
-    @app.get("/api/v1/log-searches/{identifier}/results")
-    async def results(identifier: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(100, ge=1, le=100)):
+    @app.get("/api/v1/log-searches/{identifier}/results", description='分页读取历史检索作业已确认的结果。结果按作业当前状态返回；FAILED、CANCELLED或EXPIRED保留的部分结果不代表剩余范围不存在匹配。')
+    async def results(identifier: Annotated[str, ApiPath(description='路径中指定要分页读取结果的日志检索作业标识。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(100, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
         doc = await repo().get("jobs", identifier)
         authorize(user, "logs:read", doc["taskId"])
         items = doc.get("results", [])
         return {"items": items[(page-1)*pageSize:page*pageSize], "total": len(items), "page": page, "pageSize": pageSize,
                 "status": doc["status"], "truncated": doc.get("truncated", False)}
 
-    @app.get("/api/v1/downloads/{identifier}/content")
-    async def download_content(identifier: str, request: Request):
+    @app.get("/api/v1/downloads/{identifier}/content", description='公开下载已生成日志归档，无需登录、Token、票据或来源IP授权。支持Range与If-Range；未完成返回409，已过期或清理返回410。')
+    async def download_content(identifier: Annotated[str, ApiPath(description='路径中指定公开下载内容的已完成日志下载作业标识。')], request: Request):
         """已记录下载制品作为缺陷附件公开读取，不依赖用户或短期票据。"""
         doc = await repo().get("jobs", identifier)
         if doc["status"] != "SUCCEEDED":
@@ -283,8 +286,8 @@ def install_log_routes(app):
         return await proxy_file(repo(), doc["nodeId"], f"/internal/downloads/{identifier}", request.headers.get("range"), request.headers.get("if-range"))
 
     @app.delete("/api/v1/downloads/{identifier}", status_code=204)
-    @app.delete("/api/v1/log-searches/{identifier}", status_code=204)
-    async def cancel(identifier: str, user: User):
+    @app.delete("/api/v1/log-searches/{identifier}", status_code=204, description='取消本人创建的历史检索作业；取消他人作业需要admin。')
+    async def cancel(identifier: Annotated[str, ApiPath(description='路径中指定要取消的日志下载作业或日志检索作业标识。')], user: User):
         doc = await repo().get("jobs", identifier)
         authorize(user, "logs:read", doc["taskId"])
         if doc["actor"] != user["id"]:
@@ -296,11 +299,17 @@ def install_log_routes(app):
         """首帧鉴权后按游标推送字节块；发送超时关闭慢连接，正文可通过文件接口补读。"""
         await ws.accept()
         try:
-            hello = await asyncio.wait_for(ws.receive_json(), timeout=10)
+            try:
+                hello = SubscribeFrame.model_validate(await asyncio.wait_for(ws.receive_json(), timeout=10))
+            except ValidationError:
+                ws.state.failure_type = "ValidationError"
+                await ws.close(code=4408, reason="订阅首帧格式无效")
+                return
+
             async def current_identity():
                 """每次推送重验会话与范围；权限撤销不能留下旧实时订阅。"""
-                if hello.get("token"):
-                    return await apply_ip_permissions(repo(), ws, await authenticate(repo(), hello["token"]))
+                if hello.token:
+                    return await apply_ip_permissions(repo(), ws, await authenticate(repo(), hello.token))
                 check_origin(ws)
                 identity = await session_identity(repo(), ws.cookies.get(COOKIE, ""))
                 if identity.get("mustChangePassword"):
@@ -312,18 +321,20 @@ def install_log_routes(app):
             bind_websocket_actor(ws.scope, user)
             authorize(user, "logs:read", task_id)
             await repo().audit(user["id"], "live_subscribe", task_id)
-            cursor = hello.get("cursor")
+            cursor = hello.cursor
             while True:
                 user = await current_identity()
                 authorize(user, "logs:read", task_id)
                 task = await repo().get("tasks", task_id)
                 if not task.get("nodeId"):
-                    await ws.send_json({"type": "status", "status": task["status"]})
+                    await ws.send_json(StatusFrame(type="status", status=task["status"]).model_dump(mode="json"))
                 else:
                     data = await node_request(repo(), task["nodeId"], f"/internal/tail/{task_id}",
                                               {"cursor": cursor or ""}, client=ws.app.state.node_http)
                     if data.get("gap"):
-                        await ws.send_json({"type": "gap", "message": "实时缓冲已过期，请通过小时归档补读"})
+                        await ws.send_json(GapFrame(
+                            type="gap", message="实时缓冲已过期，请通过小时归档补读",
+                        ).model_dump(mode="json"))
                     for frame in data["frames"]:
                         await asyncio.wait_for(ws.send_json(frame), timeout=5)
                         cursor = frame["cursor"]

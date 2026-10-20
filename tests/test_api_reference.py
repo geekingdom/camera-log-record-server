@@ -397,3 +397,75 @@ def test_time_inputs_and_hour_range_download_are_documented_without_required_off
     assert "hourIds" in download["description"] and "向上取整" in download["description"]
     core = operations["GET /api/v1/coredumps/{identifier}/content"]
     assert "稳定" in core["description"] and "无需先导出" in core["description"]
+
+
+def test_reference_exposes_complete_response_field_contracts_and_protocol_variants(client):
+    """每个公开操作都必须提供可递归展示的成功、错误及协议响应合同。"""
+    reference = client.get("/api/v1/api-reference").json()
+    for operation in reference["operations"]:
+        contract = operation["responseContract"]
+        assert contract["kind"] in {"json", "empty", "binary", "text", "websocket"}
+        assert "errors" in contract
+        if contract["kind"] in {"empty", "websocket"}:
+            continue
+        assert contract["schema"] and contract["schema"].get("description"), operation["id"]
+    downloads = next(item for item in reference["operations"] if item["id"] == "GET /api/v1/downloads/{identifier}/content")
+    assert downloads["responseContract"]["kind"] == "binary"
+    assert set(downloads["responseContract"]["schema"]["properties"]) >= {"Content-Range", "ETag"}
+    websocket = next(item for item in reference["operations"] if item["id"] == "WS /api/v1/tasks/{task_id}/logs")
+    assert len(websocket["responseContract"]["schema"]["oneOf"]) == 3
+    events = next(item for item in reference["operations"] if item["id"] == "GET /api/v1/audit-events")
+    assert events["responseContract"]["schema"]["properties"]["items"]["items"]["properties"]["summary"]["description"]
+
+
+def test_response_contracts_are_explicit_for_every_route_and_cover_stateful_protocols(client):
+    """目录不允许回退到示例推断，并锁定关键公开协议的嵌套字段。"""
+    from camera_logs.common.api_contracts.responses import CONTRACTS
+
+    reference = client.get("/api/v1/api-reference").json()
+    operations = {operation["id"]: operation for operation in reference["operations"]}
+    http_ids = {identifier for identifier in operations if not identifier.startswith("WS ")}
+    assert set(CONTRACTS) == http_ids
+
+    job = operations["POST /api/v1/downloads"]["responseContract"]
+    assert job["kind"] == "json"
+    assert {"hourIds", "files", "error", "errorMessage"} <= set(job["schema"]["properties"])
+    assert any("includeResults=false" in note for note in job["conditional"])
+
+    coredump = operations["GET /api/v1/coredumps/{identifier}/content"]["responseContract"]
+    assert coredump["kind"] == "binary"
+    assert {error["status"] for error in coredump["errors"]} == {404, 409, 416, 422, 500}
+    assert "sourceState=STABLE" in coredump["conditional"][0]
+
+    batch = operations["POST /api/v1/admin/common-commands/batch"]["responseContract"]["schema"]
+    assert batch["required"] == ["action", "affected"]
+    assert batch["properties"]["affected"]["description"]
+
+    websocket = operations["WS /api/v1/tasks/{task_id}/logs"]["responseContract"]
+    data, gap, status = websocket["schema"]["oneOf"]
+    assert set(data["properties"]) == {"type", "fileId", "sessionId", "runId", "offset", "endOffset", "data", "size", "cursor"}
+    assert set(gap["properties"]) == {"type", "message"}
+    assert set(status["properties"]) == {"type", "status"}
+    assert "4408" in websocket["conditional"][0]
+
+
+def test_task_delete_permission_and_batch_idempotency_match_mutation_routes(client):
+    """新写接口必须同步暴露实际授权范围和必需的幂等请求头。"""
+    reference = client.get("/api/v1/api-reference").json()
+    operations = {item["id"]: item for item in reference["operations"]}
+    deletion = operations["DELETE /api/v1/tasks/{task_id}"]
+    assert "tasks:write" in deletion["permission"] and "tasks:control" in deletion["permission"]
+    assert "创建者" in deletion["permission"] and deletion["responseStatus"] == 202
+    batch = operations["POST /api/v1/admin/common-commands/batch"]
+    assert "Idempotency-Key" in batch["headers"]
+
+
+def test_batch_resource_creation_documents_input_and_device_authentication_422_variants(client):
+    """同一 422 状态码的输入校验与认证失败必须公开各自真实的 details 结构。"""
+    reference = client.get("/api/v1/api-reference").json()
+    operation = next(item for item in reference["operations"] if item["id"] == "POST /api/v1/resources/batch")
+    error = next(item for item in operation["responseContract"]["errors"] if item["status"] == 422)
+    variants = error["schema"]["oneOf"]
+    business = next(item for item in variants if item["properties"]["error"]["properties"]["code"].get("const") == "BATCH_AUTHENTICATION_FAILED")
+    failure = business["properties"]["error"]["properties"]["details"]["properties"]["items"]["items"]
+    assert set(failure["properties"]) == {"index", "ip", "code"}

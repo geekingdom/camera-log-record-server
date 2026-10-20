@@ -85,6 +85,19 @@ def diagnostic_tail(path):
     return path.read_text(errors="replace")[-8000:]
 
 
+def diagnostic_events(path):
+    """从完整临时日志摘取下载请求及已脱敏校验错误，避免末尾轮询覆盖根因。"""
+    if not path.is_file():
+        return ""
+    lines = path.read_text(errors="replace").splitlines()
+    markers = ("/api/v1/downloads", "ResponseValidationError", "ValidationError", " 500 ", '"status":500', "ERROR")
+    selected = set()
+    for index, line in enumerate(lines):
+        if any(marker in line for marker in markers):
+            selected.update(range(max(0, index - 3), min(len(lines), index + 4)))
+    return "\n".join(lines[index] for index in sorted(selected))[-12000:]
+
+
 class SerialSource:
     """持续输出带换行的本地 Telnet 字节流，使 Worker 产生真实实时帧和小时归档。"""
 
@@ -207,7 +220,12 @@ async def main():
             await wait_ready(f"http://127.0.0.1:{api_port}/health", processes)
             await wait_ready(f"http://127.0.0.1:{node_port}/health", processes)
             await wait_ready(env["BROWSER_BASE_URL"], processes)
-            browser = await asyncio.create_subprocess_exec("node", "scripts/browser_smoke.mjs", cwd=ROOT, env=env)
+            browser_log = (temporary_path / "browser.log").open("w")
+            process_logs.append(("browser", browser_log))
+            browser = await asyncio.create_subprocess_exec(
+                "node", "scripts/browser_smoke.mjs", cwd=ROOT, env=env,
+                stdout=browser_log, stderr=browser_log,
+            )
             processes.append(browser)
             async with asyncio.timeout(240):
                 if await browser.wait() != 0:
@@ -230,6 +248,9 @@ async def main():
                     tail = diagnostic_tail(Path(log.name))
                     if tail:
                         print(f"--- isolated {name} log tail ---\n{tail}")
+                    events = diagnostic_events(Path(log.name))
+                    if events:
+                        print(f"--- isolated {name} download and validation diagnostics ---\n{events}")
             try:
                 await mongo.drop_database(database)
             finally:

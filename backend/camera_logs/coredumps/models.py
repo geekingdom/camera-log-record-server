@@ -6,4 +6,4 @@ from pydantic import BaseModel, Field
 class CoredumpExportCreate(BaseModel):
     """请求将一个或多个已登记 coredump 冻结并导出。"""
 
-    fileIds: list[str] = Field(min_length=1, max_length=100)
+    fileIds: list[str] = Field(min_length=1, max_length=100, description='需要冻结并导出的 Coredump 文件标识列表。')

@@ -31,7 +31,7 @@ async def recover_planned_restart_tasks(repo, node_id: str) -> int:
     token = node["shutdownToken"]
     recovered = 0
     async for task in repo.db.tasks.find({
-        "nodeId": node_id, "plannedRestart": True, "desiredState": "RUNNING",
+        "nodeId": node_id, "plannedRestart": True, "desiredState": "RUNNING", "deletedAt": None,
         "plannedRestartToken": token,
         "status": {"$in": ["BLOCKED", "PENDING", "CONNECTING", "COLLECTING", "RECONNECTING"]},
         "resourceDeleted": {"$ne": True},
@@ -56,7 +56,7 @@ async def _recover_planned_restart_task(repo, task, node_id: str, token: str) ->
             return False
         current = await repo.db.tasks.find_one(
             owner_filter(task) | {"plannedRestart": True, "plannedRestartToken": token,
-                                  "desiredState": "RUNNING", "resourceDeleted": {"$ne": True},
+                                  "desiredState": "RUNNING", "deletedAt": None, "resourceDeleted": {"$ne": True},
                                   "status": {"$in": statuses}},
             session=session,
         )
@@ -154,7 +154,7 @@ async def accepted_restart(repo, task, session):
 
 
 async def finish_blocked_run(repo, task, session, *, restart, operation_id=None, evidence=None):
-    """在调用方事务内收尾已证实关闭的运行；不删除后继锁，不提前完成重启。"""
+    """在调用方事务内收尾已证实关闭的运行；已删除任务只能停止，不能重新启动。"""
     task_id, run_id, timestamp = task["id"], task.get("runId"), now()
     from camera_logs.collection.ssh_admission import release_task_slots
 
@@ -177,8 +177,12 @@ async def finish_blocked_run(repo, task, session, *, restart, operation_id=None,
         update["controlOperationId"] = operation_id
     if evidence is not None:
         update["isolationEvidence"] = str(redact(evidence))
+    ownership = owner_filter(task) | {"status": "BLOCKED", "controlOperationId": task.get("controlOperationId")}
+    if restart:
+        # 恢复路径不得在收尾瞬间穿透任务或资源的删除墓碑。
+        ownership.update({"deletedAt": None, "resourceDeleted": {"$ne": True}})
     changed = await repo.db.tasks.update_one(
-        owner_filter(task) | {"status": "BLOCKED", "controlOperationId": task.get("controlOperationId")},
+        ownership,
         {"$set": update}, session=session,
     )
     if not changed.matched_count:
@@ -200,13 +204,15 @@ async def finalize_closed_task(repo, task):
     """Worker 无运行对象时消费精确关闭收据；重新读取控制意图避免覆盖并发停止。"""
     async def commit(session):
         current = await repo.db.tasks.find_one_and_update(
-            owner_filter(task) | {"status": "BLOCKED"}, {"$inc": {"controlClaimVersion": 1}},
+            owner_filter(task) | {"status": "BLOCKED"},
+            {"$inc": {"controlClaimVersion": 1}},
             return_document=ReturnDocument.AFTER, session=session,
         )
         if current is None or not matching_closed_receipt(current):
             return False
-        restart = bool(current.get("restartRequested"))
-        if not restart and current.get("desiredState") != "STOPPED":
+        removed = current.get("deletedAt") is not None or current.get("resourceDeleted") is True
+        restart = bool(current.get("restartRequested")) and not removed
+        if not restart and current.get("desiredState") != "STOPPED" and not removed:
             return False
         operation_id = current.get("controlOperationId")
         if restart:
@@ -228,11 +234,15 @@ async def confirm_task_isolation(repo, task_id: str, user, evidence: str):
 
     async def commit(session):
         task = await repo.db.tasks.find_one_and_update(
-            {"id": task_id}, {"$inc": {"controlClaimVersion": 1}},
+            {"id": task_id, "deletedAt": None, "resourceDeleted": {"$ne": True}},
+            {"$inc": {"controlClaimVersion": 1}},
             return_document=ReturnDocument.AFTER, session=session,
         )
         if task is None:
-            raise HTTPException(404, "任务不存在")
+            existing = await repo.db.tasks.find_one({"id": task_id}, session=session)
+            if existing is None:
+                raise HTTPException(404, "任务不存在")
+            raise HTTPException(409, "任务已删除，仅可查询已有日志")
         accepted = await accepted_restart(repo, task, session)
         if accepted:
             return accepted

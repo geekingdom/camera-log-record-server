@@ -286,7 +286,7 @@ export const api = {
   tasks: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; status?: string; resourceId?: string; createdBy?: string; sortBy?: string; sortOrder?: "asc" | "desc" },
+    filters?: { search?: string; status?: string; resourceId?: string; createdBy?: string; includeDeleted?: string; sortBy?: string; sortOrder?: "asc" | "desc" },
   ) => request<Page<Task>>(`/tasks${query(page, pageSize, filters)}`),
   task: (id: string) => request<Task>(`/tasks/${id}`),
   createTask: (
@@ -304,6 +304,7 @@ export const api = {
       headers: { "Idempotency-Key": idempotencyKey() },
       body: JSON.stringify(pick(task, [...taskFields, "version"])),
     }),
+  deleteTask: (id: string, version: number) => request<unknown>(`/tasks/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
   operation: (id: string, action: "start" | "stop" | "pause" | "resume") =>
     request<unknown>(`/tasks/${id}/${action}`, {
       method: "POST",

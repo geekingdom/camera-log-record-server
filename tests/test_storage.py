@@ -127,6 +127,24 @@ async def test_hour_switch_archives_all_sealed_parts_and_reports_each_member(tmp
     assert len(paths) == 2
 
 
+async def test_hour_switch_manifest_uses_incremental_index_digest(tmp_path, monkeypatch):
+    """跨整点封存直接使用已追加的索引摘要，不能重新读取已关闭索引。"""
+    original_open = Path.open
+
+    def forbid_sealed_index_read(path, *args, **kwargs):
+        if path.name.endswith(".index.jsonl") and "r" in (args[0] if args else kwargs.get("mode", "r")):
+            raise AssertionError("归档 manifest 重新读取了已关闭索引")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_sealed_index_read)
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
+    first = datetime(2026, 9, 8, 1, 59, 59, tzinfo=UTC)
+    await writer.write(b"previous\n", received_at=first)
+    await writer.write(b"current\n", received_at=first.replace(hour=2))
+    assert writer.active_path is not None and writer.active_path.read_bytes() == b"current\n"
+    await writer.close()
+
+
 async def test_metadata_records_index_digest_and_sequence(tmp_path):
     writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device")
     await writer.write(b"durable\n")

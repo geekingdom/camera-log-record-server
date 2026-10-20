@@ -53,6 +53,14 @@ const selectedOperation = computed(() =>
   ?? filteredOperations.value[0],
 );
 const requestFields = computed(() => describeObjectFields(selectedOperation.value?.requestSchema, catalog.value?.schemas ?? {}));
+const responseFields = computed(() => selectedOperation.value?.responseContract.schema?.oneOf ? [] : describeObjectFields(selectedOperation.value?.responseContract.schema ?? undefined, catalog.value?.schemas ?? {}));
+const responseVariants = computed(() => selectedOperation.value?.responseContract.schema?.oneOf ?? []);
+const errorFields = computed(() => {
+  const contract = selectedOperation.value?.responseContract;
+  const fields = [contract?.errorSchema, ...(contract?.errors.map(error => error.schema) ?? [])]
+    .flatMap(schema => describeObjectFields(schema ?? undefined, catalog.value?.schemas ?? {}));
+  return [...new Map(fields.map(field => [field.path, field])).values()];
+});
 
 function stringify(value: unknown) {
   return value === null || value === undefined ? "" : JSON.stringify(value, null, 2);
@@ -151,6 +159,27 @@ onMounted(() => void reload());
         <section class="operation-section api-code-section"><div class="code-heading"><h3><FileCode2 :size="16" /> 请求示例</h3><el-tooltip :content="copied === 'request' ? '已复制' : '复制请求示例'"><el-button text :icon="copied === 'request' ? Check : Copy" aria-label="复制请求示例" @click="copy(requestExample(selectedOperation), 'request')" /></el-tooltip></div><pre>{{ requestExample(selectedOperation) }}</pre></section>
         <section class="operation-section api-code-section python-code-section"><div class="code-heading"><h3><FileCode2 :size="16" /> Python 调用示例</h3><el-tooltip :content="copied === 'python' ? '已复制' : '复制 Python 调用示例'"><el-button text :icon="copied === 'python' ? Check : Copy" aria-label="复制 Python 调用示例" @click="copy(selectedOperation.pythonExample, 'python')" /></el-tooltip></div><p class="python-example-note">{{ pythonDependencyGuide(selectedOperation) }} 请替换尖括号中的占位值和示例 ID。示例仅供复制与修改，页面不会发起请求。</p><pre>{{ selectedOperation.pythonExample }}</pre></section>
         <section class="operation-section api-code-section"><div class="code-heading"><h3>响应示例 <span>{{ selectedOperation.responseStatus }}</span></h3><el-tooltip :content="copied === 'response' ? '已复制' : '复制响应示例'"><el-button text :icon="copied === 'response' ? Check : Copy" aria-label="复制响应示例" @click="copy(stringify(selectedOperation.responseExample), 'response')" /></el-tooltip></div><pre>{{ stringify(selectedOperation.responseExample) }}</pre></section>
+        <section class="operation-section response-contract">
+          <h3>响应字段</h3>
+          <p class="response-contract-summary">{{ selectedOperation.responseContract.description }}</p>
+          <p v-for="note in selectedOperation.responseContract.conditional ?? []" :key="note" class="response-contract-note">{{ note }}</p>
+          <div v-if="responseFields.length" class="parameter-list">
+            <div v-for="field in responseFields" :key="field.path" class="parameter-row"><div><strong>{{ field.path }}</strong><span>{{ field.type }} · {{ field.constraints }}</span></div><p>{{ field.description }}</p><code>{{ field.type }}</code></div>
+          </div>
+          <p v-else-if="selectedOperation.responseContract.kind === 'empty'" class="section-empty">成功响应没有正文。</p>
+          <div v-if="responseVariants.length" class="response-variants">
+            <h4>消息类型</h4>
+            <div v-for="(variant, index) in responseVariants" :key="index" class="response-variant">
+              <p>{{ variant.description }}</p>
+              <div class="parameter-list"><div v-for="field in describeObjectFields(variant, catalog?.schemas ?? {})" :key="field.path" class="parameter-row"><div><strong>{{ field.path }}</strong><span>{{ field.type }} · {{ field.constraints }}</span></div><p>{{ field.description }}</p><code>{{ field.type }}</code></div></div>
+            </div>
+          </div>
+          <div v-if="selectedOperation.responseContract.errors.length" class="response-errors">
+            <h4>错误响应</h4>
+            <div class="parameter-list"><div v-for="failure in selectedOperation.responseContract.errors" :key="failure.status" class="parameter-row"><div><strong>{{ failure.status }}</strong><span>error object</span></div><p>{{ failure.when }}</p><code>JSON</code></div></div>
+            <div v-if="errorFields.length" class="response-error-fields"><h4>错误字段</h4><div class="parameter-list"><div v-for="field in errorFields" :key="field.path" class="parameter-row"><div><strong>{{ field.path }}</strong><span>{{ field.type }} · {{ field.constraints }}</span></div><p>{{ field.description }}</p><code>{{ field.type }}</code></div></div></div>
+          </div>
+        </section>
       </article>
       <div v-else class="api-detail-empty"><BookOpen :size="30" /><p>选择左侧接口查看参数和调用示例。</p></div>
 
@@ -188,6 +217,7 @@ onMounted(() => void reload());
 .operation-heading { padding-bottom: 22px; border-bottom: 1px solid #e5eceb; }.operation-heading h2 { margin-top: 13px; font-size: 19px; }.operation-heading p { margin-top: 8px; line-height: 1.65; }.operation-label { min-width: 0; flex-wrap: wrap; align-items: center; }.operation-label code { min-width: 0; overflow-wrap: anywhere; }.operation-label .el-tag { display: inline-flex; align-items: center; gap: 5px; height: auto; max-width: 100%; white-space: normal; line-height: 1.5; }
 .operation-section { padding: 20px 0; border-bottom: 1px solid #e9eeee; }.operation-section h3 { margin: 0 0 12px; color: #405154; font-size: 13px; }.operation-section h3 span { color: #25806d; font: 600 12px ui-monospace, monospace; }
 .parameter-list { border: 1px solid #e1e9e8; }.parameter-row { display: grid; grid-template-columns: minmax(120px, .75fr) minmax(0, 1fr) minmax(90px, .7fr); gap: 12px; padding: 10px 12px; border-bottom: 1px solid #edf1f1; font-size: 12px; }.parameter-row:last-child { border-bottom: 0; }.parameter-row strong, .parameter-row span { display: block; }.parameter-row strong { color: #334446; }.parameter-row span, .parameter-row p { margin-top: 4px; color: #819093; font-size: 12px; line-height: 1.45; }.parameter-row code { align-self: center; color: #64777a; overflow-wrap: anywhere; }.request-fields { margin-top: 18px; }.request-fields h4 { margin: 0 0 9px; color: #536669; font-size: 12px; }
+.response-contract-summary, .response-contract-note { margin: 0 0 10px; color: #657679; font-size: 12px; line-height: 1.55; }.response-contract-note { padding-left: 10px; border-left: 2px solid #b7d9d1; }.response-variants, .response-errors, .response-error-fields { margin-top: 18px; }.response-variants h4, .response-errors h4, .response-error-fields h4 { margin: 0 0 9px; color: #536669; font-size: 12px; }.response-variant + .response-variant { margin-top: 12px; }.response-variant > p { margin: 0 0 7px; color: #718185; font-size: 12px; }
 .permission-copy { line-height: 1.65; }.header-list { display: grid; gap: 6px; margin-top: 12px; }.header-list code { max-width: 100%; padding: 7px 9px; color: #506568; background: #f2f6f5; border-left: 2px solid #bcded6; overflow-wrap: anywhere; }.header-list span, .section-empty { color: #879598; font-size: 13px; }
 .api-code-section pre, .guide-error pre { max-height: 320px; margin: 0; padding: 14px; overflow: auto; color: #d6e3df; background: #182723; border-radius: 5px; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }.code-heading { justify-content: space-between; }.code-heading h3 { margin-bottom: 0; }
 .python-example-note { margin: 0 0 10px; color: #738286; font-size: 12px; line-height: 1.6; }

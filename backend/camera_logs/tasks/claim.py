@@ -106,6 +106,7 @@ async def claim_task(repo, task, node_id, *, lease=None, occupied=0):
             "id": task["id"],
             "nodeId": None,
             "desiredState": "RUNNING",
+            "deletedAt": None,
             "resourceDeleted": {"$ne": True},
             "status": task["status"],
         }

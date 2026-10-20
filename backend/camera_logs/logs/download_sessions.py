@@ -9,6 +9,7 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, Response
+from fastapi import Path as ApiPath
 from pymongo.errors import PyMongoError
 
 from camera_logs.access_policy.policy import apply_ip_permissions
@@ -97,7 +98,7 @@ def download_actor_for(target_type: str):
 def install_download_sessions(app):
     """签发五分钟下载票据，完整路径隔离作业，SameSite 限制跨站使用。"""
     @app.post("/api/v1/downloads/{identifier}/browser-session")
-    async def browser_session(identifier: str, request: Request, response: Response, user: Annotated[dict, Depends(actor)]):
+    async def browser_session(identifier: Annotated[str, ApiPath(description='路径中指定已成功生成日志归档制品的下载作业标识。')], request: Request, response: Response, user: Annotated[dict, Depends(actor)]):
         repo = request.app.state.repo
         job = await repo.get("jobs", identifier)
         authorize(user, "logs:download", job["taskId"])

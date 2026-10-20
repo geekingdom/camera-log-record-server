@@ -23,6 +23,7 @@ from camera_logs.collection.runtime import SessionRuntime
 from camera_logs.collection.slave_shell import SlaveLoginError
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
+from camera_logs.common.log_frames import DataFrame
 from camera_logs.logs.storage import HourArchive
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
@@ -565,6 +566,8 @@ def test_live_chunks_use_their_immutable_path_and_offset(tmp_path):
     asyncio.run(runtime.on_log(LogChunk("task-a", "run-a", "session", 1, b"old", 0, str(first))))
     asyncio.run(runtime.on_log(LogChunk("task-a", "run-a", "session", 2, b"new", 0, str(later))))
     frames = list(runtime.frames)
+    assert DataFrame.model_validate(frames[0]).type == "data"
+    assert DataFrame.model_validate(frames[1]).type == "data"
     assert frames[0]["offset"] == 0 and frames[0]["endOffset"] == 3
     assert frames[1]["offset"] == 0 and frames[1]["endOffset"] == 3
     assert frames[0]["fileId"] != frames[1]["fileId"]

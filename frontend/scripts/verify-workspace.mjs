@@ -10,7 +10,7 @@ const repository = fileURLToPath(new URL("../..", import.meta.url));
 const scripts = [
   "browser_workspace_layout", "browser_api_reference", "browser_account_templates",
   "browser_template_navigation", "browser_default_resource_navigation", "browser_dashboard",
-  "browser_resource_bulk_delete", "browser_task_bulk_operations",
+  "browser_resource_bulk_delete", "browser_task_bulk_operations", "browser_task_soft_delete",
   "browser_coredump_shared_monitor", "browser_blocked_recovery", "browser_command_history",
   "browser_resource_authentication_records", "browser_node_dashboard",
   "browser_live_terminal_workbench", "browser_archive_viewer", "browser_live_ranges", "browser_resource_metrics",

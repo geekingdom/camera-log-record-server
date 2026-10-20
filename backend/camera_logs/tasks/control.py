@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 async def _guard_resources(db, task, session):
     """实际写入关联资源以与软删除冲突；只读快照不足以防止写偏差。"""
-    if task.get("resourceDeleted"):
+    if task.get("deletedAt") is not None or task.get("resourceDeleted"):
         raise HTTPException(409, "设备资源已删除，仅可查询已有日志")
     identifiers = sorted({value for value in (task["resourceId"], task.get("serialServerResourceId")) if value})
     for identifier in identifiers:
@@ -151,6 +151,8 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
         if task is None:
             raise HTTPException(404, "任务不存在")
         authorize_owner(user, task)
+        if task.get("deletedAt") is not None and desired != "STOPPED":
+            raise HTTPException(409, "任务已删除，仅可查询已有日志")
         if desired == "RUNNING" and task.get("status") == "BLOCKED":
             raise HTTPException(409, "任务阻塞，必须使用重新启动或隔离确认")
         if require_paused and task.get("status") == "WAITING_DEVICE":
@@ -214,7 +216,7 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
             unset["resumeWaiting"] = ""
         query = {"id": task_id}
         if desired != "STOPPED":
-            query["resourceDeleted"] = {"$ne": True}
+            query.update({"deletedAt": None, "resourceDeleted": {"$ne": True}})
         update = {"$set": changes}
         if unset:
             update["$unset"] = unset

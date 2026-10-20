@@ -5,9 +5,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 from pymongo import AsyncMongoClient
 
+from camera_logs.common.api_errors import api_error_response
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, public
 from camera_logs.common.node_http import NodeHttpPool
@@ -83,9 +83,8 @@ def create_app(settings=None, db=None):
         """启动窗口先返回稳定 503，再在 API 请求前执行来源白名单。"""
         if not hasattr(app.state, "repo"):
             request.state.safe_error = "服务正在初始化，请稍后重试"
-            return JSONResponse(status_code=503, content={"error": {
-                "code": "SERVICE_NOT_READY", "message": request.state.safe_error,
-                "requestId": getattr(request.state, "request_id", None)}})
+            return api_error_response(503, "SERVICE_NOT_READY", request.state.safe_error,
+                                      getattr(request.state, "request_id", None))
         from camera_logs.common.public_downloads import is_public_download
         if request.url.path.startswith("/api/v1/") and not is_public_download(request.method, request.url.path):
             from camera_logs.access_policy.policy import enforce_ip
@@ -93,34 +92,30 @@ def create_app(settings=None, db=None):
                 await enforce_ip(app.state.repo, request)
             except HTTPException as exc:
                 request.state.safe_error = redact_text(str(exc.detail))
-                return JSONResponse(status_code=exc.status_code, content={"error": {
-                    "code": "IP_ACCESS_DENIED", "message": request.state.safe_error,
-                    "requestId": getattr(request.state, "request_id", None)}})
+                return api_error_response(exc.status_code, "IP_ACCESS_DENIED", request.state.safe_error,
+                                          getattr(request.state, "request_id", None))
         return await call_next(request)
     @app.exception_handler(HTTPException)
     async def http_error(request, exc):
         """将业务 HTTP 异常包装为包含 requestId 的稳定 API 错误结构。"""
         request.state.safe_error = redact_text(str(exc.detail))
-        return JSONResponse(status_code=exc.status_code, headers=exc.headers, content={"error": {
-            "code": getattr(exc, "code", str(exc.status_code)), "message": request.state.safe_error,
-            "requestId": request.state.request_id}})
+        return api_error_response(exc.status_code, getattr(exc, "code", str(exc.status_code)),
+                                  request.state.safe_error, request.state.request_id, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request, exc):
         """将 Pydantic 请求校验细节转换为前端可消费的 422 结构。"""
         request.state.safe_error = "输入校验失败"
         errors = [{"location": list(e["loc"]), "message": e["msg"]} for e in exc.errors()]
-        return JSONResponse(status_code=422, content={"error": {
-            "code": "VALIDATION_ERROR", "message": "输入校验失败", "details": errors,
-            "requestId": request.state.request_id}})
+        return api_error_response(422, "VALIDATION_ERROR", "输入校验失败",
+                                  request.state.request_id, details=errors)
 
     @app.exception_handler(Exception)
     async def unexpected_error(request, exc):
         """对外只返回安全说明；请求中间件记录异常类型及安全的结构化位置。"""
         request.state.safe_error = "服务内部异常"
-        return JSONResponse(status_code=500, content={"error": {
-            "code": "INTERNAL_ERROR", "message": "服务内部异常，请凭请求编号查询运行日志",
-            "requestId": getattr(request.state, "request_id", None)}})
+        return api_error_response(500, "INTERNAL_ERROR", "服务内部异常，请凭请求编号查询运行日志",
+                                  getattr(request.state, "request_id", None))
 
     def repo():
         """返回生命周期已初始化的 Repository，供路由安装函数闭包使用。"""
@@ -171,6 +166,8 @@ def create_app(settings=None, db=None):
     install_download_sessions(app)
     from camera_logs.reference.api import install_reference_routes
     install_reference_routes(app)
+    from camera_logs.common.api_response_contracts import install_response_contracts
+    install_response_contracts(app)
     # 最后注册的 ASGI 中间件最先执行，必须覆盖来源策略提前返回的拒绝响应。
     from camera_logs.common.observability import add_request_logging
     add_request_logging(app)

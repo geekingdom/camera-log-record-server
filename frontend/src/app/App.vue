@@ -116,6 +116,7 @@ const {
   taskStatus,
   taskCreatedBy,
   taskShowAll,
+  taskIncludeDeleted,
   taskSortBy,
   taskSortOrder,
   taskSelectionKey,
@@ -191,9 +192,13 @@ const navigation = useWorkspaceNavigation({
   refresh: (quiet) => refresh(quiet),
   onError: error,
 });
-const { activeNavigationLabel, navigate, restoreWorkspaceFromHash, syncWorkspaceHash, viewResourceTasks } = navigation;
+const { activeNavigationLabel, navigate, restoreWorkspaceFromHash, syncWorkspaceHash } = navigation;
+function viewResourceTasks(resource: Resource) {
+  taskIncludeDeleted.value = Boolean(resource.deletedAt);
+  navigation.viewResourceTasks(resource);
+}
 function editTask(task: Task) {
-  if (!hasScope("tasks:write") || !owns(task)) return;
+  if (!hasScope("tasks:write") || !owns(task) || task.deletedAt || task.resourceDeleted) return;
   selectedWorkspace.value = "config";
   selectedTask.value = task;
   taskEditorOpen.value = true;
@@ -227,9 +232,10 @@ function applyTaskFilters() {
   page.value = 1;
   navigation.requestRefresh();
 }
-function applyTaskOwnershipFilters(filters: { createdBy: string; showAll: boolean }) {
+function applyTaskOwnershipFilters(filters: { createdBy: string; showAll: boolean; includeDeleted: boolean }) {
   taskCreatedBy.value = filters.createdBy;
   taskShowAll.value = filters.showAll;
+  taskIncludeDeleted.value = filters.includeDeleted;
   page.value = 1;
   navigation.requestRefresh();
 }
@@ -390,6 +396,7 @@ onBeforeUnmount(() => {
                 isAdmin: user?.isAdmin,
                 createdBy: taskCreatedBy,
                 showAll: taskShowAll,
+                includeDeleted: taskIncludeDeleted,
                 selectionKey: taskSelectionKey,
               }"
               :listeners="{

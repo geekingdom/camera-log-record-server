@@ -27,12 +27,12 @@ class _SettingsModel(BaseModel):
 class MetricItem(_SettingsModel):
     """单条设备命令输出中提取的结构化指标。"""
 
-    id: str = Field(min_length=1, max_length=64)
-    name: str = Field(min_length=1, max_length=96)
-    command: str = Field(min_length=1, max_length=2048)
-    pattern: str = Field(min_length=1, max_length=512)
-    unit: Literal["KB", "%"]
-    enabled: bool = True
+    id: str = Field(min_length=1, max_length=64, description='系统指标的稳定唯一 ID，用于关联采样结果与配置；同一配置内不可重复。')
+    name: str = Field(min_length=1, max_length=96, description='图表和采样结果中显示的系统指标名称。')
+    command: str = Field(min_length=1, max_length=2048, description='采样本系统指标时发送的单行设备命令，复用现有采集连接。')
+    pattern: str = Field(min_length=1, max_length=512, description='从本指标命令输出中提取数值的正则表达式；第一个捕获组须能解析为数值。')
+    unit: Literal["KB", "%"] = Field(description='指标数值单位；% 表示百分比，KB 表示内存千字节，按设备命令输出的单位填写。')
+    enabled: bool = Field(default=True, description='是否执行此系统指标的采样命令并展示结果。')
 
     @field_validator("command")
     @classmethod
@@ -56,11 +56,11 @@ class MetricItem(_SettingsModel):
 class ProcessRule(_SettingsModel):
     """从进程列表中识别目标进程并生成稳定展示名称的规则。"""
 
-    id: str = Field(min_length=1, max_length=64)
-    name: str = Field(min_length=1, max_length=96)
-    pattern: str = Field(min_length=1, max_length=512)
-    nameGroup: int | None = Field(default=None, ge=1, le=16)
-    enabled: bool = True
+    id: str = Field(min_length=1, max_length=64, description='进程识别规则的稳定唯一 ID，用于关联动态进程指标；同一配置内不可重复。')
+    name: str = Field(min_length=1, max_length=96, description='进程指标的默认展示名；配置 nameGroup 时可由匹配文本生成动态名称。')
+    pattern: str = Field(min_length=1, max_length=512, description='匹配 ps 输出中进程命令列的正则表达式；nameGroup 可指定用于显示名称的捕获组。')
+    nameGroup: int | None = Field(default=None, ge=1, le=16, description='可选的进程正则捕获组编号，用于生成动态进程名称；为空时使用规则名称。')
+    enabled: bool = Field(default=True, description='是否使用此规则识别并采样目标进程。')
 
     @field_validator("pattern")
     @classmethod
@@ -83,13 +83,13 @@ class ProcessRule(_SettingsModel):
 class ResourceMonitorConfig(_SettingsModel):
     """管理员维护的资源监控规则，首版固定一分钟采样周期。"""
 
-    intervalSeconds: Literal[60] = 60
-    retentionDays: int = Field(default=90, ge=1, le=90)
-    items: list[MetricItem] = Field(default_factory=list, max_length=16)
-    processDiscoveryCommand: str = Field(default="ps", min_length=1, max_length=2048)
-    processRules: list[ProcessRule] = Field(default_factory=list, max_length=8)
-    processStatusCommand: str = Field(default="cat /proc/{pid}/status", min_length=1, max_length=2048)
-    processValuePattern: str = Field(default=r"VmRSS:\s*(\d+)\s*kB", min_length=1, max_length=512)
+    intervalSeconds: Literal[60] = Field(default=60, description='资源指标采样间隔，单位秒，目前固定为 60；复用采集连接执行。')
+    retentionDays: int = Field(default=90, ge=1, le=90, description='设备 CPU、内存采样历史的保留天数，1 至 90 天；与原始日志保留期独立。')
+    items: list[MetricItem] = Field(default_factory=list, max_length=16, description='系统指标采样规则列表，每项指定命令、数值正则、名称和单位。')
+    processDiscoveryCommand: str = Field(default="ps", min_length=1, max_length=2048, description='获取设备进程列表的单行命令，默认 ps。')
+    processRules: list[ProcessRule] = Field(default_factory=list, max_length=8, description='从进程命令列识别目标进程的规则列表。')
+    processStatusCommand: str = Field(default="cat /proc/{pid}/status", min_length=1, max_length=2048, description='读取进程状态的命令模板，唯一的 {pid} 将替换为已验证的正整数进程 ID。')
+    processValuePattern: str = Field(default=r"VmRSS:\s*(\d+)\s*kB", min_length=1, max_length=512, description='从进程状态响应中提取内存值的正则，第一个捕获组为 KB 数值。')
 
     @field_validator("processDiscoveryCommand")
     @classmethod

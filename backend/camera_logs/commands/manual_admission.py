@@ -21,7 +21,7 @@ async def admit_manual(repo, task, identifier, body, actor_id, *, session=_NEW_T
     async def commit(session):
         current = await repo.db.tasks.find_one_and_update(
             {**owner_filter(task), "sessionId": task["sessionId"], "status": "COLLECTING",
-             "desiredState": "RUNNING", "resourceDeleted": {"$ne": True}},
+             "desiredState": "RUNNING", "deletedAt": None, "resourceDeleted": {"$ne": True}},
             {"$inc": {"commandClaimVersion": 1}},
             return_document=ReturnDocument.AFTER, session=session,
         )

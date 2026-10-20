@@ -18,9 +18,9 @@ class Model(BaseModel):
 class IpRule(Model):
     """一条平台客户端来源网络规则及其可使用的既有权限集合。"""
 
-    label: str = Field(min_length=1, max_length=128)
-    network: str = Field(min_length=1, max_length=64)
-    scopes: list[str] = Field(min_length=1, max_length=32)
+    label: str = Field(min_length=1, max_length=128, description='来源 IP 白名单规则的可读名称。')
+    network: str = Field(min_length=1, max_length=64, description='允许访问平台的单个 IP 地址或 CIDR 网段。')
+    scopes: list[str] = Field(min_length=1, max_length=32, description='来自本 IP 或网段的调用最多可使用的权限列表，与登录用户或服务账号自身权限取交集；不会额外授予账户原本没有的权限。')
 
     @field_validator("label")
     @classmethod
@@ -52,9 +52,9 @@ class IpRule(Model):
 class IpPolicyPatch(Model):
     """使用版本比较整体替换平台来源限制，防止并发覆盖。"""
 
-    version: int = Field(ge=1, strict=True)
-    enabled: bool
-    rules: list[IpRule] = Field(max_length=256)
+    version: int = Field(ge=1, strict=True, description='当前配置版本号，用于乐观锁并发修改校验。')
+    enabled: bool = Field(description='是否启用平台来源 IP 白名单；启用时至少须保留一条允许规则。')
+    rules: list[IpRule] = Field(max_length=256, description='来源 IP 白名单规则列表，启用策略时至少包含一项。')
 
     @model_validator(mode="after")
     def enabled_requires_rules(self):

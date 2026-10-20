@@ -151,6 +151,49 @@ def test_soft_deleted_resource_blocks_new_tasks_and_restart_but_preserves_logs(c
     assert client.patch(f'/api/v1/tasks/{task["id"]}', json={"version": 1, "name": "changed"}).status_code == 409
 
 
+def test_task_soft_delete_hides_default_list_stops_task_and_preserves_log_files(client, tmp_path):
+    """任务删除只撤销配置和运行资格，既有原始日志目录仍可按保留策略读取。"""
+    seed_resource(client, version=1)
+    task = create(client).json()
+    path = tmp_path / "retained-task.log"
+    path.write_bytes(b"retained\n")
+    client.portal.call(client.app.state.repo.db.files.insert_one, {
+        "id": "retained-task-file", "taskId": task["id"], "hour": "2026-10-20T00:00:00+00:00",
+        "path": str(path), "status": "READY", "bytes": path.stat().st_size,
+    })
+    client.portal.call(client.app.state.repo.db.tasks.update_one, {"id": task["id"]}, {"$set": {
+        "status": "COLLECTING", "desiredState": "RUNNING", "nodeId": "node-a",
+    }})
+
+    deleted = client.delete(f'/api/v1/tasks/{task["id"]}?version=1')
+
+    assert deleted.status_code == 202, deleted.text
+    stored = client.portal.call(client.app.state.repo.db.tasks.find_one, {"id": task["id"]})
+    assert stored["deletedAt"] and stored["desiredState"] == "STOPPED"
+    assert client.get("/api/v1/tasks").json()["total"] == 0
+    assert client.get("/api/v1/tasks?includeDeleted=true").json()["items"][0]["id"] == task["id"]
+    assert path.read_bytes() == b"retained\n"
+    assert client.get(f'/api/v1/tasks/{task["id"]}/log-hours').json()["total"] == 1
+    assert client.post(f'/api/v1/tasks/{task["id"]}/start').status_code == 409
+    assert client.delete(f'/api/v1/tasks/{task["id"]}?version=2').status_code == 202
+    assert client.delete(f'/api/v1/tasks/{task["id"]}?version=1').status_code == 409
+
+
+def test_resource_delete_soft_deletes_all_linked_tasks(client):
+    """删除主设备或串口资源都要让关联任务退出默认工作台和调度候选集。"""
+    seed_resource(client, version=1)
+    first, second = create(client).json(), create(client).json()
+
+    deleted = client.delete("/api/v1/resources/network?version=1")
+
+    assert deleted.status_code == 202, deleted.text
+    records = [client.portal.call(client.app.state.repo.db.tasks.find_one, {"id": item["id"]})
+               for item in (first, second)]
+    assert all(item.get("deletedAt") and item["desiredState"] == "STOPPED" for item in records)
+    assert client.get("/api/v1/tasks?resourceId=network").json()["total"] == 0
+    assert client.get("/api/v1/tasks?resourceId=network&includeDeleted=true").json()["total"] == 2
+
+
 def test_delete_wins_against_late_start_request(client, monkeypatch):
     """启动已读过资源后，删除写入的标记仍阻止迟到的 RUNNING 更新。"""
     seed_resource(client, version=1)

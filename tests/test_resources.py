@@ -342,6 +342,7 @@ def test_batch_create_returns_sanitized_item_failures_without_creating_any_resou
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "BATCH_AUTHENTICATION_FAILED"
     assert response.json()["error"]["details"] == {"items": [{"index": 1, "ip": "192.0.2.82", "code": "AUTH_FAILED"}]}
+    assert response.json()["error"]["requestId"]
     assert secret not in response.text
     repo = resource_client.app.state.repo
     assert resource_client.portal.call(repo.db.resources.count_documents, {}) == 0
@@ -614,7 +615,7 @@ def test_soft_delete_stops_linked_tasks_and_keeps_deleted_resource_readable(reso
     deleted = resource_client.delete(f"/api/v1/resources/{resource['id']}?version=1")
     assert deleted.status_code == 202, deleted.text
     assert deleted.json()["deletedAt"]
-    assert deleted.json()["taskCount"] == 3
+    assert deleted.json()["taskCount"] == 0
     assert deleted.json()["activeTaskCount"] == 0
     for identifier in ("primary", "serial", "paused"):
         task = resource_client.portal.call(repo.db.tasks.find_one, {"id": identifier})
@@ -652,6 +653,11 @@ def test_pending_deletion_retries_after_stop_sweep_failure(resource_client, monk
         resource_client.delete(f"/api/v1/resources/{resource['id']}?version=1")
     stored = resource_client.portal.call(repo.db.resources.find_one, {"id": resource["id"]})
     assert stored["deletionState"] == "PENDING"
+    # API 返回前的连接收尾可失败，但资源、关联任务和审计的删除意图已经同事务提交。
+    task_after_commit = resource_client.portal.call(repo.db.tasks.find_one, {"id": "retry-task"})
+    assert task_after_commit["deletedAt"] is not None
+    assert task_after_commit["desiredState"] == "STOPPED"
+    assert task_after_commit["resourceDeleted"] is True
     monkeypatch.setattr("camera_logs.resources.api.reconcile_resource_deletion", reconcile_resource_deletion)
     retried = resource_client.delete(f"/api/v1/resources/{resource['id']}?version=1")
     assert retried.status_code == 202
@@ -738,3 +744,29 @@ def test_scheduler_reconciles_pending_resource_deletions(tmp_path):
     resource, task = asyncio.run(scenario())
     assert resource["deletionState"] == "DONE"
     assert task["desiredState"] == "STOPPED"
+
+
+def test_done_resource_reconciles_legacy_visible_task_and_paused_run():
+    """旧版已完成资源仍需隐藏漏标任务，并由补偿收尾释放暂停运行锁。"""
+    async def scenario():
+        database = AsyncMongoMockClient().db
+        await database.resources.insert_one({"id": "legacy-resource", "deletedAt": "then", "deletionState": "DONE"})
+        await database.tasks.insert_one({
+            "id": "legacy-task", "resourceId": "legacy-resource", "deletedAt": None,
+            "nodeId": None, "runId": "legacy-run", "status": "PAUSED", "desiredState": "RUNNING",
+        })
+        await database.endpoint_locks.insert_one({"taskId": "legacy-task", "runId": "legacy-run"})
+        await database.runs.insert_one({"id": "legacy-run"})
+        await reconcile_resource_deletion(SimpleNamespace(db=database), "legacy-resource")
+        return (
+            await database.resources.find_one({"id": "legacy-resource"}),
+            await database.tasks.find_one({"id": "legacy-task"}),
+            await database.endpoint_locks.count_documents({"taskId": "legacy-task"}),
+        )
+
+    resource, task, lock_count = asyncio.run(scenario())
+    assert resource["deletionState"] == "DONE"
+    assert task["deletedAt"] == "then"
+    assert task["status"] == "STOPPED"
+    assert task["resourceDeleted"] is True
+    assert lock_count == 0

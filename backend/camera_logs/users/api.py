@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi import Path as ApiPath
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -107,8 +108,8 @@ def install_user_routes(app):
         return {"scopes": [{"value": value, "label": label} for value, label in PERMISSIONS.items()]}
 
     @app.get("/api/v1/users/creators")
-    async def creators(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
-                       search: str = Query("", max_length=128)):
+    async def creators(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
+                       search: str = Query("", max_length=128, description='按资源名称、地址、型号、序列号或软件版本进行综合检索。')):
         """提供历史创建人筛选所需最小目录，保留停用及删除用户但不暴露权限和凭据。"""
         if "*" not in user["scopes"] and not {"tasks:read", "templates:read"}.intersection(user["scopes"]):
             raise HTTPException(403, "无创建用户目录读取权限")
@@ -120,7 +121,7 @@ def install_user_routes(app):
                 "page": page, "pageSize": pageSize, "total": await repo().db.users.count_documents(query)}
 
     @app.get("/api/v1/users/share-targets")
-    async def share_targets(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+    async def share_targets(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
         """分页返回可被模板共享的有效用户最小目录，不暴露权限或会话安全字段。"""
         authorize(user, "templates:read")
         query = {"enabled": True, "deletedAt": None}
@@ -130,7 +131,7 @@ def install_user_routes(app):
                 "page": page, "pageSize": pageSize, "total": await repo().db.users.count_documents(query)}
 
     @app.get("/api/v1/users")
-    async def users(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+    async def users(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
         authorize(user, "admin")
         query = {"deletedAt": None}
         items = repo().db.users.find(query).sort("createdAt", -1).skip((page-1)*pageSize).limit(pageSize)
@@ -179,7 +180,7 @@ def install_user_routes(app):
         return public_user(changed)
 
     @app.patch("/api/v1/users/{identifier}")
-    async def edit(identifier: str, body: UserPatch, user: User):
+    async def edit(identifier: Annotated[str, ApiPath(description='要编辑的平台用户 ID，可由创建用户响应、用户列表或创建人列表返回。')], body: UserPatch, user: User):
         authorize(user, "admin")
         values = body.model_dump(exclude_unset=True, exclude={"version"})
         if "scopes" in values:
@@ -195,12 +196,12 @@ def install_user_routes(app):
         return await update(identifier, body.version, values, user, "edit_user")
 
     @app.post("/api/v1/users/{identifier}/reset-password")
-    async def reset(identifier: str, body: PasswordReset, user: User):
+    async def reset(identifier: Annotated[str, ApiPath(description='要重置密码的平台用户 ID，可由创建用户响应、用户列表或创建人列表返回。')], body: PasswordReset, user: User):
         authorize(user, "admin")
         return await update(identifier, body.version, {
             "passwordHash": await password_work(repo(), hash_password, body.password),
             "mustChangePassword": True}, user, "reset_user_password")
 
     @app.delete("/api/v1/users/{identifier}", status_code=204)
-    async def delete(identifier: str, user: User, version: int = Query(ge=1)):
+    async def delete(identifier: Annotated[str, ApiPath(description='要停用并软删除的平台用户 ID，可由创建用户响应、用户列表或创建人列表返回。')], user: User, version: int = Query(ge=1, description='删除或更新对象时必须提供的当前版本号。')):
         await update(identifier, version, {"enabled": False, "deletedAt": now()}, user, "delete_user")

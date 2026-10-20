@@ -17,6 +17,11 @@ function task(overrides: Partial<Task>): Task {
 }
 
 describe("availableTaskActions", () => {
+  it("已软删除任务不能继续采集或重新启动", () => {
+    for (const status of ["STOPPED", "COLLECTING", "PAUSED", "BLOCKED"]) {
+      expect(availableTaskActions(task({ status, desiredState: "RUNNING", deletedAt: "2026-10-20T10:00:00+08:00" }))).toEqual([]);
+    }
+  });
   it("采集中的串口任务只显示停止", () => {
     expect(availableTaskActions(task({
       protocol: "TELNET_SERIAL", status: "COLLECTING", desiredState: "RUNNING",

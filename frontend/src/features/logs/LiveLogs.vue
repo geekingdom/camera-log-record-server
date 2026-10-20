@@ -285,7 +285,7 @@ function onScroll(event: Event) {
 }
 async function send() {
   const value = command.value.trim();
-  if (!props.canSend || sending.value || !value) return;
+  if (!props.canSend || taskState.value?.deletedAt || taskState.value?.resourceDeleted || sending.value || !value) return;
   if (taskState.value?.commandBlocked && value !== "debug") return ElMessage.warning("命令通道尚未恢复，日志采集仍在继续");
   const current = ++commandGeneration;
   sending.value = true;
@@ -417,12 +417,12 @@ onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGenerati
     </div>
     <div class="manual-command">
       <div class="command-entry">
-        <el-input ref="commandInput" v-model="command" :disabled="!props.canSend || sending" placeholder="输入手工命令" aria-label="输入手工命令" @focus="loadCommonCommands" @input="commandHistoryIndex = -1" @compositionstart="composing = true" @compositionend="composing = false" @keydown="onCommandKeydown" />
+        <el-input ref="commandInput" v-model="command" :disabled="!props.canSend || Boolean(taskState?.deletedAt || taskState?.resourceDeleted) || sending" placeholder="输入手工命令" aria-label="输入手工命令" @focus="loadCommonCommands" @input="commandHistoryIndex = -1" @compositionstart="composing = true" @compositionend="composing = false" @keydown="onCommandKeydown" />
         <div v-if="command.trim() && commandCandidates.length" class="command-suggestions" role="listbox">
           <button v-for="item in commandCandidates" :key="item.command" type="button" role="option" @click="selectCommandCandidate(item.command)"><span>{{ item.command }}</span><small v-if="item.description">{{ item.description }}</small></button>
         </div>
       </div>
-      <el-button v-if="props.canSend" type="primary" :icon="Send" :loading="sending" :disabled="sending || !command.trim() || (taskState?.commandBlocked && command.trim() !== 'debug')" @click="send">发送</el-button>
+      <el-button v-if="props.canSend" type="primary" :icon="Send" :loading="sending" :disabled="Boolean(taskState?.deletedAt || taskState?.resourceDeleted) || sending || !command.trim() || (taskState?.commandBlocked && command.trim() !== 'debug')" @click="send">发送</el-button>
     </div>
     <LiveLogRanges v-model="rangesOpen" :task-id="props.taskId" :ranges="missingRanges" :dropped-count="droppedRangeCount" @history="emit('history')" />
   </section>

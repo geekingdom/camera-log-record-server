@@ -337,6 +337,34 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${screenshots}/archives-workspace-mobile.png`, fullPage: true });
 
+  // 仅删除本脚本创建的合成任务；验证真实Worker收连接且既有公开下载不受影响。
+  if (createdTask) {
+    const current = await (await context.request.get(`${baseUrl}/api/v1/tasks/${createdTask.id}`)).json();
+    const removal = await context.request.delete(`${baseUrl}/api/v1/tasks/${createdTask.id}?version=${current.version}`, {
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    });
+    assertResponse(removal, "软删除浏览器验收合成任务");
+    const deadline = Date.now() + 20000;
+    let settled = false;
+    while (Date.now() < deadline) {
+      const latest = await (await context.request.get(`${baseUrl}/api/v1/tasks/${createdTask.id}`)).json();
+      if (latest.deletedAt && !latest.nodeId && latest.status === "STOPPED") { settled = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    if (!settled) throw new Error("删除合成任务后Worker未完成连接收尾");
+    const hidden = await (await context.request.get(`${baseUrl}/api/v1/tasks?resourceId=${createdResource.id}`)).json();
+    if (hidden.items.some(item => item.id === createdTask.id)) throw new Error("软删任务仍出现在默认列表");
+    const history = await (await context.request.get(`${baseUrl}/api/v1/tasks?resourceId=${createdResource.id}&includeDeleted=true`)).json();
+    if (!history.items.some(item => item.id === createdTask.id)) throw new Error("软删任务无法通过历史筛选查看");
+    const anonymousAfterDelete = await browser.newContext();
+    try {
+      const response = await anonymousAfterDelete.request.get(download.url(), { headers: { Range: "bytes=0-15" } });
+      if (response.status() !== 206 || (await response.body()).length !== 16)
+        throw new Error("删除任务后既有匿名下载链接不可用");
+    } finally { await anonymousAfterDelete.close(); }
+    console.log(JSON.stringify({ taskSoftDeleted: true, workerClosed: true, previousDownloadAvailable: true }));
+  }
+
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth > window.innerWidth,
   );

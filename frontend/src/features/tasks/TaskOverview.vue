@@ -7,8 +7,8 @@ import { abnormalStatuses } from "./taskStatus";
 const props = defineProps<{ tasks: Task[]; total: number; nodes: number }>();
 const metrics = computed(() => [
   { label: "任务总数", value: props.total, icon: Layers3, tone: "neutral", scope: "全部任务" },
-  { label: "正在采集", value: props.tasks.filter(t => t.status === "COLLECTING").length, icon: Radio, tone: "healthy", scope: "当前页" },
-  { label: "异常任务", value: props.tasks.filter(t => abnormalStatuses.has(t.status ?? "")).length, icon: TriangleAlert, tone: "attention", scope: "当前页" },
+  { label: "正在采集", value: props.tasks.filter(t => !t.deletedAt && t.status === "COLLECTING").length, icon: Radio, tone: "healthy", scope: "当前页" },
+  { label: "异常任务", value: props.tasks.filter(t => !t.deletedAt && abnormalStatuses.has(t.status ?? "")).length, icon: TriangleAlert, tone: "attention", scope: "当前页" },
   { label: "采集节点", value: props.nodes, icon: Server, tone: "neutral", scope: "已发现" },
 ]);
 </script>

@@ -113,8 +113,8 @@ async function remove(resource: Resource) {
     if (latest.deletedAt) { await load(); return; }
     const count = latest.taskCount ?? 0, unsettled = latest.unsettledTaskCount ?? 0;
     const message = count
-      ? `资源“${latest.name}”关联 ${count} 个采集任务，其中 ${unsettled} 个尚未收束。删除后将停止关联采集，已有日志文件保留，可继续查询和下载。确认删除？`
-      : `确认删除资源“${latest.name}”？资源将标记为已删除，已有日志文件保留。`;
+      ? `资源“${latest.name}”关联 ${count} 个采集任务，其中 ${unsettled} 个尚未收束。删除后将停止并软删除所有关联任务，已有日志文件保留，可继续查询和下载。确认删除？`
+      : `确认删除资源“${latest.name}”？资源及关联任务将标记为已删除，已有日志文件保留。`;
     const ownerNotice = !props.isAdmin && count ? "关联任务若由其他用户创建，服务端将拒绝本次删除。" : "";
     if (!(await confirmAction(`${message}${ownerNotice}`, "确认删除设备资源"))) return;
     await api.deleteResource(latest.id, latest.version ?? 1);

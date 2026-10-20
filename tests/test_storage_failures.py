@@ -81,3 +81,32 @@ async def test_collector_sync_failure_closes_device_and_reports_stop_failure(tmp
     assert not archives
     assert not list(tmp_path.rglob("*.tar.gz"))
     assert next(tmp_path.rglob("*.log")).read_bytes().endswith(b"device-output\n")
+
+
+@pytest.mark.parametrize("batched", [False, True])
+async def test_short_index_write_does_not_advance_incremental_digest(tmp_path, batched):
+    """索引短写不能被内存摘要误认为完整写入；保留正文但拒绝发布和重试。"""
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="testingdevice")
+    await writer.write(b"before\n")
+    original = writer._index_handle
+    previous = writer._index_digest.hexdigest(), writer._index_size
+    path = writer.active_path
+
+    class ShortIndex:
+        def write(self, text):
+            return original.write(text[:len(text) // 2])
+
+        def __getattr__(self, name):
+            return getattr(original, name)
+
+    writer._index_handle = ShortIndex()
+    with pytest.raises(OSError, match="index file did not accept a complete write"):
+        if batched:
+            await writer.write_many([(b"after\n", None), (b"last\n", None)])
+        else:
+            await writer.write(b"after\n")
+    assert (writer._index_digest.hexdigest(), writer._index_size) == previous
+    assert path.exists() and original.closed
+    with pytest.raises(OSError):
+        await writer.close()
+    assert not list(tmp_path.rglob("*.tar.gz"))

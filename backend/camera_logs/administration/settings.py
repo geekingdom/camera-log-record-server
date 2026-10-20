@@ -9,6 +9,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -65,31 +66,31 @@ class SettingsModel(BaseModel):
 class PlatformSettingsPatch(SettingsModel):
     """平台保留期更新携带乐观锁版本，避免后写覆盖其他管理员修改。"""
 
-    retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True)
-    clusterCapacity: int | None = Field(default=None, ge=1, le=MAX_CLUSTER_CAPACITY, strict=True)
+    retentionDays: int = Field(ge=1, le=MAX_RETENTION_DAYS, strict=True, description='采集原始日志及其小时归档的保留天数；活动引用受保护，下载副本按制品独立保留期处理。')
+    clusterCapacity: int | None = Field(default=None, ge=1, le=MAX_CLUSTER_CAPACITY, strict=True, description='平台允许同时运行的全部采集任务总上限。')
     liveLogBufferMiB: int | None = Field(default=None, ge=MIN_LIVE_LOG_BUFFER_MIB,
                                           le=MAX_LIVE_LOG_BUFFER_MIB, strict=True,
                                           description="实时日志页面允许保留在浏览器内存中的最大数据量，单位MiB")
     serviceLogRetentionDays: int | None = Field(default=None, ge=1, le=MAX_SERVICE_LOG_RETENTION_DAYS,
                                                  strict=True, description="API 和 Worker 服务运行 JSONL 的保留天数")
-    resourceMonitor: ResourceMonitorConfig | None = None
-    recordRetention: RecordRetentionConfig | None = None
-    version: int = Field(ge=1, strict=True)
+    resourceMonitor: ResourceMonitorConfig | None = Field(default=None, description='管理员维护的设备 CPU 与内存采样配置，保存后下一轮采样生效。')
+    recordRetention: RecordRetentionConfig | None = Field(default=None, description='审计、运行事件及已结束运行明细的保留天数；0禁用对应维护，活动及不确定引用继续保护。')
+    version: int = Field(ge=1, strict=True, description='当前配置版本号，用于乐观锁并发修改校验。')
 
 
 class NodeRegistration(SettingsModel):
     """定义管理员托管的节点配置，未登记 worker 保留原有部署兼容行为。"""
 
-    id: str = Field(min_length=1, max_length=128)
-    url: str = Field(min_length=1, max_length=2048)
-    capacity: int = Field(ge=1, le=MAX_NODE_CAPACITY, strict=True)
-    accepting: bool = True
+    id: str = Field(min_length=1, max_length=128, description='Worker 的固定节点 ID，须与其 NODE_ID 配置一致。')
+    url: str = Field(min_length=1, max_length=2048, description='Worker 节点供平台回调和代理访问的 HTTP(S) 根地址。')
+    capacity: int = Field(ge=1, le=MAX_NODE_CAPACITY, strict=True, description='该 Worker 节点允许同时承载的采集任务数量。')
+    accepting: bool = Field(default=True, description='节点是否接受调度器分配新的采集任务。')
     inputRateLimitMiB: int = Field(default=DEFAULT_INPUT_RATE_LIMIT_MIB, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
                                     description="日志输入速率准入上限，单位MiB/s；0禁用，达到上限暂停分配新任务，不停止已有采集")
     writeLatencyLimitMs: int = Field(default=DEFAULT_WRITE_LATENCY_LIMIT_MS, ge=1, le=MAX_WRITE_LATENCY_LIMIT_MS, strict=True,
                                      description="写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
-    isGeneralNode: bool = True
-    resourceNetworks: list[str] = Field(default_factory=list, max_length=128)
+    isGeneralNode: bool = Field(default=True, description='是否为可接收全部设备资源的通用节点，默认 true；false 时按资源地址规则准入并优先分配。')
+    resourceNetworks: list[str] = Field(default_factory=list, max_length=128, description='非通用节点允许接入的资源 IP 或 CIDR 列表，匹配所属资源地址而非串口连接地址。')
     performance: PerformancePolicy = Field(default_factory=PerformancePolicy,
                                            description="节点采集性能策略；AUTO 使用预算上限自适应，MANUAL 使用明确参数。")
 
@@ -145,15 +146,15 @@ class NodeRegistration(SettingsModel):
 class NodeConfigPatch(SettingsModel):
     """节点配置只允许调整准入开关和容量，地址需通过重新登记审核。"""
 
-    version: int = Field(ge=1, strict=True)
-    capacity: int | None = Field(default=None, ge=1, le=MAX_NODE_CAPACITY, strict=True)
-    accepting: bool | None = None
+    version: int = Field(ge=1, strict=True, description='当前配置版本号，用于乐观锁并发修改校验。')
+    capacity: int | None = Field(default=None, ge=1, le=MAX_NODE_CAPACITY, strict=True, description='该 Worker 节点允许同时承载的采集任务数量。')
+    accepting: bool | None = Field(default=None, description='节点是否接受调度器分配新的采集任务。')
     inputRateLimitMiB: int | None = Field(default=None, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
                                            description="节点日志输入准入上限MiB/s，0禁用；保存后调度立即读取新配置")
     writeLatencyLimitMs: int | None = Field(default=None, ge=1, le=MAX_WRITE_LATENCY_LIMIT_MS, strict=True,
                                              description="节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
-    isGeneralNode: bool | None = None
-    resourceNetworks: list[str] | None = Field(default=None, max_length=128)
+    isGeneralNode: bool | None = Field(default=None, description='是否为可接收全部设备资源的通用节点，默认 true；false 时按资源地址规则准入并优先分配。')
+    resourceNetworks: list[str] | None = Field(default=None, max_length=128, description='非通用节点允许接入的资源 IP 或 CIDR 列表，匹配所属资源地址而非串口连接地址。')
     performance: PerformancePolicy | None = Field(default=None,
                                                    description="完整替换节点采集性能策略；省略时保留已有策略。")
 
@@ -356,7 +357,7 @@ def install_settings_routes(app):
         return _public_node_config(document, heartbeat)
 
     @app.patch("/api/v1/admin/nodes/{node_id}")
-    async def update_node_config(node_id: str, body: NodeConfigPatch, request: Request, user: User):
+    async def update_node_config(node_id: Annotated[str, ApiPath(description='节点管理列表返回的 Worker 节点 ID，与该节点 NODE_ID 配置一致。')], body: NodeConfigPatch, request: Request, user: User):
         """通过版本锁修改人工准入设置，不触碰 worker 当前写入的心跳数据。"""
         authorize(user, "admin")
         repo = request.app.state.repo
@@ -388,7 +389,7 @@ def install_settings_routes(app):
         return _public_node_config(document, heartbeat)
 
     @app.delete("/api/v1/admin/nodes/{node_id}", status_code=204)
-    async def remove_node(node_id: str, request: Request, user: User, version: int = Query(ge=0)):
+    async def remove_node(node_id: Annotated[str, ApiPath(description='节点管理列表返回的 Worker 节点 ID，与该节点 NODE_ID 配置一致。')], request: Request, user: User, version: int = Query(ge=0, description='删除或更新对象时必须提供的当前版本号。')):
         """管理员删除空闲节点登记及发现项；保留节点地址和全部历史日志。"""
         authorize(user, "admin")
         await delete_node(request.app.state.repo, user["id"], node_id, version)

@@ -3,6 +3,7 @@
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
@@ -61,8 +62,8 @@ def install_template_routes(app, repo, listing):
     User = Annotated[dict, Depends(actor)]
 
     @app.get("/api/v1/command-templates")
-    async def templates(user: User, page: int = Query(1, ge=1), pageSize: int = Query(100, ge=1, le=100),
-                        createdBy: str | None = None, includeDeleted: bool = False):
+    async def templates(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(100, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
+                        createdBy: Annotated[str | None, Query(description='按资源、任务或模板的创建用户标识筛选。')] = None, includeDeleted: Annotated[bool, Query(description='是否包含已软删除的命令模板；默认 false，已创建任务保留独立配置快照。')] = False):
         """分页列出可读取模板；历史项只向管理员或创建者开放。"""
         authorize(user, "templates:read")
         query = template_read_query(user, includeDeleted)
@@ -91,13 +92,13 @@ def install_template_routes(app, repo, listing):
                                                     "create_template", body.model_dump(), "templates", prepare))
 
     @app.get("/api/v1/command-templates/{identifier}")
-    async def get_template(identifier: str, user: User):
+    async def get_template(identifier: Annotated[str, ApiPath(description='目标命令模板 ID，可由创建命令模板响应或命令模板列表返回。')], user: User):
         """读取单个模板及其命令快照。"""
         authorize(user, "templates:read")
         return public_template(await readable_template(repo(), user, identifier))
 
     @app.patch("/api/v1/command-templates/{identifier}")
-    async def edit_template(identifier: str, body: TemplatePatch, user: User):
+    async def edit_template(identifier: Annotated[str, ApiPath(description='要编辑的命令模板 ID，可由创建命令模板响应或命令模板列表返回。')], body: TemplatePatch, user: User):
         """以 version 条件原子更新模板，陈旧版本拒绝覆盖新内容。"""
         authorize(user, "templates:write")
         existing = await repo().get("templates", identifier)
@@ -123,7 +124,7 @@ def install_template_routes(app, repo, listing):
         return public_template(result)
 
     @app.delete("/api/v1/command-templates/{identifier}", status_code=204)
-    async def delete_template(identifier: str, user: User, version: int = Query(..., ge=1)):
+    async def delete_template(identifier: Annotated[str, ApiPath(description='要删除的命令模板 ID，可由创建命令模板响应或命令模板列表返回。')], user: User, version: int = Query(..., ge=1, description='删除或更新对象时必须提供的当前版本号。')):
         """仅删除指定版本的模板，防止并发编辑后误删。"""
         authorize(user, "templates:write")
         existing = await repo().get("templates", identifier)

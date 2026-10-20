@@ -109,7 +109,7 @@ async def edit_task(repo, user, task_id, body):
     async def commit(session):
         """事务内按版本重读状态，写操作、任务与审计要么同时提交要么同时回滚。"""
         current = await repo.db.tasks.find_one_and_update(
-            {"id": task_id, "version": body.version, "resourceDeleted": {"$ne": True}},
+            {"id": task_id, "version": body.version, "deletedAt": None, "resourceDeleted": {"$ne": True}},
             {"$inc": {"controlClaimVersion": 1}}, return_document=ReturnDocument.AFTER, session=session,
         )
         if current is None:
@@ -136,7 +136,7 @@ async def edit_task(repo, user, task_id, body):
                 )
                 changes.update(desiredState="STOPPED", restartRequested=True, controlOperationId=operation_id)
         changed = await repo.db.tasks.find_one_and_update(
-            {"id": task_id, "version": body.version, "resourceDeleted": {"$ne": True}},
+            {"id": task_id, "version": body.version, "deletedAt": None, "resourceDeleted": {"$ne": True}},
             {"$set": changes, "$inc": {"version": 1}}, return_document=ReturnDocument.AFTER, session=session,
         )
         if changed is None:

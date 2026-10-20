@@ -12,6 +12,7 @@ const transitionalRunningStatuses = new Set(["PENDING", "CONNECTING", "RECONNECT
 
 /** 根据任务的实际状态、期望状态和协议返回当前可发起的生命周期操作。 */
 export function availableTaskActions(task: Task): TaskAction[] {
+  if (task.deletedAt || task.resourceDeleted) return [];
   const status = task.status ?? "";
   const desiredState = task.desiredState ?? "";
 

@@ -74,3 +74,39 @@ def test_common_command_rejects_duplicate_stale_and_invalid_updates(client):
     assert client.portal.call(client.app.state.repo.db.audit.count_documents, {
         "action": "update_common_command", "targetId": first["id"],
     }) == 0
+
+
+def test_admin_common_command_filters_pagination_and_atomic_batch(client):
+    """管理员列表可筛选，批量命令以全部快照版本原子变更且可幂等重放。"""
+    db = client.app.state.repo.db
+    commands = [
+        {"id": f"common-{number}", "command": f"show {number:02}", "description": "网络检查" if number == 0 else "系统检查",
+         "enabled": number % 2 == 0, "version": 1}
+        for number in range(25)
+    ]
+    client.portal.call(db.common_commands.insert_many, commands)
+    first = client.get("/api/v1/admin/common-commands")
+    assert first.status_code == 200
+    assert first.json()["pageSize"] == 20 and len(first.json()["items"]) == 20
+    disabled = client.get("/api/v1/admin/common-commands?enabled=false&query=%E7%B3%BB%E7%BB%9F")
+    assert disabled.status_code == 200
+    assert disabled.json()["total"] == 12 and all(not item["enabled"] for item in disabled.json()["items"])
+
+    selected = [{"id": "common-1", "version": 1}, {"id": "common-3", "version": 1}]
+    response = client.post("/api/v1/admin/common-commands/batch", headers={"Idempotency-Key": "batch-enable"}, json={
+        "action": "ENABLE", "items": selected,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json() == {"action": "ENABLE", "affected": 2}
+    replay = client.post("/api/v1/admin/common-commands/batch", headers={"Idempotency-Key": "batch-enable"}, json={
+        "action": "ENABLE", "items": selected,
+    })
+    assert replay.json() == response.json()
+    assert client.portal.call(db.common_commands.find_one, {"id": "common-1"})["version"] == 2
+    assert client.portal.call(db.audit.count_documents, {"action": "batch_enable_common_commands"}) == 2
+
+    stale = client.post("/api/v1/admin/common-commands/batch", headers={"Idempotency-Key": "batch-stale"}, json={
+        "action": "DISABLE", "items": [{"id": "common-1", "version": 1}, {"id": "common-5", "version": 1}],
+    })
+    assert stale.status_code == 409
+    assert client.portal.call(db.common_commands.find_one, {"id": "common-5"})["version"] == 1

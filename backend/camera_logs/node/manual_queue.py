@@ -19,7 +19,8 @@ async def next_manual_command(repo, runtime):
         {"runId": {"$ne": run_id}}, {"sessionId": {"$ne": session_id}},
     ]}, {"id": 1, "runId": 1, "sessionId": 1}).sort([("createdAt", 1), ("id", 1)]).limit(100)]
     current = await repo.db.tasks.find_one({**owner_filter(runtime.task), "sessionId": session_id,
-                                          "status": "COLLECTING", "desiredState": "RUNNING"})
+                                          "status": "COLLECTING", "desiredState": "RUNNING",
+                                          "deletedAt": None})
     if current is None or runtime.collector is not collector or runtime.stopping:
         return None
     if stale:

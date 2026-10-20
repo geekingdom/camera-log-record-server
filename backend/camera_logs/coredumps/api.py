@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi import Path as ApiPath
 
 from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
@@ -56,8 +57,8 @@ def install_coredump_routes(app):
         return app.state.repo
 
     @app.get("/api/v1/resources/{resource_id}/coredumps")
-    async def list_coredumps(resource_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
-                             receivedFrom: str | None = None, receivedTo: str | None = None, name: str | None = Query(None, max_length=256)):
+    async def list_coredumps(resource_id: Annotated[str, ApiPath(description='路径中指定要查询的设备资源标识。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(50, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
+                             receivedFrom: Annotated[str | None, Query(description='仅返回服务器首次接收时间不早于该时刻的 Coredump 文件；可传2026-10-19T12:00:00，不带时区按北京时间解释。')] = None, receivedTo: Annotated[str | None, Query(description='仅返回服务器首次接收时间不晚于该时刻的 Coredump 文件；不带时区按北京时间解释。')] = None, name: str | None = Query(None, max_length=256, description='按资源名称或 Coredump 文件名的字面子串筛选。')):
         """按资源、首次发现时间和字面文件名分页；源稳定性与下载快照状态分别返回。"""
         await _resource(repo(), user, resource_id)
         # 历史设备会写入同名标志文件；catalog 保留原记录，列表不把它当作可导出的 coredump。
@@ -103,7 +104,7 @@ def install_coredump_routes(app):
                                           "create_coredump_export", body.model_dump(), "coredump_exports", prepare))
 
     @app.get("/api/v1/coredump-exports/{identifier}")
-    async def export(identifier: str, user: User):
+    async def export(identifier: Annotated[str, ApiPath(description='路径中指定要查询的 Coredump 导出作业标识。')], user: User):
         authorize(user, "logs:download")
         document = await repo().get("coredump_exports", identifier)
         if document["actor"] != user["id"] and not user.get("isAdmin"):
@@ -111,7 +112,7 @@ def install_coredump_routes(app):
         return _view(document)
 
     @app.post("/api/v1/coredump-exports/{identifier}/browser-session")
-    async def export_browser_session(identifier: str, request: Request, response: Response, user: User):
+    async def export_browser_session(identifier: Annotated[str, ApiPath(description='路径中指定要为其签发下载会话的已完成 Coredump 导出作业标识。')], request: Request, response: Response, user: User):
         """签发只作用于该导出内容 URL 的短期浏览器下载 Cookie。"""
         document = await repo().get("coredump_exports", identifier)
         authorize(user, "logs:download")
@@ -126,7 +127,7 @@ def install_coredump_routes(app):
         return {"url": path, "expiresInSeconds": 300}
 
     @app.post("/api/v1/coredumps/{identifier}/browser-session")
-    async def coredump_browser_session(identifier: str, request: Request, response: Response, user: User):
+    async def coredump_browser_session(identifier: Annotated[str, ApiPath(description='路径中指定要为其签发下载会话的稳定或有有效冻结副本的 Coredump 文件标识。')], request: Request, response: Response, user: User):
         """单固定副本同样使用路径受限票据，禁止前端 Blob 中转。"""
         document = await repo().get("coredump_files", identifier)
         await _resource(repo(), user, document["resourceId"])
@@ -141,7 +142,7 @@ def install_coredump_routes(app):
         return {"url": path, "expiresInSeconds": 300}
 
     @app.delete("/api/v1/coredump-exports/{identifier}", status_code=204)
-    async def cancel_export(identifier: str, user: User):
+    async def cancel_export(identifier: Annotated[str, ApiPath(description='路径中指定要取消的 Coredump 导出作业标识。')], user: User):
         authorize(user, "logs:download")
         document = await repo().get("coredump_exports", identifier)
         if document["actor"] != user["id"] and not user.get("isAdmin"):
@@ -151,8 +152,8 @@ def install_coredump_routes(app):
                 {"$set": {"status": "CANCELLED", "updatedAt": now()}}, session=session)
         await audited_mutation(repo(), user["id"], "cancel_coredump_export", identifier, cancel)
 
-    @app.get("/api/v1/coredump-exports/{identifier}/content")
-    async def export_content(identifier: str, request: Request):
+    @app.get("/api/v1/coredump-exports/{identifier}/content", description='公开下载已生成Coredump导出，无需创建者权限、登录、Token、票据或来源IP授权。支持Range与If-Range；未完成或已到期返回409。')
+    async def export_content(identifier: Annotated[str, ApiPath(description='路径中指定公开下载内容的已完成且未过期 Coredump 导出作业标识。')], request: Request):
         """公开读取已生成导出，附件访问不受创建者和账号状态限制。"""
         document = await repo().get("coredump_exports", identifier)
         if document.get("status") != "SUCCEEDED" or _expired(document.get("expiresAt")):
@@ -161,8 +162,8 @@ def install_coredump_routes(app):
         return await proxy_file(repo(), document["coordinatorNodeId"], f"/internal/coredump-exports/{identifier}/content",
                                 request.headers.get("range"), request.headers.get("if-range"))
 
-    @app.get("/api/v1/coredumps/{identifier}/content")
-    async def coredump_content(identifier: str, request: Request):
+    @app.get("/api/v1/coredumps/{identifier}/content", description='按文件ID公开下载文件已稳定的Coredump，无需先导出，也无需登录、Token、票据或来源IP授权。兼容有效固定副本，支持Range与If-Range；源文件尚未稳定、变化或不可用时不能下载。')
+    async def coredump_content(identifier: Annotated[str, ApiPath(description='路径中指定公开下载内容的稳定源文件或有效冻结副本的 Coredump 文件标识。')], request: Request):
         """代理冻结副本或已稳定源版本，Range/If-Range 交由持有源的节点处理。"""
         document = await repo().get("coredump_files", identifier)
         frozen = document.get("status") == "FROZEN" and document.get("snapshot")

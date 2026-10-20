@@ -12,14 +12,14 @@ class ResourceInput(Model):
     """描述一个可供任务引用的网络设备或串口服务器资源。"""
 
     name: str | None = Field(default=None, max_length=128, description="可省略；空白时保存为规范 IP")
-    kind: Literal["HIKVISION_NETWORK", "SERIAL_SERVER"]
-    ip: str
-    username: str = Field(default="", max_length=256)
-    password: str = Field(default="", max_length=4096)
-    authType: Literal["DIGEST", "BASIC"] = "DIGEST"
-    enableCoredumpMonitor: bool = False
+    kind: Literal["HIKVISION_NETWORK", "SERIAL_SERVER"] = Field(description='设备类型：HIKVISION_NETWORK 为海康网络设备，SERIAL_SERVER 为串口服务器。')
+    ip: str = Field(description='设备资源、串口服务器或采集连接目标的 IPv4/IPv6 地址。')
+    username: str = Field(default="", max_length=256, description='登录设备或平台账户使用的用户名。')
+    password: str = Field(default="", max_length=4096, description='海康网络资源认证用登录密码；新建网络资源必须提供，串口服务器不可填写。')
+    authType: Literal["DIGEST", "BASIC"] = Field(default="DIGEST", description='访问海康 ISAPI 设备信息接口时使用的 HTTP 认证方式。')
+    enableCoredumpMonitor: bool = Field(default=False, description='海康设备资源是否启用 Coredump NFS 监控；仅有正在采集的 SSH 或 Telnet 设备任务时执行。')
     # 资源级 CPU/内存监控开关由采集会话按资源归属和租约动态执行。
-    enableResourceMonitor: bool = False
+    enableResourceMonitor: bool = Field(default=False, description='海康设备资源是否启用每分钟 CPU 与内存采样；复用正在采集的设备连接。')
 
     @field_validator("name")
     @classmethod
@@ -69,16 +69,16 @@ class ResourceBatchInput(Model):
 class ResourcePatch(Model):
     """更新资源展示名称或 HTTP 凭据时提交的完整稳定身份与乐观锁版本。"""
 
-    version: int = Field(ge=1)
-    name: str = Field(min_length=1, max_length=128)
-    kind: Literal["HIKVISION_NETWORK", "SERIAL_SERVER"]
-    ip: str
-    username: str = Field(default="", max_length=256)
-    password: str = Field(default="", max_length=4096)
-    authType: Literal["DIGEST", "BASIC"] = "DIGEST"
-    enableCoredumpMonitor: bool = False
+    version: int = Field(ge=1, description='当前配置版本号，用于乐观锁并发修改校验。')
+    name: str = Field(min_length=1, max_length=128, description='资源、任务、模板、节点或服务账号的用户可识别名称。')
+    kind: Literal["HIKVISION_NETWORK", "SERIAL_SERVER"] = Field(description='设备类型：HIKVISION_NETWORK 为海康网络设备，SERIAL_SERVER 为串口服务器。')
+    ip: str = Field(description='设备资源、串口服务器或采集连接目标的 IPv4/IPv6 地址。')
+    username: str = Field(default="", max_length=256, description='登录设备或平台账户使用的用户名。')
+    password: str = Field(default="", max_length=4096, description='海康网络资源的新登录密码；空字符串保留已存密码。串口服务器不可填写凭据。')
+    authType: Literal["DIGEST", "BASIC"] = Field(default="DIGEST", description='访问海康 ISAPI 设备信息接口时使用的 HTTP 认证方式。')
+    enableCoredumpMonitor: bool = Field(default=False, description='海康设备资源是否启用 Coredump NFS 监控；仅有正在采集的 SSH 或 Telnet 设备任务时执行。')
     # 与创建模型一致地完整提交，采集会话据此动态调整资源监控。
-    enableResourceMonitor: bool = False
+    enableResourceMonitor: bool = Field(default=False, description='海康设备资源是否启用每分钟 CPU 与内存采样；复用正在采集的设备连接。')
 
     @field_validator("name")
     @classmethod
@@ -109,13 +109,13 @@ class ResourcePatch(Model):
 class CoredumpMonitorOwner(Model):
     """资源共享监控的当前负责采集任务；只公开前端展示所需的稳定身份。"""
 
-    id: str
-    name: str
+    id: str = Field(description='当前持有该设备 Core 监控租约的采集任务 ID。')
+    name: str = Field(description='当前负责该设备 Core 监控的采集任务名称。')
 
 
 class CoredumpMonitorStatus(Model):
     """资源级 Coredump 监控共享状态，不把短租约或设备控制配置回写给调用方。"""
 
-    active: bool
-    ownerTask: CoredumpMonitorOwner | None = None
-    mountStatus: str | None = None
+    active: bool = Field(description='资源当前是否存在有效的 Coredump 监控负责人。')
+    ownerTask: CoredumpMonitorOwner | None = Field(default=None, description='当前负责资源级 Coredump 监控的采集任务摘要。')
+    mountStatus: str | None = Field(default=None, description='Coredump NFS 在设备侧最后一次观测到的挂载状态。')

@@ -3,6 +3,7 @@
 from typing import Annotated, Literal
 
 from fastapi import Depends, Query, Request, Response
+from fastapi import Path as ApiPath
 
 from camera_logs.commands.history import execution_history
 from camera_logs.commands.manual_submission import submit_manual
@@ -26,7 +27,7 @@ def install_command_routes(app, repo, listing):
     User = Annotated[dict, Depends(actor)]
 
     @app.post("/api/v1/tasks/{task_id}/commands", status_code=202)
-    async def command(task_id: str, body: InitialCommand, request: Request, user: User):
+    async def command(task_id: Annotated[str, ApiPath(description='要写入手动命令的采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], body: InitialCommand, request: Request, user: User):
         """将手动命令加入当前采集会话队列，并限制每任务待执行数量。"""
         authorize(user, "commands:send", task_id)
         authorize_owner(user, await repo().get("tasks", task_id))
@@ -34,7 +35,7 @@ def install_command_routes(app, repo, listing):
                                           request.headers.get("Idempotency-Key"), body.model_dump()))
 
     @app.get("/api/v1/commands/{identifier}")
-    async def get_command(identifier: str, user: User):
+    async def get_command(identifier: Annotated[str, ApiPath(description='目标命令执行记录 ID，由发送手动命令响应或任务命令执行记录列表返回。')], user: User):
         """读取单个命令执行状态，并按所属任务校验读取范围。"""
         doc = await repo().get("commands", identifier)
         authorize(user, "tasks:read", doc["taskId"])
@@ -42,9 +43,9 @@ def install_command_routes(app, repo, listing):
 
     @app.get("/api/v1/tasks/{task_id}/command-executions")
     async def executions(
-        task_id: str, user: User, page: int = Query(1, ge=1), pageSize: int = Query(50, ge=1, le=100),
-        commandId: str | None = Query(None, min_length=1, max_length=128),
-        kind: Literal["MANUAL", "SCHEDULED"] | None = None,
+        task_id: Annotated[str, ApiPath(description='要查询命令执行记录的采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(50, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
+        commandId: str | None = Query(None, min_length=1, max_length=128, description='按某一条定时命令配置标识筛选执行记录。'),
+        kind: Annotated[Literal["MANUAL", "SCHEDULED"] | None, Query(description='按执行来源筛选：MANUAL 为用户手动命令，SCHEDULED 为定时命令；省略包含两类。')] = None,
     ):
         """分页返回命令正文快照；按单项定时配置筛选并附当前运行独立预算。"""
         authorize(user, "tasks:read", task_id)
@@ -79,7 +80,7 @@ def install_command_routes(app, repo, listing):
         return await create_service_token(repo(), user["id"], body)
 
     @app.get("/api/v1/service-tokens")
-    async def service_tokens(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100)):
+    async def service_tokens(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
         """管理员读取全量，绑定用户仅读取自己的令牌公开信息。"""
         authorize(user, "service-tokens:read")
         query = {} if user.get("isAdmin") or "*" in user["scopes"] else {"userId": user["id"]}
@@ -91,28 +92,28 @@ def install_command_routes(app, repo, listing):
         return result
 
     @app.post("/api/v1/service-tokens/{identifier}/reveal")
-    async def reveal_token(identifier: str, response: Response, user: User):
+    async def reveal_token(identifier: Annotated[str, ApiPath(description='要查看明文的一次性服务令牌 ID，可由创建服务令牌响应或服务令牌列表返回。')], response: Response, user: User):
         """管理员或绑定用户查看已加密保存的服务令牌明文。"""
         authorize(user, "service-tokens:read")
         response.headers["Cache-Control"] = "no-store"
         return await reveal_service_token(repo(), user, identifier)
 
     @app.patch("/api/v1/service-tokens/{identifier}")
-    async def edit_token(identifier: str, body: TokenPatch, user: User):
+    async def edit_token(identifier: Annotated[str, ApiPath(description='要编辑的服务令牌 ID，可由创建服务令牌响应或服务令牌列表返回。')], body: TokenPatch, user: User):
         """管理员修改令牌名称或绑定用户；下一次 Bearer 认证立即使用新用户权限。"""
         authorize(user, "admin")
         from camera_logs.users.service_tokens import update_service_token
         return await update_service_token(repo(), user["id"], identifier, body)
 
     @app.post("/api/v1/service-tokens/{identifier}/rotate")
-    async def rotate_token(identifier: str, body: TokenRotate, response: Response, user: User):
+    async def rotate_token(identifier: Annotated[str, ApiPath(description='要轮换的一次性服务令牌 ID，可由创建服务令牌响应或服务令牌列表返回。')], body: TokenRotate, response: Response, user: User):
         """管理员以版本锁生成新令牌，旧令牌在事务提交后立即失效。"""
         authorize(user, "admin")
         response.headers["Cache-Control"] = "no-store"
         return await rotate_service_token(repo(), user["id"], identifier, body.version)
 
     @app.delete("/api/v1/service-tokens/{identifier}", status_code=204)
-    async def revoke_token(identifier: str, user: User):
+    async def revoke_token(identifier: Annotated[str, ApiPath(description='要撤销的服务令牌 ID，可由创建服务令牌响应或服务令牌列表返回。')], user: User):
         """撤销服务令牌并追加审计，不删除历史令牌记录。"""
         authorize(user, "admin")
         await revoke_service_token(repo(), user["id"], identifier)

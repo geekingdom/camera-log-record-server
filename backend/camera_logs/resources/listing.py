@@ -38,9 +38,9 @@ def resource_sort(sort_by: str | None, sort_order: str | None) -> dict[str, int]
 def _task_summary_lookup() -> dict[str, Any]:
     """按资源 ID 在数据库内聚合任务数量，避免把任务正文数组拼入资源管道。"""
     return {"$lookup": {"from": "tasks", "let": {"resourceId": "$id"}, "pipeline": [
-        {"$match": {"$expr": {"$or": [
+        {"$match": {"$and": [{"deletedAt": None}, {"$expr": {"$or": [
             {"$eq": ["$resourceId", "$$resourceId"]}, {"$eq": ["$serialServerResourceId", "$$resourceId"]},
-        ]}}},
+        ]}}]}},
         {"$group": {"_id": None, "taskCount": {"$sum": 1},
             "activeTaskCount": {"$sum": {"$cond": [{"$and": [
                 {"$eq": ["$status", "COLLECTING"]}, {"$eq": ["$desiredState", "RUNNING"]},
@@ -122,7 +122,7 @@ async def _add_task_summaries(db: Any, resources: list[dict[str, Any]]) -> None:
     if not identifiers:
         return
     cursor = db.tasks.aggregate([
-        {"$match": {"$or": [{"resourceId": {"$in": identifiers}}, {"serialServerResourceId": {"$in": identifiers}}]}},
+        {"$match": {"deletedAt": None, "$or": [{"resourceId": {"$in": identifiers}}, {"serialServerResourceId": {"$in": identifiers}}]}},
         {"$project": {"id": 1, "resourceId": 1, "serialServerResourceId": 1, "status": 1, "desiredState": 1, "nodeId": 1}},
     ])
     if inspect.isawaitable(cursor):

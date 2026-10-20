@@ -111,7 +111,7 @@ async def request_reachable_worker_fencing(repo, stale_nodes):
         if config is None or node.get("url") != config.get("url"):
             continue
         retryable = {"$or": [{"failoverFenceRetryAt": {"$exists": False}}, {"failoverFenceRetryAt": {"$lte": now()}}]}
-        async for task in repo.db.tasks.find({"nodeId": node["id"], "desiredState": "RUNNING", **retryable}).limit(FENCE_MAX_CANDIDATES):
+        async for task in repo.db.tasks.find({"nodeId": node["id"], "desiredState": "RUNNING", "deletedAt": None, **retryable}).limit(FENCE_MAX_CANDIDATES):
             if not all(task.get(key) is not None for key in ("runId", "generation", "sessionId")):
                 continue
             candidates.append((node, config, task))
@@ -174,7 +174,7 @@ async def consume_confirmed_failovers(repo):
     """原子释放有关闭证明的失联运行，保留旧节点排除直到新运行被领取。"""
     retryable = {"$or": [{"failoverConsumeRetryAt": {"$exists": False}}, {"failoverConsumeRetryAt": {"$lte": now()}}]}
     candidates = [task async for task in repo.db.tasks.find({
-        "status": "BLOCKED", "desiredState": "RUNNING", "closedReceipt.reason": AUTO_FAILOVER_FENCED, **retryable,
+        "status": "BLOCKED", "desiredState": "RUNNING", "deletedAt": None, "closedReceipt.reason": AUTO_FAILOVER_FENCED, **retryable,
     }).sort([("updatedAt", 1), ("id", 1)]).limit(FAILOVER_CONSUME_MAX)]
     consumed = 0
 
@@ -190,7 +190,7 @@ async def consume_confirmed_failovers(repo):
     for candidate in candidates:
         async def commit(session, task_id=candidate["id"]):
             task = await repo.db.tasks.find_one_and_update(
-                {"id": task_id, "status": "BLOCKED", "desiredState": "RUNNING"},
+                {"id": task_id, "status": "BLOCKED", "desiredState": "RUNNING", "deletedAt": None},
                 {"$inc": {"controlClaimVersion": 1}}, return_document=True, session=session,
             )
             if task is None or not is_confirmed_failover_receipt(task) or task.get("resourceDeleted"):
@@ -199,7 +199,7 @@ async def consume_confirmed_failovers(repo):
             old_node_id = task["nodeId"]
             await finish_blocked_run(repo, task, session, restart=True)
             changed = await repo.db.tasks.update_one(
-                {"id": task["id"], "nodeId": None, "status": "STOPPED", "desiredState": "RUNNING"},
+                {"id": task["id"], "nodeId": None, "status": "STOPPED", "desiredState": "RUNNING", "deletedAt": None},
                 {"$set": {"failoverExcludedNodeId": old_node_id, "failoverFromNodeId": old_node_id,
                           "failoverReason": AUTO_FAILOVER_FENCED, "updatedAt": now()},
                  "$currentDate": {"failoverReleasedAt": True}}, session=session,

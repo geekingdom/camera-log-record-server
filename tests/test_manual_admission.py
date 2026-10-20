@@ -100,7 +100,7 @@ async def test_manual_admission_rejects_current_session_queue_at_capacity(admit)
     query, update, kwargs = tasks.queries[0]
     assert query == {"id": "task", "runId": "run", "nodeId": "node", "generation": 3,
                      "sessionId": "session", "status": "COLLECTING", "desiredState": "RUNNING",
-                     "resourceDeleted": {"$ne": True}}
+                     "deletedAt": None, "resourceDeleted": {"$ne": True}}
     assert update == {"$inc": {"commandClaimVersion": 1}}
     assert kwargs["session"] is None
     assert commands.documents == [command(task, index=index) for index in range(100)]

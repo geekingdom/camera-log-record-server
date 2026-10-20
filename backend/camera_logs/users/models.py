@@ -21,17 +21,17 @@ class Input(BaseModel):
 
 
 class Login(Input):
-    username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=128)
+    username: str = Field(min_length=1, max_length=64, description='平台登录账号，服务端去除首尾空白并按小写匹配。')
+    password: str = Field(min_length=1, max_length=128, description='平台账号登录密码，不是设备登录密码。')
 
 
 class UserCreate(Input):
-    username: str = Field(pattern=r"^[a-zA-Z0-9_.-]{3,64}$")
-    displayName: str = Field(min_length=1, max_length=128)
-    password: str = Field(min_length=8, max_length=128)
-    isAdmin: Literal[False] = False
-    scopes: list[str] = Field(default_factory=list, max_length=32)
-    enabled: bool = True
+    username: str = Field(pattern=r"^[a-zA-Z0-9_.-]{3,64}$", description='登录设备或平台账户使用的用户名。')
+    displayName: str = Field(min_length=1, max_length=128, description='平台账户在界面和审计记录中显示的名称。')
+    password: str = Field(min_length=8, max_length=128, description='新平台账号的初始密码；普通查询不会返回密码或哈希。')
+    isAdmin: Literal[False] = Field(default=False, description='账户是否为管理员；创建普通子账户时只能为 false。')
+    scopes: list[str] = Field(default_factory=list, max_length=32, description='授予平台账号的权限标识列表；可选值由 GET /api/v1/users/permissions 返回，普通用户另有系统基础读取权限。')
+    enabled: bool = Field(default=True, description='新平台账号是否可以登录和使用绑定的服务令牌。')
 
     @field_validator("username")
     @classmethod
@@ -57,17 +57,17 @@ class UserCreate(Input):
 
 
 class UserPatch(Input):
-    version: int = Field(ge=1)
-    displayName: str | None = Field(default=None, min_length=1, max_length=128)
-    scopes: list[str] | None = Field(default=None, max_length=32)
-    enabled: bool | None = None
+    version: int = Field(ge=1, description='当前配置版本号，用于乐观锁并发修改校验。')
+    displayName: str | None = Field(default=None, min_length=1, max_length=128, description='平台账户在界面和审计记录中显示的名称。')
+    scopes: list[str] | None = Field(default=None, max_length=32, description='授予平台账号的权限标识列表；可选值由 GET /api/v1/users/permissions 返回，普通用户另有系统基础读取权限。')
+    enabled: bool | None = Field(default=None, description='是否允许该平台账号继续登录和使用绑定的服务令牌；省略保持原值。')
 
 
 class PasswordChange(Input):
-    currentPassword: str = Field(min_length=1, max_length=128)
-    newPassword: str = Field(min_length=8, max_length=128)
+    currentPassword: str = Field(min_length=1, max_length=128, description='当前登录账户的原密码，用于验证本人改密请求。')
+    newPassword: str = Field(min_length=8, max_length=128, description='要设置给当前登录账户的新密码。')
 
 
 class PasswordReset(Input):
-    version: int = Field(ge=1)
-    password: str = Field(min_length=8, max_length=128)
+    version: int = Field(ge=1, description='当前配置版本号，用于乐观锁并发修改校验。')
+    password: str = Field(min_length=8, max_length=128, description='管理员为目标平台账号设置的新密码；成功后该用户必须修改密码，已有会话失效。')

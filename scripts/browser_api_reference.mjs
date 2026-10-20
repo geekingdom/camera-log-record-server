@@ -6,7 +6,11 @@ import { mkdir } from "node:fs/promises";
 const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
 const python = process.env.PYTHON_BIN || ".venv/bin/python";
-const catalog = JSON.parse(execFileSync(python, ["-c", "import json; from camera_logs.main import create_app; from camera_logs.reference.catalog import catalog; print(json.dumps(catalog(create_app())))"], { encoding: "utf8" }));
+const catalog = JSON.parse(execFileSync(
+  python,
+  ["-c", "import json; from camera_logs.main import create_app; from camera_logs.reference.catalog import catalog; print(json.dumps(catalog(create_app())))"],
+  { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+));
 assert.ok(catalog.operations.length > 0, "接口目录必须包含操作");
 assert.ok(catalog.operations.every(operation => typeof operation.pythonExample === "string" && operation.pythonExample.trim()),
   "每个 HTTP 和 WebSocket 操作都必须提供非空 Python 调用示例");
@@ -136,6 +140,9 @@ try {
     assert.ok(metrics.parameters > 0, "资源目录必须展示查询参数");
     assert.equal(metrics.codeBlocks, 3, "详情必须展示请求、Python 和响应示例");
     assert.ok(metrics.guides > 1, "详情页必须展示接入指南");
+    await page.getByRole("heading", { name: "响应字段", exact: true }).waitFor();
+    assert.ok(await page.locator(".response-contract").getByText("items[].id", { exact: true }).count(),
+      "页码列表必须展开显示嵌套响应字段");
     const pythonSection = page.locator(".python-code-section");
     const httpPythonExample = await pythonSection.locator("pre").innerText();
     assert.ok(httpPythonExample.includes("requests"), "HTTP Python 示例必须使用 requests");
@@ -157,6 +164,18 @@ try {
     assert.ok(websocketPythonExample.includes("http://127.0.0.1:8000"), "WebSocket Python 示例必须保留本机回退地址");
     const websocketNote = await pythonSection.locator(".python-example-note").innerText();
     assert.ok(websocketNote.includes("pip install websockets"), "WebSocket Python 区域必须说明 websockets 安装方式");
+    await page.getByRole("heading", { name: "消息类型", exact: true }).waitFor();
+    assert.ok(await page.locator(".response-contract").getByText("fileId", { exact: true }).count(),
+      "WebSocket 文档必须展示 data 帧字段");
+    assert.ok(await page.locator(".response-contract").getByText(/4408/).count(),
+      "WebSocket 文档必须展示实际关闭码");
+    await search.fill("coredumps/{identifier}/content");
+    await page.locator(".api-operation-list > button").filter({ hasText: "下载单个Coredump文件" }).click();
+    await page.getByRole("heading", { name: "错误响应", exact: true }).waitFor();
+    assert.ok(await page.locator(".response-contract").getByText("Content-Range", { exact: true }).count(),
+      "二进制下载必须展示范围响应头");
+    assert.ok(await page.locator(".response-contract").getByText("409", { exact: true }).count(),
+      "稳定源不可用必须展示 409 语义");
     await page.screenshot({ path: `${screenshots}/api-reference-${width}.png`, fullPage: true, animations: "disabled" });
     assert.deepEqual(errors, []);
     await context.close();

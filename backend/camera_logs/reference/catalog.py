@@ -1,7 +1,11 @@
 """从实际OpenAPI路径构造完整目录，补齐权限、中文分组及第三方调用说明。"""
 
-from camera_logs.reference.descriptions import describe_operation, describe_parameter, described_schemas
+from camera_logs.common.api_contracts.response_reference import RESPONSE_SCHEMA
+from camera_logs.common.api_contracts.responses import response_contract
+from camera_logs.common.log_frames import SUBSCRIBE_SCHEMA
+from camera_logs.reference.descriptions import describe_parameter, described_schemas
 from camera_logs.reference.examples import request_example, response_example, schema_example
+from camera_logs.reference.openapi_responses import openapi_response_contract, response_schema_example
 from camera_logs.reference.python_examples import build_python_example
 
 GUIDES = [
@@ -190,6 +194,8 @@ def permission(path, method):
         return "tasks:control + 仅任务创建者或admin；confirmIsolation=true仅admin"
     if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume")):
         return "tasks:control + 仅任务创建者或admin"
+    if path == "/api/v1/tasks/{task_id}" and method == "DELETE":
+        return "tasks:write + tasks:control + 仅任务创建者或admin"
     if path.endswith("/tasks") and method == "POST":
         return "tasks:create；autoStart=true另需tasks:control"
     return "tasks:write + 仅任务创建者或admin" if method == "PATCH" else "tasks:read"
@@ -235,6 +241,7 @@ def catalog(app):
     spec = app.openapi()
     # 文档目录使用独立副本补齐中文语义，不能污染 FastAPI 用于接口校验的 OpenAPI 缓存。
     schemas = described_schemas(spec.get("components", {}).get("schemas", {}))
+    schemas["ResponseSchema"] = RESPONSE_SCHEMA
     operations = []
     for path, methods in spec["paths"].items():
         for method, definition in methods.items():
@@ -243,24 +250,28 @@ def catalog(app):
             verb = method.upper()
             schema = definition.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema")
             code = min(int(code) for code in definition["responses"] if code.startswith("2"))
+            contract = openapi_response_contract(definition, code, schemas)
+            response = response_example(path, verb, code)
+            if contract["kind"] == "json":
+                response = response_schema_example(contract["schema"], schemas, response)
             title = operation_title(verb, path)
-            idempotent = method == "post" and (path == "/api/v1/resources/batch" or path.split("/")[-1] in {"resources", "tasks", "command-templates", "common-commands", "downloads", "log-searches", "commands", "coredump-exports"})
+            idempotent = method == "post" and (path in {"/api/v1/resources/batch", "/api/v1/admin/common-commands/batch"} or path.split("/")[-1] in {"resources", "tasks", "command-templates", "common-commands", "downloads", "log-searches", "commands", "coredump-exports"})
             headers = request_headers(path, verb, schema, idempotent)
             parameters = [{**item, "description": describe_parameter(item),
                            "example": schema_example(item.get("schema", {}), schemas, item["name"])}
                           for item in definition.get("parameters", [])]
             operations.append({"id": f"{verb} {path}", "method": verb, "path": path, "title": title,
-                               "group": group(path), "description": describe_operation(
-                                   verb, path, definition.get("description", "按当前权限执行操作，响应字段随状态变化。"),
-                               ),
+                               "group": group(path), "description": definition.get("description", definition.get("summary", title)),
                                "permission": permission(path, verb), "headers": headers, "parameters": parameters,
                                "requestSchema": schema, "requestExample": request_example(schema, schemas) if schema else None,
-                               "responseStatus": code, "responseExample": response_example(path, verb, code)})
+                               "responseStatus": code, "responseExample": response,
+                               "responseContract": contract})
     operations.append({"id": "WS /api/v1/tasks/{task_id}/logs", "method": "WS", "path": "/api/v1/tasks/{task_id}/logs",
                        "title": "订阅任务实时日志", "group": "日志查询", "description": next(item["text"] for item in GUIDES if item["title"] == "实时日志"),
-                       "permission": "logs:read", "headers": {}, "parameters": [{"name": "task_id", "in": "path", "required": True, "schema": {"type": "string", "description": describe_parameter({"name": "task_id"})}, "description": describe_parameter({"name": "task_id"}), "example": "task-example"}],
-                       "requestSchema": None, "requestExample": {"token": "<SERVICE_TOKEN>", "cursor": ""},
-                       "responseStatus": 101, "responseExample": {"type": "data", "fileId": "file-example", "offset": 0, "data": "bG9nCg==", "cursor": "<续传游标>"}})
+                       "permission": "logs:read", "headers": {}, "parameters": [{"name": "task_id", "in": "path", "required": True, "schema": {"type": "string", "description": "要订阅实时日志的采集任务 ID，由任务列表返回。"}, "description": "要订阅实时日志的采集任务 ID，由任务列表返回。", "example": "task-example"}],
+                       "requestSchema": SUBSCRIBE_SCHEMA, "requestExample": {"token": "<SERVICE_TOKEN>", "cursor": ""},
+                       "responseStatus": 101, "responseExample": {"type": "data", "fileId": "file-example", "offset": 0, "data": "bG9nCg==", "cursor": "<续传游标>"},
+                       "responseContract": response_contract("/api/v1/tasks/{task_id}/logs", "WS", 101, {"type": "data", "fileId": "file-example", "offset": 0, "data": "bG9nCg==", "cursor": "<续传游标>"})})
     for operation in operations:
         operation["pythonExample"] = build_python_example(operation)
     return {"version": "1.1", "guides": GUIDES, "operations": operations, "schemas": schemas,

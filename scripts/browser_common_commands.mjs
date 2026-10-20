@@ -11,7 +11,7 @@ const monitor = { intervalSeconds: 60, retentionDays: 90, items: [{ id: "cpu", n
 const platform = { retentionDays: 7, clusterCapacity: 500, liveLogBufferMiB: 10, serviceLogRetentionDays: 7, version: 1, updatedAt: "2026-10-19T00:00:00Z", resourceMonitor: monitor, recordRetention: { auditDays: 90, eventDays: 90, runDays: 90 } };
 const task = { id: "task-1", name: "验收任务", protocol: "SSH", ip: "192.0.2.1", port: 22, status: "COLLECTING", desiredState: "RUNNING", initialCommands: [], scheduledCommands: [], version: 1 };
 const json = (route, body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
-const pageOf = (items, page = 1, pageSize = 100) => ({ items, total: items.length, page, pageSize });
+const pageOf = (items, page = 1, pageSize = 20) => ({ items, total: items.length, page, pageSize });
 const deferred = () => {
   let resolve;
   const promise = new Promise(done => { resolve = done; });
@@ -20,20 +20,29 @@ const deferred = () => {
 const delayedAdminPages = [];
 const delayedUpdates = [];
 const delayedCommonPages = [];
+const batchRequests = [];
 await context.route("**/api/v1/**", async route => {
   const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
   if (path === "/api/v1/auth/me") return json(route, { user: { id: "admin", username: "admin", displayName: "管理员", isAdmin: true, enabled: true, mustChangePassword: false, scopes: ["*"] } });
   if (path === "/api/v1/platform-settings" && method === "GET") return json(route, platform);
   if (path === "/api/v1/admin/nodes") return json(route, pageOf([]));
   if (path === "/api/v1/admin/common-commands") {
-    const page = Number(url.searchParams.get("page") || 1), size = Number(url.searchParams.get("pageSize") || 100);
+    const page = Number(url.searchParams.get("page") || 1), size = Number(url.searchParams.get("pageSize") || 20);
     assert.ok(Number.isInteger(page) && page >= 1, "管理列表必须发送有效页码");
     if (method === "GET") {
       const delayed = delayedAdminPages.shift();
       if (delayed) return delayed.promise.then(body => json(route, body));
-      return json(route, { ...pageOf(common.slice((page - 1) * size, page * size), page, size), total: common.length });
+      const query = (url.searchParams.get("query") || "").toLowerCase(), enabled = url.searchParams.get("enabled");
+      const filtered = common.filter(item => (enabled === null || String(item.enabled) === enabled) && (!query || `${item.command} ${item.description}`.toLowerCase().includes(query)));
+      return json(route, { ...pageOf(filtered.slice((page - 1) * size, page * size), page, size), total: filtered.length });
     }
     if (method === "POST") { const body = request.postDataJSON(); common.unshift({ id: "common-new", version: 1, createdAt: "2026-10-19T00:00:00Z", updatedAt: "2026-10-19T00:00:00Z", ...body }); return json(route, common[0], 201); }
+  }
+  if (path === "/api/v1/admin/common-commands/batch" && method === "POST") {
+    const body = request.postDataJSON();
+    batchRequests.push(body);
+    for (const selected of body.items) { const row = common.find(item => item.id === selected.id); if (body.action === "DELETE") common.splice(common.indexOf(row), 1); else Object.assign(row, { enabled: body.action === "ENABLE", version: row.version + 1 }); }
+    return json(route, { action: body.action, affected: body.items.length });
   }
   if (path.startsWith("/api/v1/admin/common-commands/") && method === "PATCH") {
     const row = common.find(item => item.id === path.split("/").at(-1));
@@ -73,15 +82,58 @@ try {
   await page.getByText("常用命令", { exact: true }).click();
   await page.getByRole("button", { name: "刷新常用命令", exact: true }).click();
   await page.getByText("logread -f", { exact: true }).waitFor();
-  await page.getByText("command-101", { exact: true }).count();
+  assert.equal(await page.getByText("command-101", { exact: true }).count(), 0, "默认页应为20条");
   await page.locator(".common-commands .el-pagination .btn-next").click();
-  await page.getByText("command-101", { exact: true }).waitFor();
+  await page.getByText("command-021", { exact: true }).waitFor();
   await page.locator(".common-commands .el-pagination .btn-prev").click();
   await page.getByText("logread -f", { exact: true }).waitFor();
   await page.getByRole("button", { name: "禁用常用命令 logread -f" }).click();
-  await page.getByText("常用命令已禁用", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "确认", exact: true }).click();
+  await page.getByText("已禁用 1 条常用命令", { exact: true }).waitFor();
   await page.getByRole("button", { name: "新增命令" }).click(); await page.getByRole("dialog", { name: "新增常用命令" }).getByLabel("常用命令", { exact: true }).fill("ifconfig"); await page.getByRole("button", { name: "保存", exact: true }).click();
   await page.getByText("常用命令已新增", { exact: true }).waitFor();
+
+  // 搜索必须匹配描述、状态可交叉筛选；勾选后刷新不能沿用旧行版本。
+  const search = page.getByLabel("搜索常用命令");
+  await search.fill("描述 20");
+  await page.getByRole("button", { name: "查询", exact: true }).click();
+  await page.getByText("command-020", { exact: true }).waitFor();
+  assert.equal(await page.locator(".common-commands .el-table__body tr").count(), 1);
+  await search.fill("");
+  await page.getByRole("button", { name: "查询", exact: true }).click();
+  await page.getByText("ifconfig", { exact: true }).waitFor();
+  await page.locator(".common-commands .filters .el-select__wrapper").click();
+  await page.getByRole("option", { name: "禁用", exact: true }).click();
+  await page.getByText("logread -f", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll(".common-commands .el-table__body tr").length === 2);
+  await page.locator(".common-commands .el-table__body tr").first().locator("label.el-checkbox").click();
+  await page.getByText("已选 1 条", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "刷新常用命令", exact: true }).click();
+  await page.getByText("已选 0 条", { exact: true }).waitFor();
+  assert.equal(await page.locator(".common-commands .el-table__body .el-checkbox.is-checked").count(), 0);
+  await page.locator(".common-commands .el-table__header label.el-checkbox").click();
+  await page.getByText("已选 2 条", { exact: true }).waitFor();
+  const enabledBefore = batchRequests.length;
+  await page.getByRole("button", { name: "批量启用", exact: true }).click();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  assert.equal(batchRequests.length, enabledBefore, "取消批量确认不能提交");
+  await page.getByRole("button", { name: "批量启用", exact: true }).click();
+  await page.getByRole("button", { name: "确认", exact: true }).click();
+  await page.getByText("已启用 2 条常用命令", { exact: true }).waitFor();
+  assert.equal(batchRequests.at(-1).items.length, 2);
+  await page.getByText("暂无常用命令", { exact: true }).waitFor();
+  await page.locator(".common-commands .filters .el-select__wrapper").click();
+  await page.getByRole("option", { name: "全部状态", exact: true }).click();
+  await page.getByText("ifconfig", { exact: true }).waitFor();
+  // 确认窗口期间后台刷新改变列表，则原确认意图失效，不能操作新列表。
+  await page.locator(".common-commands .el-table__body tr").first().locator("label.el-checkbox").click();
+  await page.getByRole("button", { name: "批量删除", exact: true }).click();
+  const deleteBefore = batchRequests.length;
+  await page.getByRole("button", { name: "刷新常用命令", exact: true }).evaluate(element => element.click());
+  await page.getByText("已选 0 条", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "确认", exact: true }).click();
+  await page.waitForTimeout(100);
+  assert.equal(batchRequests.length, deleteBefore, "列表已变时不得执行过期批量确认");
 
   // 旧分页晚于新分页返回时，表格和序号必须保留最新目标页的数据。
   const slowSecondPage = deferred(), freshFirstPage = deferred();
@@ -95,9 +147,9 @@ try {
     { ...common[1], id: "race-b", command: "fresh-page-b", description: "当前页 B" },
   ];
   common.unshift(...raceRows);
-  freshFirstPage.resolve({ ...pageOf(raceRows, 1, 100), total: 101 });
+  freshFirstPage.resolve({ ...pageOf(raceRows, 1, 20), total: 101 });
   await page.getByText("fresh-page-a", { exact: true }).waitFor();
-  slowSecondPage.resolve({ ...pageOf([{ ...common[100], command: "stale-page-two" }], 2, 100), total: 101 });
+  slowSecondPage.resolve({ ...pageOf([{ ...common[20], command: "stale-page-two" }], 2, 20), total: 101 });
   await page.waitForTimeout(100);
   assert.equal(await page.getByText("stale-page-two", { exact: true }).count(), 0, "旧页响应不得覆盖新分页");
   assert.equal(await page.getByText("fresh-page-a", { exact: true }).count(), 1, "最新分页必须保留对应行");

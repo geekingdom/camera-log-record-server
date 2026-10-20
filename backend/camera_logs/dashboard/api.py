@@ -278,7 +278,7 @@ def install_dashboard_routes(app: Any) -> None:
     """安装平台资源看板的只读路由，任务概览与日志统计采用不同权限可用性。"""
     app.state.dashboard_cache = {}
 
-    @app.get("/api/v1/dashboard")
+    @app.get("/api/v1/dashboard", description='返回截至指定Asia/Shanghai自然日的资源、任务、日志目录和Coredump概览，需要tasks:read。days只允许7、14或30；无logs:read时日志统计字段返回null，无admin时节点字段返回null。日志统计只累计登记的原始分卷bytes，查询超时返回503。')
     async def dashboard(user: Annotated[dict, Depends(actor)],
                         days: Annotated[int, Query(description="统计窗口，只允许 7、14 或 30 个上海自然日")] = 7,
                         date: Annotated[CalendarDate | None, Query(description="统计截至的上海日期，格式 YYYY-MM-DD；默认今天")] = None):

@@ -24,6 +24,10 @@ Authorization: Bearer <access-token>
 
 ## 站内接口目录
 
+请求参数、请求正文与响应正文的字段表直接从当前服务的 OpenAPI 模型生成，包含嵌套对象、数组元素、必填性、可空性、类型及源码声明的中文业务说明。JSON 响应模型同时参与实际接口返回校验，新增字段、错误类型或缺失必填字段不能被静默忽略；新增接口可以直接声明 Pydantic `response_model`，无需再登记一份文档字段清单。已有接口的共享响应合同位于 `common/api_contracts`，由安装器转为运行时模型，文档只读取生成后的 OpenAPI。实时日志帧的说明同样读取实际发送所用的帧模型。
+
+后续接口调整应在实际模型的 `Field(description=...)`、`Query` 或 `Path` 中更新准确中文说明；字段缺少说明会导致文档校验失败。说明需区分同名字段在不同接口中的含义，并写明时间范围是否包含端点、数值单位、状态值与空值语义。自动生成保证结构和声明同源，业务释义的准确性仍须结合实现审查与测试，不能从字段名称自动猜测。页面示例仅提供虚拟值，正文结构按当前模型投影，不作为完整字段合同。
+
 平台导航中的“API 文档”展示当前部署版本的公共接口，提供分类、搜索、权限、参数、请求与响应示例以及接入指南。目录来自 `GET /api/v1/api-reference`，有效服务 Token 或登录会话均可访问；查阅目录不会授予调用权限。目录只展示虚拟示例，不执行设备操作，不依赖 GitHub 或外部 CDN。
 
 目录版本为 `1.1`。每个操作包含可直接改造的 Python 调用示例；示例使用占位服务地址、令牌和标识，调用前必须替换，且不改变接口权限、幂等键、Cookie 或二进制响应的处理要求。
@@ -430,3 +434,15 @@ Content-Type: application/json
 ## 稳定 Coredump 按文件 ID 下载
 
 查询 `GET /api/v1/resources/{resourceId}/coredumps` 获取文件列表，可使用 `receivedFrom=2026-10-19T12:00:00`、`receivedTo=2026-10-19T16:00:00` 筛选北京时间范围。文件显示“文件已稳定”（`sourceState=STABLE`）后，直接使用其 `id` 访问 `GET /api/v1/coredumps/{id}/content`，无需先创建导出作业。该内容链接无需登录或Token，支持Range与If-Range，适合缺陷附件分享。有效冻结副本保持兼容；多文件打包仍可使用Coredump导出作业。稳定观测后源文件仍可能被设备改写，下载入口须确认当前源版本可用，不将未稳定或已变化的文件作为稳定内容提供。
+
+## 任务软删除与历史查询
+
+`DELETE /api/v1/tasks/{task_id}?version=<当前版本>` 使用 `tasks:write`、`tasks:control` 及任务创建者/管理员权限，返回202。任务写入删除标记和停止意图，正在运行的连接由Worker收尾；202不代表连接已物理关闭。删除不清理任务日志、归档或已有下载制品，内容链接按原保留期继续可用。
+
+`GET /api/v1/tasks` 默认不返回已删除任务，传 `includeDeleted=true` 可查看历史。已删除任务不能重新启动、恢复、编辑或发送命令。删除设备资源会软删除其主设备/串口服务器关联采集任务。资源任务数量和看板当前活跃采集数量排除已删除任务，历史日志统计继续保留。
+
+## 常用命令分页与批量操作
+
+管理员列表 `GET /api/v1/admin/common-commands` 支持 `page/pageSize`，页面默认20条、可选50或100；`query` 对命令及描述执行不区分大小写的字面子串查询，`enabled=true/false` 筛选启用或禁用，省略表示全部。
+
+`POST /api/v1/admin/common-commands/batch` 要求管理员及 `Idempotency-Key`，提交 `action=ENABLE|DISABLE|DELETE` 和 `items=[{"id":"命令ID","version":1}]`，一次1至100条。版本冲突或记录缺失时整批不生效；成功返回 `action` 和 `affected`。请求结果未知时用同一幂等键及原请求重试，不重新生成请求键。

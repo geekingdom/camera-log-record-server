@@ -26,12 +26,15 @@ export interface ReferenceOperation {
   pythonExample: string;
   responseStatus: number;
   responseExample: unknown;
+  responseContract: ResponseContract;
 }
 
 export interface ReferenceSchema {
   $ref?: string;
   type?: string;
   format?: string;
+  nullable?: boolean;
+  additionalProperties?: ReferenceSchema | boolean;
   description?: string;
   enum?: unknown[];
   default?: unknown;
@@ -56,6 +59,21 @@ export interface ApiReferenceCatalog {
   errorExample: unknown;
 }
 
+export interface ResponseError {
+  status: number;
+  when: string;
+  schema: ReferenceSchema;
+}
+
+export interface ResponseContract {
+  kind: "json" | "empty" | "binary" | "text" | "websocket";
+  description: string;
+  schema: ReferenceSchema | null;
+  conditional?: string[];
+  errors: ResponseError[];
+  errorSchema: ReferenceSchema | null;
+}
+
 export interface SchemaDescription {
   type: string;
   constraints: string;
@@ -69,20 +87,21 @@ export interface SchemaFieldDescription extends SchemaDescription {
 }
 
 // OpenAPI 既会直接给出类型，也会通过 $ref、anyOf 表达 Optional；统一展开后再生成可读约束。
-function resolveReference(schema: ReferenceSchema, schemas: Record<string, unknown>): ReferenceSchema {
-  if (!schema.$ref) return schema;
+function resolveReference(schema: ReferenceSchema, schemas: Record<string, unknown>, seen = new Set<string>()): ReferenceSchema {
+  if (!schema.$ref || seen.has(schema.$ref)) return schema;
+  seen.add(schema.$ref);
   const name = schema.$ref.split("/").at(-1);
   const referenced = schemas[name ?? ""] as ReferenceSchema | undefined;
   if (!referenced) return schema;
   const { $ref: _reference, ...own } = schema;
-  return { ...resolveReference(referenced, schemas), ...own };
+  return { ...resolveReference(referenced, schemas, seen), ...own };
 }
 
 function normalizeSchema(source: ReferenceSchema, schemas: Record<string, unknown>) {
   let schema = resolveReference(source, schemas);
   const alternatives = schema.anyOf ?? schema.oneOf ?? [];
   const resolved = alternatives.map(item => resolveReference(item, schemas));
-  const nullable = resolved.some(item => item.type === "null");
+  const nullable = Boolean(schema.nullable) || resolved.some(item => item.type === "null");
   const preferred = resolved.find(item => item.type !== "null");
   if (preferred) {
     const { anyOf: _anyOf, oneOf: _oneOf, ...base } = schema;
@@ -123,23 +142,41 @@ export function describeSchema(
   return { type, constraints };
 }
 
-/** 递归展开请求对象，令嵌套命令、白名单规则和分页结构也能逐字段阅读。 */
+/** 展开对象、数组、联合类型及动态字典；递归引用仅展开一次以避免循环。 */
 export function describeObjectFields(
   source: ReferenceSchema | undefined,
   schemas: Record<string, unknown>,
   prefix = "",
+  ancestors = new Set<ReferenceSchema>(),
 ): SchemaFieldDescription[] {
-  const schema = objectSchema(source, schemas);
+  if (!source) return [];
+  const referenced = source.$ref
+    ? schemas[source.$ref.split("/").at(-1) ?? ""] as ReferenceSchema | undefined
+    : source;
+  if (referenced && ancestors.has(referenced)) return [];
+  const visited = new Set(ancestors);
+  if (referenced) visited.add(referenced);
+  const raw = resolveReference(source, schemas);
+  const variants = (raw.oneOf ?? raw.anyOf ?? []).filter(item => item.type !== "null");
+  if (variants.length > 1) {
+    return variants.flatMap((variant, index) => describeObjectFields(
+      variant, schemas, `${prefix}${prefix ? "." : ""}{分支${index + 1}}`, visited,
+    ));
+  }
+  const schema = objectSchema(raw, schemas);
   const rows: SchemaFieldDescription[] = [];
-  for (const [name, field] of Object.entries(schema.properties ?? {})) {
-    const path = prefix ? `${prefix}.${name}` : name;
-    const required = Boolean(schema.required?.includes(name));
+  const add = (name: string, field: ReferenceSchema, path: string, required: boolean) => {
     const detail = describeSchema(field, schemas, required);
     const resolved = objectSchema(field, schemas);
-    rows.push({ name, path, ...detail, required, description: resolved.description ?? field.description ?? "" });
-    if (resolved.properties) rows.push(...describeObjectFields(field, schemas, path));
-    if (resolved.type === "array" && objectSchema(resolved.items, schemas).properties)
-      rows.push(...describeObjectFields(resolved.items, schemas, `${path}[]`));
+    rows.push({ name, path, ...detail, required, description: field.description ?? resolved.description ?? "" });
+    if (resolved.type === "array") rows.push(...describeObjectFields(resolved.items, schemas, `${path}[]`, visited));
+    else rows.push(...describeObjectFields(field, schemas, path, visited));
+  };
+  for (const [name, field] of Object.entries(schema.properties ?? {})) {
+    add(name, field, prefix ? `${prefix}.${name}` : name, Boolean(schema.required?.includes(name)));
+  }
+  if (schema.additionalProperties && typeof schema.additionalProperties === "object") {
+    add("{键}", schema.additionalProperties, prefix ? `${prefix}.{键}` : "{键}", false);
   }
   return rows;
 }

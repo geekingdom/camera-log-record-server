@@ -77,6 +77,7 @@ def test_auto_start_creation_commits_task_mapping_operation_and_audits(client):
     audits = client.portal.call(task_audits)
     assert mapping["resourceId"] == task["id"] and mapping["state"] == "SUCCEEDED"
     assert (task["desiredState"], task["status"], task["nodeId"]) == ("RUNNING", "STOPPED", None)
+    assert task["creationOperationStatus"] == "PENDING"
     assert (operation["action"], operation["desiredState"], operation["status"]) == (
         "start", "RUNNING", "PENDING",
     )

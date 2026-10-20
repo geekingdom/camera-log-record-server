@@ -39,6 +39,7 @@ async def claim_manual(repo, task, session_id, record):
                 "sessionId": session_id,
                 "status": "COLLECTING",
                 "desiredState": "RUNNING",
+                "deletedAt": None,
                 "resourceDeleted": {"$ne": True},
             },
             {"$inc": {"commandClaimVersion": 1}},

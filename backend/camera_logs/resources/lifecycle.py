@@ -12,6 +12,63 @@ def task_resource_query(identifier: str) -> dict:
     return {"$or": [{"resourceId": identifier}, {"serialServerResourceId": identifier}]}
 
 
+async def _task_deletion_complete(repo, task: dict) -> bool:
+    """只在连接归属、停止意图和运行锁均已回收后确认任务删除完成。"""
+    if (task.get("nodeId") is not None or task.get("desiredState") != "STOPPED"
+            or task.get("status") not in {"STOPPED", "ERROR", "BLOCKED"}):
+        return False
+    return not await repo.db.endpoint_locks.count_documents({"taskId": task["id"]})
+
+
+async def reconcile_task_deletion(repo, identifier: str, *, resource_deleted: bool = False) -> dict | None:
+    """推进单个已软删任务的受控停止，绝不触碰日志目录、归档或下载制品。"""
+    task = await repo.db.tasks.find_one({"id": identifier, "deletedAt": {"$ne": None}})
+    if task is None:
+        return None
+    timestamp = now()
+    changes = {"desiredState": "STOPPED", "restartRequested": False, "updatedAt": timestamp}
+    if resource_deleted:
+        changes["resourceDeleted"] = True
+    await repo.db.tasks.update_one({"id": identifier, "deletedAt": {"$ne": None}}, {"$set": changes})
+    await repo.db.operations.update_many(
+        {"taskId": identifier, "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
+        {"$set": {"status": "CANCELLED", "completedAt": timestamp}},
+    )
+    # 已暂停任务没有 owner 时没有 Worker 会再把它改为停止；软删除必须自行结束该运行。
+    await repo.db.tasks.update_one(
+        {"id": identifier, "deletedAt": {"$ne": None}, "nodeId": None,
+         "desiredState": "STOPPED", "status": "PAUSED"},
+        {"$set": {"status": "STOPPED", "updatedAt": timestamp}},
+    )
+    # 未被节点持有的历史运行可以立刻精确释放；活跃连接只能由 owner Worker 关闭。
+    stopped = await repo.db.tasks.find_one({
+        "id": identifier, "deletedAt": {"$ne": None}, "nodeId": None, "desiredState": "STOPPED",
+        "status": {"$in": ["PAUSED", "STOPPED", "ERROR", "BLOCKED"]},
+        "runId": {"$exists": True, "$nin": [None, ""]},
+    })
+    if stopped:
+        await repo.db.endpoint_locks.delete_one({"taskId": identifier, "runId": stopped["runId"]})
+        await repo.db.runs.update_one(
+            {"id": stopped["runId"], "endedAt": {"$exists": False}}, {"$set": {"endedAt": timestamp}}
+        )
+    current = await repo.db.tasks.find_one({"id": identifier})
+    if current and await _task_deletion_complete(repo, current):
+        await repo.db.tasks.update_one(
+            {"id": identifier, "deletedAt": {"$ne": None}, "deletionState": "PENDING"},
+            {"$set": {"deletionState": "DONE", "deletionCompletedAt": timestamp, "updatedAt": timestamp}},
+        )
+    return await repo.db.tasks.find_one({"id": identifier})
+
+
+async def reconcile_deleted_tasks(repo, limit: int = 500) -> None:
+    """由调度周期重试已删除任务的运行收尾，单项故障不能阻断其它任务。"""
+    async for task in repo.db.tasks.find({"deletedAt": {"$ne": None}, "deletionState": "PENDING"}).limit(limit):
+        try:
+            await reconcile_task_deletion(repo, task["id"])
+        except Exception:
+            logger.exception("软删除任务停止扫尾失败 task=%s", task["id"])
+
+
 async def deletion_cleanup_complete(repo, identifier: str) -> bool:
     """确认关联任务均已脱离节点、停止到终态且不再持有运行锁。"""
     query = task_resource_query(identifier)
@@ -29,29 +86,34 @@ async def reconcile_resource_deletion(repo, identifier: str) -> dict | None:
     resource = await repo.db.resources.find_one({"id": identifier, "deletedAt": {"$ne": None}})
     if resource is None:
         return None
+    query = task_resource_query(identifier)
+    # 兼容早期资源软删除：这些记录可能已写成 DONE，却没有给关联任务写 deletedAt。
+    # 先补齐可见任务的删除标记，再根据实际连接回收结果决定是否重新进入 PENDING。
+    visible = [task async for task in repo.db.tasks.find(
+        {"$and": [query, {"deletedAt": None}]}, {"id": 1},
+    )]
+    if visible:
+        timestamp = resource.get("deletedAt") or now()
+        identifiers = [task["id"] for task in visible]
+        await repo.db.tasks.update_many(
+            {"id": {"$in": identifiers}, "deletedAt": None},
+            {"$set": {"deletedAt": timestamp, "deletionState": "PENDING", "desiredState": "STOPPED",
+                      "restartRequested": False, "resourceDeleted": True, "updatedAt": timestamp}},
+        )
+        await repo.db.operations.update_many(
+            {"taskId": {"$in": identifiers}, "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
+            {"$set": {"status": "CANCELLED", "completedAt": timestamp}},
+        )
+        await repo.db.resources.update_one(
+            {"id": identifier, "deletedAt": {"$ne": None}},
+            {"$set": {"deletionState": "PENDING", "updatedAt": timestamp}},
+        )
+        resource["deletionState"] = "PENDING"
     if resource.get("deletionState") == "DONE":
         return resource
-    query = task_resource_query(identifier)
     async for task in repo.db.tasks.find(query):
-        # 删除资源优先写停止意图；一旦写入，调度器的 RUNNING 领取条件不再匹配该任务。
-        await repo.db.tasks.update_one({"id": task["id"], **query}, {"$set": {
-            "desiredState": "STOPPED", "restartRequested": False, "resourceDeleted": True, "updatedAt": now(),
-        }})
-        await repo.db.operations.update_many(
-            {"taskId": task["id"], "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
-            {"$set": {"status": "CANCELLED", "completedAt": now()}},
-        )
-        # 重新读取当前停止态快照。未归属节点的终态会话可按同一运行回收锁；
-        # 保留 PAUSED 是为了处理调度器尚未将其推进到 STOPPED 的本轮过渡态。
-        stopped = await repo.db.tasks.find_one({"id": task["id"], **query, "nodeId": None,
-                                                "desiredState": "STOPPED",
-                                                "status": {"$in": ["PAUSED", "STOPPED", "ERROR", "BLOCKED"]},
-                                                "runId": {"$exists": True, "$nin": [None, ""]}})
-        if stopped:
-            await repo.db.endpoint_locks.delete_one({"taskId": stopped["id"], "runId": stopped["runId"]})
-            await repo.db.runs.update_one(
-                {"id": stopped["runId"], "endedAt": {"$exists": False}}, {"$set": {"endedAt": now()}}
-            )
+        # 当前任务已由删除事务或旧记录补偿路径标记；这里只做可重试的连接/锁收尾。
+        await reconcile_task_deletion(repo, task["id"], resource_deleted=True)
     if await deletion_cleanup_complete(repo, identifier):
         await repo.db.resources.update_one(
             {"id": identifier, "deletedAt": {"$ne": None}, "deletionState": "PENDING"},

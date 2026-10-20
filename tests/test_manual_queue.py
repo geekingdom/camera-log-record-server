@@ -58,6 +58,18 @@ def test_missing_session_rejects_command(client):
                        headers={"Idempotency-Key": "no-session"}).status_code == 409
 
 
+def test_deleted_task_rejects_new_manual_command(client, mock_reservation_transaction):
+    """软删除已请求关闭后，不能在 Worker 收尾前再向设备写入手动命令。"""
+    client.portal.call(client.app.state.repo.db.tasks.insert_one, {
+        "id": "task", "status": "COLLECTING", "desiredState": "RUNNING", "runId": "run",
+        "sessionId": "current", "deletedAt": "2026-10-20T00:00:00+00:00",
+    })
+    response = client.post("/api/v1/tasks/task/commands", json={"command": "ls"},
+                           headers={"Idempotency-Key": "deleted-task"})
+    assert response.status_code == 409
+    assert client.portal.call(client.app.state.repo.db.commands.count_documents, {}) == 0
+
+
 def test_reconnect_between_api_check_and_admission_rejects_old_snapshot(client, monkeypatch, mock_reservation_transaction):
     """正式路由首次读取后发生重连时，事务必须拒绝把命令写入旧会话。"""
     from camera_logs.commands import manual_submission
@@ -87,6 +99,13 @@ async def test_lost_ownership_does_not_cancel_queue(tmp_path, change):
     await runtime.repo.db.tasks.update_one({"id": "task"}, {"$set": change})
     assert await next_manual_command(runtime.repo, runtime) is None
     assert (await runtime.repo.db.commands.find_one({"id": "command"}))["status"] == "QUEUED"
+
+
+async def test_deleted_task_does_not_dispatch_queued_manual_command(tmp_path):
+    """发送前复核删除标记，队列中已有命令也不能越过删除收尾窗口。"""
+    runtime, _ = await runtime_and_command(tmp_path)
+    await runtime.repo.db.tasks.update_one({"id": "task"}, {"$set": {"deletedAt": "deleted"}})
+    assert await next_manual_command(runtime.repo, runtime) is None
 
 
 async def test_successor_insert_during_cleanup_is_preserved(tmp_path, monkeypatch):

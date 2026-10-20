@@ -43,6 +43,7 @@ def _response(document):
     result = document.copy()
     if result.get("creationOperationId"):
         result["operationId"] = result["creationOperationId"]
+        result["creationOperationStatus"] = "PENDING"
     return result
 
 

@@ -191,6 +191,7 @@ export interface Task {
   sourceTemplateId?: string | null;
   sourceTemplateVersion?: number | null;
   resourceId: string;
+  deletedAt?: string | null;
   resourceDeleted?: boolean;
   resourceDeletedAt?: string;
   serialServerResourceId?: string | null;

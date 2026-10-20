@@ -21,11 +21,15 @@ async def request_blocked_restart(repo, task_id, user):
 
     async def commit(session):
         task = await repo.db.tasks.find_one_and_update(
-            {"id": task_id}, {"$inc": {"controlClaimVersion": 1}},
+            {"id": task_id, "deletedAt": None, "resourceDeleted": {"$ne": True}},
+            {"$inc": {"controlClaimVersion": 1}},
             return_document=ReturnDocument.AFTER, session=session,
         )
         if task is None:
-            raise HTTPException(404, "任务不存在")
+            existing = await repo.db.tasks.find_one({"id": task_id}, session=session)
+            if existing is None:
+                raise HTTPException(404, "任务不存在")
+            raise HTTPException(409, "任务已删除，仅可查询已有日志")
         authorize_owner(user, task)
         accepted = await accepted_restart(repo, task, session)
         if accepted:
@@ -55,17 +59,19 @@ async def request_blocked_restart(repo, task_id, user):
         timestamp = now()
         operation = {"id": identifier, "taskId": task_id, "desiredState": "RUNNING", "action": "restart-blocked",
                      "actor": user["id"], "status": "PENDING", "createdAt": timestamp}
+        changed = await repo.db.tasks.update_one(
+            {"id": task_id, "status": "BLOCKED", "nodeId": task.get("nodeId"), "runId": task.get("runId"),
+             "generation": task.get("generation"), "deletedAt": None, "resourceDeleted": {"$ne": True}},
+            {"$set": {"desiredState": "STOPPED", "restartRequested": True,
+                      "controlOperationId": identifier, "updatedAt": timestamp}}, session=session,
+        )
+        if not changed.matched_count:
+            raise HTTPException(409, "任务已删除或运行归属已变化，请重新查询")
         await repo.db.operations.update_many(
             {"taskId": task_id, "desiredState": "RUNNING", "status": "PENDING"},
             {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session,
         )
         await repo.db.operations.insert_one(operation, session=session)
-        await repo.db.tasks.update_one(
-            {"id": task_id, "status": "BLOCKED", "nodeId": task.get("nodeId"), "runId": task.get("runId"),
-             "generation": task.get("generation")},
-            {"$set": {"desiredState": "STOPPED", "restartRequested": True,
-                      "controlOperationId": identifier, "updatedAt": timestamp}}, session=session,
-        )
         await repo.audit(user["id"], "restart_blocked", task_id, session=session)
         return operation
 

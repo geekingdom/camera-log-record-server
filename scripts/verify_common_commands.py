@@ -7,6 +7,8 @@ import asyncio
 import json
 from uuid import uuid4
 
+from camera_logs.commands.batch import apply_common_command_batch
+from camera_logs.commands.models import CommonCommandBatchRequest
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
@@ -116,6 +118,30 @@ async def verify(database_name: str, mongo_uri: str) -> dict:
         check(await database.audit.count_documents({"action": "update_common_command", "targetId": first["id"]}) == 1,
               "并发版本编辑产生了错误数量的更新审计")
 
+        batch_body = CommonCommandBatchRequest(action="DISABLE", items=[
+            {"id": first["id"], "version": 2},
+        ])
+        batch = await apply_common_command_batch(repository, "verify-admin", "common-command-batch", batch_body)
+        replay = await apply_common_command_batch(repository, "verify-admin", "common-command-batch", batch_body)
+        check(batch == replay == {"action": "DISABLE", "affected": 1}, "批量幂等重放结果不稳定")
+        check((await database.common_commands.find_one({"id": first["id"]}))["version"] == 3,
+              "批量状态修改没有推进版本")
+        rollback_target = {"id": "batch-rollback-target", "command": "show rollback", "description": "批量回滚验证",
+                           "enabled": True, "version": 1, "createdAt": now(), "updatedAt": now()}
+        await database.common_commands.insert_one(rollback_target)
+        try:
+            await apply_common_command_batch(repository, "verify-admin", "common-command-stale", CommonCommandBatchRequest(
+                action="DISABLE", items=[{"id": first["id"], "version": 2}, {"id": rollback_target["id"], "version": 1}],
+            ))
+        except HTTPException as error:
+            check(error.status_code == 409, "批量旧版本没有返回409")
+        else:
+            raise AssertionError("批量旧版本请求意外成功")
+        untouched = await database.common_commands.find_one({"id": rollback_target["id"]})
+        check(untouched["enabled"] is True and untouched["version"] == 1, "批量CAS冲突发生了部分写入")
+        check(await database.audit.count_documents({"action": "batch_disable_common_commands"}) == 1,
+              "失败批量不应写入审计或重放成功映射")
+
         fixtures = [{"id": f"fixture-{number:04d}", "command": f"show item {number:04d}",
                      "description": "Explain夹具", "enabled": number < 1000, "version": 1,
                      "createdAt": now(), "updatedAt": now()} for number in range(1200)]
@@ -125,9 +151,12 @@ async def verify(database_name: str, mongo_uri: str) -> dict:
             "idempotentCreate": True,
             "transactionalAudit": True,
             "concurrentVersionCas": True,
+            "batchIdempotentCas": True,
+            "batchAtomicRollback": True,
             "plans": {
                 "userEnabledDefault": await explain_default_list(database, {"enabled": True}, "common_commands_enabled_command"),
                 "adminDefault": await explain_default_list(database, {}, "common_commands_command"),
+                "adminDisabled": await explain_default_list(database, {"enabled": False}, "common_commands_enabled_command"),
             },
         }
     finally:

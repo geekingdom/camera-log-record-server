@@ -72,6 +72,8 @@ class _Segment:
     hour: datetime
     size: int
     digest: str
+    index_size: int
+    index_digest: str
     first: int | None
     last: int | None
 
@@ -97,6 +99,8 @@ class HourlyWriter:
         self._index_handle = None
         self._size, self._sequence, self._durable_size = 0, 0, 0
         self._digest = hashlib.sha256()
+        self._index_digest = hashlib.sha256()
+        self._index_size = 0
         self._first_sequence = self._last_sequence = None
         self._last_received_at: datetime | None = None
         self._pending: list[_Segment] = []
@@ -177,7 +181,7 @@ class HourlyWriter:
                 log.unlink(missing_ok=True)
                 raise
             try:
-                index_handle = index.open("a", encoding="utf-8")
+                index_handle = index.open("a", encoding="utf-8", newline="")
             except BaseException:
                 handle.close()
                 log.unlink(missing_ok=True)
@@ -187,6 +191,8 @@ class HourlyWriter:
             break
         self._size = self._durable_size = 0
         self._digest = hashlib.sha256()
+        self._index_digest = hashlib.sha256()
+        self._index_size = 0
         self._first_sequence = self._last_sequence = None
         self._last_sync = time.monotonic()
 
@@ -304,7 +310,10 @@ class HourlyWriter:
         assert self._index_handle is not None
         started = time.monotonic()
         try:
-            self._index_handle.write("".join(rows))
+            index_text = "".join(rows)
+            index_payload = index_text.encode("utf-8")
+            if self._index_handle.write(index_text) != len(index_text):
+                raise OSError("index file did not accept a complete write")
             self._index_handle.flush()
         finally:
             record_stage("indexAppendMs", (time.monotonic() - started) * 1000)
@@ -312,6 +321,8 @@ class HourlyWriter:
         self._sequence = self._last_sequence = positions[-1].sequence
         self._first_sequence = self._first_sequence or positions[0].sequence
         self._digest.update(payload)
+        self._index_digest.update(index_payload)
+        self._index_size += len(index_payload)
         self._last_received_at = chunks[-1][2]
         if time.monotonic() - self._last_sync >= 1:
             self._sync_files()
@@ -332,11 +343,16 @@ class HourlyWriter:
         assert self._index_handle is not None
         started = time.monotonic()
         try:
-            self._index_handle.write(json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
-                "receivedAt": instant.astimezone(self.zone).isoformat()}, separators=(",", ":")) + "\n")
+            index_text = json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
+                "receivedAt": instant.astimezone(self.zone).isoformat()}, separators=(",", ":")) + "\n"
+            index_payload = index_text.encode("utf-8")
+            if self._index_handle.write(index_text) != len(index_text):
+                raise OSError("index file did not accept a complete write")
             self._index_handle.flush()
         finally:
             record_stage("indexAppendMs", (time.monotonic() - started) * 1000)
+        self._index_digest.update(index_payload)
+        self._index_size += len(index_payload)
 
     def _sync_files(self) -> None:
         if self._handle is None or self._index_handle is None:
@@ -398,23 +414,23 @@ class HourlyWriter:
             raise
         self._handle = self._index_handle = self._log = self._index = self._hour = None
         if self._size:
-            self._pending.append(_Segment(log, index, hour, self._size, self._digest.hexdigest(),
+            self._pending.append(_Segment(log, index, hour, self._size, self._digest.hexdigest(), self._index_size,
+                self._index_digest.hexdigest(),
                 self._first_sequence, self._last_sequence))
         else:
             await asyncio.to_thread(log.unlink, missing_ok=True)
             await asyncio.to_thread(index.unlink, missing_ok=True)
 
     def _segment_manifest(self, segment: _Segment) -> dict:
-        with segment.index.open("rb") as source:
-            index_hash = hashlib.file_digest(source, "sha256").hexdigest()
+        """复用成功追加并封存的索引摘要，避免整点再次读取完整索引。"""
         return {"taskId": self.task_id, "runId": self.run_id, "sessionId": self.session_id,
             "hourStart": segment.hour.astimezone(UTC).isoformat(), "rawSize": segment.size, "sha256": segment.digest,
             "firstSequence": segment.first, "lastSequence": segment.last, "logPath": str(segment.log),
-            "logName": segment.log.name, "indexName": segment.index.name, "indexSha256": index_hash,
-            "indexBytes": segment.index.stat().st_size}
+            "logName": segment.log.name, "indexName": segment.index.name, "indexSha256": segment.index_digest,
+            "indexBytes": segment.index_size}
 
     def _prepare_archive(self, segments: list[_Segment]) -> tuple[Path, list[dict]]:
-        """在线程中扫描已有小时包并读取索引摘要，保持调用方传入的分卷顺序。"""
+        """在线程中扫描已有小时包并组装已封存摘要，保持调用方传入的分卷顺序。"""
         target = self._target(segments[0].hour, self._base(segments[0].hour))
         return target, [self._segment_manifest(segment) for segment in segments]
 

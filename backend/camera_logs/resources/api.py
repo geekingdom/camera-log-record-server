@@ -5,6 +5,7 @@ from datetime import UTC, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi import Path as ApiPath
 from pydantic import IPvAnyAddress
 from pymongo import ReturnDocument
 
@@ -55,7 +56,8 @@ async def _resource_view(repo, document, user: dict | None = None, task_limit: i
     """返回有界任务列表，以及用于展示采集和删除风险的两类独立摘要。"""
     item = _resource_public(document)
     item["hasCoredumps"] = await _resource_has_coredumps(repo, item["id"]) if has_coredumps is None else has_coredumps
-    task_query = task_resource_query(item["id"])
+    # 资源详情与列表统计统一排除软删除任务；历史任务由 tasks?includeDeleted=true 显式读取。
+    task_query = {"$and": [task_resource_query(item["id"]), {"deletedAt": None}]}
     if not summary_present:
         item["taskCount"] = await repo().db.tasks.count_documents(task_query)
         item["activeTaskCount"] = await repo().db.tasks.count_documents({"$and": [task_query, {
@@ -127,15 +129,15 @@ def install_resource_routes(app, repo, listing):
     install_batch_creation_route(app, repo)
 
     @app.get("/api/v1/resources")
-    async def resources(user: User, page: int = Query(1, ge=1), pageSize: int = Query(20, ge=1, le=100),
-                        kind: str | None = None, search: str | None = Query(None, max_length=256),
-                        createdBy: str | None = Query(None, max_length=128),
-                        includeDeleted: bool = False, taskLimit: int = Query(100, ge=1, le=500),
-                        name: str | None = Query(None, max_length=128), ip: IPvAnyAddress | None = None,
-                        model: str | None = Query(None, max_length=256),
-                        subSerialNumber: str | None = Query(None, max_length=256),
-                        softwareVersion: str | None = Query(None, max_length=256), hasCoredumps: bool | None = None,
-                        sortBy: str | None = Query(None, max_length=32), sortOrder: str | None = Query(None, max_length=4)):
+    async def resources(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
+                        kind: Annotated[str | None, Query(description='按设备类型精确筛选：HIKVISION_NETWORK（海康网络设备）或 SERIAL_SERVER（串口服务器）。')] = None, search: str | None = Query(None, max_length=256, description='按资源名称、地址、型号、序列号或软件版本进行综合检索。'),
+                        createdBy: str | None = Query(None, max_length=128, description='按资源、任务或模板的创建用户标识筛选。'),
+                        includeDeleted: Annotated[bool, Query(description='是否包含已软删除的设备资源；默认 false，true 同时包含正常和已删除资源。')] = False, taskLimit: int = Query(100, ge=1, le=500, description='资源列表中每个资源内嵌任务摘要的最大返回数量。'),
+                        name: str | None = Query(None, max_length=128, description='按资源名称或 Coredump 文件名的字面子串筛选。'), ip: Annotated[IPvAnyAddress | None, Query(description='按设备资源或节点的精确网络地址筛选。')] = None,
+                        model: str | None = Query(None, max_length=256, description='按海康设备型号的字面子串筛选资源。'),
+                        subSerialNumber: str | None = Query(None, max_length=256, description='按设备短序列号的字面子串筛选资源。'),
+                        softwareVersion: str | None = Query(None, max_length=256, description='按设备软件版本的字面子串筛选资源。'), hasCoredumps: Annotated[bool | None, Query(description='是否存在已登记且未确认缺失的 Coredump 源文件或有效冻结副本；true存在，false不存在，省略不过滤，附属标志文件不计入。')] = None,
+                        sortBy: str | None = Query(None, max_length=32, description='列表排序字段，须与sortOrder同时指定；在全部筛选结果排序后分页，相同值以稳定ID排序。省略恢复创建时间倒序。'), sortOrder: str | None = Query(None, max_length=4, description='排序方向：asc升序或desc降序；与sortBy同时指定。')):
         """资源发现：search跨名称/IP/型号/序列号/软件版本搜索；独立字段取交集，IP精确匹配。
 
         返回授权范围内任务摘要，默认最多100条；tasksTruncated为true时使用tasksUrl分页读取。
@@ -168,16 +170,16 @@ def install_resource_routes(app, repo, listing):
         return result
 
     @app.get("/api/v1/resources/{identifier}")
-    async def get_resource(identifier: str, user: User, taskLimit: int = Query(100, ge=1, le=500)):
+    async def get_resource(identifier: Annotated[str, ApiPath(description='路径中指定要读取详情的设备资源标识。')], user: User, taskLimit: int = Query(100, ge=1, le=500, description='资源列表中每个资源内嵌任务摘要的最大返回数量。')):
         """所有有效用户共享资源详情，写权限单独按创建者判断。"""
         authorize(user, "tasks:read")
         return await _resource_view(repo, await repo().get("resources", identifier), user, taskLimit)
 
     @app.get("/api/v1/resources/{identifier}/authentication-records")
-    async def authentication_records(identifier: str, user: User, page: int = Query(1, ge=1),
-                                     pageSize: int = Query(20, ge=1, le=100), result: str | None = None,
-                                     start: str | None = None, end: str | None = None,
-                                     identityChanged: bool | None = None, cursor: str | None = Query(None, max_length=1024)):
+    async def authentication_records(identifier: Annotated[str, ApiPath(description='路径中指定要读取认证历史的设备资源标识。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'),
+                                     pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'), result: Annotated[str | None, Query(description='按海康设备认证结果筛选认证历史。')] = None,
+                                     start: Annotated[str | None, Query(description='查询范围开始时间，ISO 8601（不带时区按北京时间解释，也兼容显式时区） 且包含该时刻。')] = None, end: Annotated[str | None, Query(description='查询范围结束时间，ISO 8601（不带时区按北京时间解释，也兼容显式时区） 且不包含该时刻。')] = None,
+                                     identityChanged: Annotated[bool | None, Query(description='仅返回身份信息是否发生变化的认证记录。')] = None, cursor: str | None = Query(None, max_length=1024, description='上页返回的稳定分页游标；管理事件传空字符串开启首屏游标查询，续页使用nextCursor并保持原筛选条件。不能与大于1的page同用。')):
         """分页读取认证历史；游标路径避免长期记录翻深页时扫描并丢弃前页结果。"""
         authorize(user, "tasks:read")
         await repo().get("resources", identifier)
@@ -239,7 +241,7 @@ def install_resource_routes(app, repo, listing):
                 "nextCursor": encode_cursor(records[-1]) if len(records) == pageSize else None}
 
     @app.get("/api/v1/resources/{identifier}/coredump-monitor", response_model=CoredumpMonitorStatus)
-    async def coredump_monitor_status(identifier: str, user: User):
+    async def coredump_monitor_status(identifier: Annotated[str, ApiPath(description='路径中指定要查询 Coredump 监控归属的设备资源标识。')], user: User):
         """返回当前有效的资源级 Coredump owner，不把任务配置变成永久资源占用。"""
         authorize(user, "tasks:read")
         resource = await repo().get("resources", identifier)
@@ -310,8 +312,8 @@ def install_resource_routes(app, repo, listing):
                                       body.model_dump(), "resources", prepare, before_insert=reserve)
         return await _resource_view(repo, result, user)
 
-    @app.post("/api/v1/resources/{identifier}/authenticate")
-    async def authenticate_existing_resource(identifier: str, user: User, body: ResourceInput | None = None):
+    @app.post("/api/v1/resources/{identifier}/authenticate", description='空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；ISAPI异常不停止仍有日志输出的SSH或Telnet设备任务，Worker确认连接断开或持续无输出后才系统停止；Telnet串口不受认证状态影响。未领取的网络任务仍要求认证成功。但不推进周期认证失败计数。该操作要求 resources:write、tasks:control 及资源所有权；非管理员不能影响其他用户关联的任务。携带完整 ResourceInput 时仅用于编辑器凭据预览，不改变保存资源的健康状态或任务，因此不要求 tasks:control。')
+    async def authenticate_existing_resource(identifier: Annotated[str, ApiPath(description='路径中指定要使用已保存凭据认证的设备资源标识。')], user: User, body: ResourceInput | None = None):
         """认证已有资源；空请求体只使用服务端已保存的密文凭据。"""
         authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
@@ -361,8 +363,8 @@ def install_resource_routes(app, repo, listing):
             await record_manual_authentication(old, user, result="SUCCESS", before=old, after=old | metadata)
         return metadata
 
-    @app.post("/api/v1/resources/{identifier}/credential")
-    async def reveal_resource_credential(identifier: str, user: User, response: Response):
+    @app.post("/api/v1/resources/{identifier}/credential", description='读取资源登录凭据供任务创建表单使用。仅具有resources:write权限的资源所有者或管理员可调用；禁止缓存并记录查看审计。普通资源查询不返回密码；其他有任务创建权限的用户可在服务端复用凭据，无需获得明文。')
+    async def reveal_resource_credential(identifier: Annotated[str, ApiPath(description='路径中指定要读取登录凭据的海康网络设备资源标识。')], user: User, response: Response):
         """按资源所有权一次性返回连接凭据，普通资源读取接口始终保持脱敏。"""
         authorize(user, "resources:write")
         resource = await repo().get("resources", identifier)
@@ -376,7 +378,7 @@ def install_resource_routes(app, repo, listing):
         return {"username": resource["username"], "password": repo().decrypt(resource.get("passwordEncrypted", ""))}
 
     @app.patch("/api/v1/resources/{identifier}")
-    async def edit_resource(identifier: str, body: ResourcePatch, user: User):
+    async def edit_resource(identifier: Annotated[str, ApiPath(description='路径中指定要按版本更新的设备资源标识。')], body: ResourcePatch, user: User):
         """以版本条件更新名称、HTTP 凭据和认证身份，资源 IP 与类型不可修改。"""
         authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
@@ -436,7 +438,7 @@ def install_resource_routes(app, repo, listing):
         return await _resource_view(repo, changed, user)
 
     @app.delete("/api/v1/resources/{identifier}", status_code=202)
-    async def delete_resource(identifier: str, user: User, version: int = Query(ge=1)):
+    async def delete_resource(identifier: Annotated[str, ApiPath(description='路径中指定要软删除并回收关联任务的设备资源标识。')], user: User, version: int = Query(ge=1, description='删除或更新对象时必须提供的当前版本号。')):
         """软删除资源并请求所有关联任务受控停止，保留任务、文件和历史目录。"""
         authorize(user, "resources:write")
         authorize(user, "tasks:control")
@@ -448,7 +450,7 @@ def install_resource_routes(app, repo, listing):
         deleted_at = now()
 
         async def commit(session):
-            """先提交删除意图及审计，停止任务的可重试扫尾不能扩大事务时长。"""
+            """资源、关联任务和审计必须同一事务可见；连接收尾仍交给持有节点。"""
             if not user.get("isAdmin") and "*" not in user["scopes"]:
                 foreign = {"$and": [task_resource_query(identifier), {"createdBy": {"$ne": user["id"]}}]}
                 if await repo().db.tasks.find_one(foreign, session=session):
@@ -462,6 +464,22 @@ def install_resource_routes(app, repo, listing):
             if not changed:
                 raise HTTPException(409, "资源版本已变化，请刷新")
             await release_address(repo(), changed, session)
+            linked = {task["id"] async for task in repo().db.tasks.find(
+                {"$and": [task_resource_query(identifier), {"deletedAt": None}]},
+                {"id": 1}, session=session,
+            )}
+            if linked:
+                await repo().db.tasks.update_many(
+                    {"id": {"$in": list(linked)}, "deletedAt": None},
+                    {"$set": {
+                        "deletedAt": deleted_at, "deletionState": "PENDING", "desiredState": "STOPPED",
+                        "restartRequested": False, "resourceDeleted": True, "updatedAt": deleted_at,
+                    }}, session=session,
+                )
+                await repo().db.operations.update_many(
+                    {"taskId": {"$in": list(linked)}, "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
+                    {"$set": {"status": "CANCELLED", "completedAt": deleted_at}}, session=session,
+                )
             return changed
 
         changed = await audited_mutation(repo(), user["id"], "delete_resource", identifier, commit)

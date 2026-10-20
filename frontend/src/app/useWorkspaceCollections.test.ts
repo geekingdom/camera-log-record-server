@@ -19,6 +19,25 @@ function template(id: string): Template {
 const page = <T>(items: T[]): Page<T> => ({ items, total: items.length, page: 1, pageSize: 20 });
 
 describe("useWorkspaceCollections", () => {
+  it("删除筛选进入请求且切换时拒绝旧响应", async () => {
+    const pending = deferred<Page<Task>>();
+    const filters: Array<Record<string, string | undefined>> = [];
+    const subject = useWorkspaceCollections({
+      user: ref({ id: "owner", isAdmin: true }), sessionGeneration: ref(1), can: () => true,
+      api: { tasks: (_page, _size, query) => { filters.push(query ?? {}); return pending.promise; },
+        templates: async () => page([]), nodes: async () => page([]) }, onError: () => {},
+    });
+    const oldRequest = subject.loadTasks();
+    subject.taskIncludeDeleted.value = true;
+    pending.resolve(page([task("old")]));
+    await oldRequest;
+    expect(subject.tasks.value).toEqual([]);
+    await subject.loadTasks();
+    expect(filters[0].includeDeleted).toBeUndefined();
+    expect(filters[1].includeDeleted).toBe("true");
+    subject.clear();
+    expect(subject.taskIncludeDeleted.value).toBe(false);
+  });
   it("忽略旧筛选的任务迟到响应", async () => {
     const user = ref({ id: "user-a", isAdmin: false });
     const sessionGeneration = ref(1);

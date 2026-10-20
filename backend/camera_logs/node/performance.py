@@ -23,12 +23,12 @@ class PerformancePolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: str = Field("AUTO", pattern="^(AUTO|MANUAL)$")
-    bufferMiB: Annotated[int, Field(strict=True, ge=16, le=4096)] = 64
-    writeConcurrency: Annotated[int, Field(strict=True, ge=1, le=32)] = 4
-    batchKiB: Annotated[int, Field(strict=True, ge=16, le=1024)] = 256
-    flushIntervalMs: Annotated[int, Field(strict=True, ge=10, le=200)] = 100
-    readMiBPerSecond: Annotated[int, Field(strict=True, ge=1, le=200)] = 50
+    mode: str = Field("AUTO", pattern="^(AUTO|MANUAL)$", description='节点性能策略模式；AUTO 在资源预算上限内自适应，MANUAL 使用明确参数。')
+    bufferMiB: Annotated[int, Field(strict=True, ge=16, le=4096)] = Field(default=64, description='节点日志写入缓冲预算，单位MiB，整数16至4096，默认64。')
+    writeConcurrency: Annotated[int, Field(strict=True, ge=1, le=32)] = Field(default=4, description='节点允许并发执行的写入工作数，整数1至32，默认4。')
+    batchKiB: Annotated[int, Field(strict=True, ge=16, le=1024)] = Field(default=256, description='节点单次写入批量预算，单位KiB，整数16至1024，默认256。')
+    flushIntervalMs: Annotated[int, Field(strict=True, ge=10, le=200)] = Field(default=100, description='节点写入批次最长等待，单位毫秒，整数10至200，默认100。')
+    readMiBPerSecond: Annotated[int, Field(strict=True, ge=1, le=200)] = Field(default=50, description='节点后台逻辑读取预算，单位MiB/s，整数1至200，默认50；不代表采集输入上限或全盘物理带宽。')
 
 
 class PerformanceController:

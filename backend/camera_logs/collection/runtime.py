@@ -41,6 +41,7 @@ from camera_logs.collection.ssh_admission import SshCapacityError, SshSlotUncert
 from camera_logs.commands.manual_claim import ManualClaimUncertain, claim_manual
 from camera_logs.commands.reservation import ReservationUncertain, reserve_scheduled
 from camera_logs.common.database import now
+from camera_logs.common.log_frames import DataFrame
 from camera_logs.common.ownership import OwnershipLost, owner_filter
 from camera_logs.common.resource_monitoring import supports_resource_monitoring
 from camera_logs.logs.catalog_identity import file_identity
@@ -128,10 +129,11 @@ class SessionRuntime:
                 "sessionStartedAt": self.started_at, "firstSequence": chunk.sequence, "status": "OPEN"}
         self.input_bytes += len(chunk.data)
         self.frame_number += 1
-        frame = {"type": "data", "fileId": file_id, "sessionId": chunk.session_id,
-                 "runId": chunk.run_id, "offset": chunk.offset, "endOffset": end_offset,
-                 "cursor": f'{self.task["runId"]}:{self.frame_number}',
-                 "data": base64.b64encode(chunk.data).decode(), "size": len(chunk.data)}
+        frame = DataFrame(
+            type="data", fileId=file_id, sessionId=chunk.session_id, runId=chunk.run_id,
+            offset=chunk.offset, endOffset=end_offset, cursor=f'{self.task["runId"]}:{self.frame_number}',
+            data=base64.b64encode(chunk.data).decode(), size=len(chunk.data),
+        ).model_dump(mode="json")
         self.frames.append(frame)
         self.frame_bytes += len(chunk.data)
         while self.frame_bytes > 8*1024*1024 and self.frames:
@@ -340,7 +342,8 @@ class SessionRuntime:
                     or collector.session_id != claimed["sessionId"]):
                 raise OwnershipLost("手动命令发送前会话已失属")
             current = await self.repo.db.tasks.find_one({**owner_filter(self.task), "sessionId": collector.session_id,
-                "status": "COLLECTING", "desiredState": "RUNNING", "resourceDeleted": {"$ne": True}})
+                "status": "COLLECTING", "desiredState": "RUNNING", "deletedAt": None,
+                "resourceDeleted": {"$ne": True}})
             # 查询 await 期间本地运行可能已停止或 collector 已被替换，返回后必须再核对。
             if (current is None or self.stopping or getattr(self, "retired", False)
                     or self.collector is not collector or collector.session_id != claimed["sessionId"]):

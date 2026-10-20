@@ -69,7 +69,7 @@ async def _resume_requested_after_probe(repo, snapshot, resource, session):
             or _not_after(next_check_at, started_at):
         return False
     async for task in repo.db.tasks.find(
-            {"resourceId": snapshot["id"], "status": "WAITING_DEVICE", "desiredState": "RUNNING"},
+            {"resourceId": snapshot["id"], "status": "WAITING_DEVICE", "desiredState": "RUNNING", "deletedAt": None},
             session=session):
         requested_at = (task.get("resumeWaiting") or {}).get("requestedAt")
         if requested_at and _not_after(started_at, requested_at):
@@ -138,6 +138,7 @@ async def _apply_failure_commit(repo, snapshot, status, *, source, advance_failu
     await record_authentication(repo, changed, source=source, result=status, before=snapshot,
                                 after=changed, message=status, completed_at=timestamp, session=session)
     query = task_resource_query(snapshot["id"])
+    query["deletedAt"] = None
     async for task in repo.db.tasks.find(query, session=session):
         # 串口 Telnet 不使用设备 HTTP 身份或健康状态，既不应生成新恢复标记，
         # 也不得改写遗留等待状态或用户暂停上下文。
@@ -195,7 +196,7 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
                                 after=changed, completed_at=timestamp, session=session)
     if storage_identity(snapshot) != storage_identity(changed):
         identity = storage_identity(changed)
-        async for task in repo.db.tasks.find(task_resource_query(snapshot["id"]), session=session):
+        async for task in repo.db.tasks.find({"$and": [task_resource_query(snapshot["id"]), {"deletedAt": None}]}, session=session):
             await _transition_identity_task(repo, task, snapshot["id"], identity, timestamp, session)
     # 旧版本可能只有任务AUTH_FAILED标记、资源已变ERROR；成功认证仍须授权其恢复。
     await _authorize_health_recoveries(repo, snapshot["id"], timestamp, session)
@@ -203,14 +204,14 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
         # 认证从失败恢复时，只唤醒仍由同一节点持有且正在重连的 SSH 会话。
         # 标记由运行实例按 owner CAS 消费，停止、暂停和后继运行均不会被旧认证改写。
         await repo.db.tasks.update_many({
-            "resourceId": snapshot["id"], "protocol": "SSH", "desiredState": "RUNNING",
+            "resourceId": snapshot["id"], "protocol": "SSH", "desiredState": "RUNNING", "deletedAt": None,
             "status": {"$in": ["CONNECTING", "RECONNECTING"]}, "nodeId": {"$ne": None},
         }, {"$set": {"reconnectWake": {"resourceId": snapshot["id"], "requestedAt": timestamp}}}, session=session)
     if authorize_user_recovery:
         await grant_after_user_authentication(repo, changed, session)
     # 显式 resume 的设备探测成功，只把同一暂停运行恢复至 PAUSED，领取层再沿用 runId。
     async for task in repo.db.tasks.find({"resourceId": snapshot["id"], "status": "WAITING_DEVICE",
-                                          "desiredState": "RUNNING"}, session=session):
+                                          "desiredState": "RUNNING", "deletedAt": None}, session=session):
         if task.get("protocol") == "TELNET_SERIAL":
             continue
         waiting = task.get("resumeWaiting")

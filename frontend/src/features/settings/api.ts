@@ -63,6 +63,10 @@ export interface CommonCommand {
   updatedAt: string;
 }
 
+export interface CommonCommandBatchItem { id: string; version: number; }
+export type CommonCommandBatchAction = "ENABLE" | "DISABLE" | "DELETE";
+export interface CommonCommandBatchResult { action: CommonCommandBatchAction; affected: number; }
+
 /** 节点采集性能策略；AUTO 的数值是节点自动调节时可使用的资源上限。 */
 export interface PerformancePolicy {
   mode: "AUTO" | "MANUAL";
@@ -146,7 +150,12 @@ export const settingsApi = {
       body: JSON.stringify(body),
     }),
   commonCommands: (page = 1, pageSize = 100) => request<{ items: CommonCommand[]; total: number; page: number; pageSize: number }>(`/common-commands?page=${page}&pageSize=${pageSize}`),
-  adminCommonCommands: (page = 1, pageSize = 100) => request<{ items: CommonCommand[]; total: number; page: number; pageSize: number }>(`/admin/common-commands?page=${page}&pageSize=${pageSize}`),
+  adminCommonCommands: (page = 1, pageSize = 20, filters: { query?: string; enabled?: boolean } = {}) => {
+    const query = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    if (filters.query?.trim()) query.set("query", filters.query.trim());
+    if (filters.enabled !== undefined) query.set("enabled", String(filters.enabled));
+    return request<{ items: CommonCommand[]; total: number; page: number; pageSize: number }>(`/admin/common-commands?${query}`);
+  },
   createCommonCommand: (body: Pick<CommonCommand, "command" | "description" | "enabled">) =>
     request<CommonCommand>("/admin/common-commands", {
       method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: JSON.stringify(body),
@@ -157,4 +166,8 @@ export const settingsApi = {
     }),
   deleteCommonCommand: (id: string, version: number) =>
     request<void>(`/admin/common-commands/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
+  batchCommonCommands: (action: CommonCommandBatchAction, items: CommonCommandBatchItem[], key = idempotencyKey()) =>
+    request<CommonCommandBatchResult>("/admin/common-commands/batch", {
+      method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ action, items }),
+    }),
 };

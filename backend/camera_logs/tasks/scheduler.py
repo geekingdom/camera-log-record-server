@@ -24,7 +24,7 @@ from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.resource_routing import routing_config
 from camera_logs.node.write_pressure import write_latency_limit
 from camera_logs.resources.health import reconcile_authorized_recoveries
-from camera_logs.resources.lifecycle import reconcile_deleted_resources
+from camera_logs.resources.lifecycle import reconcile_deleted_resources, reconcile_deleted_tasks
 from camera_logs.tasks.claim import SchedulerLeaseLost, claim_task, requires_coredump_nfs
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ async def schedule_once(repo, lease=None):
     db = repo.db
     await consume_confirmed_failovers(repo)
     await reconcile_deleted_resources(repo)
+    await reconcile_deleted_tasks(repo)
     await reconcile_authorized_recoveries(repo)
     cutoff = now() - timedelta(seconds=30)
     stale_nodes = [node async for node in db.nodes.find({"heartbeat": {"$lt": cutoff}})]
@@ -87,7 +88,7 @@ async def schedule_once(repo, lease=None):
     if active >= cluster_capacity:
         return
     node_configs = {item["id"]: item async for item in db.node_configs.find({})}
-    async for task in db.tasks.find({"desiredState": "RUNNING", "nodeId": None,
+    async for task in db.tasks.find({"desiredState": "RUNNING", "nodeId": None, "deletedAt": None,
                                     "resourceDeleted": {"$ne": True},
                                     "status": {"$in": ["STOPPED", "PENDING", "PAUSED"]}}).limit(500):
         nodes = [n async for n in db.nodes.find({"heartbeat": {"$gte": now()-timedelta(seconds=15)},

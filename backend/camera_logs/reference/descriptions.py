@@ -1,256 +1,55 @@
-"""维护开放接口目录的中文字段语义，并在生成目录时校验完整性。
+"""检查接口声明中的中文说明；文档不再按字段名拼接独立业务释义。"""
 
-Pydantic 的 ``Field`` 约束负责接口校验；这里集中维护面向调用方的业务说明，
-避免把前端展示文案分散到页面字典中。新公开字段若未登记会在目录生成时失败，
-从而强制同时补齐文档语义与测试，而不是回退为泛化提示。
-"""
-
+import re
 from copy import deepcopy
 from typing import Any
 
-FIELD_DESCRIPTIONS = {
-    "accepting": "节点是否接受调度器分配新的采集任务。",
-    "active": "资源当前是否存在有效的 Coredump 监控负责人。",
-    "allowPartial": "小时归档存在缺失片段时，是否仍允许生成部分下载包。",
-    "authType": "访问海康 ISAPI 设备信息接口时使用的 HTTP 认证方式。",
-    "autoStart": "创建采集任务后是否立即提交启动操作。",
-    "useResourceCredentials": "SSH或Telnet设备任务是否在服务端复制所属海康资源的登录凭据；省略且用户名密码均未填写时默认启用。任务保存独立凭据副本。",
-    "capacity": "该 Worker 节点允许同时承载的采集任务数量。",
-    "mode": "节点性能策略模式；AUTO 在资源预算上限内自适应，MANUAL 使用明确参数。",
-    "bufferMiB": "节点日志写入缓冲预算，单位MiB，整数16至4096，默认64。",
-    "writeConcurrency": "节点允许并发执行的写入工作数，整数1至32，默认4。",
-    "batchKiB": "节点单次写入批量预算，单位KiB，整数16至1024，默认256。",
-    "flushIntervalMs": "节点写入批次最长等待，单位毫秒，整数10至200，默认100。",
-    "readMiBPerSecond": "节点后台逻辑读取预算，单位MiB/s，整数1至200，默认50；不代表采集输入上限或全盘物理带宽。",
-    "performance": "节点采集性能策略，PATCH 传入时完整替换，省略时保留已有策略。",
-    "writeLatencyLimitMs": "该节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动中断已有采集。",
-    "clearPassword": "编辑任务时是否明确清除已保存的设备登录密码。",
-    "clusterCapacity": "平台允许同时运行的全部采集任务总上限。",
-    "liveLogBufferMiB": "实时日志页面在浏览器内存中保留的最大数据量，单位MiB，整数1至100，默认10。",
-    "command": "发送给设备的一条单行命令正文，或管理员维护的全局快捷命令正文。",
-    "confirmIsolation": "是否确认旧运行实例已完成外部隔离，仅管理员可设为 true。",
-    "confirmation": "执行节点隔离确认时必须填写的固定确认词。",
-    "ctx": "校验失败的补充上下文，仅在错误响应中出现。",
-    "currentPassword": "当前登录账户的原密码，用于验证本人改密请求。",
-    "delaySeconds": "命令写入连接后额外等待的秒数。",
-    "description": "资源、任务、命令模板或常用命令的补充业务说明。",
-    "detail": "错误响应中的具体错误详情或详情列表。",
-    "displayName": "平台账户在界面和审计记录中显示的名称。",
-    "enableCoredumpMonitor": "海康设备资源是否启用 Coredump NFS 监控；仅有正在采集的 SSH 或 Telnet 设备任务时执行。",
-    "enableResourceMonitor": "海康设备资源是否启用每分钟 CPU 与内存采样；复用正在采集的设备连接。",
-    "resourceMonitor": "管理员维护的设备 CPU 与内存采样配置，保存后下一轮采样生效。",
-    "recordRetention": "审计、运行事件及已结束运行明细的保留天数；0禁用对应维护，活动及不确定引用继续保护。",
-    "items": "系统指标采样规则列表，每项指定命令、数值正则、名称和单位。",
-    "pattern": "用于匹配设备响应的正则表达式；数值规则使用第一个捕获组。",
-    "unit": "指标的显示单位，KB 表示内存，% 表示百分比。",
-    "processDiscoveryCommand": "获取设备进程列表的单行命令，默认 ps。",
-    "processRules": "从进程命令列识别目标进程的规则列表。",
-    "processStatusCommand": "读取进程状态的命令模板，唯一的 {pid} 将替换为已验证的正整数进程 ID。",
-    "processValuePattern": "从进程状态响应中提取内存值的正则，第一个捕获组为 KB 数值。",
-    "nameGroup": "可选的进程正则捕获组编号，用于生成动态进程名称；为空时使用规则名称。",
-    "enabled": "账户、来源 IP 白名单策略或常用命令是否启用。禁用的常用命令不再向普通用户补全列表返回。",
-    "encoding": "接收设备输出时采用的字符编码名称。",
-    "end": "时间范围结束时间，采用ISO 8601（不带时区按北京时间解释，也兼容显式时区），且不包含该时刻。",
-    "evidence": "确认旧实例隔离所依据的工单、操作记录或其他可核验证据。",
-    "expiresInDays": "服务账号从创建或更新起可使用的天数；null 表示永久有效。",
-    "fileIds": "需要冻结并导出的 Coredump 文件标识列表。",
-    "hourIds": "需要加入日志下载作业的逻辑小时归档标识列表，与start/end时间范围二选一；沿用小时目录返回的标识。",
-    "id": "对象、命令配置或节点的稳定唯一标识。",
-    "initialCommands": "连接建立后按协议初始化阶段通过该会话唯一发送队列执行的初始化命令配置；SSH主机和TELNET_DEVICE自动ASH为尽力行为，自动ASH失败不阻塞采集，SSH从机须先完成独立协议与目标身份确认。",
-    "input": "校验失败时服务端接收到的输入片段，仅在错误详情中出现。",
-    "intervalSeconds": "同一条定时命令两次发送之间等待的秒数。",
-    "ip": "设备资源、串口服务器或采集连接目标的 IPv4/IPv6 地址。",
-    "isAdmin": "账户是否为管理员；创建普通子账户时只能为 false。",
-    "isGeneralNode": "是否为可接收全部设备资源的通用节点，默认 true；false 时按资源地址规则准入并优先分配。",
-    "resourceNetworks": "非通用节点允许接入的资源 IP 或 CIDR 列表，匹配所属资源地址而非串口连接地址。",
-    "keyword": "日志检索的字面关键词；空字符串按时间范围读取原始日志片段。",
-    "kind": "设备资源类别：海康网络设备或串口服务器。",
-    "label": "来源 IP 白名单规则的可读名称。",
-    "latestAt": "连续相同成功认证聚合区间的最近一次观测时间；旧单次记录回退为 createdAt。",
-    "loc": "校验失败字段在请求中的位置路径，仅在错误详情中出现。",
-    "loginPrompt": "Telnet 登录阶段识别用户名输入提示符的文本。",
-    "mountStatus": "Coredump NFS 在设备侧最后一次观测到的挂载状态。",
-    "msg": "校验或错误详情中的人类可读消息。",
-    "name": "资源、任务、模板、节点或服务账号的用户可识别名称。",
-    "network": "允许访问平台的单个 IP 地址或 CIDR 网段。",
-    "newPassword": "要设置给当前登录账户的新密码。",
-    "newline": "发送命令时自动附加的换行符类型。",
-    "ownerTask": "当前负责资源级 Coredump 监控的采集任务摘要。",
-    "occurrenceCount": "同一UTC日内连续相同周期认证结果合并后的观测次数，包括成功、认证失败、离线和异常；旧单次记录为 1。",
-    "password": "用于登录设备、认证资源或创建账户的密码；普通查询不返回，仅专用凭据查看接口向有权限的资源所有者或管理员返回。",
-    "passwordPrompt": "Telnet 登录阶段识别密码输入提示符的文本。",
-    "port": "SSH、Telnet 设备或串口服务器的连接端口。",
-    "prompt": "命令发送后需要等待设备输出匹配的可选提示符。",
-    "protocol": "采集连接协议：SSH、Telnet 设备或 Telnet 串口。",
-    "resourceId": "所属设备资源的稳定唯一标识。",
-    "retentionDays": "日志与归档元数据在平台中保留的天数。",
-    "rules": "来源 IP 白名单规则列表，启用策略时至少包含一项。",
-    "scheduledCommands": "按各自次数和间隔独立执行的定时命令配置列表。",
-    "scopes": "账户或 IP 规则被授予的平台权限标识列表。",
-    "serialServerResourceId": "Telnet 串口任务可选关联的已登记串口服务器资源标识。",
-    "sshTarget": "SSH 日志采集目标：HOST 为默认主机；SLAVE_1、SLAVE_2、SLAVE_3 分别为指定从机。从机独立确认协议模式和目标身份；运行期间每60秒复用采集连接执行ifconfig，身份不匹配或无法确认时关闭连接并重新切换；不消耗用户定时命令预算。仅 SSH 可选择从机。",
-    "sharedWith": "可读取此命令模板的指定有效用户标识列表。",
-    "sharedWithAll": "是否将模板共享给全部有效平台用户，仅管理员可启用。",
-    "sourceTemplateId": "创建或编辑任务时复制命令配置的来源模板标识。",
-    "sourceTemplateVersion": "复制命令配置时记录的来源模板版本号。",
-    "start": "时间范围开始时间，采用ISO 8601（不带时区按北京时间解释，也兼容显式时区），且包含该时刻。",
-    "taskId": "目标日志采集任务的稳定唯一标识。",
-    "timeoutSeconds": "启用提示符等待时允许等待设备响应的最长秒数。",
-    "totalExecutions": "该定时命令在一次任务运行中最多发起的发送次数。",
-    "type": "事件类型或校验错误类型标识，具体含义由当前接口上下文决定。",
-    "url": "Worker 节点供平台回调和代理访问的 HTTP(S) 根地址。",
-    "userId": "服务账号绑定并实时继承权限的既有平台用户标识。",
-    "username": "登录设备或平台账户使用的用户名。",
-    "version": "当前配置版本号，用于乐观锁并发修改校验。",
-}
-
-# 少数接口的请求体是否存在本身承载业务状态转换，需覆盖路由简短 docstring 的目录说明。
-OPERATION_DESCRIPTIONS = {
-    ("POST", "/api/v1/downloads"): "创建日志下载作业。taskId必填；hourIds与start/end二选一。时间不带时区时按北京时间解释，开始向下取整至小时、结束向上取整至小时（结束恰为整点不扩展）。例如12:18:41至15:10:08覆盖12:00至16:00的四个小时。最多168小时；默认缺片失败，allowPartial=true才允许部分导出。",
-    ("GET", "/api/v1/downloads/{identifier}/content"): "公开下载已生成日志归档，无需登录、Token、票据或来源IP授权。支持Range与If-Range；未完成返回409，已过期或清理返回410。",
-    ("GET", "/api/v1/coredumps/{identifier}/content"): "按文件ID公开下载文件已稳定的Coredump，无需先导出，也无需登录、Token、票据或来源IP授权。兼容有效固定副本，支持Range与If-Range；源文件尚未稳定、变化或不可用时不能下载。",
-    ("GET", "/api/v1/coredump-exports/{identifier}/content"): "公开下载已生成Coredump导出，无需创建者权限、登录、Token、票据或来源IP授权。支持Range与If-Range；未完成或已到期返回409。",
-    ("POST", "/api/v1/log-searches"): (
-        "创建历史检索作业，冻结指定任务和时间范围内的文件清单后异步扫描。"
-        "需要logs:read和Idempotency-Key；创建响应仅表示作业已受理，随后查询状态并分页读取结果。"
-    ),
-    ("GET", "/api/v1/log-searches/{identifier}"): (
-        "查询历史检索作业状态。轮询时可传includeResults=false省略较大的结果和冻结文件目录；"
-        "RUNNING结果只是已扫描部分，只有SUCCEEDED且truncated=false表示冻结范围扫描完整。"
-    ),
-    ("GET", "/api/v1/log-searches/{identifier}/results"): (
-        "分页读取历史检索作业已确认的结果。结果按作业当前状态返回；FAILED、CANCELLED或EXPIRED"
-        "保留的部分结果不代表剩余范围不存在匹配。"
-    ),
-    ("DELETE", "/api/v1/log-searches/{identifier}"): "取消本人创建的历史检索作业；取消他人作业需要admin。",
-    ("GET", "/api/v1/tasks/{task_id}/downloads"): (
-        "按创建时间倒序分页读取指定任务的日志下载历史，返回作业状态和下载制品当前可用性；"
-        "不暴露节点路径、写入租约或设备日志正文。"
-    ),
-    ("GET", "/api/v1/tasks/{task_id}/search-index-status"): (
-        "查询指定时间范围的历史检索候选索引覆盖状态。索引只用于跳过不可能命中的分卷；"
-        "coverageComplete=false或fallback=RAW_SCAN时，检索仍回退原始日志扫描。"
-    ),
-    ("GET", "/api/v1/dashboard"): (
-        "返回截至指定Asia/Shanghai自然日的资源、任务、日志目录和Coredump概览，需要tasks:read。"
-        "days只允许7、14或30；无logs:read时日志统计字段返回null，无admin时节点字段返回null。"
-        "日志统计只累计登记的原始分卷bytes，查询超时返回503。"
-    ),
-    ("POST", "/api/v1/resources/batch"): (
-        "批量创建1至256个海康网络设备资源，需要resources:create与Idempotency-Key。"
-        "逐项重新认证，全部成功后原子提交；重复IP、已有资源IP或任一认证失败均不部分创建。"
-        "同一成功请求使用相同幂等键重试返回原批次；密码不通过创建响应回传。"
-    ),
-    ("POST", "/api/v1/tasks"): (
-        "创建资源所属采集任务。SSH和Telnet设备类型仅允许当前认证成功的海康网络资源；"
-        "Telnet串口不受设备HTTP认证状态限制。可用useResourceCredentials在服务端复制资源登录凭据，"
-        "autoStart默认false，启动与新建均受当前账号权限约束。"
-    ),
-    ("POST", "/api/v1/resources/{identifier}/credential"): (
-        "读取资源登录凭据供任务创建表单使用。仅具有resources:write权限的资源所有者或管理员可调用；"
-        "禁止缓存并记录查看审计。普通资源查询不返回密码；其他有任务创建权限的用户可在服务端复用凭据，无需获得明文。"
-    ),
-    ("POST", "/api/v1/resources/{identifier}/authenticate"): (
-        "空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；ISAPI异常不停止仍有日志输出的SSH或Telnet设备任务，"
-        "Worker确认连接断开或持续无输出后才系统停止；Telnet串口不受认证状态影响。未领取的网络任务仍要求认证成功。"
-        "但不推进周期认证失败计数。该操作要求 resources:write、tasks:control 及资源所有权；非管理员不能影响其他用户关联的任务。"
-        "携带完整 ResourceInput 时仅用于编辑器凭据预览，不改变保存资源的健康状态或任务，因此不要求 tasks:control。"
-    ),
-}
-
-PARAMETER_DESCRIPTIONS = {
-    "beforeFileId": "缺口前最后一个可靠帧所在的日志文件标识。",
-    "beforeOffset": "缺口前可靠帧的结束字节偏移，也是待补读的起点。",
-    "beforeSessionId": "缺口前可靠帧所属采集会话标识，必须与文件目录一致。",
-    "afterFileId": "缺口后第一个可靠帧所在的日志文件标识。",
-    "afterOffset": "缺口后可靠帧的起始字节偏移，不包含该偏移后的已展示内容。",
-    "afterSessionId": "缺口后可靠帧所属采集会话标识，允许与缺口前不同。",
-    "action": "按审计操作类型筛选，例如 create_task 或 control:PAUSED。",
-    "actor": "按执行该审计操作的平台用户标识筛选。",
-    "clientIp": "按实际访问平台的调用方来源 IP 筛选请求记录。",
-    "cursor": "上页返回的稳定分页游标；管理事件传空字符串开启首屏游标查询，续页使用nextCursor并保持原筛选条件。不能与大于1的page同用。",
-    "commandId": "按某一条定时命令配置标识筛选执行记录。",
-    "createdBy": "按资源、任务或模板的创建用户标识筛选。",
-    "date": "按 Asia/Shanghai 自然日筛选任务小时归档或作为看板统计截至日。",
-    "end": "查询范围结束时间，ISO 8601（不带时区按北京时间解释，也兼容显式时区） 且不包含该时刻。",
-    "identifier": "路径所指资源、作业、文件、命令或操作的唯一标识。",
-    "identityChanged": "仅返回身份信息是否发生变化的认证记录。",
-    "hasCoredumps": "是否存在已登记且未确认缺失的 Coredump 源文件或有效冻结副本；true存在，false不存在，省略不过滤，附属标志文件不计入。",
-    "includeDeleted": "是否在列表中包含已经软删除的资源或模板。",
-    "includeTotal": "管理事件游标查询是否额外统计精确总数，默认false并返回total:null；统计会增加数据库扫描成本。",
-    "includeResults": "检索作业状态是否包含完整结果和冻结文件清单，默认true兼容原接口；轮询建议false并从results接口分页读取已确认命中。",
-    "sortBy": "列表排序字段，须与sortOrder同时指定；在全部筛选结果排序后分页，相同值以稳定ID排序。省略恢复创建时间倒序。",
-    "sortOrder": "排序方向：asc升序或desc降序；与sortBy同时指定。",
-    "ip": "按设备资源或节点的精确网络地址筛选。",
-    "kind": "按设备资源类别或命令执行类别筛选。",
-    "level": "按事件告警级别筛选：INFO、WARNING 或 ERROR。",
-    "limit": "单次读取日志内容的最大字节数。",
-    "method": "按 HTTP 请求方法筛选请求记录。",
-    "model": "按海康设备型号的字面子串筛选资源。",
-    "name": "按资源名称或 Coredump 文件名的字面子串筛选。",
-    "nodeId": "按 Worker 节点标识筛选运行事件。",
-    "node_id": "路径中指定要管理或隔离的 Worker 节点标识。",
-    "offset": "从日志文件开头开始读取的字节偏移量。",
-    "outcome": "按事件处理结果筛选：成功、失败、处理中、取消或未知。",
-    "object": "按运行事件对象的资源、任务、节点或核心转储文件名称、IP 或标识进行字面子串筛选。",
-    "page": "从 1 开始的分页页码。",
-    "pageSize": "每页返回的记录数，受接口允许的最大值限制。",
-    "query": "按命令或描述进行不区分大小写的字面子串筛选。",
-    "receivedFrom": "仅返回服务器首次接收时间不早于该时刻的 Coredump 文件；可传2026-10-19T12:00:00，不带时区按北京时间解释。",
-    "receivedTo": "仅返回服务器首次接收时间不晚于该时刻的 Coredump 文件；不带时区按北京时间解释。",
-    "requestId": "按平台分配的请求追踪编号筛选审计或请求记录。",
-    "resourceId": "按所属设备资源标识筛选采集任务或日志任务选择结果。",
-    "resource_id": "路径中指定要查询的设备资源标识。",
-    "result": "按海康设备认证结果筛选认证历史。",
-    "route": "按 API 路由模板筛选请求记录。",
-    "search": "按资源名称、地址、型号、序列号或软件版本进行综合检索。",
-    "softwareVersion": "按设备软件版本的字面子串筛选资源。",
-    "start": "查询范围开始时间，ISO 8601（不带时区按北京时间解释，也兼容显式时区） 且包含该时刻。",
-    "status": "按 HTTP 响应状态码筛选请求记录。",
-    "summary": "按审计或运行事件的中文摘要字面子串筛选，也兼容输入内部操作或事件代码。",
-    "subSerialNumber": "按设备短序列号的字面子串筛选资源。",
-    "taskId": "按日志采集任务标识筛选相关事件或列表。",
-    "taskLimit": "资源列表中每个资源内嵌任务摘要的最大返回数量。",
-    "task_id": "路径中指定要操作、读取或订阅的日志采集任务标识。",
-    "type": "按运行事件内部类型精确筛选，例如 CONNECTION_GAP；页面优先使用summary。",
-    "version": "删除或更新对象时必须提供的当前版本号。",
+# FastAPI 自带的校验模型没有中文元数据；业务模型必须直接声明 Field(description=...)。
+_FRAMEWORK_FIELDS = {
+    "detail": "框架输入校验问题列表；平台实际错误正文以各接口错误响应表为准。",
+    "loc": "无效参数在路径、查询或请求体中的位置。",
+    "msg": "输入值不符合模型约束的原因。",
+    "type": "Pydantic 输入校验错误类型代码。",
+    "input": "触发输入校验失败的原始值。",
+    "ctx": "输入校验器附带的约束上下文。",
 }
 
 
-def _annotate_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """递归为 OpenAPI 模型属性补齐说明，未登记字段立即暴露为开发错误。"""
-    result = deepcopy(schema)
-    for name, field in result.get("properties", {}).items():
-        if not field.get("description"):
-            try:
-                field["description"] = FIELD_DESCRIPTIONS[name]
-            except KeyError as exc:
-                raise RuntimeError(f"开放接口字段缺少中文说明: {name}") from exc
-        result["properties"][name] = _annotate_schema(field)
-    if isinstance(result.get("items"), dict):
-        result["items"] = _annotate_schema(result["items"])
+def _has_chinese_description(value: Any) -> bool:
+    """拒绝空白或仅英文占位说明；业务语义是否准确仍由源码审查和测试核对。"""
+    return isinstance(value, str) and bool(re.search(r"[\u4e00-\u9fff]", value))
+
+
+def _validate(schema: dict[str, Any], location: str, schemas, *, framework=False) -> dict[str, Any]:
+    """递归验证字段说明，漏写时拒绝生成文档，避免泛化文字掩盖遗漏。"""
+    value = deepcopy(schema)
+    for name, child in value.get("properties", {}).items():
+        if not child.get("description") and child.get("$ref"):
+            child["description"] = schemas.get(child["$ref"].rsplit("/", 1)[-1], {}).get("description")
+        if not _has_chinese_description(child.get("description")):
+            if framework and name in _FRAMEWORK_FIELDS:
+                child["description"] = _FRAMEWORK_FIELDS[name]
+            else:
+                raise RuntimeError(f"API 模型字段缺少中文说明：{location}.{name}")
+        value["properties"][name] = _validate(child, f"{location}.{name}", schemas, framework=framework)
+    if isinstance(value.get("items"), dict):
+        value["items"] = _validate(value["items"], location + "[]", schemas, framework=framework)
+    if isinstance(value.get("additionalProperties"), dict):
+        value["additionalProperties"] = _validate(value["additionalProperties"], location + ".{键}", schemas, framework=framework)
     for union in ("anyOf", "oneOf", "allOf"):
-        if isinstance(result.get(union), list):
-            result[union] = [_annotate_schema(item) for item in result[union]]
-    return result
+        if isinstance(value.get(union), list):
+            value[union] = [_validate(item, location, schemas, framework=framework) for item in value[union]]
+    return value
 
 
 def described_schemas(schemas: dict[str, Any]) -> dict[str, Any]:
-    """返回不修改 FastAPI 原始 OpenAPI 缓存的、已补齐说明的组件副本。"""
-    return {name: _annotate_schema(schema) for name, schema in schemas.items()}
+    """保留接口模型自身说明，仅翻译框架内置校验模型。"""
+    return {name: _validate(schema, name, schemas, framework=name in {"HTTPValidationError", "ValidationError"})
+            for name, schema in schemas.items()}
 
 
 def describe_parameter(parameter: dict[str, Any]) -> str:
-    """为每个路径或查询参数取得正式中文语义，禁止页面生成泛化兜底。"""
-    if parameter.get("description"):
-        return parameter["description"]
-    name = parameter.get("name", "")
-    try:
-        return PARAMETER_DESCRIPTIONS[name]
-    except KeyError as exc:
-        raise RuntimeError(f"开放接口参数缺少中文说明: {name}") from exc
-
-
-def describe_operation(method: str, path: str, fallback: str) -> str:
-    """返回需要额外表达请求体语义的正式操作说明，其余路径沿用 FastAPI 描述。"""
-    return OPERATION_DESCRIPTIONS.get((method, path), fallback)
+    """参数说明来自实际 Query/Path 声明，未声明中文说明直接失败。"""
+    if not _has_chinese_description(parameter.get("description")):
+        raise RuntimeError(f"API 参数缺少中文说明：{parameter.get('name')}")
+    return parameter["description"]

@@ -35,7 +35,9 @@ async def runtime_and_command(tmp_path):
     return runtime, record
 
 
-@pytest.mark.parametrize("change", [{"runId": "new"}, {"generation": 2}, {"status": "BLOCKED"}])
+@pytest.mark.parametrize("change", [
+    {"runId": "new"}, {"generation": 2}, {"status": "BLOCKED"}, {"deletedAt": "deleted"},
+])
 async def test_old_runtime_cannot_claim_commands_after_task_changed(tmp_path, change):
     """监督器尚未观察到变化时，命令入口仍需拒绝当前归属已经失效的调用。"""
     runtime, record = await runtime_and_command(tmp_path)
