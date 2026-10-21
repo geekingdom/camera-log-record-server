@@ -20,4 +20,6 @@
 
 24 小时、504 MiB 原始合成样本的下载快路径验证通过：metadata 加 ZIP STORE 0.419 秒、历史重组参考 11.371 秒，快路径 `getmembers` 调用为 0；临时制品已清理。
 
-完整 CI 待提交后验收。未部署公司服务器，未清理真实设备日志。
+功能提交 `00533ed` 的 CI `39588453865` 首轮七项成功；前端全部测试/构建/浏览器以及 NFS 实测通过，仅两项报告上传被 GitHub Actions artifact 存储配额阻断。经用户明确授权，已删除 2026-10-19 之前的 244 份历史浏览器截图/NFS 报告（约 1364.5 MiB），保留近三天附件、运行日志和全部代码，并重跑失败作业。用户同时将仓库改为 PUBLIC，已核实。[CI 39588453865](https://github.com/geekingdom/camera-log-record-server/actions/runs/39588453865) 重跑后九项全部成功：后端、前端、完整容器、组件部署、原生部署、跨 Worker、NFS、Elasticsearch 和中文提交规范；前端截图与 NFS 报告上传成功。
+
+本轮专属 Mongo 退出前仅剩 admin/config/local，已停止并删除专属临时目录。未部署公司服务器，未清理真实设备日志。
