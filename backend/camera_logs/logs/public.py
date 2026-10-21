@@ -9,7 +9,8 @@ from camera_logs.common.database import public
 def public_log_file(document: Mapping[str, Any]) -> dict[str, Any]:
     """返回日志文件公开目录；部署预备标记含恢复令牌和节点路径，仅供 Worker 收尾。"""
     result = public(document)
-    result.pop("deploymentRecovery", None)
+    for internal in ("deploymentRecovery", "sourceLogName"):
+        result.pop(internal, None)
     return result
 
 

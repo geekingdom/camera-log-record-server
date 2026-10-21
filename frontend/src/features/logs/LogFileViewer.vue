@@ -10,6 +10,7 @@ import { findTextMatches } from "./logText";
 import { completeUtf8Length, FILE_SEGMENT_BYTES, FILE_SEGMENT_STEP_BYTES, firstCompleteUtf8Offset, segmentFetchOffset, validateSegmentResponse } from "./fileViewerSegment";
 import LogFindBar from "./LogFindBar.vue";
 import LogText from "./LogText.vue";
+import { displayLogFragmentName } from "./fragmentName";
 
 const CONTEXT_BYTES = 8 * 1024;
 const props = defineProps<{ file?: LogFile; initialOffset?: number; keyword?: string }>();
@@ -136,7 +137,7 @@ onBeforeUnmount(cancelRead);
 </script>
 <template>
   <el-dialog v-model="open" title="日志片段内容" width="min(1180px, calc(100% - 24px))" class="file-viewer-dialog" append-to-body destroy-on-close @closed="cancelRead">
-    <div class="file-viewer-meta"><strong>{{ file?.archiveName || file?.rawFileName || file?.id }}</strong><span>当前字节范围 {{ start.toLocaleString() }} 至 {{ end.toLocaleString() }}</span></div>
+    <div class="file-viewer-meta"><strong v-if="file">{{ displayLogFragmentName(file) }}</strong><span>当前字节范围 {{ start.toLocaleString() }} 至 {{ end.toLocaleString() }}</span><span v-if="file?.status === 'OPEN'">正在写入，封存后固定实际服务器时间范围</span></div>
     <div class="file-viewer-tools">
       <el-button :icon="ArrowLeft" :disabled="busy || start === 0" @click="previousSegment">上一段</el-button>
       <el-button :icon="ArrowRight" :disabled="busy || eof" @click="nextSegment">下一段</el-button>

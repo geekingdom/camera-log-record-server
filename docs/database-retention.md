@@ -206,3 +206,5 @@ python scripts/backfill_runtime_event_time.py --apply
 `camera-logs-v1` 每个 READY 文件按 32 KiB 记录文本块及一条完成证明，源版本+偏移作为确定性ID；它是允许重建的额外正文存储，非权威原始日志。默认按源小时保留7天，重建不延长，删除覆盖本节点的文本和完成证明。每轮索引开始执行到期删除及Mongo文件目录缺失/DELETED补偿；数据库失败不猜测删除，服务恢复后继续。每个Worker独立SQLite WAL仅保存来源版本、确认偏移和更新时间，不保存正文；过期检查点清除后仅会安全重放。查询鉴权仍在平台API，ES不暴露给用户，权限/容量/默认单分片无副本的部署限制见[旁路索引说明](elasticsearch-sidecar.md)。
 
 目录扫描复用 `files(nodeId,status,id)`，覆盖查询复用 `files(taskId,hour)`，跨页整包成员查询使用 `files_node_archive_members(nodeId,path,status,id)`，不引入逐日志行Mongo写入；真实 Explain 验证结果应记录在本轮实施历史中。
+
+日志片段实际时间命名不新增集合或持续写入频率：既有 `files` 目录每个封存片段增加可选首末接收时间，文件清单每个成员增加源名与首末时间，均随原片段数量线性增长。`sourceLogName` 仅在磁盘清单中用于稳定 fileId 恢复；公开响应不包含该字段。继续沿用日志保留期、原归档清理和下载制品保留策略；查询仍使用既有 id/任务小时索引，无新增索引或 TTL。

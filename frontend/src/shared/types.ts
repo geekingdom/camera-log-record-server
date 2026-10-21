@@ -361,10 +361,14 @@ export interface LogFile {
   bytes: number;
   archiveBytes?: number;
   archiveName?: string;
+  archiveMember?: string;
   rawFileName?: string;
+  segmentNumber?: number;
   sha256?: string;
   firstSequence?: number;
   lastSequence?: number;
+  firstReceivedAt?: string;
+  lastReceivedAt?: string;
 }
 export type CoredumpStatus = "RECEIVING" | "FREEZING" | "FROZEN" | string;
 export interface CoredumpFile {

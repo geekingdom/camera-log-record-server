@@ -235,8 +235,8 @@ def test_legacy_archive_filename_is_downloaded_as_one_flat_hour_tar(tmp_path):
     assert result["filename"] == "task-unknown-ip-20260908080000-20260908090000.tar.gz"
     assert _gzip_header_filename(Path(result["resultPath"])) is None
     with tarfile.open(result["resultPath"], "r:gz") as bundle:
-        assert bundle.getnames() == ["part-000001.log"]
-        assert bundle.extractfile("part-000001.log").read() == b"archive"
+        assert bundle.getnames() == ["task-unknown-ip-unknown-time-part-000001.log"]
+        assert bundle.extractfile("task-unknown-ip-unknown-time-part-000001.log").read() == b"archive"
 
 
 def test_header_safe_complete_hour_reuses_compressed_archive_bytes(tmp_path, monkeypatch):
@@ -246,17 +246,19 @@ def test_header_safe_complete_hour_reuses_compressed_archive_bytes(tmp_path, mon
         repo = Repository(AsyncMongoMockClient().db, settings)
         archive = tmp_path / "shared-hour.tar.gz"
         with archive.open("wb") as destination, gzip_tar_writer(destination) as bundle:
-            info = tarfile.TarInfo("part-000001.log")
+            member_name = "task-192.0.2.10-20260908080000-20260908080000-part-000001.log"
+            info = tarfile.TarInfo(member_name)
             info.size = 7
             bundle.addfile(info, io.BytesIO(b"archive"))
         Path(str(archive) + ".metadata.json").write_text(json.dumps({"formatVersion": 2, "members": [{
-            "logName": "part-000001.log", "rawSize": 7,
+                "logName": member_name, "sourceLogName": "task-192.0.2.10-20260908000000-20260908010000-part-000001.log",
+                "firstReceivedAt": "2026-09-08T00:00:00+00:00", "lastReceivedAt": "2026-09-08T00:00:00+00:00", "rawSize": 7,
             "sha256": hashlib.sha256(b"archive").hexdigest(),
         }]}), encoding="utf-8")
         hour = "2026-09-08T00:00:00+00:00"
         document = {"id": "f1", "path": str(archive), "status": "READY", "bytes": 7,
                     "nodeId": "node", "hour": hour, "archiveGroupId": "group",
-                    "archiveMember": "part-000001.log", "sha256": hashlib.sha256(b"archive").hexdigest(),
+                    "archiveMember": member_name, "sha256": hashlib.sha256(b"archive").hexdigest(),
                     "archiveBytes": archive.stat().st_size}
         await repo.db.files.insert_one(document)
 
@@ -313,7 +315,7 @@ def test_multi_hour_download_hides_archive_recovery_suffixes(tmp_path):
         ]
         for name in bundle.namelist():
             with tarfile.open(fileobj=io.BytesIO(bundle.read(name)), mode="r:gz") as hour:
-                assert hour.getnames() == ["part-000001.log"]
+                assert hour.getnames() == ["task-unknown-ip-unknown-time-part-000001.log"]
 
 
 def test_zip_export_keeps_readable_names_and_disambiguates_duplicates(tmp_path):
@@ -347,7 +349,7 @@ def test_zip_export_keeps_readable_names_and_disambiguates_duplicates(tmp_path):
 
     names, contents = asyncio.run(scenario())
     assert len(names) == 2 and all(name.endswith(".tar.gz") for name in names)
-    assert contents == [["part-000001.log"], ["part-000001.log"]]
+    assert contents == [["task-unknown-ip-unknown-time-part-000001.log"], ["task-unknown-ip-unknown-time-part-000001.log"]]
     assert "manifest.json" not in names
 
 
@@ -404,16 +406,19 @@ def test_download_reuses_complete_shared_hour_archive_without_member_leakage(tmp
     assert Path(result["resultPath"]) != archive
     assert Path(result["resultPath"]).parent.name == "download"
     with tarfile.open(result["resultPath"], "r:gz") as bundle:
-        assert bundle.getnames() == ["part-000001.log", "part-000002.log"]
-        assert bundle.extractfile("part-000001.log").read() == b"first"
-        assert bundle.extractfile("part-000002.log").read() == b"second"
+        assert bundle.getnames() == [
+            "task-unknown-ip-unknown-time-part-000001.log",
+            "task-unknown-ip-unknown-time-part-000002.log",
+        ]
+        assert bundle.extractfile("task-unknown-ip-unknown-time-part-000001.log").read() == b"first"
+        assert bundle.extractfile("task-unknown-ip-unknown-time-part-000002.log").read() == b"second"
     replacement = archive.with_suffix(".replacement.tar.gz")
     with tarfile.open(replacement, "w:gz") as bundle:
         info = tarfile.TarInfo("part-000001.log"); info.size = 7
         bundle.addfile(info, io.BytesIO(b"changed"))
     replacement.replace(archive)
     with tarfile.open(result["resultPath"], "r:gz") as bundle:
-        assert bundle.extractfile("part-000001.log").read() == b"first"
+        assert bundle.extractfile("task-unknown-ip-unknown-time-part-000001.log").read() == b"first"
 
 
 def test_hour_export_splits_legacy_large_member_at_format_limit(tmp_path, monkeypatch):
@@ -427,8 +432,62 @@ def test_hour_export_splits_legacy_large_member_at_format_limit(tmp_path, monkey
         ({"id": "f1", "bytes": 7}, {"id": "f1"}, source, False),
     ])
     with tarfile.open(output, "r:gz") as bundle:
-        assert bundle.getnames() == ["part-000001.log", "part-000002.log", "part-000003.log"]
+        assert bundle.getnames() == [
+            "task-unknown-ip-unknown-time-part-000001.log",
+            "task-unknown-ip-unknown-time-part-000002.log",
+            "task-unknown-ip-unknown-time-part-000003.log",
+        ]
         assert [bundle.extractfile(name).read() for name in bundle.getnames()] == [b"123", b"456", b"7"]
+
+
+def test_hour_export_names_split_parts_from_indexed_receipt_ranges(tmp_path, monkeypatch):
+    """导出分卷按实际相交接收块命名，单块跨边界时两个分卷均保留该时间。"""
+    source, output = tmp_path / "source.tar.gz", tmp_path / "hour.tar.gz"
+    index = tmp_path / "source.index.jsonl"
+    index.write_text(
+        '{"offset":0,"length":2,"receivedAt":"2026-10-19T12:18:41+08:00"}\n'
+        '{"offset":2,"length":3,"receivedAt":"2026-10-19T12:19:02+08:00"}\n'
+        '{"offset":5,"length":2,"receivedAt":"2026-10-19T12:20:03+08:00"}\n',
+        encoding="utf-8",
+    )
+    with tarfile.open(source, "w:gz") as bundle:
+        info = tarfile.TarInfo("legacy.log"); info.size = 7
+        bundle.addfile(info, io.BytesIO(b"1234567"))
+        index_info = tarfile.TarInfo(index.name); index_info.size = index.stat().st_size
+        with index.open("rb") as index_source:
+            bundle.addfile(index_info, index_source)
+    monkeypatch.setattr(hour_download, "MAX_MEMBER_BYTES", 3)
+    hour_download.write_hour_archive(output, [
+        ({"id": "f1", "bytes": 7}, {"id": "f1", "taskId": "task", "ip": "192.0.2.10",
+                                      "indexPath": str(index)}, source, False),
+    ])
+    with tarfile.open(output, "r:gz") as bundle:
+        assert bundle.getnames() == [
+            "task-192.0.2.10-20261019121841-20261019121902-part-000001.log",
+            "task-192.0.2.10-20261019121902-20261019122003-part-000002.log",
+            "task-192.0.2.10-20261019122003-20261019122003-part-000003.log",
+        ]
+        assert [bundle.extractfile(name).read() for name in bundle.getnames()] == [b"123", b"456", b"7"]
+
+
+def test_hour_export_uses_index_record_at_partial_frozen_waterline(tmp_path):
+    """冻结水位可位于最后接收块中间，已包含的字节仍使用该块接收时间。"""
+    source, output = tmp_path / "source.tar.gz", tmp_path / "hour.tar.gz"
+    index = tmp_path / "source.index.jsonl"
+    index.write_text('{"offset":0,"length":8,"receivedAt":"2026-10-19T12:18:41+08:00"}\n', encoding="utf-8")
+    with tarfile.open(source, "w:gz") as bundle:
+        info = tarfile.TarInfo("legacy.log"); info.size = 8
+        bundle.addfile(info, io.BytesIO(b"12345678"))
+        index_info = tarfile.TarInfo(index.name); index_info.size = index.stat().st_size
+        with index.open("rb") as index_source:
+            bundle.addfile(index_info, index_source)
+    hour_download.write_hour_archive(output, [
+        ({"id": "f1", "bytes": 5}, {"id": "f1", "taskId": "task", "ip": "192.0.2.10",
+                                      "indexPath": str(index)}, source, False),
+    ])
+    with tarfile.open(output, "r:gz") as bundle:
+        assert bundle.getnames() == ["task-192.0.2.10-20261019121841-20261019121841-part-000001.log"]
+        assert bundle.extractfile(bundle.getnames()[0]).read() == b"12345"
 
 
 def test_pin_cross_filesystem_copies_only_frozen_member(tmp_path, monkeypatch):
@@ -451,6 +510,30 @@ def test_pin_cross_filesystem_copies_only_frozen_member(tmp_path, monkeypatch):
     with tarfile.open(result[0][2]) as bundle:
         assert "other.log" not in bundle.getnames()
         assert bundle.extractfile("selected.log").read() == b"selected"
+
+
+def test_cross_filesystem_pin_keeps_index_for_time_aware_rebuild(tmp_path, monkeypatch):
+    """跨盘固定生成的临时快照也携带索引，不能因重组而退回未知时间。"""
+    source, output = tmp_path / "hour.tar.gz", tmp_path / "output.tar.gz"
+    index = tmp_path / "selected.index.jsonl"
+    index.write_text('{"offset":0,"length":8,"receivedAt":"2026-10-19T12:18:41+08:00"}\n', encoding="utf-8")
+    with tarfile.open(source, "w:gz") as bundle:
+        for name, data in (("selected.log", b"selected"), ("other.log", b"x" * 4096)):
+            info = tarfile.TarInfo(name); info.size = len(data)
+            bundle.addfile(info, io.BytesIO(data))
+
+    def cross_device(*_):
+        raise OSError("cross-device link")
+
+    monkeypatch.setattr(hour_download.os, "link", cross_device)
+    sources = hour_download.pin_hour_sources([
+        ({"id": "file", "bytes": 8}, {"id": "file", "taskId": "task", "ip": "192.0.2.10",
+                                               "archiveMember": "selected.log", "indexPath": str(index)}, source, False),
+    ], tmp_path / "pinned")
+    hour_download.write_hour_archive(output, sources)
+    with tarfile.open(output, "r:gz") as bundle:
+        assert bundle.getnames() == ["task-192.0.2.10-20261019121841-20261019121841-part-000001.log"]
+        assert bundle.extractfile(bundle.getnames()[0]).read() == b"selected"
 
 
 def test_rebuilt_hour_preserves_parts_when_session_sequences_restart(tmp_path):

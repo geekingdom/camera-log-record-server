@@ -225,6 +225,11 @@ class SessionRuntime:
             member_fields = {"archiveMember": member_name, "rawFileName": member_name,
                 "archiveGroupId": hashlib.sha256(str(path.relative_to(self.repo.settings.log_root)).encode()).hexdigest(),
                 "segmentNumber": self._segment_number(log_path)}
+            for source, target in (("first_received_at", "firstReceivedAt"),
+                                   ("last_received_at", "lastReceivedAt")):
+                value = getattr(archive, source, None)
+                if value is not None:
+                    member_fields[target] = value.astimezone(UTC).isoformat()
         if index_path:
             member_fields["indexPath"] = str(index_path)
         async with self.catalog_lock:

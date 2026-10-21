@@ -217,7 +217,8 @@ def install_log_routes(app):
         authorize(user, "logs:read", file["taskId"])
         fields = (
             "id", "taskId", "runId", "sessionId", "nodeId", "status", "bytes", "hour",
-            "archiveName", "rawFileName", "segmentNumber", "firstSequence", "lastSequence",
+            "archiveName", "archiveMember", "rawFileName", "segmentNumber", "firstSequence", "lastSequence",
+            "firstReceivedAt", "lastReceivedAt",
         )
         return {name: file[name] for name in fields if name in file}
 

@@ -68,6 +68,23 @@ async def test_hour_archive_name_contains_safe_task_ip_and_shanghai_hour_range(t
     assert archive.path.exists()
 
 
+async def test_archive_member_uses_actual_server_received_range_and_keeps_raw_source_identity(tmp_path):
+    """原始分卷路径固定为身份，归档成员名只展示实际首尾服务器接收时间。"""
+    writer = HourlyWriter("task-id", "run", "session", tmp_path, storage_identity="device",
+                          task_name="现场任务", device_ip="192.0.2.9")
+    first = datetime(2026, 9, 8, 1, 5, 6, tzinfo=UTC)
+    last = datetime(2026, 9, 8, 1, 7, 8, tzinfo=UTC)
+    await writer.write_many([(b"first\n", first), (b"last\n", last)])
+    archive = await writer.close()
+    member = _metadata(archive.path)["members"][0]
+
+    assert member["sourceLogName"].endswith("20260908090000-20260908100000-part-000001.log")
+    assert member["logName"] == "现场任务-192.0.2.9-20260908090506-20260908090708-part-000001.log"
+    assert archive.member_name == member["logName"]
+    assert member["firstReceivedAt"] == first.isoformat()
+    assert member["lastReceivedAt"] == last.isoformat()
+
+
 async def test_same_named_tasks_use_full_ids_in_separate_hour_directories(tmp_path):
     """同名任务的完整 ID 必须进入目录，避免共享小时包而混淆下载范围。"""
     instant = datetime(2026, 9, 8, 1, 0, tzinfo=UTC)

@@ -29,6 +29,7 @@ from camera_logs.logs.catalog_identity import file_identity
 from camera_logs.logs.compression import _hash_stream, schedule_pending_archive, schedule_recovery_archive
 from camera_logs.logs.export_locks import ExportLock
 from camera_logs.logs.job_threads import job_thread
+from camera_logs.logs.naming import segment_name_from_source
 from camera_logs.logs.search_index import index_path
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,8 @@ def _raw_segment(log: Path, identity: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("raw log or index is missing")
     offset = previous_sequence = None
     first_sequence = last_sequence = None
+    first_received_at = last_received_at = None
+    received_times_reliable = True
     with index.open(encoding="utf-8") as source:
         for line in source:
             record = json.loads(line)
@@ -175,7 +178,12 @@ def _raw_segment(log: Path, identity: dict[str, Any]) -> dict[str, Any]:
                     or isinstance(row_offset, bool) or not isinstance(length, int) or isinstance(length, bool)
                     or length <= 0 or row_offset < 0):
                 raise ValueError("index row has invalid position")
-            datetime.fromisoformat(str(received_at))
+            received = datetime.fromisoformat(str(received_at))
+            # 旧索引曾允许无时区字符串。它不能证明服务器实际接收时刻，恢复时
+            # 只能保留正文和顺序，成员名明确使用 unknown-time，绝不按本机时区猜测。
+            if received.tzinfo is None or received.utcoffset() is None:
+                received = None
+                received_times_reliable = False
             if offset is None and row_offset != 0:
                 raise ValueError("index does not start at raw log head")
             if offset is not None and row_offset != offset:
@@ -185,6 +193,9 @@ def _raw_segment(log: Path, identity: dict[str, Any]) -> dict[str, Any]:
             offset, previous_sequence = row_offset + length, sequence
             first_sequence = sequence if first_sequence is None else first_sequence
             last_sequence = sequence
+            if received is not None:
+                first_received_at = received if first_received_at is None else first_received_at
+                last_received_at = received
     raw_size = log.stat().st_size
     if offset != raw_size or first_sequence is None or last_sequence is None:
         raise ValueError("index does not cover raw log exactly")
@@ -194,10 +205,17 @@ def _raw_segment(log: Path, identity: dict[str, Any]) -> dict[str, Any]:
         index_digest, index_size = _hash_stream(source)
     if verified_size != raw_size:
         raise ValueError("raw log size changed during recovery")
+    if not received_times_reliable:
+        first_received_at = last_received_at = None
+    source_name = log.name
     return {"taskId": identity["taskId"], "runId": identity["runId"], "sessionId": identity["sessionId"],
             "hourStart": _raw_hour(log).isoformat(), "rawSize": raw_size, "sha256": digest,
             "firstSequence": first_sequence, "lastSequence": last_sequence, "logPath": str(log),
-            "logName": log.name, "indexName": index.name, "indexSha256": index_digest, "indexBytes": index_size}
+            "sourceLogName": source_name,
+            "logName": segment_name_from_source(source_name, first_received_at, last_received_at),
+            "indexName": index.name, "indexSha256": index_digest, "indexBytes": index_size,
+            "firstReceivedAt": first_received_at.astimezone(UTC).isoformat() if first_received_at else None,
+            "lastReceivedAt": last_received_at.astimezone(UTC).isoformat() if last_received_at else None}
 
 
 async def _recover_proven_raw_segments(repo: Any, spooled_logs: set[Path]) -> None:
@@ -282,15 +300,20 @@ def _members(path: Path) -> list[dict[str, Any]]:
     required = {"taskId", "runId", "sessionId", "hourStart", "rawSize", "sha256", "firstSequence", "lastSequence",
                 "logName", "indexName", "indexSha256", "indexBytes"}
     expected = {}
+    source_names: set[str] = set()
     for member in members:
         if not isinstance(member, dict) or not required <= member.keys():
             raise ValueError("archive metadata member is incomplete")
-        log_path = _member_path(path, member["logName"], ".log")
+        source_name = member.get("sourceLogName", member["logName"])
+        log_path = _member_path(path, source_name, ".log")
+        member_path = _member_path(path, member["logName"], ".log")
         _member_path(path, member["indexName"], ".index.jsonl")
-        if (log_path.name in expected or not isinstance(member["rawSize"], int)
+        if (member_path.name in expected or log_path.name in source_names
+                or not isinstance(member["rawSize"], int)
                 or not isinstance(member["indexBytes"], int)):
             raise ValueError("archive metadata member is invalid")
-        expected[log_path.name] = member
+        expected[member_path.name] = member
+        source_names.add(log_path.name)
     checked = set()
     # 一次顺序解压，不先遍历整个gzip再seek回第一成员重新解压。
     with tarfile.open(path, "r|gz") as archive:
@@ -308,7 +331,7 @@ def _members(path: Path) -> list[dict[str, Any]]:
                 index.seek(0)
                 first = index.readline()
                 if first:
-                    member["firstReceivedAt"] = json.loads(first).get("receivedAt")
+                    member.setdefault("firstReceivedAt", json.loads(first).get("receivedAt"))
             checked.add(info.name)
     if checked != set(expected):
         raise ValueError("archive members missing")
@@ -457,11 +480,11 @@ async def _register_archive_members(repo: Any, path: Path, members: list[dict], 
     _contained(repo, path)
     registered = 0
     group_id = hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()
-    identifiers = [_archive_id(root, _member_path(path, member["logName"], ".log"), node)
+    identifiers = [_archive_id(root, _member_path(path, member.get("sourceLogName", member["logName"]), ".log"), node)
                    for member in members for node in (None, repo.settings.node_id)]
     existing_records = {record["id"]: record async for record in repo.db.files.find({"id": {"$in": identifiers}})}
     for member in members:
-        log_path = _member_path(path, member["logName"], ".log")
+        log_path = _member_path(path, member.get("sourceLogName", member["logName"]), ".log")
         index_path = None if member.get("_legacy") else _member_path(path, member["indexName"], ".index.jsonl")
         identifier = _archive_id(root, log_path, repo.settings.node_id)
         existing = existing_records.get(identifier)
@@ -479,8 +502,8 @@ async def _register_archive_members(repo: Any, path: Path, members: list[dict], 
         document = {
             "id": identifier, **identity,
             "hour": datetime.fromisoformat(member["hourStart"]).astimezone(UTC).isoformat(),
-            "path": str(path), "archiveName": path.name, "archiveMember": log_path.name,
-            "archiveGroupId": group_id, "rawFileName": log_path.name,
+            "path": str(path), "archiveName": path.name, "archiveMember": member["logName"],
+            "archiveGroupId": group_id, "rawFileName": member["logName"],
             "bytes": member["rawSize"], "archiveBytes": archive_bytes, "sha256": member["sha256"],
             "firstSequence": member["firstSequence"], "lastSequence": member["lastSequence"],
             "segmentNumber": int(match.group(1)) if not member.get("_legacy") and (
@@ -489,8 +512,9 @@ async def _register_archive_members(repo: Any, path: Path, members: list[dict], 
         }
         if index_path is not None:
             document["indexPath"] = str(index_path)
-        if member.get("firstReceivedAt"):
-            document["firstReceivedAt"] = member["firstReceivedAt"]
+        for key in ("firstReceivedAt", "lastReceivedAt"):
+            if member.get(key):
+                document[key] = member[key]
         if existing and all(existing.get(key) == value for key, value in document.items() if key != "updatedAt"):
             # 超时后的下一轮跳过已完成成员，不能每次从头更新导致大包永远无法确认。
             continue

@@ -324,6 +324,8 @@ GET /api/v1/tasks/{taskId}/log-hours?page=1&pageSize=100
 
 可选 `date=YYYY-MM-DD` 按 `Asia/Shanghai` 自然日筛选。一个小时可包含重连或回拨形成的多个片段；响应的 `fragmentCount`、`readyCount`、`openCount` 与 `unavailableCount` 给出覆盖状态，`files` 按运行、会话和首块序号排序。每个片段含逻辑文件 `id`、状态、字节数、归档名、可用的 `sha256` 与序号范围；内部路径、密码和令牌不会返回。
 
+`archiveName` 是小时压缩包名称，仍使用逻辑小时范围；`archiveMember` 是该片段在包内的实际 `.log` 名称。新封存成员的名称包含首末服务器接收时间（上海时区、秒级），对应可选字段 `firstReceivedAt`、`lastReceivedAt`；它们不是设备日志正文中的时间。`rawFileName` 为片段名称，采集中可能仍为临时小时范围名，封存后与实际成员名一致。历史记录可能缺少首末时间；旧包不会原地重写，新下载作业根据固定索引重组，无法确认时使用 `unknown-time`。文件 ID、内容读取偏移和已有下载链接不因成员改名而改变。动态 API 文档从响应模型同步生成这些字段的中文释义。
+
 按月获取可选日志日期（需要 `logs:read`）：
 
 ```http

@@ -71,7 +71,7 @@ async def test_partial_download_cannot_grow_past_shared_snapshot_budget(tmp_path
     result = await jobs._download(repo, {"id": "partial-budget", "files": [first, second], "allowPartial": True})
     assert result["missing"] == ["second"]
     with tarfile.open(result["resultPath"], "r:gz") as archive:
-        assert archive.extractfile("part-000001.log").read() == b"needle\n"
+        assert archive.extractfile("task-unknown-ip-unknown-time-part-000001.log").read() == b"needle\n"
         assert len(archive.getmembers()) == 1
     assert not (tmp_path / "exports" / ".tmp" / "partial-budget").exists()
 

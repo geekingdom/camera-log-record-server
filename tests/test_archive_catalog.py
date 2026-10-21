@@ -40,6 +40,33 @@ async def test_archive_callback_keeps_member_ids_and_original_session_times(tmp_
     assert len({doc["archiveGroupId"] for doc in records}) == 1
 
 
+async def test_archive_callback_separates_actual_member_name_from_raw_file_identity(tmp_path):
+    """READY 必须沿用 OPEN 的原始路径 ID，同时公开实际接收范围成员名。"""
+    runtime = object.__new__(SessionRuntime)
+    runtime.repo = SimpleNamespace(db=AsyncMongoMockClient().db,
+                                   settings=SimpleNamespace(log_root=tmp_path, node_id="node"))
+    runtime.task = {"id": "task", "runStartedAt": datetime(2026, 9, 8, tzinfo=UTC)}
+    runtime.started_at = datetime(2026, 9, 8, 2, tzinfo=UTC)
+    runtime.paths, runtime.catalog_dirty, runtime.catalog_ready = {}, {}, set()
+    runtime.catalog_lock = asyncio.Lock()
+    archive_path = tmp_path / "hour.tar.gz"
+    archive_path.write_bytes(b"synthetic-archive")
+    source = tmp_path / "task-192.0.2.9-20260908090000-20260908100000-part-000001.log"
+    first, last = datetime(2026, 9, 8, 1, 5, 6, tzinfo=UTC), datetime(2026, 9, 8, 1, 7, 8, tzinfo=UTC)
+    identifier = runtime.file_id(source)
+    await runtime.repo.db.files.insert_one({"id": identifier, "sessionStartedAt": first})
+    archive = HourArchive("task", "run", "session", first, archive_path, 10, "digest", 1, 1, source,
+                          "task-192.0.2.9-20260908090506-20260908090708-part-000001.log",
+                          source.with_suffix(".index.jsonl"), first, last)
+
+    await runtime.on_archive(archive)
+    record = await runtime.repo.db.files.find_one({"id": identifier})
+    assert record["archiveMember"] == archive.member_name
+    assert record["rawFileName"] == archive.member_name
+    assert record["firstReceivedAt"] == first.isoformat()
+    assert record["lastReceivedAt"] == last.isoformat()
+
+
 async def test_shared_hour_archive_reuses_complete_metadata_despite_old_member_size(tmp_path):
     """同小时后续会话扩大共享 tar 时，早期 READY 记录的旧大小不能强制重压下载。"""
     runtime = object.__new__(SessionRuntime)

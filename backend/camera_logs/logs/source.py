@@ -27,8 +27,8 @@ def file_version(stat: os.stat_result) -> tuple:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _published_member(path: Path) -> tuple[Path, int]:
-    """仅由同目录正式清单定位同名正文，拒绝临时包、歧义和跨目录符号链接。"""
+def _published_member(path: Path) -> tuple[Path, int, str]:
+    """按原始源名定位正式成员，兼容成员展示名与物理源名分离的新版清单。"""
     matches = []
     parent = path.parent.resolve()
     for metadata_path in parent.glob("*.tar.gz.metadata.json"):
@@ -38,12 +38,26 @@ def _published_member(path: Path) -> tuple[Path, int]:
             metadata = json.load(handle)
         if metadata.get("formatVersion") != 2:
             continue
-        for member in metadata.get("members", []):
-            if member.get("logName") == path.name:
+        members = metadata.get("members")
+        if not isinstance(members, list):
+            raise TypeError("archive metadata members are invalid")
+        for member in members:
+            if not isinstance(member, dict):
+                raise TypeError("archive metadata member is invalid")
+            source_name = member.get("sourceLogName", member.get("logName"))
+            member_name = member.get("logName")
+            if (not isinstance(source_name, str) or Path(source_name).name != source_name
+                    or not source_name.endswith(".log") or not isinstance(member_name, str)
+                    or Path(member_name).name != member_name or not member_name.endswith(".log")):
+                raise ValueError("archive metadata member name is invalid")
+            if source_name == path.name:
                 archive = metadata_path.with_name(metadata_path.name.removesuffix(".metadata.json"))
                 if archive.resolve().parent != parent:
                     raise ValueError("archive is outside log directory")
-                matches.append((archive, int(member["rawSize"])))
+                raw_size = member.get("rawSize")
+                if not isinstance(raw_size, int) or isinstance(raw_size, bool) or raw_size < 0:
+                    raise ValueError("archive metadata raw size is invalid")
+                matches.append((archive, raw_size, member_name))
     if len(matches) != 1:
         raise FileNotFoundError(f"published archive member is missing or ambiguous: {path.name}")
     return matches[0]
@@ -64,8 +78,7 @@ def open_log_source(path: Path, member_name: str | None = None):
             except FileNotFoundError:
                 if path.suffix != ".log":
                     raise
-                member_name = path.name
-                path, expected_size = _published_member(path)
+                path, expected_size, member_name = _published_member(path)
             else:
                 yield LogSource(raw, path.name, os.fstat(raw.fileno()).st_size)
                 return

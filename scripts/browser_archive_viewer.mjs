@@ -7,8 +7,14 @@ const { chromium } = imported.default || imported;
 
 const task = { id: "archive-task", name: "归档模拟任务", protocol: "SSH", resourceId: "resource", ip: "192.0.2.8", port: 22,
   status: "COLLECTING", desiredState: "RUNNING", initialCommands: [], scheduledCommands: [] };
-const file = { id: "archive-file", status: "READY", bytes: 700000, rawFileName: "fixture.log" };
-const lateFile = { ...file, id: "archive-file-late", rawFileName: "late.log" };
+const archiveMember = "归档模拟任务-192.0.2.8-20260911081501-20260911094508-part-000001.log";
+const file = {
+  id: "archive-file", status: "READY", bytes: 700000,
+  archiveName: "归档模拟任务-192.0.2.8-20260911080000-20260911090000.tar.gz",
+  archiveMember, rawFileName: "归档模拟任务-192.0.2.8-20260911080000-20260911090000-part-000001.log",
+  firstReceivedAt: "2026-09-11T08:15:01+08:00", lastReceivedAt: "2026-09-11T09:45:08+08:00",
+};
+const lateFile = { ...file, id: "archive-file-late", archiveMember: "late.log", rawFileName: "late.log" };
 const keyword = "中文命中";
 const prefix = "无命中前置正文 ".repeat(1000);
 const matchedLine = `\u001b[31m前置 ${keyword} 完整匹配行\u001b[0m\n`;
@@ -116,6 +122,9 @@ try {
   await page.locator(".archive-table .el-table__row").first().waitFor();
   assert.equal(await date.inputValue(), "2026-09-11", "默认日期必须是上海当天");
   assert.ok(requests.some(url => url.pathname.endsWith("/log-hours") && url.searchParams.get("date") === "2026-09-11"));
+  await page.locator(".archive-table .el-table__expand-icon").first().click();
+  await page.getByText(archiveMember, { exact: true }).waitFor();
+  assert.equal(await page.getByText(file.archiveName, { exact: true }).count(), 0, "片段列表不得把小时包名当作片段名");
   await date.fill("2026-09-11");
   await date.press("Enter");
   await page.locator(".archive-table .el-table__row").first().waitFor();
@@ -151,6 +160,8 @@ try {
   await page.getByRole("button", { name: "查看具体信息", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "日志片段内容" });
   await dialog.getByText(keyword, { exact: false }).waitFor();
+  await dialog.getByText(archiveMember, { exact: true }).waitFor();
+  assert.equal(await dialog.getByText(file.archiveName, { exact: true }).count(), 0, "查看器不得把小时包名当作片段名");
   assert.equal(await dialog.locator(".file-viewer-content").evaluate(element => /\u001b|\^\[\[/.test(element.textContent || "")), false);
   // 命中所在的非整步段先回退到文件开头，再向后恢复到原始锚点。
   await dialog.getByRole("button", { name: "上一段", exact: true }).click();

@@ -290,8 +290,11 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 scratch_name = _unique_scratch_name(
                     _archive_name(file, frozen["id"], use_path=local), scratch_names
                 )
-                path, temporary = await _archive(repo, frozen, scratch, scratch_name,
-                                                 max_output_bytes=OUTPUT_LIMIT - snapshot_bytes)
+                # 远端和仍在写入的本地源必须把索引随冻结正文带回；本地 READY 包
+                # 保留旁路索引并在 pin_hour_sources 中固定，才能继续使用完整包快路径。
+                include_index = not local or frozen.get("status") != "READY"
+                path, temporary = await _archive(repo, frozen, scratch, scratch_name, include_index,
+                                                 OUTPUT_LIMIT - snapshot_bytes)
                 if temporary:
                     snapshot_bytes += path.stat().st_size
                 sources.append((frozen, file, path, temporary))
@@ -325,7 +328,9 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
                 hourly.append((reusable, filename))
                 continue
             hourly_path = scratch / filename
-            await job_thread(write_hour_archive, hourly_path, members, max_output_bytes=OUTPUT_LIMIT - hourly_bytes)
+            await job_thread(write_hour_archive, hourly_path, members,
+                             task_name=job.get("taskName") or job.get("taskId"),
+                             device_ip=job.get("taskIp"), max_output_bytes=OUTPUT_LIMIT - hourly_bytes)
             hourly_bytes += hourly_path.stat().st_size
             hourly.append((hourly_path, filename))
         await job_thread(output.mkdir, parents=True, exist_ok=True)

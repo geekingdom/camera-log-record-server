@@ -14,11 +14,13 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from camera_logs.logs.archive_access import gzip_tar_writer, read_limiter
 from camera_logs.logs.export_output import write_zip
 from camera_logs.logs.hour_download import pin_hour_sources, reusable_hour_archive, write_hour_archive
+from camera_logs.logs.naming import segment_filename
 
 HOURS = 24
 RAW_BYTES_PER_HOUR = 21 * 1024 * 1024
@@ -65,26 +67,33 @@ def _create_ready_hour(
     """创建具有生产旁路 metadata 合同的多分卷 READY 小时包。"""
     archive = root / f"20261012-{hour:02d}.tar.gz"
     members, sources = [], []
+    received_at = datetime(2026, 10, 12, hour, tzinfo=UTC)
     with archive.open("wb") as destination, gzip_tar_writer(destination) as bundle:
         for member in range(MEMBERS_PER_HOUR):
-            name = f"part-{member + 1:06d}.log"
+            part = member + 1
+            source_name = (
+                f"task-192.0.2.10-{received_at:%Y%m%d%H%M%S}-"
+                f"{received_at + timedelta(hours=1):%Y%m%d%H%M%S}-part-{part:06d}.log"
+            )
+            name = segment_filename("task", "192.0.2.10", received_at, received_at, part)
             stream = SyntheticLogStream(hour, member, RAW_BYTES_PER_MEMBER)
             info = tarfile.TarInfo(name)
             info.size = RAW_BYTES_PER_MEMBER
             bundle.addfile(info, stream)
-            members.append((name, stream.digest.hexdigest()))
+            members.append((name, source_name, stream.digest.hexdigest()))
     archive_bytes = archive.stat().st_size
     metadata = {
         "formatVersion": 2,
         "members": [
-            {"logName": name, "rawSize": RAW_BYTES_PER_MEMBER, "sha256": digest}
-            for name, digest in members
+            {"logName": name, "sourceLogName": source_name, "firstReceivedAt": received_at.isoformat(),
+             "lastReceivedAt": received_at.isoformat(), "rawSize": RAW_BYTES_PER_MEMBER, "sha256": digest}
+            for name, source_name, digest in members
         ],
     }
     archive.with_name(archive.name + ".metadata.json").write_text(
         json.dumps(metadata, sort_keys=True), encoding="utf-8",
     )
-    for member, (name, digest) in enumerate(members):
+    for member, (name, _source_name, digest) in enumerate(members):
         frozen = {
             "id": f"file-{hour}-{member}", "status": "READY", "bytes": RAW_BYTES_PER_MEMBER,
             "sha256": digest,
@@ -94,7 +103,7 @@ def _create_ready_hour(
             "archiveGroupId": f"hour-{hour}", "archiveBytes": archive_bytes, "sha256": digest,
         }
         sources.append((frozen, file, archive, False))
-    return sources, members
+    return sources, [(name, digest) for name, _source_name, digest in members]
 
 
 def _old_reusable_hour_archive(sources: list[tuple[dict, dict, Path, bool]]) -> Path | None:

@@ -2,14 +2,15 @@
 // 片段保留 run/session 与块序号身份；摘要代表归档校验，不能宣称设备断线前后无缺口。
 import { FileText } from "lucide-vue-next";
 import type { LogFile } from "../../shared/types";
+import { displayLogFragmentName } from "./fragmentName";
 defineProps<{ files: LogFile[] }>();
 defineEmits<{ view: [LogFile] }>();
 </script>
 <template>
   <div class="hour-fragments">
     <div v-for="file in files" :key="file.id" class="fragment-item">
-      <div class="fragment-heading"><FileText :size="16" /><strong>{{ file.archiveName || file.rawFileName || file.id }}</strong><el-button :icon="FileText" :disabled="!['OPEN', 'READY'].includes(file.status)" @click="$emit('view', file)">查看内容</el-button></div>
-      <dl><dt>节点 / 会话</dt><dd>{{ file.nodeId }} / {{ file.sessionId }}</dd><dt>块序号范围</dt><dd>{{ file.firstSequence ?? '未知' }} 至 {{ file.lastSequence ?? '写入中' }} · {{ file.bytes.toLocaleString() }} 字节</dd><dt>SHA-256</dt><dd>{{ file.sha256 || '尚未生成归档摘要' }}</dd></dl>
+      <div class="fragment-heading"><FileText :size="16" /><strong>{{ displayLogFragmentName(file) }}</strong><el-button :icon="FileText" :disabled="!['OPEN', 'READY'].includes(file.status)" @click="$emit('view', file)">查看内容</el-button></div>
+      <dl><dt>节点 / 会话</dt><dd>{{ file.nodeId }} / {{ file.sessionId }}</dd><dt>块序号范围</dt><dd>{{ file.firstSequence ?? '未知' }} 至 {{ file.lastSequence ?? '写入中' }} · {{ file.bytes.toLocaleString() }} 字节</dd><dt v-if="file.status === 'OPEN'">写入状态</dt><dd v-if="file.status === 'OPEN'">正在写入，封存后固定实际服务器时间范围</dd><dt>SHA-256</dt><dd>{{ file.sha256 || '尚未生成归档摘要' }}</dd></dl>
     </div>
   </div>
 </template>

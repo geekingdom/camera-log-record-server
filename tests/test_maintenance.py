@@ -413,6 +413,40 @@ async def test_recovery_registers_each_shared_archive_member_with_stable_log_ide
     }
 
 
+async def test_recovery_keeps_source_identity_when_archive_member_uses_actual_range(tmp_path):
+    """重启目录恢复按 sourceLogName 固定文件 ID，但下载成员使用实际接收范围名。"""
+    repo = repository(tmp_path)
+    path = tmp_path / "shared" / "2026-09-08" / "09" / "hour.tar.gz"
+    path.parent.mkdir(parents=True)
+    source_name = "camera-192.0.2.9-20260908090000-20260908100000-part-000001.log"
+    member_name = "camera-192.0.2.9-20260908090506-20260908090708-part-000001.log"
+    index_name = source_name.removesuffix(".log") + ".index.jsonl"
+    body = b"server output\n"
+    received = "2026-09-08T01:05:06+00:00"
+    index = (json.dumps({"sequence": 1, "offset": 0, "length": len(body), "receivedAt": received}) + "\n").encode()
+    with tarfile.open(path, "w:gz") as bundle:
+        info = tarfile.TarInfo(member_name)
+        info.size = len(body)
+        bundle.addfile(info, io.BytesIO(body))
+    (path.parent / index_name).write_bytes(index)
+    metadata = {"formatVersion": 2, "members": [{
+        "taskId": "task", "runId": "run", "sessionId": "session", "hourStart": "2026-09-08T01:00:00+00:00",
+        "rawSize": len(body), "sha256": hashlib.sha256(body).hexdigest(), "firstSequence": 1, "lastSequence": 1,
+        "sourceLogName": source_name, "logName": member_name, "indexName": index_name,
+        "indexSha256": hashlib.sha256(index).hexdigest(), "indexBytes": len(index),
+        "firstReceivedAt": received, "lastReceivedAt": "2026-09-08T01:07:08+00:00",
+    }]}
+    Path(str(path) + ".metadata.json").write_text(json.dumps(metadata))
+
+    assert await recover_orphan_archives(repo) == 1
+    record = await repo.db.files.find_one({})
+    assert record["id"] == _archive_id(tmp_path, path.parent / source_name, "node")
+    assert record["archiveMember"] == member_name
+    assert record["rawFileName"] == member_name
+    assert record["firstReceivedAt"] == received
+    assert record["lastReceivedAt"] == "2026-09-08T01:07:08+00:00"
+
+
 async def test_recovery_rejects_checksum_mismatch_and_preserves_archive(tmp_path):
     repo = repository(tmp_path)
     path, _ = archive_at(tmp_path, wrong_digest=True)

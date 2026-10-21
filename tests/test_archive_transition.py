@@ -38,6 +38,23 @@ def published_hour(tmp_path):
     return Path(segments[1]["logPath"])
 
 
+def test_raw_source_name_falls_back_to_actual_named_archive_member(tmp_path):
+    """目录尚未从 OPEN 更新时，原始 source 路径仍能定位实际时间命名的 tar 成员。"""
+    log = tmp_path / "task-192.0.2.9-20260908090000-20260908100000-part-000001.log"
+    index = log.with_suffix(".index.jsonl")
+    log.write_bytes(b"actual-range")
+    index.write_bytes(b"{}\n")
+    member = "task-192.0.2.9-20260908090506-20260908090708-part-000001.log"
+    publish_hour_archive([{"logPath": str(log), "sourceLogName": log.name, "logName": member,
+                           "indexName": index.name, "sha256": hashlib.sha256(log.read_bytes()).hexdigest(),
+                           "rawSize": log.stat().st_size, "indexSha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+                           "indexBytes": index.stat().st_size}], tmp_path / "hour.tar.gz")
+
+    with open_log_source(log) as source:
+        assert source.name == member
+        assert source.stream.read() == b"actual-range"
+
+
 def stale_catalog_app(tmp_path, path):
     """模拟磁盘已归档、数据库仍登记 OPEN 原路径的合法过渡状态。"""
     settings = Settings(encryption_key=Fernet.generate_key().decode(), internal_token="node-secret",

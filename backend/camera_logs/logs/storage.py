@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from camera_logs.logs.archive_spool import persist as persist_archive_spool
 from camera_logs.logs.compression import compress_spool, schedule_pending_archive
-from camera_logs.logs.naming import safe_device_address, safe_filename_component
+from camera_logs.logs.naming import safe_device_address, safe_filename_component, segment_name_from_source
 from camera_logs.logs.write_io import record_stage, write_thread
 
 MAX_LOG_BYTES = 10 * 1024 * 1024
@@ -44,10 +44,15 @@ class HourArchive:
     log_path: Path | None = None
     member_name: str | None = None
     index_path: Path | None = None
+    first_received_at: datetime | None = None
+    last_received_at: datetime | None = None
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
         value["hour_start"] = self.hour_start.isoformat()
+        for key in ("first_received_at", "last_received_at"):
+            if value[key] is not None:
+                value[key] = value[key].isoformat()
         for key in ("path", "log_path", "index_path"):
             if value[key] is not None:
                 value[key] = str(value[key])
@@ -76,6 +81,8 @@ class _Segment:
     index_digest: str
     first: int | None
     last: int | None
+    first_received_at: datetime | None
+    last_received_at: datetime | None
 
 
 class HourlyWriter:
@@ -102,7 +109,7 @@ class HourlyWriter:
         self._index_digest = hashlib.sha256()
         self._index_size = 0
         self._first_sequence = self._last_sequence = None
-        self._last_received_at: datetime | None = None
+        self._first_received_at = self._last_received_at = None
         self._pending: list[_Segment] = []
         self._sealed: list[HourArchive] = []
         self._archive_tasks: set[asyncio.Future[Path]] = set()
@@ -194,6 +201,7 @@ class HourlyWriter:
         self._index_digest = hashlib.sha256()
         self._index_size = 0
         self._first_sequence = self._last_sequence = None
+        self._first_received_at = self._last_received_at = None
         self._last_sync = time.monotonic()
 
     async def write(self, data: bytes, *, received_at: datetime | None = None) -> int:
@@ -324,6 +332,7 @@ class HourlyWriter:
         self._index_digest.update(index_payload)
         self._index_size += len(index_payload)
         self._last_received_at = chunks[-1][2]
+        self._first_received_at = self._first_received_at or chunks[0][2]
         if time.monotonic() - self._last_sync >= 1:
             self._sync_files()
         return positions
@@ -353,6 +362,8 @@ class HourlyWriter:
             record_stage("indexAppendMs", (time.monotonic() - started) * 1000)
         self._index_digest.update(index_payload)
         self._index_size += len(index_payload)
+        self._first_received_at = self._first_received_at or instant
+        self._last_received_at = instant
 
     def _sync_files(self) -> None:
         if self._handle is None or self._index_handle is None:
@@ -416,18 +427,21 @@ class HourlyWriter:
         if self._size:
             self._pending.append(_Segment(log, index, hour, self._size, self._digest.hexdigest(), self._index_size,
                 self._index_digest.hexdigest(),
-                self._first_sequence, self._last_sequence))
+                self._first_sequence, self._last_sequence, self._first_received_at, self._last_received_at))
         else:
             await asyncio.to_thread(log.unlink, missing_ok=True)
             await asyncio.to_thread(index.unlink, missing_ok=True)
 
     def _segment_manifest(self, segment: _Segment) -> dict:
         """复用成功追加并封存的索引摘要，避免整点再次读取完整索引。"""
+        member_name = segment_name_from_source(segment.log.name, segment.first_received_at, segment.last_received_at)
         return {"taskId": self.task_id, "runId": self.run_id, "sessionId": self.session_id,
             "hourStart": segment.hour.astimezone(UTC).isoformat(), "rawSize": segment.size, "sha256": segment.digest,
             "firstSequence": segment.first, "lastSequence": segment.last, "logPath": str(segment.log),
-            "logName": segment.log.name, "indexName": segment.index.name, "indexSha256": segment.index_digest,
-            "indexBytes": segment.index_size}
+            "sourceLogName": segment.log.name, "logName": member_name, "indexName": segment.index.name,
+            "indexSha256": segment.index_digest, "indexBytes": segment.index_size,
+            "firstReceivedAt": segment.first_received_at.astimezone(UTC).isoformat() if segment.first_received_at else None,
+            "lastReceivedAt": segment.last_received_at.astimezone(UTC).isoformat() if segment.last_received_at else None}
 
     def _prepare_archive(self, segments: list[_Segment]) -> tuple[Path, list[dict]]:
         """在线程中扫描已有小时包并组装已封存摘要，保持调用方传入的分卷顺序。"""
@@ -445,11 +459,12 @@ class HourlyWriter:
                 await asyncio.shield(persistence)
             except asyncio.CancelledError:
                 cancelled = True
-        target, _manifests, spool, inner_cancelled = persistence.result()
+        target, manifests, spool, inner_cancelled = persistence.result()
         cancelled = cancelled or inner_cancelled
         archives = tuple(HourArchive(self.task_id, self.run_id, self.session_id, segment.hour.astimezone(UTC), target,
-            segment.size, segment.digest, segment.first, segment.last, segment.log, segment.log.name, segment.index)
-            for segment in segments)
+            segment.size, segment.digest, segment.first, segment.last, segment.log, manifest["logName"], segment.index,
+            segment.first_received_at, segment.last_received_at)
+            for segment, manifest in zip(segments, manifests, strict=True))
         if not background:
             await compress_spool(spool)
             if cancelled:
