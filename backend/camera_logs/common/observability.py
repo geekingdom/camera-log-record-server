@@ -29,6 +29,7 @@ from starlette.requests import Request
 from camera_logs.common.database import now
 from camera_logs.common.request_context import request_context
 from camera_logs.common.request_targets import request_target
+from camera_logs.common.response_validation import response_validation_details
 from camera_logs.common.websocket_logging import track_websocket
 
 MAX_LOG_BYTES = 20 * 1024 * 1024
@@ -448,6 +449,7 @@ def log_request(
         context["error"] = {
             "type": type(error).__name__, "message": error_reason or "请求处理异常",
             "frames": _error_frames(error),
+            "responseValidation": response_validation_details(error, request),
         }
         logger.error("request failed", extra={"context": context})
     elif response_complete:
@@ -533,6 +535,7 @@ class RequestLoggingMiddleware:
                         "reason": reason,
                         "errorType": type(failure).__name__ if failure is not None else None,
                         "errorFrames": _error_frames(failure) if failure is not None else None,
+                        "responseValidation": response_validation_details(failure, request),
                     })
             except asyncio.CancelledError:
                 raise

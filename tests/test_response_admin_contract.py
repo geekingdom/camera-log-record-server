@@ -133,3 +133,26 @@ def test_service_token_statuses_and_secret_result_are_documented():
     ]:
         assert_documented(public_token(document, owner), TOKEN)
     assert_documented(public_token(token, user) | {"token": "test-placeholder"}, TOKEN_SECRET)
+
+
+@pytest.mark.parametrize("state", ["startup", "stale", "isolated", "shutdown"])
+def test_node_lifecycle_snapshots_remain_valid_http_responses(client, state):
+    """节点首次心跳、过期、外部隔离和关闭期间的实际公开投影均通过严格合同。"""
+    from camera_logs.node.telemetry_runtime import UNKNOWN_TELEMETRY
+
+    node = {"id": "lifecycle-node", "url": "http://node", "capacity": 4,
+            "heartbeat": now(), "accepting": False, "activeTasks": 0,
+            "telemetry": dict(UNKNOWN_TELEMETRY), "telemetryAgeSeconds": None}
+    if state == "stale":
+        node["heartbeat"] = now() - timedelta(minutes=5)
+    elif state == "isolated":
+        node["isolated"] = True
+    elif state == "shutdown":
+        node.update(shuttingDownAt=now(), shutdownToken="test-instance", shutdownCompletedAt=None)
+    client.portal.call(client.app.state.repo.db.nodes.insert_one, node)
+    response = client.get("/api/v1/nodes")
+    assert response.status_code == 200, response.text
+    assert_documented(response.json()["items"][0], NODE)
+    config = client.get("/api/v1/admin/nodes")
+    assert config.status_code == 200, config.text
+    assert_documented(config.json()["items"][0], NODE_CONFIG)

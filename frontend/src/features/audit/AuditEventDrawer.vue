@@ -62,6 +62,16 @@ async function copyRequestId() {
 
       <el-alert v-if="hasReason" :title="String(row.reason)" :type="row.level === 'ERROR' ? 'error' : row.level === 'WARNING' ? 'warning' : 'info'" :closable="false" show-icon class="reason-alert" />
 
+      <section v-if="row.responseValidation" class="detail-section">
+        <h4><CircleAlert :size="16" /> 响应字段校验</h4>
+        <p>共 {{ row.responseValidation.count }} 项错误{{ row.responseValidation.truncated ? '，以下诊断已截断' : '' }}。仅显示字段路径和错误码，不包含响应原始值。</p>
+        <dl class="detail-grid validation-issues">
+          <template v-for="(issue, index) in row.responseValidation.issues" :key="index">
+            <dt>{{ issue.type }}</dt><dd>{{ issue.location.join(' → ') }}</dd>
+          </template>
+        </dl>
+      </section>
+
       <section v-if="row.type === 'COREDUMP_DISCOVERED'" class="detail-section">
         <h4><Fingerprint :size="16" /> Coredump 文件</h4>
         <dl class="detail-grid">
@@ -134,4 +144,6 @@ async function copyRequestId() {
 .raw-collapse :deep(.el-collapse-item__header span) { display: flex; align-items: center; gap: 7px; color: #596b6f; font-size: 13px; }
 .raw-collapse pre { max-height: 300px; overflow: auto; margin: 0 0 12px; padding: 10px; border: 1px solid #e3e9ea; border-radius: 5px; background: #f7f9f9; color: #314347; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 520px) { .drawer-summary { flex-direction: column; } .drawer-tags { justify-content: start; } .detail-grid { grid-template-columns: 72px minmax(0, 1fr); gap: 8px; } }
+.detail-grid.validation-issues { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.validation-issues dt { overflow-wrap: anywhere; margin-top: 8px; font-weight: 600; }
 </style>

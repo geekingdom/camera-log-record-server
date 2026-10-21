@@ -23,7 +23,7 @@ const pendingIds = ref(new Set<string>());
 const diagnosticId = ref<string>();
 const diagnosticsOpen = ref(false);
 const blockedRestartTask = ref<Task>();
-const selected = ref<Task[]>([]), selectedIds = ref(new Set<string>()), applying = ref(false), results = ref<BulkOperationEntry[]>([]);
+const selected = ref<Task[]>([]), selectedIds = ref(new Set<string>()), applying = ref(false), deleting = ref(false), results = ref<BulkOperationEntry[]>([]), deleteResults = ref<BulkOperationEntry[]>([]);
 const table = ref<{ clearSelection: () => void; toggleRowSelection: (row: Task, selected?: boolean) => void }>();
 let pageGeneration = 0, mounted = true, restoringSelection = false, selectionInteraction = false;
 // 轮询替换任务对象后仍按 ID 选择新快照，不保留打开弹窗时的过期错误。
@@ -58,6 +58,8 @@ function showsAction(task: Task, action: TaskAction) {
   return !task.resourceDeleted && availableTaskActions(task).includes(action);
 }
 function selectable(task?: Task) { return Boolean(task && !task.deletedAt && !task.resourceDeleted && props.canControl && owns(task)); }
+function batchDeletable(task?: Task) { return Boolean(selectable(task) && props.canWrite && task?.version != null); }
+const deletableSelected = computed(() => selected.value.filter(batchDeletable));
 function clearSelection() { selected.value = []; selectedIds.value = new Set(); table.value?.clearSelection(); }
 function updateSelection(items: Task[]) {
   if (restoringSelection) return;
@@ -90,7 +92,7 @@ function openBlockedRestart(task: Task) {
   blockedRestartTask.value = task;
 }
 async function applySelected(action: TaskAction) {
-  if (applying.value || !selected.value.length) return;
+  if (applying.value || deleting.value || !selected.value.length) return;
   const generation = pageGeneration;
   const classified = applicable(action);
   if (!classified.applicable.length) return ElMessage.warning(`已选任务中没有可${actionLabel(action)}的任务，已跳过 ${classified.skipped.length} 项`);
@@ -114,6 +116,41 @@ async function applySelected(action: TaskAction) {
   await nextTick(); table.value?.clearSelection(); selected.value.forEach(item => table.value?.toggleRowSelection(item, true));
   if (submitted.some(item => item.status === "success")) emit("changed");
 }
+function matchesSelection(snapshot: Array<Pick<Task, "id" | "version">>) {
+  return snapshot.length === selected.value.length
+    && snapshot.every((item, index) => item.id === selected.value[index]?.id && item.version === selected.value[index]?.version);
+}
+function deleteSnapshotAllowed(snapshot: Array<Pick<Task, "id" | "version">>) {
+  return Boolean(props.canWrite && props.canControl && matchesSelection(snapshot)
+    && selected.value.every(batchDeletable));
+}
+// 确认框开启后仍复核选中快照，防止筛选、轮询或用户改选后删除已确认但已过期的任务集合。
+async function removeSelected() {
+  if (deleting.value || applying.value || !deletableSelected.value.length) return;
+  const generation = pageGeneration;
+  const selectionSnapshot = selected.value.map(({ id, version }) => ({ id, version }));
+  const current = deletableSelected.value.map(({ id, name, version }) => ({ id, name, version }));
+  const names = current.map(item => `“${item.name}”`).join("、");
+  if (!await confirmAction(`确认删除 ${current.length} 个采集任务：${names}？任务将停止采集并从默认列表隐藏。已有日志及下载文件仍按原保留期保留，已分享的下载链接不因删除任务而失效。`, "确认批量删除采集任务")) return;
+  if (!mounted || pageGeneration !== generation || !deleteSnapshotAllowed(selectionSnapshot)) return;
+  deleting.value = true;
+  deleteResults.value = [];
+  const submitted = await runSequentially(current, async (id, version) => {
+    await api.deleteTask(id, version);
+  }, {
+    shouldContinue: () => mounted && pageGeneration === generation && deleteSnapshotAllowed(selectionSnapshot),
+    onProgress: entries => { deleteResults.value = entries; },
+  });
+  deleteResults.value = submitted;
+  deleting.value = false;
+  const retained = new Set(submitted.filter(item => item.status !== "success").map(item => item.id));
+  selected.value = props.items.filter(item => retained.has(item.id) && batchDeletable(item));
+  selectedIds.value = new Set(selected.value.map(item => item.id));
+  await nextTick();
+  table.value?.clearSelection();
+  selected.value.forEach(item => table.value?.toggleRowSelection(item, true));
+  if (submitted.some(item => item.status === "success")) emit("changed");
+}
 function applyFilters(change: Partial<{ createdBy: string; showAll: boolean; includeDeleted: boolean }>) { emit("filters", { createdBy: props.createdBy || "", showAll: Boolean(props.showAll), includeDeleted: Boolean(props.includeDeleted), ...change }); }
 function changeSort({ prop, order }: { prop: string; order: "ascending" | "descending" | null }) {
   emit("sort", { sortBy: order ? prop : undefined, sortOrder: order === "ascending" ? "asc" : order === "descending" ? "desc" : undefined });
@@ -124,7 +161,7 @@ async function state(
   task: Task,
   action: "start" | "stop" | "pause" | "resume",
 ) {
-  if (!props.canControl || !owns(task) || busy(task)) return;
+  if (!props.canControl || deleting.value || !owns(task) || busy(task)) return;
   if (!await confirmAction(`确认${action === "start" ? "启动" : action === "stop" ? "停止" : action === "pause" ? "暂停" : "继续"}任务“${task.name}”吗？`, "确认任务操作")) return;
   pendingIds.value = new Set(pendingIds.value).add(task.id);
   try {
@@ -142,7 +179,7 @@ async function state(
 }
 // 删除提交绑定已确认的任务版本，轮询不会改变用户确认的目标。
 async function remove(task: Task) {
-  if (!props.canWrite || !props.canControl || !owns(task) || task.deletedAt || busy(task) || task.version == null) return;
+  if (!props.canWrite || !props.canControl || deleting.value || !owns(task) || task.deletedAt || task.resourceDeleted || busy(task) || task.version == null) return;
   const { id, name, version } = task;
   if (!await confirmAction(`确认删除任务“${name}”吗？任务将停止采集并从默认列表隐藏。已有日志及下载文件仍按原保留期保留，已分享的下载链接不因删除任务而失效。`, "确认删除采集任务")) return;
   if (!mounted || busy(task)) return;
@@ -161,8 +198,9 @@ const rows = computed(() => props.items);
 </script>
 
 <template>
-  <div class="table-actions"><CreatorFilter v-if="props.showAll" :model-value="props.createdBy || ''" @change="(value: string) => applyFilters({ createdBy: value })" /><el-checkbox :model-value="Boolean(props.showAll)" @change="(value: boolean | string | number) => applyFilters({ showAll: Boolean(value) })">查看全部</el-checkbox><el-checkbox :model-value="Boolean(props.includeDeleted)" @change="(value: boolean | string | number) => applyFilters({ includeDeleted: Boolean(value) })">包含已删除任务</el-checkbox><el-button v-for="action in taskActions" :key="action" :disabled="!selected.length || applying" :loading="applying" @click="applySelected(action)">批量{{ actionLabel(action) }} ({{ applicable(action).applicable.length }}/{{ selected.length }})</el-button></div>
+  <div class="table-actions"><CreatorFilter v-if="props.showAll" :model-value="props.createdBy || ''" @change="(value: string) => applyFilters({ createdBy: value })" /><el-checkbox :model-value="Boolean(props.showAll)" @change="(value: boolean | string | number) => applyFilters({ showAll: Boolean(value) })">查看全部</el-checkbox><el-checkbox :model-value="Boolean(props.includeDeleted)" @change="(value: boolean | string | number) => applyFilters({ includeDeleted: Boolean(value) })">包含已删除任务</el-checkbox><el-button v-for="action in taskActions" :key="action" :disabled="!selected.length || applying || deleting" :loading="applying" @click="applySelected(action)">批量{{ actionLabel(action) }} ({{ applicable(action).applicable.length }}/{{ selected.length }})</el-button><el-button type="danger" :icon="Trash2" :disabled="!deletableSelected.length || applying || deleting" :loading="deleting" @click="removeSelected">删除已选 {{ deletableSelected.length ? `(${deletableSelected.length})` : "" }}</el-button></div>
   <div v-if="results.length" class="bulk-operation-result" aria-live="polite"><p>已提交 {{ results.filter(item => item.status === 'success').length }} 项控制请求；失败 {{ results.filter(item => item.status === 'error').length }} 项；跳过 {{ results.filter(item => item.status === 'skipped').length }} 项。</p><ul><li v-for="item in results" :key="item.id">{{ item.name }}：{{ item.status === 'success' ? '已提交控制请求' : item.status === 'error' ? `失败${item.error ? `（${item.error}）` : ''}` : '跳过' }}</li></ul></div>
+  <div v-if="deleteResults.length" class="bulk-delete-result" aria-live="polite"><p>已删除 {{ deleteResults.filter(item => item.status === 'success').length }} 项；失败 {{ deleteResults.filter(item => item.status === 'error').length }} 项；未执行 {{ deleteResults.filter(item => item.status === 'skipped').length }} 项。</p><ul><li v-for="item in deleteResults" :key="item.id">{{ item.name }}：{{ item.status === 'success' ? '已删除，日志按保留期保存' : item.status === 'error' ? `删除失败${item.error ? `（${item.error}）` : ''}` : '未执行' }}</li></ul></div>
   <el-table
     ref="table"
     scrollbar-always-on
@@ -213,7 +251,7 @@ const rows = computed(() => props.items);
     <el-table-column label="资源删除时间" prop="resourceDeletedAt" sortable="custom" min-width="180"><template #default="{ row }">{{ row.resourceDeletedAt ? new Date(row.resourceDeletedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-' }}</template></el-table-column>
     <el-table-column label="操作" width="250" fixed="right"
       ><template #default="{ row }">
-        <el-tooltip v-if="props.canWrite && props.canControl && owns(row) && !row.deletedAt" content="删除任务，保留历史日志"><el-button text type="danger" :icon="Trash2" aria-label="删除采集任务" :disabled="busy(row) || row.version == null" @click="remove(row)" /></el-tooltip>
+        <el-tooltip v-if="props.canWrite && props.canControl && owns(row) && !row.deletedAt && !row.resourceDeleted" content="删除任务，保留历史日志"><el-button text type="danger" :icon="Trash2" aria-label="删除采集任务" :disabled="busy(row) || deleting || applying || row.version == null" @click="remove(row)" /></el-tooltip>
         <el-tooltip :content="`查看任务状态 · ID: ${row.id}`">
           <el-button text :icon="Info" aria-label="查看任务状态" @click="showDiagnostics(row)" />
         </el-tooltip>

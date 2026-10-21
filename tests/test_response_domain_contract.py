@@ -95,6 +95,33 @@ def test_resource_core_metric_and_log_metadata_responses_are_documented(client):
     _assert_response(client, "GET /api/v1/log-files/{identifier}", client.get("/api/v1/log-files/contract-file"))
 
 
+def test_resource_list_redacts_internal_health_and_collection_coordination_fields(client):
+    """健康探测、监控和从机协调字段留在资源文档中，但不得进入严格公开响应。"""
+    repo = client.app.state.repo
+    stamp = datetime(2026, 10, 21, tzinfo=UTC)
+    internal = {
+        "healthLeaseUntil": stamp + timedelta(seconds=20),
+        "healthLeaseStartedAt": stamp,
+        "healthLeaseToken": "health-probe-token",
+        "healthConsumeClaim": 3,
+        "resourceMonitorLeaseUntil": stamp + timedelta(seconds=70),
+        "resourceMonitorLeaseTaskId": "monitor-task",
+        "resourceMonitorLeaseRunId": "monitor-run",
+        "resourceMonitorLeaseGeneration": 2,
+        "resourceMonitorLeaseNodeId": "monitor-node",
+        "resourceMonitorCheckedAt": stamp,
+        "outputRecoveryLeases": {"NORMAL": {"taskId": "task", "until": stamp}},
+        "slaveSshPort": 18080,
+        "slaveSshBootstrap": {"token": "bootstrap-token", "expiresAt": stamp + timedelta(seconds=30)},
+    }
+    client.portal.call(repo.db.resources.update_one, {"id": "fixture-device"}, {"$set": internal})
+
+    response = client.get("/api/v1/resources")
+    _assert_response(client, "GET /api/v1/resources", response)
+    item = next(item for item in response.json()["items"] if item["id"] == "fixture-device")
+    assert not (set(item) & set(internal))
+
+
 def test_log_hour_download_search_and_gap_responses_are_documented(client):
     """日志目录、作业和实时缺口均通过真实路由输出覆盖合同。"""
     repo = client.app.state.repo

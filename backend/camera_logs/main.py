@@ -114,7 +114,7 @@ def create_app(settings=None, db=None):
     async def unexpected_error(request, exc):
         """对外只返回安全说明；请求中间件记录异常类型及安全的结构化位置。"""
         request.state.safe_error = "服务内部异常"
-        return api_error_response(500, "INTERNAL_ERROR", "服务内部异常，请凭请求编号查询运行日志",
+        return api_error_response(500, "INTERNAL_ERROR", "服务内部异常，请管理员在“审计与事件 → 请求记录”中按请求编号查询",
                                   getattr(request.state, "request_id", None))
 
     def repo():

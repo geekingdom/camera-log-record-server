@@ -42,6 +42,7 @@ def public(document):
             "outputWriterNodeId",
             "outputWriterStartedAt",
             "outputWriterClosedAt",
+            "outputWriterClosureReason",
             "outputCleanupState",
             "outputCleanupStartedAt",
             "outputCleanupLeaseUntil",
@@ -52,9 +53,15 @@ def public(document):
             "resourceMonitorLeaseRunId",
             "resourceMonitorLeaseGeneration",
             "resourceMonitorLeaseNodeId",
+            "resourceMonitorCheckedAt",
+            "healthLeaseUntil",
+            "healthLeaseStartedAt",
+            "healthLeaseToken",
+            "healthConsumeClaim",
             "resumeClaimToken",
             "resumeClaimExpires",
             "outputRecoveryLeases",
+            "slaveSshPort",
             "slaveSshBootstrap",
         }
     }

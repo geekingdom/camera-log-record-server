@@ -162,6 +162,8 @@ POST /api/v1/tasks/{taskId}/pause
 POST /api/v1/tasks/{taskId}/resume
 ```
 
+任务页“删除所选”复用既有 `DELETE /api/v1/tasks/{id}?version=...`，按当前页确认的任务ID和版本逐项串行执行，不新增批量后端接口。取消、确认期间改选或权限失效不会提交旧选择；单项失败逐项显示，其余符合条件的任务继续处理。软删除保留日志与已有下载制品，仍按原保留期处理。
+
 暂停适用于正在运行的 SSH 或 Telnet 设备任务；Telnet 串口调用 pause/resume 返回 `409`。暂停保留运行与定时预算，关闭连接；恢复重新连接并执行初始化。海康设备恢复会使下一次新探测成为候选，恢复不主动释放已在途认证的租约；该认证结束后归还自己的租约，再由下一次短周期扫描领取。正常资源仍按 60 秒认证周期检查。两种网络设备任务均可启用 `enableCoredumpMonitor`，共享同一资源的唯一监控负责人，暂停或停止时使用 `umount -l` 卸载，恢复后重新挂载。
 
 ### 控制操作与事务边界
@@ -303,6 +305,10 @@ GET /api/v1/runtime-events?cursor=&pageSize=50&type=COREDUMP_MOUNT
 ```
 
 `level` 只能是 `DEBUG`、`INFO`、`WARNING` 或 `ERROR`；`outcome` 只能是 `PENDING`、`SUCCEEDED`、`FAILED`、`CANCELLED` 或 `UNKNOWN`，其他值返回 422。旧事件没有持久化这些字段时，服务端按与页面相同的规则在数据库聚合中推导后筛选和计数；分页完成后才批量补齐操作者、任务、资源、模板、节点、作业和命令名称。返回条目可包含 `summary`、`level`、`outcome`、`actorName`、`targetName`、`taskName`、`deviceIp`、`requestId`、`clientIp`、`reason`、`runId`、`sessionId` 和 `nodeId`。摘要为中文；例如 `CONNECTION_GAP` 显示为“采集连接中断”，其结果为 `UNKNOWN`、级别为 `WARNING`。
+
+接口返回“服务内部异常”时，管理员应打开“审计与事件 → 请求记录”，将报错中的请求编号填入“按请求编号筛选”，并将时间范围调整为包含故障发生时间（页面默认近24小时）。也可调用 `GET /api/v1/request-events?requestId=...`。运行事件只记录采集、节点等状态，不是所有 HTTP 请求的排障入口。
+
+响应合同校验失败时，请求记录及 API JSONL 会额外包含 `responseValidation`：错误总数 `count`、是否截断 `truncated`、最多20项 `issues`。每项仅有最多12层 `location` 与标准错误码 `type`；字段路径来自响应合同，未知字段及动态字典键隐藏。不会记录原始响应值、Pydantic `input`、`ctx` 或错误正文。各字段中文释义由同一运行时响应合同自动生成。升级前的历史错误没有这些细节，无法从旧请求编号还原被省略的字段。
 
 请求事件记录 `/api/v1/` 下的所有 HTTP 请求，包括成功的 `GET`/`HEAD` 查询和下载；健康检查不在该路径下，不进入该集合。请求成功发送完毕时，HTTP 202 为 `PENDING`，其他 2xx 为 `SUCCEEDED`，4xx/5xx 为 `FAILED`；响应未完整发送时为 `UNKNOWN`。数据库持久化最多等待 0.2 秒，失败不改变原请求结果；已取消请求不会在清理阶段等待写入。因此数据库异常时，可查询的请求事件可能缺失，不能把它视为所有故障请求均可靠落库的保证。事件不保存 query、header、请求/响应 body 或设备日志正文，失败原因仅来自已脱敏的安全错误文本。`request_events` 以 `createdAt` 建立 30 天 TTL，另建 `requestId` 和 `(taskId, createdAt)` 索引；该 TTL 不作用于设备日志、下载或归档。
 

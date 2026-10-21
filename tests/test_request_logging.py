@@ -330,3 +330,74 @@ def test_completed_accepted_response_with_late_error_is_not_left_pending(tmp_pat
     assert event["outcome"] == "FAILED"
     assert event["reason"] == "响应完成后处理失败"
     assert event["errorType"] == "RuntimeError"
+
+
+def test_response_validation_records_safe_field_details_and_request_lookup(tmp_path):
+    """真实响应校验失败同时记录到访问日志和可查询请求事件，不记录原始值或动态键。"""
+    from pydantic import BaseModel, ConfigDict
+
+    class Payload(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        count: int
+
+    secret = "synthetic_private_credential"
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    settings = Settings(_env_file=None, bootstrap_token="synthetic-bootstrap",
+                        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+                        start_background=False)
+    app = create_app(settings, AsyncMongoMockClient().camera_logs)
+
+    @app.get("/api/v1/invalid-response", response_model=Payload)
+    async def invalid_response():
+        return {"count": secret, secret: secret}
+
+    logger = logging.getLogger("camera_logs.access")
+    capture = Capture()
+    logger.addHandler(capture)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/invalid-response", headers={"X-Request-ID": "invalid-response"})
+            event = client.portal.call(app.state.repo.db.request_events.find_one, {"requestId": "invalid-response"})
+            listing = client.get("/api/v1/request-events", params={"requestId": "invalid-response"},
+                                 headers={"Authorization": "Bearer synthetic-bootstrap"})
+    finally:
+        logger.removeHandler(capture)
+    assert response.status_code == 500
+    assert "请求记录" in response.json()["error"]["message"]
+    assert event["responseValidation"] == {
+        "count": 2, "truncated": False, "issues": [
+            {"location": ["response", "count"], "type": "int_parsing"},
+            {"location": ["response", "[未声明字段或动态键]"], "type": "extra_forbidden"},
+        ],
+    }
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["items"][0]["responseValidation"] == event["responseValidation"]
+    failed = next(record for record in records if record.context.get("status") == 500)
+    assert failed.context["error"]["responseValidation"] == event["responseValidation"]
+    assert secret not in str(event)
+    assert secret not in observability.JsonLineFormatter().format(failed)
+
+
+def test_response_validation_diagnostics_bound_size_and_hide_custom_message():
+    """大量错误、长路径、自定义错误码和上下文不能扩大诊断或泄露任意正文。"""
+    from types import SimpleNamespace
+
+    from camera_logs.common.response_validation import response_validation_details
+    from fastapi.exceptions import ResponseValidationError
+
+    error = ResponseValidationError([
+        {"loc": ("response", *range(30), "secret"), "type": "secret", "msg": "secret",
+         "input": "secret", "ctx": {"secret": "secret"}} for _ in range(30)
+    ])
+    result = response_validation_details(error, SimpleNamespace(scope={}))
+    assert result["count"] == 30
+    assert result["truncated"] is True
+    assert len(result["issues"]) == 20
+    assert len(result["issues"][0]["location"]) == 12
+    assert result["issues"][0]["type"] == "custom_error"
+    assert "secret" not in str(result)

@@ -19,7 +19,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from camera_logs.access_policy.policy import apply_ip_permissions
-from camera_logs.common.database import public
 from camera_logs.common.log_frames import GapFrame, StatusFrame, SubscribeFrame
 from camera_logs.common.models import DownloadCreate, SearchCreate
 from camera_logs.common.presentation_time import utc_iso
@@ -29,6 +28,7 @@ from camera_logs.logs.download_availability import download_available
 from camera_logs.logs.gap_catalog import catalog_cursor_page, catalog_gap_fragments
 from camera_logs.logs.hour_catalog import summarize_hours
 from camera_logs.logs.job_submission import cancel_job, submit_job
+from camera_logs.logs.public import public_job
 from camera_logs.users.sessions import COOKIE, check_origin, session_identity
 
 logger = logging.getLogger(__name__)
@@ -224,7 +224,7 @@ def install_log_routes(app):
     async def create_job(body, request, user, kind):
         """冻结任务文件目录，申请保留期保护，并通过幂等键提交后台作业。"""
         authorize(user, "logs:download" if kind == "DOWNLOAD" else "logs:read", body.taskId)
-        return public(await submit_job(repo(), user["id"], request.headers.get("Idempotency-Key"), body, kind))
+        return public_job(await submit_job(repo(), user["id"], request.headers.get("Idempotency-Key"), body, kind))
 
     @app.post("/api/v1/downloads", status_code=202, description='创建日志下载作业。taskId必填；hourIds与start/end二选一。时间不带时区时按北京时间解释，开始向下取整至小时、结束向上取整至小时（结束恰为整点不扩展）。例如12:18:41至15:10:08覆盖12:00至16:00的四个小时。最多168小时；默认缺片失败，allowPartial=true才允许部分导出。')
     async def download(body: DownloadCreate, request: Request, user: User):
@@ -245,7 +245,7 @@ def install_log_routes(app):
             if doc is None:
                 raise HTTPException(404, "记录不存在")
         authorize(user, "logs:download" if doc["kind"] == "DOWNLOAD" else "logs:read", doc["taskId"])
-        return public(doc)
+        return public_job(doc)
 
     @app.get("/api/v1/tasks/{task_id}/downloads", description='按创建时间倒序分页读取指定任务的日志下载历史，返回作业状态和下载制品当前可用性；不暴露节点路径、写入租约或设备日志正文。')
     async def download_history(task_id: Annotated[str, ApiPath(description='路径中指定要查询下载历史的日志采集任务标识。')], user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
@@ -261,7 +261,7 @@ def install_log_routes(app):
         cursor = repo().db.jobs.find(query, fields).sort([("createdAt", -1), ("id", -1)]).skip((page - 1) * pageSize).limit(pageSize)
         items = []
         async for document in cursor:
-            item = public(document)
+            item = public_job(document)
             item["downloadAvailable"] = download_available(document)
             items.append(item)
         return {"items": items, "total": total, "page": page, "pageSize": pageSize}

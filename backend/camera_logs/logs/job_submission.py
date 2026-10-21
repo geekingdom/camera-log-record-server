@@ -7,10 +7,11 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from camera_logs.common import audited_mutations
 from camera_logs.common.api_time import parse_api_datetime
-from camera_logs.common.database import now, public
+from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.common.presentation_time import SHANGHAI, utc_iso
 from camera_logs.logs.order import ordered_files
+from camera_logs.logs.public import public_log_file
 
 
 async def _confirmed(database, actor_id, key, digest, *, session=None):
@@ -126,7 +127,7 @@ async def submit_job(repo, actor_id, key, body, kind):
         previous = await _confirmed(repo.db, actor_id, key, digest, session=session)
         if previous is not None:
             return previous
-        files = ordered_files([public(file) async for file in repo.db.files.find(query, session=session)])
+        files = ordered_files([public_log_file(file) async for file in repo.db.files.find(query, session=session)])
         _validate_files(files, body, kind)
         for file in files:
             if file["status"] not in ("OPEN", "READY"):

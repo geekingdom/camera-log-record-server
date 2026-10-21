@@ -124,6 +124,21 @@ EVENT["properties"]["debugDiagnostic"] = obj(
     (),
 ) | {"nullable": True}
 
+EVENT["properties"]["responseValidation"] = obj(
+    "响应字段校验失败的安全诊断；其他异常或正常请求为 null，不包含实际响应值。",
+    {
+        "count": field("integer", "本次响应校验错误总数，包括超出展示上限的错误。"),
+        "truncated": field("boolean", "错误超过20项或字段路径超过12层时为 true，表示诊断已截断。"),
+        "issues": array("最多20项字段校验错误。", obj(
+            "单项响应校验错误，不记录原始值和错误正文。",
+            {
+                "location": array("从 response 开始的字段路径；数组下标以字符串表示，未知字段或动态字典键显示占位符。",
+                                  field("string", "合同字段名称、数组下标，或隐藏未知键的占位符。")),
+                "type": field("string", "Pydantic 标准错误码，例如 missing 缺字段、extra_forbidden 未声明字段、string_type 字符串类型不符；自定义错误统一为 custom_error。"),
+            }, ("location", "type"))),
+    }, ("count", "truncated", "issues"),
+) | {"nullable": True}
+
 EVENT_PAGE = obj(
     "事件页码或游标分页结果。",
     {

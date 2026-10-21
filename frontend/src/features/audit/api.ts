@@ -6,6 +6,11 @@ export type EventOutcome =
   "SUCCEEDED" | "FAILED" | "PENDING" | "CANCELLED" | "UNKNOWN";
 
 export interface EventBase {
+  responseValidation?: {
+    count: number;
+    truncated: boolean;
+    issues: Array<{ location: string[]; type: string }>;
+  } | null;
   sourceName?: string;
   sourceDetail?: string;
   sourceKind?: string;

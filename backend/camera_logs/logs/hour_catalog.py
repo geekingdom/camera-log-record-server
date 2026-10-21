@@ -1,7 +1,7 @@
 """按逻辑小时汇总片段，区分已校验归档与源端日志完整性。"""
 
-from camera_logs.common.database import public
 from camera_logs.logs.order import ordered_files
+from camera_logs.logs.public import public_log_file
 
 
 def summarize_hours(files):
@@ -14,7 +14,7 @@ def summarize_hours(files):
         entry["bytes"] += file.get("bytes", 0)
         archive_key = (hour, file.get("nodeId"), file.get("archiveGroupId") or file["id"])
         archive_sizes[archive_key] = max(archive_sizes.get(archive_key, 0), file.get("archiveBytes", 0))
-        entry["files"].append(public(file))
+        entry["files"].append(public_log_file(file))
     for entry in groups.values():
         entry["archiveBytes"] = sum(size for key, size in archive_sizes.items() if key[0] == entry["hour"])
         fragments = entry["files"] = ordered_files(entry["files"])

@@ -204,6 +204,7 @@ void load();
 
     <el-alert v-if="denied" title="当前账号没有管理员查询权限。" type="error" :closable="false" show-icon />
     <template v-else>
+      <el-alert title="接口报错请在“请求记录”按请求编号查询，并确认时间范围包含报错时间。“运行事件”用于采集、节点等运行状态。" type="info" :closable="false" show-icon />
       <section class="audit-filter-panel" aria-label="事件筛选">
         <div class="range-tools">
           <el-date-picker v-model="dateRange" type="datetimerange" start-placeholder="开始时间" end-placeholder="结束时间" aria-label="按时间范围筛选" />

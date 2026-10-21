@@ -22,6 +22,7 @@ const tasks = [
 ];
 const operations = [];
 const restartBodies = [];
+const deletes = [];
 const errors = [];
 
 async function newPage(isAdmin) {
@@ -36,8 +37,18 @@ async function newPage(isAdmin) {
     if (path === "/api/v1/tasks" && request.method() === "GET") {
       taskReads += 1;
       const createdBy = url.searchParams.get("createdBy");
-      const items = tasks.filter(item => !createdBy || item.createdBy === createdBy).map(item => ({ ...item }));
+      const includeDeleted = url.searchParams.get("includeDeleted") === "true";
+      const items = tasks.filter(item => (includeDeleted || !item.deletedAt) && (!createdBy || item.createdBy === createdBy)).map(item => ({ ...item }));
       return route.fulfill({ json: { items, total: items.length, page: 1, pageSize: 20 } });
+    }
+    const deleteMatch = path.match(/^\/api\/v1\/tasks\/([^/]+)$/);
+    if (deleteMatch && request.method() === "DELETE") {
+      const id = deleteMatch[1];
+      deletes.push(`${id}:${url.searchParams.get("version")}`);
+      if (id === "paused") return route.fulfill({ status: 409, json: { message: "任务版本已变化" } });
+      const item = tasks.find(task => task.id === id);
+      if (item) item.deletedAt = "2026-10-21T10:00:00+08:00";
+      return route.fulfill({ status: 202, json: item });
     }
     const match = path.match(/^\/api\/v1\/tasks\/([^/]+)\/(start|stop|pause|resume|restart)$/);
     if (match && request.method() === "POST") {
@@ -80,6 +91,11 @@ try {
     true,
     "资源已删除任务不得进入批量控制选择",
   );
+  assert.equal(
+    await row(admin.page, "资源已删除任务").getByRole("button", { name: "删除采集任务", exact: true }).count(),
+    0,
+    "资源已删除任务不得显示行内删除操作",
+  );
   for (const name of ["可启动任务", "可停止任务"]) {
     await select(admin.page, name);
   }
@@ -120,6 +136,31 @@ try {
   await admin.page.getByText("失败 1 项", { exact: false }).last().waitFor();
   assert.deepEqual(operations.slice(-2), ["blocked:restart", "blocked-ok:restart"], "一项隔离失败不能阻断后续重启");
   assert.deepEqual(restartBodies, [{}, {}], "批量重启不得自动携带隔离确认");
+  await admin.page.reload({ waitUntil: "networkidle" });
+  await admin.page.getByRole("tab", { name: "采集任务", exact: true }).click();
+  await admin.page.getByText("可启动任务", { exact: true }).waitFor();
+  await select(admin.page, "可启动任务");
+  await select(admin.page, "可继续任务");
+  await admin.page.getByRole("button", { name: /删除已选 \(2\)/ }).click();
+  const batchDelete = admin.page.getByRole("dialog", { name: "确认批量删除采集任务" });
+  await batchDelete.waitFor();
+  assert.match(await batchDelete.textContent(), /已有日志及下载文件仍按原保留期保留/);
+  await row(admin.page, "可继续任务").locator(".el-checkbox input").evaluate(input => input.click());
+  await batchDelete.getByRole("button", { name: "确认", exact: true }).click();
+  await admin.page.waitForTimeout(100);
+  assert.deepEqual(deletes, [], "确认期间选中集合变化不得提交旧删除请求");
+  await select(admin.page, "可继续任务");
+  await admin.page.getByRole("button", { name: /删除已选 \(2\)/ }).click();
+  await batchDelete.waitFor();
+  await batchDelete.getByRole("button", { name: "取消", exact: true }).click();
+  assert.deepEqual(deletes, [], "取消批量删除不得发送 DELETE");
+  await admin.page.getByRole("button", { name: /删除已选 \(2\)/ }).click();
+  await batchDelete.getByRole("button", { name: "确认", exact: true }).click();
+  await admin.page.getByText("失败 1 项", { exact: false }).last().waitFor();
+  assert.deepEqual(deletes, ["stopped:1", "paused:1"], "批量删除必须按勾选顺序继续处理失败后的任务");
+  assert.match(await admin.page.locator(".bulk-delete-result").textContent(), /可继续任务.*任务版本已变化/);
+  await row(admin.page, "可启动任务").waitFor({ state: "detached" });
+  await admin.page.screenshot({ path: "output/playwright/task-bulk-1440.png", fullPage: true });
   for (const width of [390, 320]) {
     await admin.page.setViewportSize({ width, height: 844 });
     await admin.page.waitForTimeout(150);
@@ -133,7 +174,7 @@ try {
   assert.ok(!operations.some(item => item.startsWith("other:")), "普通用户查询不应包含其他创建者任务");
   await member.context.close();
   assert.deepEqual(errors, [], `浏览器控制台异常：${errors.join("；")}`);
-  console.log(JSON.stringify({ passed: true, operations, viewports: [390, 320], consoleErrors: 0 }));
+  console.log(JSON.stringify({ passed: true, operations, deletes, viewports: [1440, 390, 320], consoleErrors: 0 }));
 } finally {
   await browser.close();
 }
