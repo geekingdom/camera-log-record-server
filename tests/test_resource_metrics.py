@@ -287,6 +287,145 @@ def test_resource_metric_history_route_limits_range_and_returns_public_config(re
     assert too_wide.status_code == 422
 
 
+def test_resource_metric_dates_uses_shanghai_month_and_keeps_deleted_history(resource_client, monkeypatch):
+    """日期选择器只取得保留期内的实际样本日，并以上海自然月划分。"""
+    repo = resource_client.app.state.repo
+    now = datetime.now(UTC)
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "deleted-calendar-camera", "kind": "HIKVISION_NETWORK", "deletedAt": now,
+    })
+    rows = [
+        {
+            "id": "metric-october", "resourceId": "deleted-calendar-camera",
+            "bucketStart": datetime(2026, 10, 31, 15, tzinfo=UTC),
+            "expiresAt": now + timedelta(days=1),
+            "samples": [{"sampledAt": datetime(2026, 10, 31, 15, 59, tzinfo=UTC)}],
+        },
+        {
+            "id": "metric-november", "resourceId": "deleted-calendar-camera",
+            "bucketStart": datetime(2026, 10, 31, 16, tzinfo=UTC),
+            "expiresAt": now + timedelta(days=1),
+            "samples": [{"sampledAt": datetime(2026, 10, 31, 16, tzinfo=UTC)}],
+        },
+        {
+            "id": "metric-empty", "resourceId": "deleted-calendar-camera",
+            "bucketStart": datetime(2026, 10, 20, 1, tzinfo=UTC),
+            "expiresAt": now + timedelta(days=1), "samples": [],
+        },
+        {
+            "id": "metric-expired", "resourceId": "deleted-calendar-camera",
+            "bucketStart": datetime(2026, 10, 20, 2, tzinfo=UTC),
+            "expiresAt": now - timedelta(seconds=1),
+            "samples": [{"sampledAt": datetime(2026, 10, 20, 2, tzinfo=UTC)}],
+        },
+    ]
+    resource_client.portal.call(repo.db.resource_metric_hours.insert_many, rows)
+
+    pipelines = []
+
+    class _DaysCursor:
+        """mongomock 尚不支持 $dateToString 的 timezone；路由边界仍由正式聚合合同锁定。"""
+
+        def __init__(self, values):
+            self.values = values
+
+        def __aiter__(self):
+            self._iterator = iter(self.values)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._iterator)
+            except StopIteration as error:
+                raise StopAsyncIteration from error
+
+    async def aggregate(_collection, pipeline):
+        pipelines.append(pipeline)
+        lower = pipeline[0]["$match"]["bucketStart"]["$gte"]
+        return _DaysCursor([{"day": "2026-10-31" if lower.month == 9 else "2026-11-01"}])
+
+    monkeypatch.setattr(type(repo.db.resource_metric_hours), "aggregate", aggregate)
+
+    october = resource_client.get(
+        "/api/v1/resources/deleted-calendar-camera/resource-metric-dates", params={"month": "2026-10"}
+    )
+    assert october.status_code == 200, october.text
+    assert october.json() == {"days": ["2026-10-31"]}
+    november = resource_client.get(
+        "/api/v1/resources/deleted-calendar-camera/resource-metric-dates", params={"month": "2026-11"}
+    )
+    assert november.status_code == 200, november.text
+    assert november.json() == {"days": ["2026-11-01"]}
+    assert resource_client.get(
+        "/api/v1/resources/deleted-calendar-camera/resource-metric-dates", params={"month": "2026-13"}
+    ).status_code == 422
+    assert resource_client.get(
+        "/api/v1/resources/missing/resource-metric-dates", params={"month": "2026-10"}
+    ).status_code == 404
+    assert len(pipelines) == 2
+    first = pipelines[0]
+    assert first[0]["$match"]["samples.0"] == {"$exists": True}
+    assert first[1] == {"$unwind": "$samples"}
+    assert first[2]["$match"]["samples.sampledAt"]
+    assert first[3]["$group"]["_id"]["$dateToString"]["timezone"] == "Asia/Shanghai"
+    assert first[-1] == {"$project": {"_id": 0, "day": "$_id"}}
+
+
+def test_deleted_resource_keeps_metric_history_but_never_returns_stale_monitor_owner(resource_client):
+    """软删只停止后续采样；保留期内历史仍可读，删除前残留租约不能显示为 owner。"""
+    repo = resource_client.app.state.repo
+    stamp = datetime.now(UTC).replace(second=0, microsecond=0)
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "deleted-camera", "kind": "HIKVISION_NETWORK", "deletedAt": stamp,
+        "resourceMonitorLeaseTaskId": "deleted-owner", "resourceMonitorLeaseRunId": "run-1",
+        "resourceMonitorLeaseGeneration": 1, "resourceMonitorLeaseNodeId": "node-1",
+        "resourceMonitorLeaseUntil": stamp + timedelta(minutes=5),
+    })
+    resource_client.portal.call(repo.db.tasks.insert_one, {
+        "id": "deleted-owner", "name": "已删除设备的旧采集", "resourceId": "deleted-camera",
+        "runId": "run-1", "generation": 1, "nodeId": "node-1", "status": "COLLECTING",
+        "desiredState": "RUNNING", "deletedAt": stamp, "resourceDeleted": True,
+    })
+
+    async def save():
+        await ResourceMetricStore(repo.db).save(
+            "deleted-camera", {"sampledAt": stamp, "status": "OK", "values": [], "configVersion": 1},
+            retention_days=90,
+        )
+
+    resource_client.portal.call(save)
+    before = resource_client.portal.call(repo.db.resource_metric_hours.count_documents,
+                                         {"resourceId": "deleted-camera"})
+    response = resource_client.get("/api/v1/resources/deleted-camera/resource-metrics", params={
+        "start": (stamp - timedelta(minutes=1)).isoformat(), "end": (stamp + timedelta(minutes=1)).isoformat(),
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["items"][0]["status"] == "OK"
+    assert response.json()["owner"] is None
+    assert resource_client.portal.call(repo.db.resource_metric_hours.count_documents,
+                                       {"resourceId": "deleted-camera"}) == before
+
+
+def test_active_resource_hides_owner_when_lease_task_was_soft_deleted(resource_client):
+    """任务先软删或标记资源已删时，即使旧租约未过期也不能作为当前 owner 返回。"""
+    repo = resource_client.app.state.repo
+    stamp = datetime.now(UTC)
+    resource_client.portal.call(repo.db.resources.insert_one, {
+        "id": "camera-with-deleted-owner", "kind": "HIKVISION_NETWORK", "deletedAt": None,
+        "resourceMonitorLeaseTaskId": "old-owner", "resourceMonitorLeaseRunId": "run-2",
+        "resourceMonitorLeaseGeneration": 2, "resourceMonitorLeaseNodeId": "node-2",
+        "resourceMonitorLeaseUntil": stamp + timedelta(minutes=5),
+    })
+    resource_client.portal.call(repo.db.tasks.insert_one, {
+        "id": "old-owner", "name": "已软删旧任务", "resourceId": "camera-with-deleted-owner",
+        "runId": "run-2", "generation": 2, "nodeId": "node-2", "status": "COLLECTING",
+        "desiredState": "RUNNING", "deletedAt": stamp, "resourceDeleted": True,
+    })
+    response = resource_client.get("/api/v1/resources/camera-with-deleted-owner/resource-metrics")
+    assert response.status_code == 200, response.text
+    assert response.json()["owner"] is None
+
+
 def _runtime(database):
     return SimpleNamespace(
         repo=SimpleNamespace(db=database),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import regex
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,6 +22,16 @@ class _SettingsModel(BaseModel):
     """监控设置拒绝未声明字段，避免错误配置被悄悄保存。"""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class ResourceMetricDates(BaseModel):
+    """资源指标日历只公开可用日期，防止把完整采样正文带入日期查询。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    days: list[Annotated[str, Field(description="上海自然日，格式 YYYY-MM-DD。")]] = Field(
+        description="指定上海自然月内至少有一个未过期实际指标样本的日期，按日期升序去重；无可用样本返回空列表，不返回样本正文或样本计数。"
+    )
 
 
 class MetricItem(_SettingsModel):

@@ -140,6 +140,8 @@ def response_example(path, method, status):
                      "initialAuthentication": False, "message": "认证成功，设备身份已变化"})
     if path.endswith("/coredump-monitor"):
         return {"active": True, "ownerTask": {"id": "task-example", "name": "值守采集"}, "mountStatus": "MOUNTED"}
+    if path.endswith("/resource-metric-dates"):
+        return {"days": ["2026-10-19", "2026-10-20"]}
     if path.endswith("/resource-metrics"):
         return {"items": [{"sampledAt": STAMP, "status": "PARTIAL", "configVersion": 1,
                            "identity": {"model": "DS-2CD", "subSerialNumber": "SN-EXAMPLE"},

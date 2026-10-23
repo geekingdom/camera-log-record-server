@@ -49,6 +49,7 @@ from camera_logs.common.api_contracts.response_schema import (
 )
 from camera_logs.common.api_contracts.response_tasks import COMMAND_HISTORY, COMMON, TASK, TEMPLATE
 from camera_logs.common.log_frames import DataFrame, GapFrame, StatusFrame
+from camera_logs.resource_metrics.models import ResourceMetricDates
 
 ERROR = error_schema()
 VALIDATION = error_schema(True)
@@ -130,6 +131,7 @@ def _mapping() -> dict[str, dict[str, Any]]:
     add("GET", ("/api/v1/resources/{identifier}/coredump-monitor",), json(obj("Coredump 监控归属。", {"active": field("boolean", "是否启用。"), "ownerTask": {**owner_task, "nullable": True}, "mountStatus": field("string", "挂载状态。", nullable=True)}, ("active", "ownerTask", "mountStatus")), NOT_FOUND))
     add("GET", ("/api/v1/resources/{resource_id}/coredumps",), json(page(COREDUMP), NOT_FOUND, ["sourceState=STABLE 时，可直接用 id 下载稳定源文件，不必创建导出副本。"] ))
     add("GET", ("/api/v1/resources/{resource_id}/resource-metrics",), json(METRIC_HISTORY, NOT_FOUND))
+    add("GET", ("/api/v1/resources/{resource_id}/resource-metric-dates",), json(ResourceMetricDates.model_json_schema(), NOT_FOUND))
     add("GET", ("/api/v1/common-commands", "/api/v1/admin/common-commands"), json(page(COMMON)))
     add("POST", ("/api/v1/admin/common-commands",), json(COMMON, MUTATE)); add("PATCH", ("/api/v1/admin/common-commands/{identifier}",), json(COMMON, MUTATE + [(404, "命令不存在。")]))
     add("DELETE", ("/api/v1/admin/common-commands/{identifier}",), empty(MUTATE + [(404, "命令不存在。")]))

@@ -113,6 +113,16 @@ Content-Type: application/json
 
 列表及详情包含 `taskCount`、`activeTaskCount`。列表默认排除已删除资源，增加 `includeDeleted=true` 可查询；已删除资源详情保留 `deletedAt`，`deletionState=PENDING` 表示关联任务仍在停止或等待回收，所有任务停止且运行锁释放后才标记 `DONE`。文件查询和下载接口保持可用。
 
+## 资源 CPU 与内存历史日期
+
+`GET /api/v1/resources/{resourceId}/resource-metric-dates?month=2026-10` 需要 `tasks:read`，为 CPU/内存自定义时间选择器返回指定上海自然月内存在历史指标的日期：
+
+```json
+{"days":["2026-10-19","2026-10-20"]}
+```
+
+`month` 固定使用 `YYYY-MM`，不是带时区的时间参数。服务端只标记至少有一条未过期实际采样的日期，不返回指标正文；没有数据的日期不在列表中。按上海自然日归属，跨 UTC 月界的样本按其北京时间日期处理。已删除资源在指标保留期内仍可查询历史日期。选择日期范围后，再调用 `GET /api/v1/resources/{resourceId}/resource-metrics` 并传入不带时区的 `start`、`end`（例如 `2026-10-19T12:00:00`）读取对应采样。
+
 ## 任务
 
 创建采集任务：

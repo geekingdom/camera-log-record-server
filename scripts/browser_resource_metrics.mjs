@@ -13,7 +13,11 @@ const resources = [
   { id: "disabled-resource", name: "未启用趋势", kind: "HIKVISION_NETWORK", ip: "192.0.2.31", version: 1, enableResourceMonitor: false },
   { id: "serial-resource", name: "串口资源", kind: "SERIAL_SERVER", ip: "192.0.2.32", version: 1, enableResourceMonitor: true },
 ];
+const dateRequests = [];
+let failDates = false;
 let metricRequests = 0;
+const deletedAt = "2026-09-11T00:03:00.000Z";
+let deletedRequests = 0;
 let failNextMetrics = false;
 let delayNextMetrics = false;
 let delayedMetricsStarted;
@@ -24,6 +28,12 @@ async function json(route, body, status = 200) {
 }
 await context.route("**/api/v1/**", async route => {
   const request = route.request(); const url = new URL(request.url()); const path = url.pathname; const method = request.method();
+  if (method === "GET" && path.endsWith("/resource-metric-dates")) {
+    dateRequests.push(url);
+    if (failDates) return json(route, {detail: "模拟日期查询失败"}, 500);
+    const month = url.searchParams.get("month");
+    return json(route, {days: [`${month}-11`]});
+  }
   if (method === "GET" && path === "/api/v1/auth/me") return json(route, { user: { id: "reader", username: "reader", displayName: "只读用户", scopes: ["tasks:read", "logs:read"], isAdmin: false, enabled: true, mustChangePassword: false } });
   if (method === "GET" && path === "/api/v1/resources") return json(route, { items: resources, total: resources.length, page: 1, pageSize: 20 });
   if (method === "GET" && path === "/api/v1/tasks") return json(route, { items: [], total: 0, page: 1, pageSize: 20 });
@@ -44,6 +54,12 @@ await context.route("**/api/v1/**", async route => {
       ], nextCursor: "next-page",
     });
     return json(route, { items: [{ sampledAt: "2026-09-11T00:00:00.000Z", status: "TIMEOUT", errorCode: "COMMAND_TIMEOUT", values: [] }], nextCursor: null });
+  }
+  if (method === "GET" && path === "/api/v1/resources/deleted-resource/resource-metrics") {
+    deletedRequests += 1;
+    assert.equal(url.searchParams.get("end"), deletedAt);
+    assert.equal(url.searchParams.get("start"), "2026-09-10T23:03:00.000Z");
+    return json(route, {items: [{sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{id: "cpu", name: "CPU", unit: "%", value: 21}, {id: "mem", name: "内存", unit: "KB", value: 2048}]}], nextCursor: null, owner: null});
   }
   throw new Error(`未模拟的 API 请求：${method} ${path}`);
 });
@@ -157,6 +173,47 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, `${width}px 不得横向溢出`);
   }
   await page.locator(".resource-metrics-dialog .el-dialog__headerbtn").click();
+  resources.push({id: "deleted-resource", name: "已删除趋势设备", kind: "HIKVISION_NETWORK", ip: "192.0.2.33", version: 2, deletedAt, enableResourceMonitor: false});
+  await page.reload({waitUntil: "networkidle"});
+  const deletedRow = page.getByRole("row").filter({hasText: "已删除趋势设备"});
+  await deletedRow.getByLabel("查看 CPU 与内存趋势").click();
+  await page.getByText("删除前 1 小时", {exact: true}).waitFor();
+  await page.locator(".metrics-chart canvas").first().waitFor();
+  assert.equal(deletedRequests, 1);
+  assert.equal(await page.getByRole("button", {name: "恢复自动刷新", exact:true}).count(), 0);
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({width, height: 844});
+    await page.screenshot({path: `output/playwright/deleted-resource-metrics-${width}.png`, fullPage: true});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
+  }
+  await page.getByText("CPU", {exact:true}).click();
+  await page.getByRole("heading", {name:"CPU（%）",exact:true}).waitFor();
+  await page.getByText("自定义", {exact:true}).click();
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('.metrics-custom-range .el-range-input[placeholder="开始时间"]').click();
+  await page.locator('.metrics-calendar-cell[title="2026-09-11 有指标采样"] i').waitFor();
+  assert.ok(dateRequests.some(url => url.pathname.includes("deleted-resource") && url.searchParams.get("month") === "2026-09"));
+  assert.equal(await page.locator('.metrics-calendar-cell[title="2026-09-12"] i').count(), 0);
+  for (const width of [1440,390]) {
+    await page.setViewportSize({width,height:1000});
+    await page.screenshot({path:`output/playwright/resource-metric-dates-${width}.png`,fullPage:false});
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, "日期面板不得横向溢出");
+    assert.equal(await page.locator(".metrics-calendar-popper:visible .el-picker-panel__body").evaluate(element => element.scrollWidth > element.clientWidth), false, "日期面板内部不能裁切日期列");
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  const panel = page.locator(".metrics-calendar-popper:visible");
+  await panel.locator(".el-picker-panel__icon-btn.arrow-right").last().click();
+  await panel.locator('[title="2026-11-11 有指标采样"] i').waitFor();
+  assert.ok(dateRequests.some(url => url.searchParams.get("month") === "2026-12"), "翻月覆盖右侧面板及相邻月");
+  failDates = true;
+  await panel.locator(".el-picker-panel__icon-btn.arrow-right").last().click();
+  await page.getByText("日期标记加载失败，重新打开日历可重试", {exact:true}).waitFor();
+  await page.locator('.metrics-custom-range .el-range-input[placeholder="开始时间"]').press("Escape");
+  await panel.waitFor({state:"hidden"});
+  failDates = false;
+  await page.locator('.metrics-custom-range .el-range-input[placeholder="开始时间"]').click();
+  await page.getByText("日期标记加载失败，重新打开日历可重试", {exact:true}).waitFor({state:"hidden"});
+  await page.locator('.metrics-calendar-cell[title="2026-09-11 有指标采样"] i').waitFor();
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ passed: true, metricRequests, screenshots: "output/playwright/resource-metrics-{1440,390}.png", consoleErrors: 0 }));
 } finally { await browser.close(); }

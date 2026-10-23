@@ -11,6 +11,7 @@ import { api } from "../../shared/api";
 import type { Resource, ResourceMetricSample } from "../../shared/types";
 import { metricIssueCount, metricSeries, metricSummaries, metricsCsv, validMetricRange } from "./resourceMetrics";
 import { memoryLabel, memoryPrecision, memoryUnit, metricAxis, percentageLabel } from "./metricAxis";
+import ResourceMetricDatePicker from "./ResourceMetricDatePicker.vue";
 import { relativeMetricSeries } from "./metricRelative";
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
@@ -20,6 +21,7 @@ const props = defineProps<{ resource?: Resource }>();
 type Preset = "30m" | "1h" | "custom";
 const preset = ref<Preset>("1h");
 const customRange = ref<[Date, Date] | null>(null);
+const calendarAnchor = ref(new Date());
 const samples = ref<ResourceMetricSample[]>([]);
 const loading = ref(false);
 const paused = ref(false);
@@ -49,7 +51,9 @@ const zeroBaselineNames = computed(() => selectedUnit.value === "KB" && memoryDi
 
 /** 当前选择范围始终转换为 ISO UTC，默认最近一小时，服务端再执行最终范围校验。 */
 function selectedRange(): { start: Date; end: Date } {
-  const end = new Date();
+  // 已删除资源的预设范围锚定删除时间，避免多年后仍查询当前空白窗口。
+  const deleted = props.resource?.deletedAt ? new Date(props.resource.deletedAt) : undefined;
+  const end = deleted && Number.isFinite(deleted.getTime()) ? deleted : new Date();
   if (preset.value === "custom" && customRange.value) return { start: customRange.value[0], end: customRange.value[1] };
   const minutes = preset.value === "30m" ? 30 : 60;
   return { start: new Date(end.getTime() - minutes * 60_000), end };
@@ -115,7 +119,7 @@ function disposeCharts() {
 function scheduleRefresh() {
   if (refreshTimer) window.clearInterval(refreshTimer);
   refreshTimer = undefined;
-  if (open.value && !paused.value) refreshTimer = window.setInterval(() => void load(), 60_000);
+  if (open.value && !paused.value && !props.resource?.deletedAt) refreshTimer = window.setInterval(() => void load(), 60_000);
 }
 /** 使用请求代次隔离切换范围、关闭弹窗和轮询时迟到的历史分页响应。 */
 async function load() {
@@ -167,7 +171,9 @@ function exportCsv() {
 watch(() => [open.value, props.resource?.id] as const, ([visible]) => {
   generation += 1;
   if (visible) {
-    paused.value = false;
+    paused.value = Boolean(props.resource?.deletedAt);
+    preset.value = "1h"; customRange.value = null;
+    calendarAnchor.value = selectedRange().end;
     memoryDisplayMode.value = "absolute";
     void nextTick(observeCharts);
     loading.value = false; reload();
@@ -181,21 +187,22 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
 </script>
 <template>
   <el-dialog v-model="open" :title="`${props.resource?.name ?? '资源'} · CPU 与内存趋势`" width="min(1100px, 96vw)" destroy-on-close class="resource-metrics-dialog">
+    <el-alert v-if="props.resource?.deletedAt" title="该资源已删除，仅查看保留期内的历史采样，不会恢复采集。预设时间范围截止于删除时间，可自定义查询更早记录。" type="info" :closable="false" class="metrics-alert" />
     <div class="metrics-toolbar">
       <el-radio-group :model-value="selectedUnit" aria-label="监控指标" @change="selectMetric"><el-radio-button value="KB">内存</el-radio-button><el-radio-button value="%">CPU</el-radio-button></el-radio-group>
       <el-tooltip v-if="selectedUnit === 'KB'" content="比率 = 当前值 ÷ 首个有效采样值 × 100%，首个有效值为100%；缩放不改变基准，刷新或重新查询后按新范围计算。" :popper-style="{ maxWidth: 'min(320px, calc(100vw - 24px))', whiteSpace: 'normal' }">
         <el-radio-group :model-value="memoryDisplayMode" aria-label="内存图展示方式" @change="selectMemoryDisplay"><el-radio-button value="absolute">原始数值</el-radio-button><el-radio-button value="relative">比率</el-radio-button></el-radio-group>
       </el-tooltip>
       <el-radio-group :model-value="preset" aria-label="监控历史时间范围" @change="choosePreset">
-        <el-radio-button value="30m">最近 30 分钟</el-radio-button><el-radio-button value="1h">最近 1 小时</el-radio-button><el-radio-button value="custom">自定义</el-radio-button>
+        <el-radio-button value="30m">{{ props.resource?.deletedAt ? "删除前 30 分钟" : "最近 30 分钟" }}</el-radio-button><el-radio-button value="1h">{{ props.resource?.deletedAt ? "删除前 1 小时" : "最近 1 小时" }}</el-radio-button><el-radio-button value="custom">自定义</el-radio-button>
       </el-radio-group>
       <div class="metrics-commands">
         <el-tooltip content="刷新趋势"><el-button circle :icon="RefreshCw" aria-label="刷新趋势" :loading="loading" @click="load" /></el-tooltip>
-        <el-tooltip :content="paused ? '恢复自动刷新' : '暂停自动刷新'"><el-button circle :icon="paused ? Play : Pause" :aria-label="paused ? '恢复自动刷新' : '暂停自动刷新'" @click="togglePause" /></el-tooltip>
+        <el-tooltip v-if="!props.resource?.deletedAt" :content="paused ? '恢复自动刷新' : '暂停自动刷新'"><el-button circle :icon="paused ? Play : Pause" :aria-label="paused ? '恢复自动刷新' : '暂停自动刷新'" @click="togglePause" /></el-tooltip>
         <el-tooltip content="导出原始采样值，不受图表比率展示影响"><el-button :icon="Download" :disabled="!samples.length" @click="exportCsv">导出 CSV</el-button></el-tooltip>
       </div>
     </div>
-    <div v-if="preset === 'custom'" class="metrics-custom-range"><el-date-picker v-model="customRange" type="datetimerange" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" :teleported="false" /><el-button type="primary" @click="applyCustomRange">查询</el-button></div>
+    <div v-if="preset === 'custom'" class="metrics-custom-range"><ResourceMetricDatePicker v-if="props.resource" v-model="customRange" :resource-id="props.resource.id" :anchor="calendarAnchor" /><el-button type="primary" @click="applyCustomRange">查询</el-button></div>
     <el-alert v-if="error" type="error" show-icon :title="error" :closable="false" class="metrics-alert" />
     <el-alert v-if="zeroBaselineNames.length" type="warning" show-icon :closable="false" class="metrics-alert" :title="`以下曲线的首个有效采样为 0，无法计算比率：${zeroBaselineNames.join('、')}`" />
     <div class="metrics-summary" aria-label="资源监控摘要">
