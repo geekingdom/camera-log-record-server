@@ -21,4 +21,4 @@
 
 ## 交付状态
 
-本地验证完成，待中文提交推送及该提交完整九项 CI。公司服务器未部署。短时本机验证不替代生产保留期和容量验收。
+功能提交 `df8e935` 已推送 main，[CI 39946124081](https://github.com/geekingdom/camera-log-record-server/actions/runs/39946124081) 九项全部成功：backend、frontend、cross-worker-read、nfs-smoke、commit-messages、component-smoke、container-smoke、native-smoke、elasticsearch-sidecar。验收记录提交的 CI 在最终交付前另行确认。公司服务器未部署。短时本机验证不替代生产保留期和容量验收。
