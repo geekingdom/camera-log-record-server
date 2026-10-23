@@ -1,4 +1,4 @@
-"""按设备、任务和自然小时写入原始日志，并严格以 10 MiB 分卷。"""
+"""按设备、任务和自然小时写入原始日志，并严格使用配置的物理分片上限。"""
 
 from __future__ import annotations
 
@@ -21,9 +21,10 @@ from zoneinfo import ZoneInfo
 from camera_logs.logs.archive_spool import persist as persist_archive_spool
 from camera_logs.logs.compression import compress_spool, schedule_pending_archive
 from camera_logs.logs.naming import safe_device_address, safe_filename_component, segment_name_from_source
+from camera_logs.logs.segment_size import DEFAULT_LOG_SEGMENT_MIB, MIB
 from camera_logs.logs.write_io import record_stage, write_thread
 
-MAX_LOG_BYTES = 10 * 1024 * 1024
+MAX_LOG_BYTES = DEFAULT_LOG_SEGMENT_MIB * MIB
 MAX_PENDING_ARCHIVE_NOTIFICATIONS = 8
 ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS = 5
 logger = logging.getLogger(__name__)
@@ -91,7 +92,8 @@ class HourlyWriter:
     def __init__(self, task_id: str, run_id: str, session_id: str, root: Path, *, storage_identity: str,
                  task_name: str | None = None, device_ip: str | None = None,
                  timezone: str = "Asia/Shanghai", now: Callable[[], datetime] | None = None,
-                 on_archive: Callable[[HourArchive], object] | None = None) -> None:
+                 on_archive: Callable[[HourArchive], object] | None = None,
+                 segment_bytes: Callable[[], int] | None = None) -> None:
         self.task_id, self.run_id, self.session_id = task_id, run_id, session_id
         self.task_name = safe_filename_component(task_name or task_id)
         # 完整任务 ID 是同名任务的物理隔离键；目录组件保留其全部安全文本，
@@ -114,12 +116,16 @@ class HourlyWriter:
         self._sealed: list[HourArchive] = []
         self._archive_tasks: set[asyncio.Future[Path]] = set()
         # 队列按一次小时发布分组而非按单个分卷计数。单个小时可能有数十个
-        # 10 MiB 分卷，必须作为完整批次通知；最多八个批次滞留，额外批次的
+        # 配置大小的分卷，必须作为完整批次通知；最多八个批次滞留，额外批次的
         # 已落盘 metadata 由维护扫描补偿，不能无限占用采集进程内存。
         self._archive_notifications: deque[Iterator[HourArchive]] = deque()
         self._archive_notification_task: asyncio.Task[None] | None = None
         self._archive_errors: list[Exception] = []
         self._on_archive = on_archive
+        # 物理分片打开后必须保留当时上限。配置保存只影响后续新分片，不能让
+        # 收紧后的上限小于已有字节数而出现负剩余容量或重写已采集正文。
+        self._segment_bytes_provider = segment_bytes
+        self._segment_max_bytes = MAX_LOG_BYTES
         self._last_sync, self._close_error = time.monotonic(), None
 
     @property
@@ -158,7 +164,7 @@ class HourlyWriter:
         end = hour + timedelta(hours=1)
         return base / f"{self.task_name}-{self.device_ip}-{hour:%Y%m%d%H%M%S}-{end:%Y%m%d%H%M%S}.tar.gz"
 
-    def _open_sync(self, hour: datetime) -> None:
+    def _open_sync(self, hour: datetime, segment_max_bytes: int) -> None:
         base = self._base(hour)
         base.mkdir(parents=True, exist_ok=True)
         parts = [int(match.group(1)) for path in base.glob("*.index.jsonl")
@@ -202,7 +208,21 @@ class HourlyWriter:
         self._index_size = 0
         self._first_sequence = self._last_sequence = None
         self._first_received_at = self._last_received_at = None
+        self._segment_max_bytes = segment_max_bytes
         self._last_sync = time.monotonic()
+
+    async def _open(self, hour: datetime) -> None:
+        """在打开新物理分片前读取一次内存上限，失败时沿用兼容默认值。"""
+        segment_max_bytes = MAX_LOG_BYTES
+        if self._segment_bytes_provider is not None:
+            try:
+                candidate = self._segment_bytes_provider()
+                if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+                    segment_max_bytes = candidate
+            except Exception as error:  # noqa: BLE001 - 配置短暂不可读不能中断已运行采集。
+                logger.warning("日志分片配置读取失败，使用默认上限 task=%s errorType=%s",
+                               self.task_id, type(error).__name__)
+        await write_thread(self._open_sync, hour, segment_max_bytes)
 
     async def write(self, data: bytes, *, received_at: datetime | None = None) -> int:
         positions = await self.write_many([(data, received_at)])
@@ -239,12 +259,12 @@ class HourlyWriter:
                 if normalized:
                     hour = self._hour_of(normalized[0][2], self.zone)
                     if self._hour is None:
-                        await write_thread(self._open_sync, hour)
+                        await self._open(hour)
                     stamps = [entry[2] for entry in normalized]
                     if (self._hour == hour and all(self._hour_of(stamp, self.zone) == hour for stamp in stamps)
                             and all(a <= b for a, b in pairwise(stamps))
                             and (self._last_received_at is None or stamps[0] >= self._last_received_at)
-                            and self._size + sum(len(entry[1]) for entry in normalized) <= MAX_LOG_BYTES):
+                            and self._size + sum(len(entry[1]) for entry in normalized) <= self._segment_max_bytes):
                         return await write_thread(self._append_batch_sync, normalized)
                 return await self._write_rotating_locked(normalized)
             except Exception as error:
@@ -259,23 +279,23 @@ class HourlyWriter:
                 raise
 
     async def _write_rotating_locked(self, chunks):
-        """调用方已持锁；只在跨小时、回拨或10MiB边界时逐片轮转。"""
+        """调用方已持锁；只在跨小时、回拨或分片边界时逐片轮转。"""
         positions: list[ChunkPosition] = []
         for source_index, data, instant in chunks:
             rollback = self._last_received_at if self._last_received_at and instant < self._last_received_at else None
             hour = self._hour_of(instant, self.zone)
             if self._hour is None:
-                await write_thread(self._open_sync, hour)
+                await self._open(hour)
             elif hour != self._hour or rollback:
                 await self._seal_locked()
                 await self._publish_pending_locked(background=True)
-                await write_thread(self._open_sync, hour)
+                await self._open(hour)
             consumed = 0
             while consumed < len(data):
-                if self._size == MAX_LOG_BYTES:
+                if self._size >= self._segment_max_bytes:
                     await self._seal_locked()
-                    await write_thread(self._open_sync, hour)
-                count = min(MAX_LOG_BYTES - self._size, len(data) - consumed)
+                    await self._open(hour)
+                count = min(self._segment_max_bytes - self._size, len(data) - consumed)
                 piece = data[consumed:consumed + count]
                 self._sequence += 1
                 position = ChunkPosition(self._sequence, self._size, count, self._log, rollback if consumed == 0 else None,
@@ -553,7 +573,7 @@ class HourlyWriter:
             await self._seal_locked()
             archives = await self._publish_pending_locked(background=False)
             if now is not None:
-                await write_thread(self._open_sync, self._hour_of(now, self.zone))
+                await self._open(self._hour_of(now, self.zone))
             if archives and len(archives) > 1:
                 self._sealed.extend(archives[1:])
             return archives[0] if archives else None

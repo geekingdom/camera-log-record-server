@@ -84,6 +84,8 @@ jobs:
         run: python scripts/verify_hour_boundary_latency.py
       - name: 验证小时归档预算恢复及八路压缩完整性
         run: python scripts/verify_archive_budget_recovery.py
+      - name: 验证日志分片动态大小与实际接收时间命名
+        run: python scripts/verify_log_segment_resize.py
       - name: 检查Docker构建上下文排除规则
         run: python scripts/verify_build_context.py
   frontend:
@@ -217,6 +219,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_health_transactions.py
       - name: 验证管理配置正式接口审计回滚与来源权限
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_admin_audit_transactions.py
+      - name: 验证Core历史重添与扫描删除事务竞争
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_coredump_resource_reassociation.py
       - name: 验证任务控制并发幂等与审计事务
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_task_control_transactions.py
       - name: 验证任务软删除级联、索引与审计事务

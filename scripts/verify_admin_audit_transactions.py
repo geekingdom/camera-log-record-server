@@ -86,7 +86,7 @@ async def verify_platform_settings(client, repo, headers):
     check(before is None, "临时数据库在平台配置首次写入前已有默认记录")
     failed = await with_audit_failure(repo, lambda: client.patch(
         "/api/v1/platform-settings", headers=headers,
-        json={"retentionDays": 14, "version": 1},
+        json={"retentionDays": 14, "logSegmentMiB": 25, "version": 1},
     ))
     check(failed.status_code == 503, "保留期审计失败没有返回 503")
     stored = await repo.db.platform_settings.find_one({"id": "platform"})
@@ -95,18 +95,19 @@ async def verify_platform_settings(client, repo, headers):
           "保留期审计失败后留下成功审计")
 
     retried = await request(client, "PATCH", "/api/v1/platform-settings", 200, headers=headers,
-                            json={"retentionDays": 14, "version": 1})
+                            json={"retentionDays": 14, "logSegmentMiB": 25, "version": 1})
     version = retried.json()["version"]
+    check(retried.json()["logSegmentMiB"] == 25, "分片大小重试后未与保留期原子提交")
     check(await audit_count(repo, "update_platform_settings", "platform") == 1,
           "保留期重试没有留下恰好一条审计")
     await request(client, "PATCH", "/api/v1/platform-settings", 409, headers=headers,
-                  json={"retentionDays": 15, "version": 1})
+                  json={"retentionDays": 15, "logSegmentMiB": 100, "version": 1})
     check(await audit_count(repo, "update_platform_settings", "platform") == 1,
           "保留期陈旧版本追加了虚假审计")
 
     responses = await asyncio.gather(*[
         client.patch("/api/v1/platform-settings", headers=headers,
-                     json={"retentionDays": 16 + index, "version": version})
+                     json={"retentionDays": 16 + index, "logSegmentMiB": 30 + index * 5, "version": version})
         for index in range(4)
     ])
     check(sum(item.status_code == 200 for item in responses) == 1,
@@ -115,6 +116,15 @@ async def verify_platform_settings(client, repo, headers):
           "保留期并发失败请求没有全部返回 409")
     check(await audit_count(repo, "update_platform_settings", "platform") == 2,
           "保留期并发 CAS 产生了虚假审计")
+    winner = next(item.json() for item in responses if item.status_code == 200)
+    stored = await repo.db.platform_settings.find_one({"id": "platform"})
+    check(stored["logSegmentMiB"] == winner["logSegmentMiB"], "分片大小未保持并发CAS胜出值")
+    for invalid in (5, 11, 101, True, "20", 12.5):
+        await request(client, "PATCH", "/api/v1/platform-settings", 422, headers=headers,
+                      json={"retentionDays": 14, "logSegmentMiB": invalid, "version": winner["version"]})
+    preserved = await request(client, "PATCH", "/api/v1/platform-settings", 200, headers=headers,
+                              json={"retentionDays": 14, "version": winner["version"]})
+    check(preserved.json()["logSegmentMiB"] == winner["logSegmentMiB"], "其它配置更新重置了分片大小")
 
 
 async def register_node(client, headers, identifier):

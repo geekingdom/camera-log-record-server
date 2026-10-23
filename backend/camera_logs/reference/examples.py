@@ -68,7 +68,8 @@ def schema_example(schema, schemas, name="", depth=0):
     if schema.get("type") == "boolean":
         return False
     if schema.get("type") in ("integer", "number"):
-        return max(1, schema.get("minimum", 1), schema.get("exclusiveMinimum", 0) + 1)
+        value = max(1, schema.get("minimum", 1), schema.get("exclusiveMinimum", 0) + 1)
+        return int(value) if schema.get("type") == "integer" else value
     if schema.get("format") in ("date-time", "date"):
         return LOCAL_STAMP if schema["format"] == "date-time" else "2026-09-09"
     return "example"
@@ -241,7 +242,7 @@ def response_example(path, method, status):
     if "/display-settings" in path:
         return {"liveLogBufferMiB": 10}
     if "/platform-settings" in path:
-        return {"retentionDays": 7, "clusterCapacity": 500, "liveLogBufferMiB": 10, "recordRetention": {"auditDays": 90, "eventDays": 90, "runDays": 90},
+        return {"retentionDays": 7, "clusterCapacity": 500, "liveLogBufferMiB": 10, "logSegmentMiB": 10, "recordRetention": {"auditDays": 90, "eventDays": 90, "runDays": 90},
                 "version": 1, "updatedAt": STAMP}
     if "/nodes" in path:
         if path.endswith("/confirm-isolation"):

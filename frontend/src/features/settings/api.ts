@@ -41,6 +41,7 @@ export interface PlatformSettings {
   clusterCapacity?: number;
   liveLogBufferMiB: number;
   serviceLogRetentionDays: number;
+  logSegmentMiB: number;
   version: number;
   updatedAt: string;
   resourceMonitor?: ResourceMonitorConfig;
@@ -128,7 +129,7 @@ export interface NodeRegistration {
 export const settingsApi = {
   platform: () => request<PlatformSettings>("/platform-settings"),
   display: () => request<DisplaySettings>("/display-settings"),
-  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; liveLogBufferMiB?: number; serviceLogRetentionDays?: number; resourceMonitor?: ResourceMonitorConfig; recordRetention?: RecordRetentionConfig }) =>
+  updatePlatform: (body: Pick<PlatformSettings, "retentionDays" | "version"> & { clusterCapacity?: number; liveLogBufferMiB?: number; serviceLogRetentionDays?: number; logSegmentMiB?: number; resourceMonitor?: ResourceMonitorConfig; recordRetention?: RecordRetentionConfig }) =>
     request<PlatformSettings>("/platform-settings", {
       method: "PATCH",
       headers: { "Idempotency-Key": idempotencyKey() },

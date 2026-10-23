@@ -10,6 +10,7 @@ from pymongo import ReturnDocument
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.coredumps.resource_identity import reassociate_coredump_history
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import record_authentication
 from camera_logs.resources.health_policy import resource_health_blocks_task, stop_for_resource_health
@@ -194,6 +195,8 @@ async def _apply_success_commit(repo, snapshot, metadata, *, source, session, au
         return False
     await record_authentication(repo, changed, source=source, result="SUCCESS", before=snapshot,
                                 after=changed, completed_at=timestamp, session=session)
+    if source == "MANUAL":
+        await reassociate_coredump_history(repo, changed, session=session)
     if storage_identity(snapshot) != storage_identity(changed):
         identity = storage_identity(changed)
         async for task in repo.db.tasks.find({"$and": [task_resource_query(snapshot["id"]), {"deletedAt": None}]}, session=session):

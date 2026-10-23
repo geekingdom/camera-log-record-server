@@ -48,6 +48,7 @@ from camera_logs.logs.search_archives import ReadyArchiveGroup
 from camera_logs.logs.search_candidates import search_candidates
 from camera_logs.logs.search_results import publish_search_results
 from camera_logs.logs.search_stream import StreamSearch, index_entries
+from camera_logs.logs.segment_size import DEFAULT_LOG_SEGMENT_MIB, MIB, configured_log_segment_bytes
 from camera_logs.logs.time_range import TimeRangeScan
 
 OUTPUT_LIMIT = 20_000_000_000
@@ -276,6 +277,7 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
     sources: list[Source] = []
     missing: list[str] = []
     progress: JobProgress | None = job.get("_progress")
+    segment_bytes = await configured_log_segment_bytes(repo)
     await _reserve_temp(repo, job["id"], OUTPUT_LIMIT * 2)
     try:
         await job_thread(scratch.mkdir, parents=True, exist_ok=True)
@@ -320,7 +322,12 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             if await _cancelled(repo, job["id"]):
                 raise asyncio.CancelledError()
             filename = hour_export_name(job, hour)
-            reusable = await job_thread(reusable_hour_archive, members)
+            # 十 MiB 是历史默认，保持既有一参调用以兼容同进程诊断/验证替身；
+            # 非默认平台值才要求复用校验同时验证成员大小上限。
+            reusable = await job_thread(
+                reusable_hour_archive, members,
+                **({} if segment_bytes == DEFAULT_LOG_SEGMENT_MIB * MIB else {"max_member_bytes": segment_bytes}),
+            )
             if reusable is not None and not await job_thread(gzip_header_has_filename, reusable):
                 hourly_bytes += reusable.stat().st_size
                 if hourly_bytes > OUTPUT_LIMIT:
@@ -330,7 +337,8 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             hourly_path = scratch / filename
             await job_thread(write_hour_archive, hourly_path, members,
                              task_name=job.get("taskName") or job.get("taskId"),
-                             device_ip=job.get("taskIp"), max_output_bytes=OUTPUT_LIMIT - hourly_bytes)
+                             device_ip=job.get("taskIp"), max_output_bytes=OUTPUT_LIMIT - hourly_bytes,
+                             max_member_bytes=segment_bytes)
             hourly_bytes += hourly_path.stat().st_size
             hourly.append((hourly_path, filename))
         await job_thread(output.mkdir, parents=True, exist_ok=True)

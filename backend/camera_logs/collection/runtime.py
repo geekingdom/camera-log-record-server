@@ -45,6 +45,7 @@ from camera_logs.common.log_frames import DataFrame
 from camera_logs.common.ownership import OwnershipLost, owner_filter
 from camera_logs.common.resource_monitoring import supports_resource_monitoring
 from camera_logs.logs.catalog_identity import file_identity
+from camera_logs.logs.segment_size import segment_size_cache
 
 logger = logging.getLogger(__name__)
 
@@ -456,7 +457,8 @@ class SessionRuntime:
                     on_log=self.on_log, on_state=self.on_state, on_archive=self.on_archive,
                     reserve_execution=self.reserve, update_execution=self.update_execution,
                     resolve_debug_password=self.debug_passwords, on_debug=self.on_debug,
-                    claim_output_recovery=lambda: claim_output_recovery_lease(self.repo, self.task))
+                    claim_output_recovery=lambda: claim_output_recovery_lease(self.repo, self.task),
+                    segment_bytes=segment_size_cache(self.repo).current)
                 collector = self.collector
                 collector._on_receive = lambda collector=collector: (
                     self.liveness.received(collector) if collector is self.collector else None

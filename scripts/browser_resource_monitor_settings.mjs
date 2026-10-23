@@ -17,7 +17,7 @@ const nodeWrites = [];
 try {
   await mkdir("output/playwright", { recursive: true });
   for (const width of [1440, 390]) {
-    let platform = { retentionDays: 7, clusterCapacity: 500, liveLogBufferMiB: 10, serviceLogRetentionDays: 7, version: 1, resourceMonitor: structuredClone(config) };
+    let platform = { retentionDays: 7, clusterCapacity: 500, liveLogBufferMiB: 10, serviceLogRetentionDays: 7, logSegmentMiB: 10, version: 1, resourceMonitor: structuredClone(config) };
     let registeredNodes = [];
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.addInitScript(() => sessionStorage.setItem("camera-log-record-token", "monitor-settings-fixture"));
@@ -64,6 +64,7 @@ try {
     await platformModule.waitFor();
     await page.getByRole("spinbutton", { name: "实时日志内存上限", exact: true }).fill("24");
     await page.getByRole("spinbutton", { name: "服务运行日志保留天数", exact: true }).fill("14");
+    await page.getByRole("spinbutton", { name: "日志分片大小", exact: true }).fill("25");
     await page.getByRole("button", { name: "保存平台与容量配置", exact: true }).click();
     const platformConfirmation = page.getByRole("dialog", { name: "确认保存配置", exact: true });
     await platformConfirmation.getByRole("button", { name: "确认", exact: true }).click();
@@ -71,8 +72,10 @@ try {
     await page.getByText("平台配置已保存", { exact: true }).waitFor();
     assert.equal(writes.at(-1).liveLogBufferMiB, 24);
     assert.equal(writes.at(-1).serviceLogRetentionDays, 14);
+    assert.equal(writes.at(-1).logSegmentMiB, 25);
     assert.equal(await page.getByRole("spinbutton", { name: "实时日志内存上限", exact: true }).inputValue(), "24");
     assert.equal(await page.getByRole("spinbutton", { name: "服务运行日志保留天数", exact: true }).inputValue(), "14");
+    assert.equal(await page.getByRole("spinbutton", { name: "日志分片大小", exact: true }).inputValue(), "25");
     await page.screenshot({ path: `output/playwright/platform-settings-${width}.png`, fullPage: false });
 
     await modules.getByText("记录保留", { exact: true }).click();

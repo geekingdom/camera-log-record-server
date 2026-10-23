@@ -14,6 +14,7 @@ from camera_logs.common.observability import (
     service_log_retention_loop,
     setup_logging,
 )
+from camera_logs.logs.segment_size import segment_size_cache
 from camera_logs.node.worker import Worker
 
 
@@ -24,7 +25,7 @@ def create_worker_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
         listener = client = None
-        worker_task = retention_task = reads = worker = None
+        worker_task = retention_task = segment_size_task = reads = worker = None
         try:
             listener = setup_logging(settings.log_root.parent / "service-logs" / settings.node_id)
             client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, tz_aware=True,
@@ -33,6 +34,10 @@ def create_worker_app(settings=None):
             await repo.initialize()
             # 每个独立节点直接读取共享配置，避免 API 进程内热更新无法传到其它主机。
             await refresh_service_log_retention(repo)
+            # 采集 Writer 在锁内只读此共享内存缓存；每秒后台刷新使运行中任务的
+            # 下一物理分片使用管理员最新保存的上限，不把 Mongo 往返加入整点写入。
+            segment_cache = segment_size_cache(repo)
+            await segment_cache.refresh(repo)
             # deploy-all 的计划重启可能与调度器的心跳扫描交错；新 Worker 先消费
             # 同节点计划窗口产生的 BLOCKED 任务，再开始新一轮调度。
             from camera_logs.node.recovery import recover_planned_restart_tasks
@@ -54,12 +59,16 @@ def create_worker_app(settings=None):
             worker.start_maintenance()
             worker_task = asyncio.create_task(worker.run())
             retention_task = asyncio.create_task(service_log_retention_loop(repo))
+            segment_size_task = asyncio.create_task(segment_cache.loop(repo))
             yield
         finally:
             try:
                 if retention_task is not None:
                     retention_task.cancel()
                     await asyncio.gather(retention_task, return_exceptions=True)
+                if segment_size_task is not None:
+                    segment_size_task.cancel()
+                    await asyncio.gather(segment_size_task, return_exceptions=True)
                 if worker_task is not None:
                     worker_task.cancel()
                     await asyncio.gather(worker_task, return_exceptions=True)

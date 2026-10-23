@@ -55,6 +55,7 @@ class Collector:
         on_receive: Callback | None = None,
         on_liveness_reset: Callback | None = None,
         claim_output_recovery: Callback | None = None,
+        segment_bytes: Callback | None = None,
     ) -> None:
         self.task = dict(task)
         self.task_id = str(task.get("id") or task.get("_id"))
@@ -75,6 +76,7 @@ class Collector:
             device_ip=str(self.task.get("ip") or "unknown"),
             storage_identity=self.task["storageIdentity"],
             on_archive=self._on_archive,
+            segment_bytes=segment_bytes,
         )
         self.write_latency = WriteLatency()
         # 总延迟保留批处理与文件锁等待；实际I/O只统计write_thread文件操作，

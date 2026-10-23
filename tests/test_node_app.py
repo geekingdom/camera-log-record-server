@@ -1,5 +1,6 @@
 """节点内部服务装配失败时的资源释放回归。"""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -79,4 +80,75 @@ async def test_client_close_failure_still_stops_listener(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="close failed"):
         async with app.router.lifespan_context(app):
             pass
+    assert client.closed and listener.stopped
+
+
+async def test_lifespan_cancels_and_awaits_shared_log_segment_cache(tmp_path, monkeypatch):
+    """Worker 生命周期预热共享缓存，退出时必须取消并等待其后台刷新循环。"""
+    listener, client = Listener(), Client()
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    class Cache:
+        async def refresh(self, _repo):
+            return 10 * 1024 * 1024
+
+        async def loop(self, _repo):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    class Repository:
+        def __init__(self, *_args):
+            self.db = SimpleNamespace(coredump_exports=SimpleNamespace(update_many=self.update_exports))
+
+        async def initialize(self):
+            return None
+
+        async def update_exports(self, *_args, **_kwargs):
+            return None
+
+    class Worker:
+        def __init__(self, _repo):
+            self.closed = False
+
+        def start_maintenance(self):
+            return None
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+        async def close(self):
+            self.closed = True
+
+    class Reads:
+        async def close(self):
+            return None
+
+    async def no_op(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(node_app, "setup_logging", lambda _path: listener)
+    monkeypatch.setattr(node_app, "AsyncMongoClient", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(node_app, "Repository", Repository)
+    monkeypatch.setattr(node_app, "Worker", Worker)
+    monkeypatch.setattr(node_app, "segment_size_cache", lambda _repo: Cache())
+    monkeypatch.setattr(node_app, "refresh_service_log_retention", no_op)
+    monkeypatch.setattr(node_app, "service_log_retention_loop", no_op)
+    from camera_logs.logs import compression, write_io
+    from camera_logs.node import files, recovery, search_index_routes
+
+    monkeypatch.setattr(recovery, "recover_planned_restart_tasks", no_op)
+    monkeypatch.setattr(files, "install_node_routes", lambda *_args: Reads())
+    monkeypatch.setattr(search_index_routes, "install_search_index_routes", lambda *_args: None)
+    monkeypatch.setattr(compression, "shutdown_compression", no_op)
+    monkeypatch.setattr(write_io, "shutdown", no_op)
+    from camera_logs.logs import job_lease
+
+    monkeypatch.setattr(job_lease, "recover_expired_jobs", no_op)
+    app = node_app.create_worker_app(settings(tmp_path))
+    async with app.router.lifespan_context(app):
+        await asyncio.wait_for(started.wait(), timeout=1)
+    assert cancelled.is_set()
     assert client.closed and listener.stopped

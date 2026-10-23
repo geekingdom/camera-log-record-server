@@ -11,8 +11,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.coredumps.events import record_discovery_event
+from camera_logs.coredumps.resource_identity import (
+    coredump_device_identity_document,
+    legacy_source_key,
+    stable_source_key,
+)
 from camera_logs.coredumps.safety import device_directory, regular_unlinked_file, source_path
 
 logger = logging.getLogger(__name__)
@@ -100,7 +106,7 @@ class CoredumpScanner:
                         "kind": "HIKVISION_NETWORK",
                         "deletedAt": None,
                     },
-                    {"id": 1, "ip": 1, "name": 1},
+                    {"id": 1, "ip": 1, "name": 1, "kind": 1, "model": 1, "subSerialNumber": 1, "version": 1},
                 )
             ]
             state = await self.repo.db.coredump_scan_state.find_one({"id": self.repo.settings.node_id}) or {}
@@ -152,9 +158,12 @@ class CoredumpScanner:
 
     async def _record(self, resource: dict[str, Any], name: str, info: os.stat_result) -> None:
         """同一未冻结源版本只更新观测；已有快照遇变化时创建下一版本。"""
-        source_key = hashlib.sha256(
-            f"{self.repo.settings.node_id}\x00{resource['id']}\x00{name}\x00{info.st_dev}\x00{info.st_ino}".encode()
-        ).hexdigest()
+        legacy_key = legacy_source_key(
+            self.repo.settings.node_id, resource["id"], name, info.st_dev, info.st_ino
+        )
+        source_key = stable_source_key(
+            self.repo.settings.node_id, resource, name, info.st_dev, info.st_ino
+        ) or legacy_key
         fingerprint = {
             "inode": info.st_ino,
             "device": info.st_dev,
@@ -162,32 +171,26 @@ class CoredumpScanner:
             "mtimeNs": info.st_mtime_ns,
             "ctimeNs": info.st_ctime_ns,
         }
+        device_identity = coredump_device_identity_document(resource)
         current = await self.repo.db.coredump_files.find_one(
-            {"sourceKey": source_key, "nodeId": self.repo.settings.node_id}, sort=[("version", -1)]
+            {"sourceKey": {"$in": [source_key, legacy_key]}, "nodeId": self.repo.settings.node_id},
+            sort=[("version", -1)],
         )
+        if current and not self._catalog_identity_compatible(
+            current, resource["id"], device_identity, source_key, legacy_key
+        ):
+            current = None
         if current and current.get("snapshot") and current.get("source") != fingerprint:
             current = None
         if current is None:
-            previous = (
-                await self.repo.db.coredump_files.find_one(
-                    {"nodeId": self.repo.settings.node_id, "resourceId": resource["id"], "name": name},
-                    sort=[("version", -1)],
-                    projection={"version": 1},
-                )
-                or {}
-            )
-            version = int(previous.get("version", 0)) + 1
-            identifier = hashlib.sha256(f"{source_key}\x00{version}".encode()).hexdigest()[:32]
             timestamp = now()
             document = {
-                "id": identifier,
                 "nodeId": self.repo.settings.node_id,
                 "resourceId": resource["id"],
                 "deviceIp": resource["ip"],
                 "name": name,
                 "sourceKey": source_key,
                 "source": fingerprint,
-                "version": version,
                 "status": "RECEIVING",
                 "size": info.st_size,
                 "receivedAt": timestamp,
@@ -200,9 +203,16 @@ class CoredumpScanner:
                 "sourceStableAt": None,
                 "updatedAt": timestamp,
             }
-            await self.repo.db.coredump_files.insert_one(document)
-            await self._record_discovery_event(resource, document)
-            return
+            if device_identity is not None:
+                document["deviceIdentity"] = device_identity
+            current, inserted = await self._insert_catalog_with_resource_fence(
+                resource, document, source_key, legacy_key
+            )
+            if current is None:
+                return
+            if inserted:
+                await self._record_discovery_event(resource, current)
+                return
         timestamp = now()
         unchanged_since = current.get("sourceUnchangedSince")
         if current.get("source") != fingerprint:
@@ -227,6 +237,7 @@ class CoredumpScanner:
             {
                 "$set": {
                     "source": fingerprint,
+                    "sourceKey": self._observed_source_key(current, device_identity, source_key, legacy_key),
                     "size": info.st_size,
                     "sourceModifiedAt": datetime.fromtimestamp(info.st_mtime_ns / 1_000_000_000, UTC),
                     "sourceState": source_state,
@@ -240,6 +251,75 @@ class CoredumpScanner:
             },
         )
         await self._record_discovery_event(resource, current)
+
+    async def _insert_catalog_with_resource_fence(
+        self, resource: dict[str, Any], document: dict[str, Any], source_key: str, legacy_key: str
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """原子栅栏确认资源仍有效，令软删除与新目录登记不能交错留下旧归属。"""
+        async def commit(session):
+            device_identity = coredump_device_identity_document(resource)
+            resource_filter = {"id": resource["id"], "kind": "HIKVISION_NETWORK", "deletedAt": None}
+            if device_identity is not None:
+                resource_filter.update(device_identity)
+            else:
+                resource_filter["version"] = resource.get("version")
+            fenced = await self.repo.db.resources.update_one(
+                resource_filter,
+                {"$set": {"coredumpCatalogFenceAt": now()}}, session=session,
+            )
+            if not fenced.matched_count:
+                return None, False
+            existing = await self.repo.db.coredump_files.find_one(
+                {"sourceKey": {"$in": [source_key, legacy_key]}, "nodeId": self.repo.settings.node_id},
+                sort=[("version", -1)],
+                session=session,
+            )
+            if existing is not None and not self._catalog_identity_compatible(
+                existing, resource["id"], device_identity, source_key, legacy_key
+            ):
+                # 旧资源键可能属于认证前的其它物理设备。仅当它明确是 legacy
+                # 键且新扫描拥有完整身份时，才为当前设备登记新的独立版本。
+                if device_identity is None or existing.get("sourceKey") != legacy_key or source_key == legacy_key:
+                    return None, False
+                existing = None
+            if existing is not None and not (
+                existing.get("snapshot") and existing.get("source") != document["source"]
+            ):
+                return existing, False
+            previous = await self.repo.db.coredump_files.find_one(
+                {"nodeId": self.repo.settings.node_id, "resourceId": resource["id"], "name": document["name"]},
+                sort=[("version", -1)], projection={"version": 1}, session=session,
+            ) or {}
+            version = int(previous.get("version", 0)) + 1
+            catalog = document | {
+                "id": hashlib.sha256(f"{source_key}\x00{version}".encode()).hexdigest()[:32],
+                "version": version,
+            }
+            await self.repo.db.coredump_files.insert_one(catalog, session=session)
+            return catalog, True
+
+        return await audited_mutations.mutation_transaction(self.repo, commit)
+
+    @staticmethod
+    def _catalog_identity_compatible(catalog: dict[str, Any], resource_id: str,
+                                     device_identity: dict[str, str] | None,
+                                     source_key: str, legacy_key: str) -> bool:
+        """拒绝用当前设备身份观测或升级未知/不同设备留下的 legacy 目录。"""
+        recorded = catalog.get("deviceIdentity")
+        if recorded is not None:
+            return recorded == device_identity
+        # 升级前同一资源已有的 legacy catalog 没有证据可推断出它属于另一设备，
+        # 必须原地继续维护以避免全量重新发现；但不把它升级为当前认证身份的键。
+        return catalog.get("resourceId") == resource_id and catalog.get("sourceKey") == legacy_key
+
+    @staticmethod
+    def _observed_source_key(catalog: dict[str, Any], device_identity: dict[str, str] | None,
+                             source_key: str, legacy_key: str) -> str:
+        """旧同资源 legacy 行保持原键，只有已证明身份一致的目录才升级稳定键。"""
+        if catalog.get("deviceIdentity") is None and device_identity is not None \
+                and catalog.get("sourceKey") == legacy_key:
+            return legacy_key
+        return source_key
 
     async def _record_discovery_event(self, resource: dict[str, Any], catalog: dict[str, Any]) -> None:
         """事件失败只保留未确认 catalog，后续观察可补写且不阻断其它目录登记。"""

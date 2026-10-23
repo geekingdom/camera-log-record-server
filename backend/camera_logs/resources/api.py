@@ -17,6 +17,7 @@ from camera_logs.coredumps.presence import (
     coredump_presence_by_resource_ids,
     visible_coredump_query,
 )
+from camera_logs.coredumps.resource_identity import reassociate_coredump_history
 from camera_logs.resources.address_claim import claim_address, release_address
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import (
@@ -307,6 +308,7 @@ def install_resource_routes(app, repo, listing):
             if document["kind"] == "HIKVISION_NETWORK":
                 await record_authentication(repo(), document, source="CREATE", result="SUCCESS", after=document,
                                             completed_at=document["authenticatedAt"], session=session)
+                await reassociate_coredump_history(repo(), document, session=session)
 
         result = await audited_create(repo(), user["id"], request.headers.get("Idempotency-Key"), "create_resource",
                                       body.model_dump(), "resources", prepare, before_insert=reserve)
@@ -430,6 +432,7 @@ def install_resource_routes(app, repo, listing):
                     identity_changed=(changed.get("model"), changed.get("subSerialNumber"))
                     != (old.get("model"), old.get("subSerialNumber")),
                 )
+                await reassociate_coredump_history(repo(), changed, session=session)
                 await record_authentication(repo(), changed, source="EDIT", result="SUCCESS", before=old,
                                             after=changed, session=session)
             return changed

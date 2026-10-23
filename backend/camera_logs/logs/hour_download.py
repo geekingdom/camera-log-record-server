@@ -1,7 +1,7 @@
 """小时归档下载的成员选择、重组和原包复用。
 
 用户下载仅暴露日志成员。旧归档可能包含超过新格式限制的成员，导出时按
-10 MiB 分卷；已完整选择的本地共享小时包则直接复用其原始压缩文件。
+当前作业固定的分片大小切分；符合该上限的完整本地小时包直接复用原始压缩文件。
 """
 from __future__ import annotations
 
@@ -227,8 +227,12 @@ def source_member(path: Path, member_name: str | None) -> Iterator[tuple[tarfile
 
 
 def write_hour_archive(destination: Path, sources: list[Source], *, task_name: object | None = None,
-                       device_ip: object | None = None, max_output_bytes: int | None = None) -> int:
-    """按稳定顺序重组一个小时，并将旧的大成员拆为最多 10 MiB 的分卷。"""
+                       device_ip: object | None = None, max_output_bytes: int | None = None,
+                       max_member_bytes: int | None = None) -> int:
+    """按稳定顺序重组一个小时，并按作业开始时的平台分片上限拆分旧成员。"""
+    max_member_bytes = MAX_MEMBER_BYTES if max_member_bytes is None else max_member_bytes
+    if not isinstance(max_member_bytes, int) or isinstance(max_member_bytes, bool) or max_member_bytes <= 0:
+        raise ValueError("invalid log segment byte limit")
     by_id = {source[0]["id"]: source for source in sources}
     ordered = ordered_files([frozen | file for frozen, file, _, _ in sources])
 
@@ -248,7 +252,7 @@ def write_hour_archive(destination: Path, sources: list[Source], *, task_name: o
                 remaining, offset = frozen_bytes, 0
                 with _receipt_cursor(path, file, frozen_bytes) as receipts:
                     while remaining:
-                        size = min(remaining, MAX_MEMBER_BYTES)
+                        size = min(remaining, max_member_bytes)
                         first, last = receipts.range(offset, offset + size) if receipts is not None else (None, None)
                         info = tarfile.TarInfo(segment_filename(identity_task, identity_ip, first, last, number))
                         info.size = size
@@ -264,8 +268,11 @@ def write_hour_archive(destination: Path, sources: list[Source], *, task_name: o
     return destination.stat().st_size
 
 
-def reusable_hour_archive(sources: list[Source]) -> Path | None:
+def reusable_hour_archive(sources: list[Source], *, max_member_bytes: int | None = None) -> Path | None:
     """以已发布旁路清单确认完整选择的固定 READY 包，避免为 ZIP STORE 再解压全部正文。"""
+    max_member_bytes = MAX_MEMBER_BYTES if max_member_bytes is None else max_member_bytes
+    if not isinstance(max_member_bytes, int) or isinstance(max_member_bytes, bool) or max_member_bytes <= 0:
+        return None
     if not sources or any(temporary for _frozen, _file, _path, temporary in sources):
         return None
     paths = {path for _frozen, _file, path, _temporary in sources}
@@ -322,7 +329,7 @@ def reusable_hour_archive(sources: list[Source]) -> Path | None:
                     or member.get("logName") != segment_name_from_source(source_name, first, last)
                     or not str(member.get("logName", "")).endswith(".log")
                     or not isinstance(member.get("rawSize"), int) or member["rawSize"] != expected_bytes
-                    or member["rawSize"] > MAX_MEMBER_BYTES or not expected_hash
+                    or member["rawSize"] > max_member_bytes or not expected_hash
                     or member.get("sha256") != expected_hash):
                 return None
         return path

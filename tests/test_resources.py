@@ -1,7 +1,7 @@
 """设备资源 API 与海康认证探测的隔离回归测试。"""
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -289,6 +289,89 @@ def test_resource_authenticate_create_list_and_hide_password(resource_client, mo
     assert resource_client.get(f"/api/v1/resources/{resource['id']}").json()["id"] == resource["id"]
     listed = resource_client.get("/api/v1/resources?search=大厅&kind=HIKVISION_NETWORK").json()
     assert listed["total"] == 1 and listed["items"][0]["id"] == resource["id"]
+
+
+def test_readding_authenticated_hikvision_resource_keeps_coredump_history(resource_client, monkeypatch):
+    """重添同一已认证设备时目录 ID、首次发现和已写发现事件均继续有效。"""
+    from camera_logs.common.database import now
+    from camera_logs.coredumps.resource_identity import stable_source_key
+
+    repo = resource_client.app.state.repo
+    timestamp = now().replace(microsecond=0)
+    old_resource = {
+        "id": "deleted-camera", "name": "旧相机", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.120",
+        "model": "DS-2CD", "subSerialNumber": "SN-120", "deletedAt": timestamp,
+    }
+    source = {"device": 9, "inode": 12, "size": 4, "mtimeNs": 1, "ctimeNs": 1}
+    resource_client.portal.call(repo.db.resources.insert_one, old_resource)
+    resource_client.portal.call(repo.db.coredump_files.insert_one, {
+        "id": "historic-core", "resourceId": old_resource["id"], "nodeId": "resources",
+        "deviceIp": old_resource["ip"], "name": "historic.core", "source": source,
+        "sourceKey": "legacy-key", "version": 1, "size": 4, "receivedAt": timestamp,
+        "firstSeenAt": timestamp, "sourcePresent": True, "sourceState": "STABLE",
+        "sourceStableAt": timestamp, "discoveryEventRecordedAt": timestamp,
+    })
+    resource_client.portal.call(repo.db.events.insert_one, {
+        "id": "coredump-discovered:historic-core", "type": "COREDUMP_DISCOVERED",
+        "resourceId": old_resource["id"], "fileId": "historic-core", "createdAt": timestamp,
+    })
+
+    async def verified(**_kwargs):
+        return {"model": "DS-2CD", "subSerialNumber": "SN-120", "softwareVersion": "V5.8"}
+
+    monkeypatch.setattr("camera_logs.resources.api.authenticate_network_resource", verified)
+    created = resource_client.post("/api/v1/resources", headers={"Idempotency-Key": "readd-core-history"}, json={
+        "name": "新相机", "kind": "HIKVISION_NETWORK", "ip": old_resource["ip"],
+        "username": "admin", "password": "secret", "authType": "DIGEST",
+    })
+    assert created.status_code == 201, created.text
+    new_resource = created.json()
+    catalog = resource_client.portal.call(repo.db.coredump_files.find_one, {"id": "historic-core"})
+    assert catalog["resourceId"] == new_resource["id"]
+    assert catalog["firstSeenAt"].replace(tzinfo=UTC) == timestamp
+    assert catalog["receivedAt"].replace(tzinfo=UTC) == timestamp
+    assert catalog["sourceKey"] == stable_source_key("resources", new_resource, "historic.core", 9, 12)
+    assert resource_client.get(f"/api/v1/resources/{new_resource['id']}/coredumps").json()["items"][0]["id"] == "historic-core"
+    assert resource_client.portal.call(repo.db.coredump_files.count_documents, {"id": "historic-core"}) == 1
+    event = resource_client.portal.call(repo.db.events.find_one, {"fileId": "historic-core"})
+    assert event["resourceId"] == old_resource["id"]
+    assert event["createdAt"].replace(tzinfo=UTC) == timestamp
+    resource_client.portal.call(repo.db.resources.update_one, {"id": new_resource["id"]},
+                                {"$set": {"coredumpCatalogFenceAt": timestamp}})
+    assert "coredumpCatalogFenceAt" not in resource_client.get(f"/api/v1/resources/{new_resource['id']}").json()
+
+
+async def test_coredump_history_does_not_associate_without_complete_device_identity(tmp_path):
+    """旧设备身份不完整时，即使 IP 相同也不可把历史 Core 交给新资源。"""
+    from camera_logs.common.config import Settings
+    from camera_logs.common.database import Repository
+    from camera_logs.coredumps.resource_identity import reassociate_coredump_history
+    from cryptography.fernet import Fernet
+    from mongomock_motor import AsyncMongoMockClient
+
+    repo = Repository(AsyncMongoMockClient().db, Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
+                                                           log_root=tmp_path / "logs", nfs_root=tmp_path / "nfs"))
+    await repo.initialize()
+    await repo.db.resources.insert_one({"id": "old", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.121",
+                                        "model": "DS-2CD", "subSerialNumber": "", "deletedAt": now()})
+    await repo.db.coredump_files.insert_one({"id": "old-core", "resourceId": "old", "deviceIp": "192.0.2.121"})
+    await repo.db.resources.insert_one({"id": "different-serial", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.121",
+                                        "model": "DS-2CD", "subSerialNumber": "SN-other", "deletedAt": now()})
+    await repo.db.coredump_files.insert_one({"id": "different-serial-core", "resourceId": "different-serial",
+                                             "deviceIp": "192.0.2.121"})
+    await repo.db.resources.insert_one({"id": "changed-after-discovery", "kind": "HIKVISION_NETWORK",
+                                        "ip": "192.0.2.121", "model": "DS-2CD", "subSerialNumber": "SN-121",
+                                        "deletedAt": now()})
+    await repo.db.coredump_files.insert_one({
+        "id": "old-identity-core", "resourceId": "changed-after-discovery", "deviceIp": "192.0.2.121",
+        "deviceIdentity": {"ip": "192.0.2.121", "model": "DS-2CD", "subSerialNumber": "SN-before-change"},
+    })
+    new_resource = {"id": "new", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.121",
+                    "model": "DS-2CD", "subSerialNumber": "SN-121"}
+    assert await reassociate_coredump_history(repo, new_resource) == 0
+    assert (await repo.db.coredump_files.find_one({"id": "old-core"}))["resourceId"] == "old"
+    assert (await repo.db.coredump_files.find_one({"id": "different-serial-core"}))["resourceId"] == "different-serial"
+    assert (await repo.db.coredump_files.find_one({"id": "old-identity-core"}))["resourceId"] == "changed-after-discovery"
 
 
 def test_batch_create_authenticates_all_then_commits_once_and_replays_without_password(resource_client, monkeypatch):

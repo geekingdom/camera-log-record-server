@@ -454,3 +454,9 @@ Content-Type: application/json
 管理员列表 `GET /api/v1/admin/common-commands` 支持 `page/pageSize`，页面默认20条、可选50或100；`query` 对命令及描述执行不区分大小写的字面子串查询，`enabled=true/false` 筛选启用或禁用，省略表示全部。
 
 `POST /api/v1/admin/common-commands/batch` 要求管理员及 `Idempotency-Key`，提交 `action=ENABLE|DISABLE|DELETE` 和 `items=[{"id":"命令ID","version":1}]`，一次1至100条。版本冲突或记录缺失时整批不生效；成功返回 `action` 和 `affected`。请求结果未知时用同一幂等键及原请求重试，不重新生成请求键。
+
+## 日志分片与 Core 历史连续性
+
+`GET/PATCH /api/v1/platform-settings` 的 `logSegmentMiB` 表示日志分片上限，单位 MiB，默认 10，允许 10、15、20…100。PATCH 省略该字段会保留现值；越界、非 5 的倍数、布尔值、字符串及浮点数返回 422。Worker 每秒刷新配置，新打开分片生效，已打开分片按原大小收尾；已封存文件不重写。请求和响应中文释义由实际模型生成。
+
+同 IP、型号、子序列号的海康设备软删后重新认证添加，历史 Core 的 `resourceId` 关联到新资源，但 `id`、`firstSeenAt`、`receivedAt` 保持原值。列表时间筛选仍对应原始发现时刻，已有文件 ID 下载地址保持兼容；不会因此新增首次发现事件。身份不完整或不一致时不关联历史。

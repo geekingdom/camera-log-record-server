@@ -50,6 +50,22 @@ def test_node_write_latency_limit_is_documented_with_valid_examples(client):
     assert operations["POST /api/v1/admin/nodes"]["responseExample"]["writeLatencyLimitMs"] == 200
 
 
+def test_platform_log_segment_size_is_documented_with_a_valid_example(client):
+    """平台日志分片大小在输入模型、范围约束和响应示例中必须一致。"""
+    reference = client.get("/api/v1/api-reference").json()
+    operations = {item["id"]: item for item in reference["operations"]}
+    field = reference["schemas"]["PlatformSettingsPatch"]["properties"]["logSegmentMiB"]
+    numeric = next(item for item in field["anyOf"] if item.get("type") == "integer")
+    assert numeric["minimum"] == 10 and numeric["maximum"] == 100 and numeric["multipleOf"] == 5
+    assert "5 MiB" in field["description"]
+    assert "Worker每秒刷新，刷新成功后新分片生效" in field["description"]
+    assert "已打开分片按原上限收尾" in field["description"]
+    assert "下载作业启动时固定" in field["description"]
+    update = operations["PATCH /api/v1/platform-settings"]
+    assert update["requestExample"]["logSegmentMiB"] == 10
+    assert update["responseExample"]["logSegmentMiB"] == 10
+
+
 def test_node_performance_policy_is_documented_with_valid_nested_examples(client):
     """节点性能策略的范围、默认值和 PATCH 全量替换示例必须可直接提交。"""
     reference = client.get("/api/v1/api-reference").json()

@@ -208,3 +208,5 @@ python scripts/backfill_runtime_event_time.py --apply
 目录扫描复用 `files(nodeId,status,id)`，覆盖查询复用 `files(taskId,hour)`，跨页整包成员查询使用 `files_node_archive_members(nodeId,path,status,id)`，不引入逐日志行Mongo写入；真实 Explain 验证结果应记录在本轮实施历史中。
 
 日志片段实际时间命名不新增集合或持续写入频率：既有 `files` 目录每个封存片段增加可选首末接收时间，文件清单每个成员增加源名与首末时间，均随原片段数量线性增长。`sourceLogName` 仅在磁盘清单中用于稳定 fileId 恢复；公开响应不包含该字段。继续沿用日志保留期、原归档清理和下载制品保留策略；查询仍使用既有 id/任务小时索引，无新增索引或 TTL。
+
+设备 Core 历史重添关联不新增集合：既有 `coredump_files` 每项增加固定大小的内部设备身份快照，重添原地更新归属和扫描键，文件 ID、首次发现时间、事件幂等标记不变，继续沿用源文件与下载引用清理规则。首次登记事务写 `resources.coredumpCatalogFenceAt` 与软删除竞争，字段不公开、不按扫描行持续新增历史。资源身份查询新增 `resources_coredump_reassociation_identity(kind,ip,model,subSerialNumber,deletedAt,id)`，不改旧索引选项；真实 Mongo 3004 条资源的精确匹配查询返回 4 条，扫描 5 键/4 文档。日志分片配置只为平台单条记录新增整数，节点每秒读取缓存，无新集合、TTL或保留期变化。

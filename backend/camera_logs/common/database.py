@@ -54,6 +54,7 @@ def public(document):
             "resourceMonitorLeaseGeneration",
             "resourceMonitorLeaseNodeId",
             "resourceMonitorCheckedAt",
+            "coredumpCatalogFenceAt",
             "healthLeaseUntil",
             "healthLeaseStartedAt",
             "healthLeaseToken",
@@ -187,6 +188,11 @@ class Repository:
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
         await self.db.resources.create_index("deletionState")
+        # 重添设备只关联IP、型号和序列号全部一致的历史资源，避免逐次扫描全部软删记录。
+        await self.db.resources.create_index(
+            [("kind", 1), ("ip", 1), ("model", 1), ("subSerialNumber", 1), ("deletedAt", 1), ("id", 1)],
+            name="resources_coredump_reassociation_identity",
+        )
         # 健康循环短周期只检索网络资源中已到期的候选项，避免扫描全部资源。
         await self.db.resources.create_index([("kind", 1), ("deletedAt", 1), ("nextHealthCheckAt", 1)])
         await self.db.jobs.create_index([("nodeId", 1), ("status", 1), ("leaseUntil", 1)])

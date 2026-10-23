@@ -16,6 +16,7 @@ from camera_logs.common.api_errors import api_error_response_for_schema
 from camera_logs.common.database import now, public
 from camera_logs.common.models import new_id
 from camera_logs.common.security import actor, authorize
+from camera_logs.coredumps.resource_identity import reassociate_coredump_history
 from camera_logs.resources.address_claim import claim_address
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import record_authentication
@@ -149,6 +150,7 @@ def install_batch_creation_route(app, repo):
             for document in documents:
                 await record_authentication(repo(), document, source="CREATE", result="SUCCESS", after=document,
                                             completed_at=document["authenticatedAt"], session=session)
+                await reassociate_coredump_history(repo(), document, session=session)
                 await repo().audit(user["id"], "create_resource", document["id"], session=session)
             return documents
 
