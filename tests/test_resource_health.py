@@ -238,13 +238,16 @@ def test_auth_failure_keeps_live_network_runtime_but_stops_unowned_task(tmp_path
     asyncio.run(scenario())
 
 
-def test_telnet_serial_ignores_resource_auth_failure_and_identity_change(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("health_status", "error_type"), [
+    ("AUTH_FAILED", PermissionError), ("OFFLINE", DeviceOfflineError), ("ERROR", RuntimeError),
+])
+def test_telnet_serial_ignores_resource_auth_failure_and_identity_change(tmp_path, monkeypatch, health_status, error_type):
     """串口 Telnet 仅依赖串口链路，HTTP 认证状态和身份刷新均不可改变其任务。"""
     async def scenario():
         repo = _repo(tmp_path)
         await repo.db.resources.insert_one({"id": "camera", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.9",
             "username": "admin", "authType": "DIGEST", "passwordEncrypted": repo.encrypt("secret"),
-            "model": "old", "subSerialNumber": "old", "deletedAt": None})
+            "model": "old", "subSerialNumber": "old", "deletedAt": None, "healthStatus": "ONLINE"})
         await repo.db.tasks.insert_one({"id": "serial", "resourceId": "camera", "protocol": "TELNET_SERIAL",
             "desiredState": "RUNNING", "status": "COLLECTING", "nodeId": "node", "runId": "run", "generation": 1,
             "storageIdentity": "preserved"})
@@ -253,12 +256,15 @@ def test_telnet_serial_ignores_resource_auth_failure_and_identity_change(tmp_pat
             "resumeWaiting": {"waitingReason": "unchanged"}, "storageIdentity": "waiting-preserved"})
 
         async def rejected(**_kwargs):
-            raise PermissionError("bad")
+            raise error_type("模拟认证异常")
 
+        before = await repo.db.tasks.find_one({"id": "serial"})
         monkeypatch.setattr("camera_logs.resources.health.authenticate_network_resource", rejected)
         await check_resource(repo, await repo.db.resources.find_one({"id": "camera"}))
         unchanged = await repo.db.tasks.find_one({"id": "serial"})
-        assert (unchanged["desiredState"], unchanged["storageIdentity"]) == ("RUNNING", "preserved")
+        assert unchanged == before
+        assert await repo.db.operations.count_documents({"taskId": "serial"}) == 0
+        assert (await repo.db.resources.find_one({"id": "camera"}))["healthStatus"] == health_status
         waiting = await repo.db.tasks.find_one({"id": "serial-waiting"})
         assert waiting["resumeWaiting"]["waitingReason"] == "unchanged"
 

@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 650" role="img" aria-labelledby="title desc">
+  <title id="title">日志、索引与下载制品生命周期</title>
+  <desc id="desc">节点本地日志归档、下载制品、Elasticsearch 和 SQLite FTS 的独立保留与清理关系。</desc>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+      <path d="M0 0L9 4 0 8z" fill="#94a3b8"/>
+    </marker>
+    <style>text{font-family:'Noto Sans SC','PingFang SC',sans-serif;letter-spacing:0}.t{fill:#fff;font-size:16px;font-weight:700}.n{fill:#fff;font-size:12px;font-weight:700}.s{fill:#cbd5e1;font-size:10px}.b{stroke-width:1.5;rx:6}.l{stroke:#94a3b8;stroke-width:1.5;fill:none;marker-end:url(#a)}.d{stroke:#64748b;stroke-width:1.3;stroke-dasharray:5 3;fill:none;marker-end:url(#a)}</style>
+  </defs>
+  <rect width="1160" height="650" fill="#0f172a"/>
+  <text x="36" y="40" class="t">日志、索引与下载制品的生命周期</text>
+  <text x="36" y="61" class="s">采集日志和小时归档位于所属节点本地；索引与下载制品均可重建或独立清理。</text>
+  <rect x="55" y="155" width="220" height="95" class="b" fill="#064e3b" stroke="#34d399"/>
+  <text x="165" y="186" class="n" text-anchor="middle">节点本地原始片段</text>
+  <text x="165" y="208" class="s" text-anchor="middle">接收顺序、行前缀、小时分段</text>
+  <text x="165" y="229" class="s" text-anchor="middle">活动写入，不按 TTL 直接删除</text>
+  <path d="M275 202H410" class="l"/>
+  <text x="342" y="191" class="s" text-anchor="middle">关闭、同步、压缩、校验</text>
+  <rect x="410" y="155" width="240" height="95" class="b" fill="#2e1065" stroke="#a78bfa"/>
+  <text x="530" y="186" class="n" text-anchor="middle">节点本地小时归档</text>
+  <text x="530" y="208" class="s" text-anchor="middle">tar.gz、manifest、文件目录 READY</text>
+  <text x="530" y="229" class="s" text-anchor="middle">权威日志数据</text>
+  <path d="M530 250V330" class="l"/>
+  <text x="542" y="294" class="s">下载作业冻结目录</text>
+  <rect x="410" y="330" width="240" height="95" class="b" fill="#083344" stroke="#22d3ee"/>
+  <text x="530" y="361" class="n" text-anchor="middle">节点本地下载制品</text>
+  <text x="530" y="383" class="s" text-anchor="middle">tar.gz / ZIP，outputPath</text>
+  <text x="530" y="404" class="s" text-anchor="middle">成功后按 expiresAt 可下载</text>
+  <path d="M650 202H785" class="d"/>
+  <text x="717" y="191" class="s" text-anchor="middle">独立 Indexer 读取正文</text>
+  <rect x="785" y="125" width="150" height="95" class="b" fill="#78350f" stroke="#fbbf24"/>
+  <text x="860" y="156" class="n" text-anchor="middle">Elasticsearch</text>
+  <text x="860" y="178" class="s" text-anchor="middle">可重建正文副本</text>
+  <text x="860" y="199" class="s" text-anchor="middle">独立保留策略</text>
+  <path d="M650 225H745V332H785" class="d"/>
+  <text x="720" y="248" class="s">归档旁</text>
+  <rect x="785" y="285" width="150" height="95" class="b" fill="#78350f" stroke="#fbbf24"/>
+  <text x="860" y="316" class="n" text-anchor="middle">SQLite FTS</text>
+  <text x="860" y="338" class="s" text-anchor="middle">候选索引，可重建</text>
+  <text x="860" y="359" class="s" text-anchor="middle">随归档维护清理</text>
+  <rect x="285" y="510" width="600" height="82" rx="8" fill="none" stroke="#fb7185" stroke-dasharray="7 4"/>
+  <text x="585" y="540" class="n" text-anchor="middle">维护与清理</text>
+  <text x="585" y="562" class="s" text-anchor="middle">归档仅在已发布、超过 retentionDays 且未被 retainUntil / 活动作业保护时清理。</text>
+  <text x="585" y="579" class="s" text-anchor="middle">制品按 expiresAt；ES 按其检查点与保留策略；SQLite 缺失或删除后回退原始归档扫描。</text>
+  <path d="M165 250V475H360V510M530 250V300H690V495H585V510M530 425V475H585V510M935 175H1010V480H875V510M860 380V450H835V510" class="l"/>
+  <text x="580" y="630" class="s" text-anchor="middle">归档发布失败保留原始片段；Core NFS 源文件与此日志保留链路分离。</text>
+</svg>

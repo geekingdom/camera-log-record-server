@@ -302,6 +302,9 @@ class Worker:
             task = assigned.get(task_id)
             if task is None or owner_filter(runtime.task) != owner_filter(task):
                 continue
+            # 协议豁免属于 Worker 控制边界，不依赖采集器是否报告无输出。
+            if task.get("protocol") == "TELNET_SERIAL":
+                continue
             liveness = getattr(runtime, "liveness", None)
             eligible = getattr(liveness, "allows_health_stop", None)
 

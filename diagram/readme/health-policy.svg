@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 720" role="img" aria-labelledby="title desc">
+  <title id="title">资源认证与运行存活策略</title>
+  <desc id="desc">串口任务不受 HTTP 认证门控，未领取任务可由坏健康直接停止，已运行任务需本机接收证据。</desc>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+      <path d="M0 0L9 4 0 8z" fill="#94a3b8"/>
+    </marker>
+    <style>text{font-family:'Noto Sans SC','PingFang SC',sans-serif;letter-spacing:0}.t{fill:#fff;font-size:16px;font-weight:700}.n{fill:#fff;font-size:12px;font-weight:700}.s{fill:#cbd5e1;font-size:10px}.p{fill:#083344;stroke:#22d3ee;stroke-width:1.5}.d{fill:#78350f;stroke:#fbbf24;stroke-width:1.5}.e{fill:#4c0519;stroke:#fb7185;stroke-width:1.5}.ok{fill:#064e3b;stroke:#34d399;stroke-width:1.5}.l{stroke:#94a3b8;stroke-width:1.5;fill:none;marker-end:url(#a)}</style>
+  </defs>
+  <rect width="1160" height="720" fill="#0f172a"/>
+  <text x="36" y="40" class="t">资源认证异常与采集运行的裁决</text>
+  <text x="36" y="61" class="s">健康轮询处理未领取任务；已领取会话由 Worker 的本机单调时钟和接收证据裁决。</text>
+  <rect x="450" y="88" width="260" height="55" rx="25" class="p"/>
+  <text x="580" y="121" class="n" text-anchor="middle">任务连接门控 / 健康检查</text>
+  <path d="M580 143V181" class="l"/>
+  <g transform="translate(580 216)">
+    <polygon points="0,-35 82,0 0,35 -82,0" class="d"/>
+    <text y="4" class="n" text-anchor="middle">TELNET_SERIAL？</text>
+  </g>
+  <path d="M498 216H230V285" class="l"/>
+  <text x="360" y="205" class="s">是</text>
+  <rect x="100" y="285" width="260" height="70" rx="6" class="ok"/>
+  <text x="230" y="314" class="n" text-anchor="middle">不受 HTTP 认证门控</text>
+  <text x="230" y="335" class="s" text-anchor="middle">用户停止、删除、链路故障仍适用</text>
+  <path d="M662 216H905V285" class="l"/>
+  <text x="760" y="205" class="s">否：SSH / TELNET_DEVICE</text>
+  <g transform="translate(905 320)">
+    <polygon points="0,-35 88,0 0,35 -88,0" class="d"/>
+    <text y="4" class="n" text-anchor="middle">资源健康正常？</text>
+  </g>
+  <path d="M905 355V395" class="l"/>
+  <text x="917" y="382" class="s">是</text>
+  <rect x="780" y="395" width="250" height="65" rx="6" class="ok"/>
+  <text x="905" y="424" class="n" text-anchor="middle">允许新连接</text>
+  <text x="905" y="445" class="s" text-anchor="middle">认证成功或不适用健康模型</text>
+  <path d="M993 320H1070V490H760" class="l"/>
+  <text x="1020" y="294" class="s" text-anchor="middle">否：认证或网络异常</text>
+  <g transform="translate(665 490)">
+    <polygon points="0,-35 95,0 0,35 -95,0" class="d"/>
+    <text y="4" class="n" text-anchor="middle">已领取且活跃运行？</text>
+  </g>
+  <path d="M570 490H280V550" class="l"/>
+  <text x="425" y="479" class="s">否：未领取</text>
+  <rect x="135" y="550" width="290" height="70" rx="6" class="e"/>
+  <text x="280" y="579" class="n" text-anchor="middle">健康策略直接停止</text>
+  <text x="280" y="600" class="s" text-anchor="middle">写入 STOPPED 意图并记录审计</text>
+  <path d="M665 525V555" class="l"/>
+  <text x="678" y="545" class="s">是</text>
+  <g transform="translate(665 590)">
+    <polygon points="0,-35 105,0 0,35 -105,0" class="d"/>
+    <text y="-5" class="n" text-anchor="middle">十秒无字节、无存储忙</text>
+    <text y="11" class="n" text-anchor="middle">且连接无可用输出？</text>
+  </g>
+  <path d="M770 590H880" class="l"/>
+  <text x="820" y="579" class="s">是</text>
+  <rect x="880" y="555" width="230" height="70" rx="6" class="e"/>
+  <text x="995" y="584" class="n" text-anchor="middle">Worker 停止当前任务</text>
+  <text x="995" y="605" class="s" text-anchor="middle">保留恢复条件与审计</text>
+  <path d="M665 625V670H515" class="l"/>
+  <text x="678" y="646" class="s">否</text>
+  <text x="300" y="680" class="s">继续等待接收、重连或健康恢复；暂停、停止、删除意图始终优先并回收连接。</text>
+</svg>

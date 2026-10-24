@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 720" role="img" aria-labelledby="title desc">
+  <title id="title">小时日志下载时序</title>
+  <desc id="desc">客户端通过 API 创建下载作业，并经 API 代理从所属节点的内部文件服务读取制品。</desc>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+      <path d="M0 0L9 4 0 8z" fill="#94a3b8"/>
+    </marker>
+    <style>text{font-family:'Noto Sans SC','PingFang SC',sans-serif;letter-spacing:0}.t{fill:#fff;font-size:16px;font-weight:700}.n{fill:#fff;font-size:12px;font-weight:700}.s{fill:#cbd5e1;font-size:10px}.life{stroke:#334155;stroke-dasharray:6 4}.m{stroke:#94a3b8;stroke-width:1.5;marker-end:url(#a)}.back{stroke:#64748b;stroke-width:1.2;stroke-dasharray:5 3;marker-end:url(#a)}</style>
+  </defs>
+  <rect width="1160" height="720" fill="#0f172a"/>
+  <text x="36" y="40" class="t">小时下载：目录快照、节点制品与 API 代理</text>
+  <text x="36" y="61" class="s">时间从上到下。创建作业需鉴权，内容 GET 匿名经 API 路由，节点内部文件接口不向客户端暴露。</text>
+  <g>
+    <rect x="40" y="88" width="140" height="46" rx="6" fill="#083344" stroke="#22d3ee"/>
+    <text x="110" y="116" class="n" text-anchor="middle">浏览器 / 客户端</text>
+    <rect x="270" y="88" width="130" height="46" rx="6" fill="#064e3b" stroke="#34d399"/>
+    <text x="335" y="116" class="n" text-anchor="middle">FastAPI</text>
+    <rect x="500" y="88" width="130" height="46" rx="6" fill="#2e1065" stroke="#a78bfa"/>
+    <text x="565" y="116" class="n" text-anchor="middle">MongoDB</text>
+    <rect x="730" y="88" width="150" height="46" rx="6" fill="#064e3b" stroke="#34d399"/>
+    <text x="805" y="116" class="n" text-anchor="middle">Worker</text>
+    <rect x="960" y="88" width="160" height="46" rx="6" fill="#2e1065" stroke="#a78bfa"/>
+    <text x="1040" y="116" class="n" text-anchor="middle">节点文件服务</text>
+  </g>
+  <g class="life">
+    <path d="M110 134V680M335 134V680M565 134V680M805 134V680M1040 134V680"/>
+  </g>
+  <path d="M110 180H335" class="m"/>
+  <text x="222" y="170" class="s" text-anchor="middle">POST /downloads + Idempotency-Key</text>
+  <path d="M335 225H565" class="m"/>
+  <text x="450" y="215" class="s" text-anchor="middle">hourIds 或 start/end 规范为上海小时</text>
+  <path d="M565 270H335" class="back"/>
+  <text x="450" y="260" class="s" text-anchor="middle">OPEN / READY 文件目录</text>
+  <rect x="245" y="292" width="430" height="64" rx="5" fill="none" stroke="#64748b" stroke-dasharray="5 3"/>
+  <text x="260" y="315" class="s">事务：校验、冻结 files[] 目录快照、保护 retainUntil、创建 DOWNLOAD 作业</text>
+  <path d="M335 350H110" class="back"/>
+  <text x="222" y="340" class="s" text-anchor="middle">202 + 作业 ID</text>
+  <path d="M805 405H565" class="m"/>
+  <text x="685" y="395" class="s" text-anchor="middle">领取作业租约与文件快照</text>
+  <path d="M805 450H1040" class="m"/>
+  <text x="922" y="440" class="s" text-anchor="middle">节点本地片段 / 小时归档</text>
+  <path d="M805 495H1040" class="m"/>
+  <text x="922" y="485" class="s" text-anchor="middle">写出 tar.gz 或 ZIP 制品</text>
+  <path d="M805 540H565" class="m"/>
+  <text x="685" y="530" class="s" text-anchor="middle">SUCCEEDED + outputPath + expiresAt</text>
+  <path d="M110 585H335" class="m"/>
+  <text x="222" y="575" class="s" text-anchor="middle">GET /downloads/{id}/content</text>
+  <path d="M335 630H565" class="m"/>
+  <text x="450" y="620" class="s" text-anchor="middle">校验产物状态并读取 nodeId</text>
+  <path d="M335 660H1040" class="m"/>
+  <text x="688" y="650" class="s" text-anchor="middle">内部 GET /internal/downloads/{id}（Range / If-Range）</text>
+  <path d="M1040 690H335" class="back"/>
+  <text x="688" y="680" class="s" text-anchor="middle">文件字节流由 API 代理返回客户端</text>
+</svg>

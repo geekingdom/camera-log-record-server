@@ -21,6 +21,67 @@ from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
 
+def _public_document(document):
+    """移除 Mongo 内部标识后比较完整任务快照，避免只验证部分状态字段。"""
+    return {key: value for key, value in document.items() if key != "_id"}
+
+
+async def _assert_serial_health_boundary(repo, *, status, manual):
+    """在真实事务中验证 HTTP 认证恶化不改变串口任务，网络未领取任务仍停止。"""
+    prefix = ("manual" if manual else "periodic") + "-" + status.lower()
+    resource = {
+        "id": f"serial-boundary-{prefix}", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.251",
+        "deletedAt": None, "healthStatus": "ONLINE", "healthFailureCount": 3,
+        "version": 1, "healthRevision": 1, "passwordEncrypted": repo.encrypt("verification-secret"),
+    }
+    await repo.db.resources.insert_one(resource)
+    serial_collecting = {
+        "id": f"{prefix}-serial-collecting", "resourceId": resource["id"], "protocol": "TELNET_SERIAL",
+        "desiredState": "RUNNING", "status": "COLLECTING", "nodeId": "serial-node", "runId": "serial-run",
+        "generation": 7, "sessionId": "serial-session", "controlClaimVersion": 11,
+        "ip": "192.0.2.251", "port": 9000, "createdBy": "verification",
+    }
+    serial_pending = {
+        "id": f"{prefix}-serial-pending", "resourceId": resource["id"], "protocol": "TELNET_SERIAL",
+        "desiredState": "RUNNING", "status": "PENDING", "nodeId": None, "runId": "serial-pending-run",
+        "generation": 8, "controlClaimVersion": 12, "ip": "192.0.2.251", "port": 9001,
+        "createdBy": "verification",
+    }
+    network_tasks = [
+        {"id": f"{prefix}-ssh", "resourceId": resource["id"], "protocol": "SSH", "desiredState": "RUNNING",
+         "status": "PENDING", "nodeId": None, "ip": "192.0.2.251", "port": 22, "createdBy": "verification"},
+        {"id": f"{prefix}-telnet-device", "resourceId": resource["id"], "protocol": "TELNET_DEVICE",
+         "desiredState": "RUNNING", "status": "PENDING", "nodeId": None, "ip": "192.0.2.251", "port": 23,
+         "createdBy": "verification"},
+    ]
+    await repo.db.tasks.insert_many([serial_collecting, serial_pending, *network_tasks])
+    serial_before = {
+        task["id"]: _public_document(await repo.db.tasks.find_one({"id": task["id"]}))
+        for task in (serial_collecting, serial_pending)
+    }
+    if manual:
+        snapshot = await repo.db.resources.find_one({"id": resource["id"]})
+        await apply_manual_result(repo, snapshot | {"manualHealthResult": True}, status=status,
+                                  metadata={}, actor="verification")
+    else:
+        await _apply_failure(repo, await repo.db.resources.find_one({"id": resource["id"]}), status)
+    changed_resource = await repo.db.resources.find_one({"id": resource["id"]})
+    assert changed_resource["healthStatus"] == status
+    for identifier, expected in serial_before.items():
+        assert _public_document(await repo.db.tasks.find_one({"id": identifier})) == expected
+    for task in network_tasks:
+        stopped = await repo.db.tasks.find_one({"id": task["id"]})
+        assert stopped["desiredState"] == "STOPPED"
+        assert stopped["resourceHealthRecovery"]["reason"] == status
+    resource_before_direct_stop = _public_document(changed_resource)
+    operation_count = await repo.db.operations.count_documents({"taskId": {"$in": list(serial_before)}})
+    assert not await stop_unresponsive_task(repo, serial_collecting, liveness_check=lambda: True)
+    assert _public_document(await repo.db.resources.find_one({"id": resource["id"]})) == resource_before_direct_stop
+    assert await repo.db.operations.count_documents({"taskId": {"$in": list(serial_before)}}) == operation_count
+    for identifier, expected in serial_before.items():
+        assert _public_document(await repo.db.tasks.find_one({"id": identifier})) == expected
+
+
 async def main():
     """只创建随机验证库和临时日志目录，finally 中无条件删除两者。"""
     configured, name = Settings(), "resource_health_verify_" + uuid4().hex
@@ -31,6 +92,9 @@ async def main():
         repo = Repository(mongo[name], settings)
         try:
             await repo.initialize()
+            for failure_status in ("AUTH_FAILED", "OFFLINE", "ERROR"):
+                await _assert_serial_health_boundary(repo, status=failure_status, manual=False)
+                await _assert_serial_health_boundary(repo, status=failure_status, manual=True)
             await repo.db.resources.insert_one({"id": "resource", "kind": "HIKVISION_NETWORK", "ip": "192.0.2.250",
                                                 "healthStatus": "ONLINE", "deletedAt": None})
             await repo.db.tasks.insert_one({"id": "offline-recover", "resourceId": "resource", "desiredState": "RUNNING",
@@ -159,6 +223,8 @@ async def main():
                               "unfinishedRunLockProtected": True, "backoffBoundaries": observed_backoff,
                               "manualSuccessIdentityReset": True, "manualFailureStopsWithoutBackoffAdvance": True,
                               "staleRevisionRejected": True, "transactionRollbackVerified": True,
+                              "serialHealthBoundaryPeriodic": ["AUTH_FAILED", "OFFLINE", "ERROR"],
+                              "serialHealthBoundaryManual": ["AUTH_FAILED", "OFFLINE", "ERROR"],
                               "noDeviceAccess": True}))
         finally:
             await mongo.drop_database(name)

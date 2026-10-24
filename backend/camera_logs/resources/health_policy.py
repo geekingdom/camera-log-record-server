@@ -91,6 +91,10 @@ async def stop_for_resource_health(repo, task, resource, session, *, require_own
 
 async def stop_unresponsive_task(repo, task, *, liveness_check: Callable[[], bool] | None = None) -> bool:
     """供 Worker 在本地单调时钟证明十秒无可用日志后停止当前非成功 ISAPI 运行。"""
+    # 串口日志走独立连接，认证状态及认证数据库事务都不能介入其运行。
+    if task.get("protocol") == "TELNET_SERIAL":
+        return False
+
     async def commit(session):
         resource = await repo.db.resources.find_one(
             {"id": task.get("resourceId"), "deletedAt": None,

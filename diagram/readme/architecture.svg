@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 800" role="img" aria-labelledby="title desc"><title id="title">平台组件与数据流</title><desc id="desc">API、Worker、节点文件、MongoDB、设备 Core NFS 与可选独立索引器的连接关系。</desc><defs><pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse"><path d="M0 0L8 4 0 8z" fill="#94a3b8"/></marker><style>text{font-family:'PingFang SC','Microsoft YaHei',sans-serif}.label{fill:#cbd5e1;font-size:13px}.edge{fill:none;stroke:#94a3b8;stroke-width:1.6;marker-end:url(#a)}</style></defs><rect width="1120" height="800" fill="#0f172a"/><rect width="1120" height="800" fill="url(#grid)"/><text x="40" y="40" fill="white" font-size="24" font-weight="700">平台组件与数据流</text><text x="40" y="67" class="label">控制面保存元数据；每个 Worker 独立持有日志；检索索引为可选旁路。</text>
+<path d="M260 150H390" class="edge"/>
+<text x="325" y="135" class="label" text-anchor="middle">HTTPS / WS</text>
+<path d="M690 150H840" class="edge"/>
+<text x="765" y="135" class="label" text-anchor="middle">查询 / 事务</text>
+<path d="M540 200V330" class="edge" marker-start="url(#a)"/>
+<text x="625" y="270" class="label" text-anchor="middle">内部转发 / 文件读取</text>
+<path d="M390 380H260" class="edge"/>
+<text x="325" y="363" class="label" text-anchor="middle">主动 SSH / Telnet</text>
+<path d="M690 380H840" class="edge"/>
+<text x="765" y="363" class="label" text-anchor="middle">顺序写入</text>
+<path d="M690 350H770V230H940V200" class="edge"/>
+<text x="864" y="250" class="label" text-anchor="middle">心跳 / 领取 / 目录</text>
+<path d="M150 430V560" class="edge"/>
+<text x="204" y="505" class="label" text-anchor="middle">设备写 Core</text>
+<path d="M435 430V490H250V560" class="edge"/>
+<text x="343" y="478" class="label" text-anchor="middle">扫描 / 读取 NFS</text>
+<path d="M900 430V510H620V560" class="edge"/>
+<text x="770" y="498" class="label" text-anchor="middle">旁路读取节点日志</text>
+<path d="M690 610H840" class="edge"/>
+<text x="765" y="595" class="label" text-anchor="middle">可重建索引</text>
+<rect x="40" y="100" width="220" height="100" rx="10" fill="#142034" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="150.0" y="129" fill="#22d3ee" font-size="18" font-weight="600" text-anchor="middle">浏览器 / 第三方</text>
+<text x="150.0" y="154" class="label" text-anchor="middle">Vue 3 控制台、REST 调用</text>
+<text x="150.0" y="176" class="label" text-anchor="middle">用户操作与实时日志订阅</text>
+<rect x="390" y="100" width="300" height="100" rx="10" fill="#142034" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="129" fill="#34d399" font-size="18" font-weight="600" text-anchor="middle">FastAPI 公共入口</text>
+<text x="540.0" y="154" class="label" text-anchor="middle">鉴权、任务控制、目录与作业</text>
+<text x="540.0" y="176" class="label" text-anchor="middle">按节点归属代理内容下载</text>
+<rect x="840" y="100" width="240" height="100" rx="10" fill="#142034" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="960.0" y="129" fill="#a78bfa" font-size="18" font-weight="600" text-anchor="middle">MongoDB 副本集</text>
+<text x="960.0" y="154" class="label" text-anchor="middle">配置、运行、租约、目录、审计</text>
+<text x="960.0" y="176" class="label" text-anchor="middle">不保存设备原始日志正文</text>
+<rect x="40" y="330" width="220" height="100" rx="10" fill="#142034" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="150.0" y="359" fill="#22d3ee" font-size="18" font-weight="600" text-anchor="middle">设备 / 串口服务器</text>
+<text x="150.0" y="384" class="label" text-anchor="middle">SSH / Telnet 输出</text>
+<text x="150.0" y="406" class="label" text-anchor="middle">网络设备可写入 Core NFS</text>
+<rect x="390" y="330" width="300" height="100" rx="10" fill="#142034" stroke="#34d399" stroke-width="1.6"/>
+<text x="540.0" y="359" fill="#34d399" font-size="18" font-weight="600" text-anchor="middle">Worker 采集节点</text>
+<text x="540.0" y="384" class="label" text-anchor="middle">领取、心跳、连接、采集与归档</text>
+<text x="540.0" y="406" class="label" text-anchor="middle">单接收器 / 单命令队列 / 顺序写</text>
+<rect x="840" y="330" width="240" height="100" rx="10" fill="#142034" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="960.0" y="359" fill="#a78bfa" font-size="18" font-weight="600" text-anchor="middle">本节点 LOG_ROOT</text>
+<text x="960.0" y="384" class="label" text-anchor="middle">日志分片、小时归档</text>
+<text x="960.0" y="406" class="label" text-anchor="middle">下载制品与恢复清单</text>
+<rect x="40" y="560" width="220" height="100" rx="10" fill="#142034" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="150.0" y="589" fill="#fbbf24" font-size="18" font-weight="600" text-anchor="middle">Core NFS 源目录</text>
+<text x="150.0" y="614" class="label" text-anchor="middle">设备产生的 Coredump</text>
+<text x="150.0" y="636" class="label" text-anchor="middle">与普通采集日志目录分开</text>
+<rect x="390" y="560" width="300" height="100" rx="10" fill="#142034" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="540.0" y="589" fill="#fbbf24" font-size="18" font-weight="600" text-anchor="middle">独立 Indexer（可选）</text>
+<text x="540.0" y="614" class="label" text-anchor="middle">读取节点日志及 Mongo 元数据</text>
+<text x="540.0" y="636" class="label" text-anchor="middle">检查点、回放与幂等索引</text>
+<rect x="840" y="560" width="240" height="100" rx="10" fill="#142034" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="960.0" y="589" fill="#fbbf24" font-size="18" font-weight="600" text-anchor="middle">Elasticsearch（可选）</text>
+<text x="960.0" y="614" class="label" text-anchor="middle">日志正文检索副本</text>
+<text x="960.0" y="636" class="label" text-anchor="middle">独立保留、可重建</text>
+<text x="40" y="715" class="label">普通日志无需跨节点共享目录；API 通过 Worker 内部接口读取对应节点文件。</text><text x="40" y="741" class="label">Core NFS 仅用于设备 Core 源文件。索引不可用或不完整时回退原文扫描，不阻断采集。</text></svg>

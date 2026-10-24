@@ -1,0 +1,86 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 690" role="img" aria-labelledby="title desc">
+  <title id="title">核心 MongoDB 逻辑关系</title>
+  <desc id="desc">用户、资源、任务、运行、节点本地日志目录、下载作业和 Coredump 目录。</desc>
+  <defs>
+    <pattern id="g" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width=".5"/>
+    </pattern>
+    <marker id="a" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto">
+      <path d="M0 0L9 4 0 8z" fill="#94a3b8"/>
+    </marker>
+    <style>text{font-family:'Noto Sans SC','PingFang SC',sans-serif;letter-spacing:0}.t{fill:#fff;font-size:16px;font-weight:700}.h{fill:#fff;font-size:13px;font-weight:700}.f{fill:#cbd5e1;font-size:10px}.r{stroke:#94a3b8;stroke-width:1.5;fill:none;marker-end:url(#a)}.b{fill:#0f172a;stroke-width:1.5;rx:6}.d{stroke-width:1;stroke-opacity:.6}</style>
+  </defs>
+  <rect width="1200" height="690" fill="#0f172a"/>
+  <rect width="1200" height="690" fill="url(#g)"/>
+  <text x="40" y="42" class="t">核心 MongoDB 逻辑关系</text>
+  <text x="40" y="62" class="f">日志正文保存在各节点本地 LOG_ROOT；MongoDB 保存目录和协调元数据。</text>
+  <path d="M230 205H300M495 205H570M765 205H850M667 305V420M665 570V610H290V570M495 275V400H1065V420" class="r"/>
+  <text x="245" y="195" class="f">1:N</text>
+  <text x="520" y="195" class="f">1:N</text>
+  <text x="800" y="195" class="f">1:N</text>
+  <text x="680" y="345" class="f">tasks 1 → 0..N files</text>
+  <text x="425" y="599" class="f">jobs 1 → 1..N files（冻结目录快照）</text>
+  <text x="850" y="388" class="f">resources 1:N coredump_files</text>
+  <g transform="translate(50 135)">
+    <rect width="180" height="140" class="b" fill="#083344" stroke="#22d3ee"/>
+    <text x="90" y="28" class="h" text-anchor="middle">users</text>
+    <path d="M0 40H180" class="d" stroke="#22d3ee"/>
+    <text x="12" y="65" class="f">PK id</text>
+    <text x="12" y="88" class="f">username / displayName</text>
+    <text x="12" y="111" class="f">scopes / isAdmin</text>
+  </g>
+  <g transform="translate(300 135)">
+    <rect width="195" height="140" class="b" fill="#064e3b" stroke="#34d399"/>
+    <text x="97" y="28" class="h" text-anchor="middle">resources</text>
+    <path d="M0 40H195" class="d" stroke="#34d399"/>
+    <text x="12" y="65" class="f">PK id / FK createdBy</text>
+    <text x="12" y="88" class="f">kind / ip / healthStatus</text>
+    <text x="12" y="111" class="f">authRejectedAt / deletedAt</text>
+  </g>
+  <g transform="translate(570 135)">
+    <rect width="195" height="170" class="b" fill="#064e3b" stroke="#34d399"/>
+    <text x="97" y="28" class="h" text-anchor="middle">tasks</text>
+    <path d="M0 40H195" class="d" stroke="#34d399"/>
+    <text x="12" y="65" class="f">PK id / FK resourceId, createdBy</text>
+    <text x="12" y="88" class="f">protocol / desiredState / status</text>
+    <text x="12" y="111" class="f">nodeId / runId / generation</text>
+    <text x="12" y="134" class="f">加密凭据副本</text>
+  </g>
+  <g transform="translate(850 135)">
+    <rect width="180" height="140" class="b" fill="#064e3b" stroke="#34d399"/>
+    <text x="90" y="28" class="h" text-anchor="middle">runs</text>
+    <path d="M0 40H180" class="d" stroke="#34d399"/>
+    <text x="12" y="65" class="f">PK id / FK taskId</text>
+    <text x="12" y="88" class="f">nodeId / startedAt / endedAt</text>
+    <text x="12" y="111" class="f">部署与恢复证明</text>
+  </g>
+  <g transform="translate(570 420)">
+    <rect width="195" height="150" class="b" fill="#2e1065" stroke="#a78bfa"/>
+    <text x="97" y="28" class="h" text-anchor="middle">files</text>
+    <path d="M0 40H195" class="d" stroke="#a78bfa"/>
+    <text x="12" y="65" class="f">PK id / FK taskId, runId, nodeId</text>
+    <text x="12" y="88" class="f">hour / sessionId / status</text>
+    <text x="12" y="111" class="f">本地 path / archiveGroupId / sha256</text>
+    <text x="12" y="134" class="f">bytes / retainUntil</text>
+  </g>
+  <g transform="translate(195 420)">
+    <rect width="190" height="150" class="b" fill="#78350f" stroke="#fbbf24"/>
+    <text x="95" y="28" class="h" text-anchor="middle">jobs</text>
+    <path d="M0 40H190" class="d" stroke="#fbbf24"/>
+    <text x="12" y="65" class="f">PK id / FK taskId, actor, nodeId</text>
+    <text x="12" y="88" class="f">kind=DOWNLOAD / status</text>
+    <text x="12" y="111" class="f">files[] 目录快照 / outputPath</text>
+    <text x="12" y="134" class="f">expiresAt</text>
+  </g>
+  <g transform="translate(970 420)">
+    <rect width="190" height="150" class="b" fill="#083344" stroke="#22d3ee"/>
+    <text x="95" y="28" class="h" text-anchor="middle">coredump_files</text>
+    <path d="M0 40H190" class="d" stroke="#22d3ee"/>
+    <text x="12" y="65" class="f">PK id / FK resourceId, nodeId</text>
+    <text x="12" y="88" class="f">sourceKey / version / name</text>
+    <text x="12" y="111" class="f">source 指纹 / sourceState</text>
+    <text x="12" y="134" class="f">snapshot（固定副本时）</text>
+  </g>
+  <text x="40" y="656" class="f">Core 的 NFS 源文件不按此目录记录的 expiresAt 删除；固定副本的到期和回收由 snapshot 生命周期处理。</text>
+</svg>
