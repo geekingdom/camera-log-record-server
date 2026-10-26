@@ -67,6 +67,24 @@ const page = await context.newPage(); page.setDefaultTimeout(12_000);
 const errors = []; page.on("pageerror", error => errors.push(error.message)); page.on("console", message => {
   if (message.type() === "error" && !message.text().includes("Failed to load resource: the server responded with a status of 500")) errors.push(message.text());
 });
+// ECharts 通过 ResizeObserver 异步应用视口变化；等待画布实际匹配容器后再检查页面宽度。
+async function waitForChartLayout(viewportWidth) {
+  await page.waitForFunction(() => {
+    const chart = document.querySelector(".resource-metrics-dialog .metrics-chart");
+    const canvas = chart?.querySelector("canvas");
+    if (!chart || !canvas) return false;
+    const chartBounds = chart.getBoundingClientRect();
+    const canvasBounds = canvas.getBoundingClientRect();
+    return chartBounds.width > 0
+      && Math.abs(canvasBounds.width - chartBounds.width) <= 1
+      && document.documentElement.scrollWidth <= window.innerWidth;
+  });
+  assert.equal(
+    await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth),
+    false,
+    `${viewportWidth}px 趋势面板不得横向溢出`,
+  );
+}
 try {
   await mkdir("output/playwright", { recursive: true });
   await page.goto(`${baseUrl.replace(/\/$/, "")}/#resources`, { waitUntil: "networkidle" });
@@ -168,9 +186,8 @@ try {
   await page.waitForTimeout(500);
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 844 });
-    await page.waitForTimeout(250);
+    await waitForChartLayout(width);
     await page.screenshot({ path: `output/playwright/resource-metrics-${width}.png`, fullPage: true });
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, `${width}px 不得横向溢出`);
   }
   await page.locator(".resource-metrics-dialog .el-dialog__headerbtn").click();
   resources.push({id: "deleted-resource", name: "已删除趋势设备", kind: "HIKVISION_NETWORK", ip: "192.0.2.33", version: 2, deletedAt, enableResourceMonitor: false});
@@ -183,8 +200,8 @@ try {
   assert.equal(await page.getByRole("button", {name: "恢复自动刷新", exact:true}).count(), 0);
   for (const width of [1440, 390]) {
     await page.setViewportSize({width, height: 844});
+    await waitForChartLayout(width);
     await page.screenshot({path: `output/playwright/deleted-resource-metrics-${width}.png`, fullPage: true});
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
   }
   await page.getByText("CPU", {exact:true}).click();
   await page.getByRole("heading", {name:"CPU（%）",exact:true}).waitFor();
