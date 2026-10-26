@@ -26,6 +26,8 @@ await context.route("**/api/v1/**", async route => {
   } });
   if (method === "GET" && path === "/api/v1/resources")
     return json(route, { items: resources, total: resources.length, page: 1, pageSize: 20 });
+  if (method === "GET" && path === "/api/v1/users/share-targets")
+    return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (method === "GET" && ["/api/v1/tasks", "/api/v1/nodes", "/api/v1/command-templates", "/api/v1/users/creators"].includes(path))
     return json(route, { items: [], total: 0, page: 1, pageSize: 20 });
   if (path === "/api/v1/platform-settings") return json(route, { retentionDays: 7, version: 1 });

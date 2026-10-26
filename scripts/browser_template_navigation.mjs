@@ -7,7 +7,7 @@ const baseUrl = process.env.BASE_URL || "http://127.0.0.1:5173";
 const timestamp = "2026-09-09T12:00:00.000Z";
 const administrator = {
   id: "legacy-template-admin", username: "legacy-template-admin", displayName: "历史模板验收管理员",
-  isAdmin: true, scopes: ["*"], enabled: true, mustChangePassword: false, version: 1,
+  isAdmin: true, scopes: ["*"], enabled: true, mustChangePassword: false, version: 1, hasActiveServiceToken: true,
 };
 const resource = {
   id: "legacy-resource", name: "旧模板切换验证资源", kind: "SERIAL_SERVER", ip: "192.0.2.33", version: 1,

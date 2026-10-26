@@ -64,5 +64,6 @@ def test_actual_task_control_and_manual_command_contract(client):
     }})
     command = client.post(f"/api/v1/tasks/{task_id}/commands", headers={"Idempotency-Key": "identity-command"}, json={"command": "ifconfig"})
     assert_response(client, "POST /api/v1/tasks/{task_id}/commands", command)
+    assert command.json()["actorUsername"] == "bootstrap"
     assert_response(client, "GET /api/v1/commands/{identifier}", client.get(f"/api/v1/commands/{command.json()['id']}"))
     assert_response(client, "GET /api/v1/tasks/{task_id}/command-executions", client.get(f"/api/v1/tasks/{task_id}/command-executions"))

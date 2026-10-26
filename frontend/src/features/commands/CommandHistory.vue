@@ -71,6 +71,7 @@ onBeforeUnmount(() => { generation++; });
     <el-table scrollbar-always-on v-loading="loading" :data="items" class="data-table" empty-text="暂无命令执行记录">
       <el-table-column label="实际命令" min-width="240" show-overflow-tooltip><template #default="{ row }"><div class="command-execution-command"><span>{{ executionCommand(row) }}</span><small>{{ executionIdentifier(row) }}</small></div></template></el-table-column>
       <el-table-column label="来源" width="100"><template #default="{ row }">{{ row.kind === 'MANUAL' ? '手动' : row.kind === 'SCHEDULED' ? '定时' : row.kind || '-' }}</template></el-table-column>
+      <el-table-column label="发送用户名" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.senderUsername || '历史记录：发送者未知' }}</template></el-table-column>
       <el-table-column label="定时预算" min-width="150"><template #default="{ row }"><span v-if="row.kind === 'SCHEDULED' && row.totalExecutions">第 {{ row.attempts ?? '-' }} / {{ row.totalExecutions }} 次；间隔 {{ row.intervalSeconds }} 秒</span><span v-else>-</span></template></el-table-column>
       <el-table-column label="状态" width="120"><template #default="{ row }">{{ labels[row.status] || row.status || '-' }}</template></el-table-column>
       <el-table-column label="时间" min-width="180"><template #default="{ row }">{{ row.createdAt ? new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) : '-' }}</template></el-table-column>

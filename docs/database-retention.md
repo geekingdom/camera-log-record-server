@@ -210,3 +210,12 @@ python scripts/backfill_runtime_event_time.py --apply
 日志片段实际时间命名不新增集合或持续写入频率：既有 `files` 目录每个封存片段增加可选首末接收时间，文件清单每个成员增加源名与首末时间，均随原片段数量线性增长。`sourceLogName` 仅在磁盘清单中用于稳定 fileId 恢复；公开响应不包含该字段。继续沿用日志保留期、原归档清理和下载制品保留策略；查询仍使用既有 id/任务小时索引，无新增索引或 TTL。
 
 设备 Core 历史重添关联不新增集合：既有 `coredump_files` 每项增加固定大小的内部设备身份快照，重添原地更新归属和扫描键，文件 ID、首次发现时间、事件幂等标记不变，继续沿用源文件与下载引用清理规则。首次登记事务写 `resources.coredumpCatalogFenceAt` 与软删除竞争，字段不公开、不按扫描行持续新增历史。资源身份查询新增 `resources_coredump_reassociation_identity(kind,ip,model,subSerialNumber,deletedAt,id)`，不改旧索引选项；真实 Mongo 3004 条资源的精确匹配查询返回 4 条，扫描 5 键/4 文档。日志分片配置只为平台单条记录新增整数，节点每秒读取缓存，无新集合、TTL或保留期变化。
+
+
+### 用户重建与资源共享（2026-10-26）
+
+用户仍软删除保留审计引用，用户名唯一约束升级为 `users_active_username` 部分唯一索引（`deletedAt: null`），启动先建新索引再删除精确旧 `username_1`；新同名用户获得新ID，旧会话、令牌与共享名单不会重新授权。资源共享名单最多100个用户ID，是配置而非持续增长记录；不建立新集合或TTL。任务读取按主资源id批量附加名单，授权查询使用已有id唯一索引。用户删除事务与创建/转移/共享通过用户文档写入声明串行化；声明版本仅作内部并发协调，不进入公开用户合同。
+
+当前身份的 API 文档资格不保存派生标记：每次登录、`/auth/me` 与改密均以服务器时间查询 `tokens(userId,revoked,expiresAt)`，接受未撤销且 `expiresAt` 为 null/缺失或未来的至少一条服务账号。启动创建命名复合索引 `tokens_active_user_expiry(userId,revoked,expiresAt)`；`expiresAt: null` 的 Mongo 匹配同时覆盖缺失字段，因此查询不增加重复 `$exists` 分支。该索引不改变令牌保存、轮换、撤销或保留策略；令牌仍随用户软删除保留审计归属，不能增加 TTL。
+
+真实副本集 Explain 由 `scripts/verify_service_token_eligibility_index.py` 在随机测试库执行。脚本要求获胜计划包含 `tokens_active_user_expiry`，并分别验证未来到期、显式 null、缺失 `expiresAt` 的有效账号均返回1条且至多扫描1份令牌文档；仅有过期/已撤销账号的用户返回0条且扫描0键/0文档。本机 `sharing` 副本集（`127.0.0.1:27119`）实测未来到期分支扫描1键/1文档、无有效账号扫描0键/0文档；脚本结束后删除随机测试库和临时日志目录，不触及业务库。

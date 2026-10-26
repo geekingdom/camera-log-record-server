@@ -9,8 +9,9 @@ from pymongo.errors import PyMongoError
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
-from camera_logs.common.security import authorize, authorize_owner
+from camera_logs.common.security import authorize
 from camera_logs.node.recovery import accepted_restart, finish_blocked_run, matching_closed_receipt
+from camera_logs.resources.sharing import authorize_task_operation
 from camera_logs.tasks.control import _guard_resources
 
 
@@ -30,7 +31,7 @@ async def request_blocked_restart(repo, task_id, user):
             if existing is None:
                 raise HTTPException(404, "任务不存在")
             raise HTTPException(409, "任务已删除，仅可查询已有日志")
-        authorize_owner(user, task)
+        await authorize_task_operation(repo, user, task, session=session)
         accepted = await accepted_restart(repo, task, session)
         if accepted:
             return accepted

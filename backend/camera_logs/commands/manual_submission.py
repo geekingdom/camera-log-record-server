@@ -1,6 +1,7 @@
 """手动命令、幂等映射和操作审计原子提交，确认不明时仅查询原命令。"""
 
 import asyncio
+from collections.abc import Mapping
 from datetime import timedelta
 
 from fastapi import HTTPException
@@ -10,6 +11,7 @@ from camera_logs.commands.manual_admission import admit_manual
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
+from camera_logs.resources.sharing import authorize_task_operation
 
 
 async def _confirmed(database, actor, key, digest, *, session=None):
@@ -22,14 +24,17 @@ async def _confirmed(database, actor, key, digest, *, session=None):
     return await audited_mutations._confirmed_existing(database, digest, "commands", existing, session=session)
 
 
-async def submit_manual(repo, actor, task_id, key, body):
+async def submit_manual(repo, actor, task_id, key, body, *, identity=None):
     """先重放同键已提交结果，再检查新命令可交互状态，设备发送不属于本事务。"""
     if not key or len(key) > 128:
         raise HTTPException(422, "必须提供不超过128字符的 Idempotency-Key")
+    identity = identity or (actor if isinstance(actor, Mapping) else None)
+    actor_id = actor["id"] if isinstance(actor, Mapping) else actor
+    actor_username = identity.get("username") or actor_id if identity is not None else None
     action = "command:" + task_id
     digest = audited_mutations.request_digest(action, body)
     database = audited_mutations._majority_primary_database(repo)
-    previous = await _confirmed(database, actor, key, digest)
+    previous = await _confirmed(database, actor_id, key, digest)
     if previous is not None:
         return previous
     task = await repo.get("tasks", task_id)
@@ -40,16 +45,21 @@ async def submit_manual(repo, actor, task_id, key, body):
 
     async def commit(session):
         """命令领取与审计可见性同步；任一写失败都不能留下可发送的命令。"""
-        previous = await _confirmed(repo.db, actor, key, digest, session=session)
+        previous = await _confirmed(repo.db, actor_id, key, digest, session=session)
         if previous is not None:
             return previous
+        if identity is not None:
+            # 与共享撤销写入同一资源，事务重试时必须以最新授权重新决定是否入队。
+            await authorize_task_operation(repo, identity, task, session=session)
         timestamp = now()
         await repo.db.idempotency.insert_one({
-            "actor": actor, "key": key, "digest": digest, "resourceId": identifier,
+            "actor": actor_id, "key": key, "digest": digest, "resourceId": identifier,
             "state": "SUCCEEDED", "updatedAt": timestamp, "expiresAt": timestamp + timedelta(days=7),
         }, session=session)
-        document = await admit_manual(repo, task, identifier, body, actor, session=session)
-        await repo.audit(actor, action, identifier, session=session)
+        document = await admit_manual(
+            repo, task, identifier, body, actor_id, actor_username=actor_username, session=session,
+        )
+        await repo.audit(actor_id, action, identifier, session=session)
         return document
 
     try:
@@ -58,7 +68,7 @@ async def submit_manual(repo, actor, task_id, key, body):
         raise
     except PyMongoError as error:
         try:
-            previous = await _confirmed(database, actor, key, digest)
+            previous = await _confirmed(database, actor_id, key, digest)
         except PyMongoError:
             previous = None
         if previous is not None:

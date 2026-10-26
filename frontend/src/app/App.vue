@@ -13,14 +13,14 @@ import type { Resource, Task, Template } from "../shared/types";
 import { taskStatusLabels } from "../features/tasks/taskStatus";
 import AsyncView from "../shared/AsyncView.vue";
 import { permissionKey } from "../shared/permissions";
-import { canManageOwnedRecord } from "../shared/ownership";
+import { canManageSharedResourceRecord } from "../shared/ownership";
 import LoginPanel from "../features/auth/LoginPanel.vue";
 import PasswordChangeDialog from "../features/auth/PasswordChangeDialog.vue";
 import { usePlatformSession } from "../features/auth/usePlatformSession";
 import AppNavigation from "./AppNavigation.vue";
 import { useWorkspaceCollections } from "./useWorkspaceCollections";
 import { DEFAULT_WORKSPACE, useWorkspaceNavigation } from "./useWorkspaceNavigation";
-import { workspaceNavigation } from "./workspaceNavigation";
+import { visibleWorkspaceNavigation } from "./workspaceNavigation";
 
 const loadTaskOverview = () => import("../features/tasks/TaskOverview.vue");
 const loadTaskList = () => import("../features/tasks/TaskList.vue");
@@ -136,10 +136,8 @@ provide(permissionKey, {
   allResources: () => Boolean(user.value),
 });
 const visibleNavigation = computed(() =>
-  workspaceNavigation.filter(
-    (item) => (!item.admin || user.value?.isAdmin) && hasScope(item.scope) &&
-      (item.key !== "dashboard" || hasScope("tasks:read")),
-  ).map(item => item.key === "access" && !user.value?.isAdmin ? { ...item, label: "我的服务账号" } : item),
+  visibleWorkspaceNavigation(user.value)
+    .map(item => item.key === "access" && !user.value?.isAdmin ? { ...item, label: "我的服务账号" } : item),
 );
 const selectedTask = ref<Task>(),
   selectedTemplate = ref<Template>();
@@ -204,8 +202,8 @@ function editTask(task: Task) {
   taskEditorOpen.value = true;
   if (hasScope("templates:read")) void loadTemplates().catch(error);
 }
-function owns(item: { createdBy?: string }) {
-  return canManageOwnedRecord(user.value?.id, user.value?.isAdmin, item.createdBy);
+function owns(item: { createdBy?: string; resourceSharedUserIds?: string[] }) {
+  return canManageSharedResourceRecord(user.value?.id, user.value?.isAdmin, item.createdBy, item.resourceSharedUserIds);
 }
 function viewTask(task: Task) {
   selectedLogTask.value = task.id;

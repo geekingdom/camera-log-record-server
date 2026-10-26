@@ -61,6 +61,20 @@ def test_request_event_actual_middleware_fields_are_documented(client):
         assert_documented(row, EVENT)
 
 
+def test_user_resource_disposition_audit_metadata_is_documented(client):
+    """用户资源处置的真实审计保留原归属和接收者，并逐字段生成中文文档。"""
+    repo = client.app.state.repo
+
+    async def produce():
+        await repo.audit("bootstrap", "transfer_user_resource", "resource",
+                         metadata={"createdBy": "old-user", "targetUserId": "new-user"})
+        return await present_events(repo.db, [row async for row in repo.db.audit.find({})])
+
+    rows = client.portal.call(produce)
+    assert rows[0]["metadata"] == {"createdBy": "old-user", "targetUserId": "new-user"}
+    assert_documented(rows[0], EVENT)
+
+
 def test_runtime_event_producers_have_documented_fields(client):
     """实际从机、调试和时钟回拨写入器生成事件，再经公开展示器核对嵌套字段。"""
     from types import SimpleNamespace

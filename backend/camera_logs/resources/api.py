@@ -18,7 +18,7 @@ from camera_logs.coredumps.presence import (
     visible_coredump_query,
 )
 from camera_logs.coredumps.resource_identity import reassociate_coredump_history
-from camera_logs.resources.address_claim import claim_address, release_address
+from camera_logs.resources.address_claim import claim_address
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import (
     after_cursor_clause,
@@ -28,9 +28,19 @@ from camera_logs.resources.authentication_records import (
 )
 from camera_logs.resources.batch_creation import install_batch_creation_route
 from camera_logs.resources.health import apply_manual_result, grant_after_user_authentication
-from camera_logs.resources.lifecycle import reconcile_resource_deletion, task_resource_query
+from camera_logs.resources.lifecycle import (
+    mark_resource_deletion,
+    reconcile_resource_deletion,
+    task_resource_query,
+)
 from camera_logs.resources.listing import page_resources
 from camera_logs.resources.models import CoredumpMonitorStatus, ResourceInput, ResourcePatch
+from camera_logs.resources.sharing import (
+    authorize_resource_operation,
+    resource_is_shared,
+    validate_share_users,
+)
+from camera_logs.users.write_gate import claim_active_user_for_resource_write
 
 
 def _resource_public(document):
@@ -56,6 +66,7 @@ async def _resource_view(repo, document, user: dict | None = None, task_limit: i
                          summary_present: bool = False):
     """返回有界任务列表，以及用于展示采集和删除风险的两类独立摘要。"""
     item = _resource_public(document)
+    item.setdefault("sharedUserIds", [])
     item["hasCoredumps"] = await _resource_has_coredumps(repo, item["id"]) if has_coredumps is None else has_coredumps
     # 资源详情与列表统计统一排除软删除任务；历史任务由 tasks?includeDeleted=true 显式读取。
     task_query = {"$and": [task_resource_query(item["id"]), {"deletedAt": None}]}
@@ -293,6 +304,7 @@ def install_resource_routes(app, repo, listing):
             metadata = await _verified_metadata(body)
             document = {"id": identifier, "name": body.name, "kind": body.kind, "ip": body.ip,
                         "version": 1, "createdAt": now(), "updatedAt": now(),
+                        "sharedUserIds": list(dict.fromkeys(body.sharedUserIds)),
                         "createdBy": user["id"], "createdByName": user.get("displayName") or user.get("username") or user["id"],
                         "enableCoredumpMonitor": body.enableCoredumpMonitor,
                         "enableResourceMonitor": body.enableResourceMonitor}
@@ -304,6 +316,8 @@ def install_resource_routes(app, repo, listing):
             return document
 
         async def reserve(document, session):
+            await claim_active_user_for_resource_write(repo().db, user["id"], session)
+            await validate_share_users(repo(), document.get("sharedUserIds", []), session=session)
             await claim_address(repo(), document, session)
             if document["kind"] == "HIKVISION_NETWORK":
                 await record_authentication(repo(), document, source="CREATE", result="SUCCESS", after=document,
@@ -314,12 +328,12 @@ def install_resource_routes(app, repo, listing):
                                       body.model_dump(), "resources", prepare, before_insert=reserve)
         return await _resource_view(repo, result, user)
 
-    @app.post("/api/v1/resources/{identifier}/authenticate", description='空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；ISAPI异常不停止仍有日志输出的SSH或Telnet设备任务，Worker确认连接断开或持续无输出后才系统停止；Telnet串口不受认证状态影响。未领取的网络任务仍要求认证成功。但不推进周期认证失败计数。该操作要求 resources:write、tasks:control 及资源所有权；非管理员不能影响其他用户关联的任务。携带完整 ResourceInput 时仅用于编辑器凭据预览，不改变保存资源的健康状态或任务，因此不要求 tasks:control。')
+    @app.post("/api/v1/resources/{identifier}/authenticate", description='空请求体仅使用服务端已保存的密文凭据认证，并刷新资源健康状态；ISAPI异常不停止仍有日志输出的SSH或Telnet设备任务，Worker确认连接断开或持续无输出后才系统停止；Telnet串口不受认证状态影响。未领取的网络任务仍要求认证成功。但不推进周期认证失败计数。该操作要求 resources:write、tasks:control 以及资源所有者、管理员或指定共享用户资格；共享不提升平台权限。携带完整 ResourceInput 时仅用于编辑器凭据预览，不改变保存资源的健康状态或任务，因此不要求 tasks:control。')
     async def authenticate_existing_resource(identifier: Annotated[str, ApiPath(description='路径中指定要使用已保存凭据认证的设备资源标识。')], user: User, body: ResourceInput | None = None):
         """认证已有资源；空请求体只使用服务端已保存的密文凭据。"""
         authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
-        authorize_owner(user, old)
+        authorize_resource_operation(user, old)
         if old.get("deletedAt"):
             raise HTTPException(409, "资源地址、类型已变化或资源已删除")
         saved_credentials = body is None
@@ -329,7 +343,9 @@ def install_resource_routes(app, repo, listing):
 
             async def authorize_tasks(session):
                 """事务内再次拒绝非管理员影响认证期间新增的他人关联任务。"""
-                if user.get("isAdmin") or "*" in user["scopes"]:
+                current = await repo().db.resources.find_one({"id": identifier}, session=session)
+                authorize_resource_operation(user, current or {})
+                if user.get("isAdmin") or "*" in user["scopes"] or resource_is_shared(user, current or {}):
                     return
                 foreign = {"$and": [task_resource_query(identifier), {"createdBy": {"$ne": user["id"]}}]}
                 if await repo().db.tasks.find_one(foreign, session=session):
@@ -365,12 +381,12 @@ def install_resource_routes(app, repo, listing):
             await record_manual_authentication(old, user, result="SUCCESS", before=old, after=old | metadata)
         return metadata
 
-    @app.post("/api/v1/resources/{identifier}/credential", description='读取资源登录凭据供任务创建表单使用。仅具有resources:write权限的资源所有者或管理员可调用；禁止缓存并记录查看审计。普通资源查询不返回密码；其他有任务创建权限的用户可在服务端复用凭据，无需获得明文。')
+    @app.post("/api/v1/resources/{identifier}/credential", description='读取资源登录凭据供任务创建表单使用。仅具有resources:write权限的资源所有者、管理员或指定共享用户可调用；禁止缓存并记录查看审计。普通资源查询不返回密码；其他有任务创建权限的用户可在服务端复用凭据，无需获得明文。')
     async def reveal_resource_credential(identifier: Annotated[str, ApiPath(description='路径中指定要读取登录凭据的海康网络设备资源标识。')], user: User, response: Response):
         """按资源所有权一次性返回连接凭据，普通资源读取接口始终保持脱敏。"""
         authorize(user, "resources:write")
         resource = await repo().get("resources", identifier)
-        authorize_owner(user, resource)
+        authorize_resource_operation(user, resource)
         if resource.get("deletedAt") is not None:
             raise HTTPException(409, "资源已删除，不能读取连接凭据")
         if resource.get("kind") != "HIKVISION_NETWORK":
@@ -384,7 +400,7 @@ def install_resource_routes(app, repo, listing):
         """以版本条件更新名称、HTTP 凭据和认证身份，资源 IP 与类型不可修改。"""
         authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
-        authorize_owner(user, old)
+        authorize_resource_operation(user, old)
         if old.get("deletedAt") is not None:
             raise HTTPException(409, "资源已删除，不能编辑")
         if old.get("version") != body.version:
@@ -409,6 +425,8 @@ def install_resource_routes(app, repo, listing):
         update = {"name": checked.name, "updatedAt": now(),
                   "enableCoredumpMonitor": checked.enableCoredumpMonitor,
                   "enableResourceMonitor": checked.enableResourceMonitor}
+        if body.sharedUserIds is not None:
+            update["sharedUserIds"] = list(dict.fromkeys(body.sharedUserIds))
         if checked.kind == "HIKVISION_NETWORK":
             update.update(username=checked.username, authType=checked.authType,
                           passwordEncrypted=repo().encrypt(password), authenticatedAt=now(),
@@ -416,6 +434,9 @@ def install_resource_routes(app, repo, listing):
                           nextHealthCheckAt=now() + timedelta(seconds=60), **metadata)
         async def commit(session):
             """版本 CAS 与审计共享会话；凭据和设备元信息已在事务外准备。"""
+            current = await repo().db.resources.find_one({"id": identifier}, session=session)
+            authorize_resource_operation(user, current or {})
+            await validate_share_users(repo(), update.get("sharedUserIds", []), session=session)
             changed = await repo().db.resources.find_one_and_update(
                 {"id": identifier, "version": body.version, "deletedAt": None},
                 {"$set": update, "$inc": {"version": 1, **({"healthRevision": 1} if checked.kind == "HIKVISION_NETWORK" else {})},
@@ -458,31 +479,10 @@ def install_resource_routes(app, repo, listing):
                 foreign = {"$and": [task_resource_query(identifier), {"createdBy": {"$ne": user["id"]}}]}
                 if await repo().db.tasks.find_one(foreign, session=session):
                     raise HTTPException(403, "资源关联其他用户创建的任务，仅管理员可删除")
-            changed = await repo().db.resources.find_one_and_update(
-                {"id": identifier, "version": version, "deletedAt": None},
-                {"$set": {"deletedAt": deleted_at, "deletionState": "PENDING", "updatedAt": deleted_at},
-                 "$inc": {"version": 1}},
-                return_document=ReturnDocument.AFTER, session=session,
-            )
-            if not changed:
+            try:
+                changed = await mark_resource_deletion(repo(), identifier, session, deleted_at, version=version)
+            except ValueError:
                 raise HTTPException(409, "资源版本已变化，请刷新")
-            await release_address(repo(), changed, session)
-            linked = {task["id"] async for task in repo().db.tasks.find(
-                {"$and": [task_resource_query(identifier), {"deletedAt": None}]},
-                {"id": 1}, session=session,
-            )}
-            if linked:
-                await repo().db.tasks.update_many(
-                    {"id": {"$in": list(linked)}, "deletedAt": None},
-                    {"$set": {
-                        "deletedAt": deleted_at, "deletionState": "PENDING", "desiredState": "STOPPED",
-                        "restartRequested": False, "resourceDeleted": True, "updatedAt": deleted_at,
-                    }}, session=session,
-                )
-                await repo().db.operations.update_many(
-                    {"taskId": {"$in": list(linked)}, "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
-                    {"$set": {"status": "CANCELLED", "completedAt": deleted_at}}, session=session,
-                )
             return changed
 
         changed = await audited_mutation(repo(), user["id"], "delete_resource", identifier, commit)

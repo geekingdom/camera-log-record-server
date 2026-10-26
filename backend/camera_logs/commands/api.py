@@ -9,10 +9,11 @@ from camera_logs.commands.history import execution_history
 from camera_logs.commands.manual_submission import submit_manual
 from camera_logs.common.database import now, public
 from camera_logs.common.models import InitialCommand, TokenCreate, TokenPatch, TokenRotate
-from camera_logs.common.security import actor, authorize, authorize_owner
+from camera_logs.common.security import actor, authorize
 from camera_logs.node.health import measurements, node_health
 from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.write_pressure import write_latency_limit
+from camera_logs.resources.sharing import authorize_task_operation
 from camera_logs.users.service_tokens import (
     create_service_token,
     public_token,
@@ -30,9 +31,9 @@ def install_command_routes(app, repo, listing):
     async def command(task_id: Annotated[str, ApiPath(description='要写入手动命令的采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], body: InitialCommand, request: Request, user: User):
         """将手动命令加入当前采集会话队列，并限制每任务待执行数量。"""
         authorize(user, "commands:send", task_id)
-        authorize_owner(user, await repo().get("tasks", task_id))
+        await authorize_task_operation(repo(), user, await repo().get("tasks", task_id))
         return public(await submit_manual(repo(), user["id"], task_id,
-                                          request.headers.get("Idempotency-Key"), body.model_dump()))
+                                          request.headers.get("Idempotency-Key"), body.model_dump(), identity=user))
 
     @app.get("/api/v1/commands/{identifier}")
     async def get_command(identifier: Annotated[str, ApiPath(description='目标命令执行记录 ID，由发送手动命令响应或任务命令执行记录列表返回。')], user: User):

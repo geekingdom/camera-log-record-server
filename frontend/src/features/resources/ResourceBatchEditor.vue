@@ -7,6 +7,7 @@ import { ApiError, api, idempotencyKey } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { createBulkResourceDraft, type BatchResourceRow } from "./bulkResource";
 import type { ResourceAuthType } from "../../shared/types";
+import ResourceShareRecipients from "./ResourceShareRecipients.vue";
 
 const props = defineProps<{ disabled?: boolean }>();
 const emit = defineEmits<{ saved: []; processing: [value: boolean] }>();
@@ -16,6 +17,7 @@ const endIp = ref("");
 const credentials = ref<{ username: string; password: string; authType: ResourceAuthType }>({ username: "", password: "", authType: "DIGEST" });
 const enableCoredumpMonitor = ref(false);
 const enableResourceMonitor = ref(false);
+const sharedUserIds = ref<string[]>([]);
 const saving = ref(false);
 const configuring = ref(false);
 const submittingKey = ref("");
@@ -118,7 +120,7 @@ async function submit() {
     const response = await api.createResourcesBatch(draft.rows.map(row => ({
       name: row.name.trim() || row.ip, kind: "HIKVISION_NETWORK", ip: row.ip, username: row.username,
       password: row.password, authType: row.authType, enableCoredumpMonitor: enableCoredumpMonitor.value,
-      enableResourceMonitor: enableResourceMonitor.value,
+      enableResourceMonitor: enableResourceMonitor.value, sharedUserIds: sharedUserIds.value,
     })), key);
     if (response.items.length !== draft.rows.length) throw new Error("服务端未返回完整批量保存结果");
     if (!mounted) return;
@@ -150,6 +152,7 @@ async function submit() {
         <div><strong>Coredump 监控</strong><small>应用到本批全部设备</small></div><el-switch v-model="enableCoredumpMonitor" aria-label="批量启用 Coredump 监控" @change="resetRequestKey" />
         <div><strong>CPU 与内存监控</strong><small>应用到本批全部设备</small></div><el-switch v-model="enableResourceMonitor" aria-label="批量启用 CPU 与内存监控" @change="resetRequestKey" />
       </div>
+      <el-form-item label="共享用户"><ResourceShareRecipients v-model="sharedUserIds" :disabled="locked" /></el-form-item>
     </el-form>
     <el-table :data="draft.rows" aria-label="批量设备认证结果" max-height="420" class="batch-resource-table">
       <el-table-column type="index" label="序号" width="64" />

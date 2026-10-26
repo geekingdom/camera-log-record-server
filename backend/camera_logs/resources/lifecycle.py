@@ -3,6 +3,7 @@
 import logging
 
 from camera_logs.common.database import now
+from camera_logs.resources.address_claim import release_address
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,41 @@ logger = logging.getLogger(__name__)
 def task_resource_query(identifier: str) -> dict:
     """匹配资源作为任务主设备或串口服务器目标的两种关联方式。"""
     return {"$or": [{"resourceId": identifier}, {"serialServerResourceId": identifier}]}
+
+
+async def mark_resource_deletion(repo, identifier: str, session, timestamp, *, version: int | None = None) -> dict:
+    """事务内标记资源及其关联任务删除，并写入由节点执行的停止意图。
+
+    该函数不删除任务、日志或下载制品；事务提交后的连接回收由
+    :func:`reconcile_resource_deletion` 统一完成，供资源 API 与用户删除复用。
+    """
+    query = {"id": identifier, "deletedAt": None}
+    if version is not None:
+        query["version"] = version
+    changed = await repo.db.resources.find_one_and_update(
+        query,
+        {"$set": {"deletedAt": timestamp, "deletionState": "PENDING", "updatedAt": timestamp},
+         "$inc": {"version": 1, "controlClaimVersion": 1}},
+        session=session,
+    )
+    if changed is None:
+        raise ValueError("资源版本已变化或已删除")
+    await release_address(repo, changed, session)
+    linked = [task["id"] async for task in repo.db.tasks.find(
+        {"$and": [task_resource_query(identifier), {"deletedAt": None}]}, {"id": 1}, session=session,
+    )]
+    if linked:
+        await repo.db.tasks.update_many(
+            {"id": {"$in": linked}, "deletedAt": None},
+            {"$set": {"deletedAt": timestamp, "deletionState": "PENDING", "desiredState": "STOPPED",
+                      "restartRequested": False, "resourceDeleted": True, "updatedAt": timestamp}},
+            session=session,
+        )
+        await repo.db.operations.update_many(
+            {"taskId": {"$in": linked}, "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
+            {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session,
+        )
+    return changed
 
 
 async def _task_deletion_complete(repo, task: dict) -> bool:

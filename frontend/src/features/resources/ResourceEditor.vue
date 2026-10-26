@@ -8,6 +8,7 @@ import { confirmAction } from "../../shared/confirm";
 import { usePermissions } from "../../shared/permissions";
 import type { Resource, ResourceAuthentication, ResourceAuthType, ResourceKind } from "../../shared/types";
 import ResourceBatchEditor from "./ResourceBatchEditor.vue";
+import ResourceShareRecipients from "./ResourceShareRecipients.vue";
 
 const open = defineModel<boolean>({ required: true });
 const props = defineProps<{ resource?: Resource; canEdit?: boolean }>();
@@ -16,7 +17,7 @@ const permissions = usePermissions();
 const canSave = computed(() => props.resource
   ? Boolean(props.canEdit) && permissions.can("resources:write")
   : permissions.can("resources:create"));
-const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType, enableCoredumpMonitor: false, enableResourceMonitor: false });
+const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType, enableCoredumpMonitor: false, enableResourceMonitor: false, sharedUserIds: [] as string[] });
 const form = ref(blank());
 const authenticated = ref<ResourceAuthentication>();
 const authenticating = ref(false);
@@ -82,7 +83,8 @@ watch(() => [open.value, props.resource] as const, async ([visible, resource]) =
       form.value = { name: loaded.name, kind: loaded.kind, ip: loaded.ip,
         username: loaded.username ?? "", password: "", authType: loaded.authType ?? "DIGEST",
         enableCoredumpMonitor: loaded.enableCoredumpMonitor ?? false,
-        enableResourceMonitor: loaded.enableResourceMonitor ?? false };
+        enableResourceMonitor: loaded.enableResourceMonitor ?? false,
+        sharedUserIds: [...(loaded.sharedUserIds ?? [])] };
       editVersion.value = loaded.version ?? 1;
       authenticated.value = loaded;
       verifiedFingerprint = fingerprint.value;
@@ -125,7 +127,7 @@ async function save() {
   saving.value = true;
   try {
     const payload = isNetwork.value ? { ...form.value, name: form.value.name.trim() || form.value.ip } : {
-      name: form.value.name.trim() || form.value.ip, kind: form.value.kind, ip: form.value.ip,
+      name: form.value.name.trim() || form.value.ip, kind: form.value.kind, ip: form.value.ip, sharedUserIds: form.value.sharedUserIds,
     };
     if (props.resource) {
       const resourceId = props.resource.id;
@@ -164,6 +166,10 @@ async function save() {
           <div><strong>CPU 与内存监控</strong><small>按资源配置采样 CPU 和内存指标</small></div>
           <el-switch v-model="form.enableResourceMonitor" aria-label="启用 CPU 与内存监控" />
         </div>
+      </section>
+      <section class="form-section resource-editor-section">
+        <div class="resource-section-heading"><span class="resource-section-icon"><ShieldCheck :size="18" /></span><div><h2>资源共享</h2><p>共享用户可以在已有平台权限范围内编辑和认证此资源</p></div></div>
+        <el-form-item label="共享用户"><ResourceShareRecipients v-model="form.sharedUserIds" :disabled="saving || loading" /></el-form-item>
       </section>
       <section v-if="isNetwork" class="form-section resource-editor-section">
         <div class="resource-section-heading resource-auth-heading"><span class="resource-section-icon verified"><ShieldCheck :size="18" /></span><div><h2>设备 HTTP 认证</h2><p>认证结果用于确认网络设备身份，不作为采集登录凭据</p></div><el-button :loading="authenticating" :icon="KeyRound" @click="authenticate">点击认证</el-button></div>

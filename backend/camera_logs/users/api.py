@@ -4,7 +4,7 @@ import hashlib
 import logging
 import re
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, HTTPException, Query, Request, Response
 from fastapi import Path as ApiPath
@@ -16,10 +16,19 @@ from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.common.security import actor, authorize
+from camera_logs.resources.lifecycle import mark_resource_deletion, reconcile_resource_deletion
 from camera_logs.users.models import PERMISSIONS, Login, PasswordChange, PasswordReset, UserCreate, UserPatch
 from camera_logs.users.passwords import hash_password, password_work, verify_password
 from camera_logs.users.session_mutations import revoke_session, rotate_session
-from camera_logs.users.sessions import COOKIE, check_origin, public_user, set_session_cookie, user_identity
+from camera_logs.users.sessions import (
+    COOKIE,
+    check_origin,
+    public_current_user,
+    public_user,
+    set_session_cookie,
+    user_identity,
+)
+from camera_logs.users.write_gate import claim_active_user_for_resource_write
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +60,9 @@ def install_user_routes(app):
         check_origin(request, write=True)
         username = body.username.strip().lower()
         await _login_budget(repo(), username, request.client.host if request.client else "unknown")
-        user = await repo().db.users.find_one({"username": username})
+        # 软删除账号保留历史归属且允许同名新建；登录只选择当前活动身份，
+        # 不能让旧文档抢先匹配并把新账号误判为不可用。
+        user = await repo().db.users.find_one({"username": username, "deletedAt": None})
         if user:
             valid = await password_work(repo(), verify_password, body.password, user["passwordHash"])
         else:
@@ -64,7 +75,7 @@ def install_user_routes(app):
         request.state.actor = {"id": user["id"]}
         policy_scopes = await enforce_ip(repo(), request)
         token, current = await rotate_session(repo(), user, request.cookies.get(COOKIE, ""))
-        identity = public_user(restrict_identity(await user_identity(repo(), current), policy_scopes))
+        identity = public_current_user(restrict_identity(await user_identity(repo(), current), policy_scopes))
         set_session_cookie(repo(), token, request, response)
         return {"user": identity}
 
@@ -73,7 +84,7 @@ def install_user_routes(app):
         response.headers["Cache-Control"] = "no-store"
         if user.get("kind") != "session":
             raise HTTPException(401, "请使用用户名和密码登录")
-        return {"user": public_user(user)}
+        return {"user": public_current_user(user)}
 
     @app.post("/api/v1/auth/logout", status_code=204)
     async def logout(request: Request, response: Response):
@@ -98,7 +109,7 @@ def install_user_routes(app):
         policy_scopes = await enforce_ip(repo(), request)
         token, changed = await rotate_session(repo(), current, request.cookies.get(COOKIE, ""),
                                                password_hash=password_hash)
-        identity = public_user(restrict_identity(await user_identity(repo(), changed), policy_scopes))
+        identity = public_current_user(restrict_identity(await user_identity(repo(), changed), policy_scopes))
         set_session_cookie(repo(), token, request, response)
         return {"user": identity}
 
@@ -122,8 +133,9 @@ def install_user_routes(app):
 
     @app.get("/api/v1/users/share-targets")
     async def share_targets(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
-        """分页返回可被模板共享的有效用户最小目录，不暴露权限或会话安全字段。"""
-        authorize(user, "templates:read")
+        """分页返回可被资源或模板共享、接收资源转移的有效用户最小目录，不暴露权限或会话安全字段。"""
+        if not any(scope in user["scopes"] for scope in ("*", "admin", "templates:read", "resources:create", "resources:write")):
+            raise HTTPException(403, "权限不足")
         query = {"enabled": True, "deletedAt": None}
         items = repo().db.users.find(query, {"id": 1, "username": 1, "displayName": 1}).sort("username", 1)
         items = items.skip((page-1)*pageSize).limit(pageSize)
@@ -203,5 +215,86 @@ def install_user_routes(app):
             "mustChangePassword": True}, user, "reset_user_password")
 
     @app.delete("/api/v1/users/{identifier}", status_code=204)
-    async def delete(identifier: Annotated[str, ApiPath(description='要停用并软删除的平台用户 ID，可由创建用户响应、用户列表或创建人列表返回。')], user: User, version: int = Query(ge=1, description='删除或更新对象时必须提供的当前版本号。')):
-        await update(identifier, version, {"enabled": False, "deletedAt": now()}, user, "delete_user")
+    async def delete(identifier: Annotated[str, ApiPath(description='要停用并软删除的平台用户 ID，可由创建用户响应、用户列表或创建人列表返回。')], user: User,
+                     version: int = Query(ge=1, description='删除或更新对象时必须提供的当前版本号。'),
+                     resourceAction: Annotated[Literal["DELETE", "TRANSFER"] | None, Query(description='删除用户已有活动设备资源时的处置方式：DELETE软删除资源并收尾关联任务；TRANSFER转移资源及该用户创建的关联任务。无活动资源时可省略。')] = None,
+                     targetUserId: Annotated[str | None, Query(max_length=128, description='resourceAction 为 TRANSFER 时的接收用户 ID；必须是不同于被删用户的正常有效用户。')] = None):
+        """软删除用户，并在同一事务中处置其活动资源和受影响任务。"""
+        authorize(user, "admin")
+        old = await repo().get("users", identifier)
+        if old.get("builtin"):
+            raise HTTPException(403, "内置管理员仅能自行修改密码")
+        timestamp = now()
+        deleted_resources: list[str] = []
+
+        async def commit(session):
+            """用户 CAS、资源归属变更与任务停止意图必须共同提交。"""
+            nonlocal deleted_resources
+            resources = [item async for item in repo().db.resources.find(
+                {"createdBy": identifier, "deletedAt": None}, {"id": 1}, session=session,
+            )]
+            if resources and resourceAction is None:
+                raise HTTPException(422, "用户仍有活动设备资源，必须选择删除或转移")
+            target = None
+            if resourceAction == "TRANSFER":
+                if not targetUserId or targetUserId == identifier:
+                    raise HTTPException(422, "转移目标必须是不同于被删用户的有效用户")
+                target = await repo().db.users.find_one(
+                    {"id": targetUserId, "enabled": True, "deletedAt": None}, session=session,
+                )
+                if target is None:
+                    raise HTTPException(422, "转移目标用户不存在、已停用或已删除")
+                # 领取与目标删除共用的用户围栏；转移提交时目标仍须有效，
+                # 不能把资源交给并发已删除的账户。
+                await claim_active_user_for_resource_write(repo().db, targetUserId, session)
+            if resourceAction == "DELETE":
+                for resource in resources:
+                    await mark_resource_deletion(repo(), resource["id"], session, timestamp)
+                    await repo().audit(user["id"], "delete_user_resource", resource["id"], session=session,
+                                       metadata={"createdBy": identifier})
+                deleted_resources = [resource["id"] for resource in resources]
+            elif resourceAction == "TRANSFER" and target is not None:
+                resource_ids = [resource["id"] for resource in resources]
+                if resource_ids:
+                    target_name = target.get("displayName") or target.get("username") or target["id"]
+                    transferable_task_ids = [task["id"] async for task in repo().db.tasks.find(
+                        {"createdBy": identifier, "deletedAt": None, "$or": [
+                            {"resourceId": {"$in": resource_ids}},
+                            {"serialServerResourceId": {"$in": resource_ids}},
+                        ]}, {"id": 1}, session=session,
+                    )]
+                    await repo().db.resources.update_many(
+                        {"id": {"$in": resource_ids}, "createdBy": identifier, "deletedAt": None},
+                        {"$set": {"createdBy": target["id"], "createdByName": target_name, "updatedAt": timestamp},
+                         "$inc": {"version": 1}}, session=session,
+                    )
+                    for resource_id in resource_ids:
+                        await repo().audit(user["id"], "transfer_user_resource", resource_id, session=session,
+                                           metadata={"createdBy": identifier, "targetUserId": target["id"]})
+                    # 只转移被删除用户创建的关联任务，其他创建人的任务维持独立归属。
+                    await repo().db.tasks.update_many(
+                        {"createdBy": identifier, "deletedAt": None, "$or": [
+                            {"resourceId": {"$in": resource_ids}}, {"serialServerResourceId": {"$in": resource_ids}},
+                        ]},
+                        {"$set": {"createdBy": target["id"], "createdByName": target_name, "updatedAt": timestamp},
+                         "$inc": {"version": 1}}, session=session,
+                    )
+                    for task_id in transferable_task_ids:
+                        await repo().audit(user["id"], "transfer_user_task", task_id, session=session,
+                                           metadata={"createdBy": identifier, "targetUserId": target["id"]})
+            changed = await repo().db.users.find_one_and_update(
+                {"id": identifier, "version": version, "deletedAt": None, "builtin": False},
+                {"$set": {"enabled": False, "deletedAt": timestamp, "updatedAt": timestamp},
+                 "$inc": {"version": 1, "authVersion": 1, "resourceWriteVersion": 1}},
+                return_document=ReturnDocument.AFTER, session=session,
+            )
+            if changed is None:
+                raise HTTPException(409, "账号版本已变化或已删除")
+            return changed
+
+        await audited_mutation(repo(), user["id"], "delete_user", identifier, commit)
+        for resource_id in deleted_resources:
+            try:
+                await reconcile_resource_deletion(repo(), resource_id)
+            except Exception:
+                logger.exception("用户删除后的资源收尾失败 resource=%s", resource_id)

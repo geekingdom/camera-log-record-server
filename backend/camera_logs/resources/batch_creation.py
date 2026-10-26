@@ -21,6 +21,8 @@ from camera_logs.resources.address_claim import claim_address
 from camera_logs.resources.authentication import DeviceOfflineError, authenticate_network_resource
 from camera_logs.resources.authentication_records import record_authentication
 from camera_logs.resources.models import ResourceBatchInput, ResourceInput
+from camera_logs.resources.sharing import validate_share_users
+from camera_logs.users.write_gate import claim_active_user_for_resource_write
 
 logger = logging.getLogger(__name__)
 _AUTHENTICATION_CONCURRENCY = 4
@@ -90,6 +92,7 @@ def _resource_document(repo, identifier: str, item: ResourceInput, metadata: dic
     return {
         "id": identifier, "name": item.name, "kind": item.kind, "ip": item.ip, "version": 1,
         "createdAt": timestamp, "updatedAt": timestamp, "createdBy": actor_id, "createdByName": actor_name,
+        "sharedUserIds": list(dict.fromkeys(item.sharedUserIds)),
         "enableCoredumpMonitor": item.enableCoredumpMonitor,
         "enableResourceMonitor": item.enableResourceMonitor, "username": item.username, "authType": item.authType,
         "passwordEncrypted": repo.encrypt(item.password),
@@ -138,7 +141,9 @@ def install_batch_creation_route(app, repo):
             previous = await _confirmed_items(repo().db, digest, user["id"], key, session=session)
             if previous is not None:
                 return previous
+            await claim_active_user_for_resource_write(repo().db, user["id"], session)
             for document in documents:
+                await validate_share_users(repo(), document.get("sharedUserIds", []), session=session)
                 await claim_address(repo(), document, session)
             timestamp = now()
             await repo().db.idempotency.insert_one({

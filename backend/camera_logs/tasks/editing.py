@@ -9,7 +9,8 @@ from pymongo.errors import PyMongoError
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import TaskCreate, new_id
-from camera_logs.common.security import authorize, authorize_owner, authorize_resource
+from camera_logs.common.security import authorize, authorize_resource
+from camera_logs.resources.sharing import authorize_resource_operation, authorize_task_operation
 from camera_logs.tasks.resource_binding import bind_resource
 
 
@@ -29,7 +30,7 @@ class _ResourceSnapshots:
 async def _prepared(repo, user, task_id, body):
     """在事务外固定密码、命令 ID 和资源绑定，驱动重试不得重复此准备。"""
     old = await repo.get("tasks", task_id)
-    authorize_owner(user, old)
+    await authorize_task_operation(repo, user, old)
     if old["version"] != body.version:
         raise HTTPException(409, "配置版本已变化，请刷新")
     if body.sourceTemplateId and body.sourceTemplateId != old.get("sourceTemplateId"):
@@ -60,6 +61,11 @@ async def _prepared(repo, user, task_id, body):
     ) if value})
     # 快照必须早于绑定计算，避免资源身份在两次读取之间变化而混用旧存储身份和新版本。
     snapshots = {identifier: await repo.get("resources", identifier) for identifier in identifiers}
+    if old.get("createdBy") != user["id"] and not user.get("isAdmin") and "*" not in user["scopes"]:
+        # 共享仅允许管理该设备的任务，不允许借编辑将他人任务搬到未共享目标。
+        for identifier in (checked.resourceId, checked.serialServerResourceId):
+            if identifier and identifier not in {old.get("resourceId"), old.get("serialServerResourceId")}:
+                authorize_resource_operation(user, snapshots[identifier])
     document = checked.model_dump(exclude={"autoStart", "password", "useResourceCredentials"})
     document.update(await bind_resource(_ResourceSnapshots(snapshots), checked))
     if "scheduledCommands" in updates:
@@ -114,7 +120,7 @@ async def edit_task(repo, user, task_id, body):
         )
         if current is None:
             raise HTTPException(409, "配置版本已变化或设备资源已删除，请刷新")
-        authorize_owner(user, current)
+        await authorize_task_operation(repo, user, current, session=session)
         if (current["desiredState"] == "PAUSED" or current["status"] in {"PAUSED", "PAUSING"}) and behavioral | ({"clearPassword"} if clear else set()):
             raise HTTPException(409, "暂停期间只能修改名称和说明；修改连接或命令前请停止任务")
         await _guard_resources(repo.db, resource_snapshots, session)

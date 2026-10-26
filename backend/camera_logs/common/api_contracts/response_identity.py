@@ -18,12 +18,19 @@ USER = obj("账号公开资料；不包含密码哈希、会话代次或令牌�
 }, ("id", "username", "displayName", "isAdmin", "builtin", "scopes", "enabled",
     "mustChangePassword", "version", "createdAt", "updatedAt", "deletedAt"))
 
+CURRENT_USER = obj("当前登录身份；不包含令牌数量、标识、名称或到期时间。", {
+    **USER["properties"],
+    "hasActiveServiceToken": field("boolean", "当前登录用户是否关联至少一个未撤销且未过期的服务账号；管理员同样必须满足该条件。"),
+}, (*USER["required"], "hasActiveServiceToken"))
+
 COMMAND = obj("手动或定时命令执行记录；历史缺少的快照字段可能省略。", {
     "id": field("string", "本次执行的稳定标识。"),
     "taskId": field("string", "所属采集任务。"),
     "runId": field("string", "创建记录时绑定的采集运行；不能迁移到后继运行重发，历史记录可能省略。"),
     "sessionId": field("string", "创建记录时绑定的设备连接会话；历史记录可能省略。"),
     "actor": field("string", "手动命令的提交者标识；定时命令和历史记录可能省略。"),
+    "actorUsername": field("string", "手动命令提交时保存的登录用户名快照；后续改名、删除或同名账号重建不改变该值；定时命令和旧记录可能省略。", nullable=True),
+    "senderUsername": field("string", "命令执行记录列表中的发送用户名：手动命令使用提交时用户名快照；SCHEDULED 显示系统（定时命令）；缺少历史快照时显示历史记录：发送者未知。", nullable=True),
     "kind": field("string", "MANUAL 为手动命令，SCHEDULED 为定时命令；历史记录可能省略。"),
     "command": field("string", "执行时的命令正文快照；旧记录可能缺失或为 null。", nullable=True),
     "newline": field("string", "命令正文后实际写入的换行符；历史记录可能省略。"),

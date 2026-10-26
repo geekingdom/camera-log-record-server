@@ -30,6 +30,8 @@ export interface Resource extends ResourceAuthentication {
   unsettledTaskCount?: number;
   createdBy?: string;
   createdByName?: string;
+  /** 显式获准编辑和认证资源的平台用户 ID；空列表表示仅所有者或管理员可操作。 */
+  sharedUserIds: string[];
 }
 /** 资源监控样本内的单项 CPU 或内存值；pid 仅兼容历史数据，进程对象按名称识别。 */
 export interface ResourceMetricValue {
@@ -200,6 +202,8 @@ export interface Task {
   passwordPrompt?: string;
   createdBy?: string;
   createdByName?: string;
+  /** 主资源当前显式共享的用户 ID，用于前端显示任务操作入口；服务端仍执行最终鉴权。 */
+  resourceSharedUserIds: string[];
   initialCommands: InitialCommand[];
   scheduledCommands: ScheduledCommand[];
 }
@@ -430,6 +434,9 @@ export interface CommandExecution {
   command?: string;
   commandId?: string;
   kind?: "MANUAL" | "SCHEDULED" | string;
+  actor?: string;
+  actorUsername?: string;
+  senderUsername?: string;
   status?: string;
   createdAt?: string;
   output?: string;

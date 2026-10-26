@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Terminal,
 } from "lucide-vue-next";
+import type { SessionUser } from "../shared/api";
 
 export const workspaceNavigation = [
   { key: "dashboard", label: "资源看板", icon: ChartNoAxesCombined },
@@ -24,3 +25,16 @@ export const workspaceNavigation = [
   { key: "settings", label: "后台配置", icon: Settings2, admin: true },
   { key: "api-reference", label: "API 文档", icon: BookOpen },
 ];
+
+/** 根据当前会话权限和服务账号资格筛选入口；哈希恢复复用该结果拒绝不可用工作区。 */
+export function visibleWorkspaceNavigation(
+  user?: Pick<SessionUser, "isAdmin" | "scopes" | "hasActiveServiceToken">,
+) {
+  const hasScope = (scope?: string) => !scope || Boolean(user?.scopes.includes("*") || user?.scopes.includes(scope));
+  return workspaceNavigation.filter((item) =>
+    (!item.admin || user?.isAdmin)
+    && hasScope(item.scope)
+    && (item.key !== "dashboard" || hasScope("tasks:read"))
+    && (item.key !== "api-reference" || user?.hasActiveServiceToken === true),
+  );
+}

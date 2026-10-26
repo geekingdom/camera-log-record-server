@@ -20,6 +20,11 @@ def public_user(user):
     return {key: user.get(key) for key in PUBLIC_FIELDS}
 
 
+def public_current_user(identity):
+    """当前会话响应额外公开服务账号资格，不将该请求专属状态带入用户目录。"""
+    return {**public_user(identity), "hasActiveServiceToken": bool(identity.get("hasActiveServiceToken"))}
+
+
 def required_login():
     """身份错误带稳定响应头，避免前端将设备认证的 401 当成平台退出。"""
     return HTTPException(401, "登录会话已失效，请重新登录", headers={"X-Auth-Required": "true"})
@@ -59,10 +64,17 @@ async def initialize_admin(repo):
 
 
 async def user_identity(repo, user):
-    """构造实时用户身份；全部有效普通用户均有基础读取和下载权限。"""
+    """构造实时用户身份；服务账号资格在每次会话身份读取时以服务器时间重新判断。"""
     scopes = ["*"] if user["isAdmin"] else sorted(set(user.get("scopes", [])) | BASE_READ_SCOPES)
+    active_token = await repo.db.tokens.find_one({
+        "userId": user["id"], "revoked": False,
+        "$or": [
+            {"expiresAt": None},
+            {"expiresAt": {"$gt": now()}},
+        ],
+    }, {"_id": 1})
     return {**public_user(user), "kind": "session", "scopes": scopes,
-            "resourceIds": None, "taskIds": None}
+            "resourceIds": None, "taskIds": None, "hasActiveServiceToken": active_token is not None}
 
 
 async def session_identity(repo, token):

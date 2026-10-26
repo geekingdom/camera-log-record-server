@@ -21,6 +21,12 @@ async def execution_history(repo, listing, task_id, page, page_size, command_id=
         for identifier, item in configured.items()
     ]
     for execution in result["items"]:
+        if execution.get("kind") == "SCHEDULED":
+            execution["senderUsername"] = "系统（定时命令）"
+        elif execution.get("actorUsername"):
+            execution["senderUsername"] = execution["actorUsername"]
+        else:
+            execution["senderUsername"] = "历史记录：发送者未知"
         execution["commandSource"] = "SNAPSHOT" if execution.get("command") is not None else "UNAVAILABLE"
         # 任务编辑会重生定时配置 ID；只能用相同 ID 恢复未保存正文的历史行。
         # 已删除配置无法可靠重建，绝不按列表位置或相似命令猜测。

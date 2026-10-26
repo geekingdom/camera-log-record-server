@@ -9,7 +9,7 @@ import type { Task } from "../../shared/types";
 import AsyncView from "../../shared/AsyncView.vue";
 import { applicableTaskActions, availableTaskActions, type TaskAction } from "./taskActions";
 import { taskStatusLabel, taskStatusTone } from "./taskStatus";
-import { canManageOwnedRecord } from "../../shared/ownership";
+import { canManageSharedResourceRecord } from "../../shared/ownership";
 import { runSequentially, type BulkOperationEntry } from "../../shared/bulkOperations";
 import CreatorFilter from "../../shared/CreatorFilter.vue";
 import BlockedRestartDialog from "./BlockedRestartDialog.vue";
@@ -52,7 +52,7 @@ function busy(task: Task) {
   return pendingIds.value.has(task.id);
 }
 function owns(task: Task) {
-  return canManageOwnedRecord(props.userId, props.isAdmin, task.createdBy);
+  return canManageSharedResourceRecord(props.userId, props.isAdmin, task.createdBy, task.resourceSharedUserIds);
 }
 function showsAction(task: Task, action: TaskAction) {
   return !task.resourceDeleted && availableTaskActions(task).includes(action);

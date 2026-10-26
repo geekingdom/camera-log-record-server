@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Resource } from "../shared/types";
 import { useWorkspaceNavigation } from "./useWorkspaceNavigation";
+import { visibleWorkspaceNavigation } from "./workspaceNavigation";
 
 const resource = { id: "camera", name: "测试设备", ip: "192.0.2.1", kind: "HIKVISION_NETWORK" } as Resource;
 
@@ -45,6 +46,20 @@ function subject(hash = "#dashboard", { enabled = true, busy = false, failSynchr
 }
 
 describe("useWorkspaceNavigation", () => {
+  it("仅有可用服务账号的当前用户可以进入 API 文档，失去资格时直达哈希回退", async () => {
+    const hidden = visibleWorkspaceNavigation({ isAdmin: true, scopes: ["*"], hasActiveServiceToken: false });
+    expect(hidden.some((item) => item.key === "api-reference")).toBe(false);
+
+    const state = subject("#api-reference");
+    state.available.value = visibleWorkspaceNavigation({ isAdmin: false, scopes: ["tasks:read"], hasActiveServiceToken: true });
+    state.navigation.restoreWorkspaceFromHash();
+    await settleNavigation();
+    expect(state.activeTab.value).toBe("api-reference");
+
+    state.available.value = visibleWorkspaceNavigation({ isAdmin: false, scopes: ["tasks:read"], hasActiveServiceToken: false });
+    await settleNavigation();
+    expect(state.activeTab.value).toBe("dashboard");
+  });
   it("从资源任务切入任务页时清除资源筛选并只刷新一次", async () => {
     const state = subject();
     state.page.value = 2;

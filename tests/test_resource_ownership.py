@@ -10,6 +10,11 @@ SCOPES = ["tasks:read", "tasks:create", "tasks:write", "tasks:control", "resourc
 def as_user(client, identifier):
     """仅替换认证身份以聚焦对象权限，登录/令牌动态继承另由用户测试覆盖。"""
     identity = {"id": identifier, "displayName": identifier, "isAdmin": False, "scopes": SCOPES}
+    async def seed():
+        await client.app.state.repo.db.users.update_one({"id": identifier}, {"$set": {
+            "id": identifier, "username": identifier, "displayName": identifier, "enabled": True, "deletedAt": None,
+        }}, upsert=True)
+    client.portal.call(seed)
     client.app.dependency_overrides[actor] = lambda: identity
 
 

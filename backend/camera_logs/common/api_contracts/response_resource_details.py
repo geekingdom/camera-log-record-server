@@ -19,6 +19,7 @@ RESOURCE = obj("设备资源公开详情；凭据密文、内部路径和资源�
     "subSerialNumber": field("string", "最近认证的设备子序列号。", nullable=True),
     "softwareVersion": field("string", "最近认证的软件版本。", nullable=True),
     "createdBy": field("string", "资源创建者标识。"), "createdByName": field("string", "资源创建者展示名。"),
+    "sharedUserIds": array("显式共享的有效平台用户ID；空列表不共享，权限仍受用户作用域限制，不能删除资源。", field("string", "指定共享用户ID。")),
     "version": field("integer", "资源乐观锁版本。"), "enableCoredumpMonitor": field("boolean", "是否启用 Core 监控。"),
     "enableResourceMonitor": field("boolean", "是否启用资源指标监控。"),
     "authenticatedAt": field("string", "最近成功认证时间。", nullable=True),

@@ -11,7 +11,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 function task(id: string): Task {
-  return { id, name: id, protocol: "SSH", resourceId: "resource", initialCommands: [], scheduledCommands: [] };
+  return { id, name: id, protocol: "SSH", resourceId: "resource", resourceSharedUserIds: [], initialCommands: [], scheduledCommands: [] };
 }
 function template(id: string): Template {
   return { id, name: id, initialCommands: [], scheduledCommands: [], sharedWith: [], sharedWithAll: false };

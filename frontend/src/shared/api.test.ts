@@ -31,6 +31,23 @@ describe("设备身份模糊筛选 API", () => {
   });
 });
 
+describe("资源共享 API", () => {
+  it("创建和编辑资源时保留显式共享用户列表", async () => {
+    vi.stubGlobal("crypto", { randomUUID: () => "request-key" });
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "resource-1" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "resource-1" })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.createResource({ name: "共享资源", kind: "SERIAL_SERVER", ip: "192.0.2.1", sharedUserIds: ["user-a", "user-b"] });
+    await api.updateResource("resource-1", { version: 3, sharedUserIds: [] });
+
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ sharedUserIds: ["user-a", "user-b"] });
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ version: 3, sharedUserIds: [] });
+  });
+});
+
 describe("运行看板 API", () => {
   it("只按约定传递统计窗口和上海自然日", async () => {
     vi.stubGlobal("sessionStorage", { getItem: () => null });

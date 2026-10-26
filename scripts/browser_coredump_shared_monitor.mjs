@@ -14,6 +14,7 @@ await context.route("**/api/v1/**", async route => {
   const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method();
   if (path === "/api/v1/auth/me") return json(route, { user: { id: "admin", username: "admin", displayName: "验收管理员", isAdmin: true, enabled: true, mustChangePassword: false, scopes: ["*"] } });
   if (method === "GET" && path === "/api/v1/resources") return json(route, { items: resources, total: 1, page: 1, pageSize: 20 });
+  if (method === "GET" && path === "/api/v1/users/share-targets") return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (method === "GET" && path === "/api/v1/resources/camera-a") return json(route, resources[0]);
   if (method === "POST" && path === "/api/v1/resources/camera-a/authenticate") return json(route, { model: "DS-2CD", subSerialNumber: "fixture", softwareVersion: "V5" });
   if (method === "PATCH" && path === "/api/v1/resources/camera-a") { const payload = request.postDataJSON(); mutations.push(payload); Object.assign(resources[0], payload); return json(route, resources[0]); }

@@ -34,8 +34,8 @@ try {
       if (path === "/api/v1/auth/me") {
         await route.fulfill({ contentType: "application/json", body: JSON.stringify({
           user: adminMode
-            ? { id: "admin", username: "admin", displayName: "文档管理员", scopes: ["*"], resourceIds: null, isAdmin: true, mustChangePassword: false }
-            : { id: "fixture", username: "fixture", displayName: "文档验收", scopes: ["tasks:read"], resourceIds: null, isAdmin: false, mustChangePassword: false },
+            ? { id: "admin", username: "admin", displayName: "文档管理员", scopes: ["*"], resourceIds: null, isAdmin: true, mustChangePassword: false, hasActiveServiceToken: true }
+            : { id: "fixture", username: "fixture", displayName: "文档验收", scopes: ["tasks:read"], resourceIds: null, isAdmin: false, mustChangePassword: false, hasActiveServiceToken: true },
         }) });
         return;
       }

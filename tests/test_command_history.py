@@ -19,20 +19,27 @@ def test_command_history_filters_and_preserves_execution_snapshot(client):
         {"id": "snapshot", "taskId": task["id"], "commandId": "a", "command": "ps", "kind": "SCHEDULED", "createdAt": now()},
         {"id": "legacy", "taskId": task["id"], "commandId": "b", "kind": "SCHEDULED", "createdAt": now()},
         {"id": "unknown", "taskId": task["id"], "commandId": "removed", "kind": "SCHEDULED", "createdAt": now()},
-        {"id": "manual", "taskId": task["id"], "command": "mount", "kind": "MANUAL", "createdAt": now()},
+        {"id": "manual", "taskId": task["id"], "command": "mount", "kind": "MANUAL",
+         "actor": "old-user", "actorUsername": "archived-operator", "createdAt": now()},
+        # 没有用户夹具：旧记录不得查询当前账号并让重名用户继承历史身份。
+        {"id": "manual-legacy", "taskId": task["id"], "command": "legacy", "kind": "MANUAL",
+         "actor": "removed-user", "createdAt": now()},
         {"id": "foreign", "taskId": "another", "commandId": "a", "command": "secret", "kind": "SCHEDULED", "createdAt": now()},
     ])
     url = f"/api/v1/tasks/{task['id']}/command-executions"
     result = client.get(url).json()
     records = {item["id"]: item for item in result["items"]}
-    assert result["total"] == 4 and result["runId"] == "current"
+    assert result["total"] == 5 and result["runId"] == "current"
     assert records["snapshot"]["command"] == "ps" and records["snapshot"]["commandSource"] == "SNAPSHOT"
     assert records["legacy"]["command"] == "ls" and records["legacy"]["commandSource"] == "CURRENT_CONFIGURATION"
     assert records["unknown"].get("command") is None and records["unknown"]["commandSource"] == "UNAVAILABLE"
+    assert records["snapshot"]["senderUsername"] == "系统（定时命令）"
+    assert records["manual"]["senderUsername"] == "archived-operator"
+    assert records["manual-legacy"]["senderUsername"] == "历史记录：发送者未知"
     assert [(item["id"], item["attempts"]) for item in result["scheduledCommands"]] == [("a", 2), ("b", 1)]
     filtered = client.get(url, params={"commandId": "a", "pageSize": 1}).json()
     assert filtered["total"] == 1 and filtered["items"][0]["id"] == "snapshot"
-    assert client.get(url, params={"kind": "MANUAL"}).json()["total"] == 1
+    assert client.get(url, params={"kind": "MANUAL"}).json()["total"] == 2
     assert client.get(url, params={"kind": "invalid"}).status_code == 422
     assert client.get("/api/v1/tasks/missing/command-executions").status_code == 404
 

@@ -210,6 +210,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_audited_mutations.py
       - name: 验证资源地址并发唯一与事务回滚
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_address.py
+      - name: 验证用户删除资源处置与事务围栏
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_user_deletion_transactions.py
       - name: 验证海康批量资源事务与未知提交恢复
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_batch.py
       - name: 验证手动设备认证历史与审计原子提交
@@ -223,6 +225,10 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_coredump_resource_reassociation.py
       - name: 验证任务控制并发幂等与审计事务
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_task_control_transactions.py
+      - name: 验证资源共享撤销、控制竞争与查询索引
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_sharing_transactions.py
+      - name: 验证服务账号文档资格查询索引
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_service_token_eligibility_index.py
       - name: 验证任务软删除级联、索引与审计事务
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_task_soft_deletion.py
       - name: 验证任务编辑暂停竞争与审计事务

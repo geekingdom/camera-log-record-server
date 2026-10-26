@@ -12,8 +12,9 @@ from pymongo.read_preferences import ReadPreference
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
-from camera_logs.common.security import authorize, authorize_owner
+from camera_logs.common.security import authorize
 from camera_logs.resources.health_policy import resource_health_blocks_task
+from camera_logs.resources.sharing import authorize_task_operation
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ async def request_control(repo, task_id, desired, user, *, require_paused=False)
         )
         if task is None:
             raise HTTPException(404, "任务不存在")
-        authorize_owner(user, task)
+        await authorize_task_operation(repo, user, task, session=session)
         if task.get("deletedAt") is not None and desired != "STOPPED":
             raise HTTPException(409, "任务已删除，仅可查询已有日志")
         if desired == "RUNNING" and task.get("status") == "BLOCKED":

@@ -51,6 +51,11 @@ try {
         secondTaskReads += 1;
         body = { ...secondTask, status: secondTaskReads === 1 ? "STOPPED" : "COLLECTING" };
       }
+      else if (/^\/api\/v1\/tasks\/[^/]+\/command-executions$/.test(path)) body = {
+        ...pageOf([{ id: "manual-command", command: "status", kind: "MANUAL", status: "SUCCEEDED",
+          senderUsername: "fixture-sender", createdAt: "2026-10-26T10:00:00Z" }]),
+        runId: null, scheduledCommands: [],
+      };
       else if (path === "/api/v1/display-settings") body = { liveLogBufferMiB: 10 };
       else if (path === "/api/v1/common-commands") body = pageOf([]);
       await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
@@ -122,6 +127,10 @@ try {
     for (const tab of ["实时打印", "小时归档与检索", "命令记录", "实时打印"]) {
       await ui.getByRole("tab", { name: tab, exact: true }).click();
       await ui.waitForTimeout(300);
+      if (tab === "命令记录") {
+        await ui.getByRole("columnheader", { name: "发送用户名", exact: true }).waitFor();
+        await ui.getByText("fixture-sender", { exact: true }).waitFor();
+      }
       samples.push(await ui.locator(".workspace").evaluate(element => ({
         x: element.getBoundingClientRect().x, width: element.getBoundingClientRect().width,
         scrollX: window.scrollX, scrollWidth: document.documentElement.scrollWidth,

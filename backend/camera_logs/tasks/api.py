@@ -13,8 +13,9 @@ from pymongo import ReturnDocument
 from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now, public
 from camera_logs.common.models import BlockedRestart, TaskCreate, TaskPatch, new_id
-from camera_logs.common.security import actor, authorize, authorize_owner
+from camera_logs.common.security import actor, authorize
 from camera_logs.resources.lifecycle import reconcile_task_deletion
+from camera_logs.resources.sharing import add_task_sharing, authorize_task_operation
 from camera_logs.tasks.control import request_control
 from camera_logs.tasks.creation import create_task as create_task_atomic
 from camera_logs.tasks.editing import edit_task as edit_task_atomic
@@ -106,6 +107,7 @@ def install_task_routes(app, repo, listing):
                 ) if resources.get(identifier) is not None), None)
                 if deleted_at is not None:
                     task["resourceDeletedAt"] = deleted_at
+        await add_task_sharing(repo(), result["items"])
         return result
 
     @app.post("/api/v1/tasks", status_code=201, description='创建资源所属采集任务。SSH和Telnet设备类型仅允许当前认证成功的海康网络资源；Telnet串口不受设备HTTP认证状态限制。可用useResourceCredentials在服务端复制资源登录凭据，autoStart默认false，启动与新建均受当前账号权限约束。')
@@ -139,7 +141,9 @@ def install_task_routes(app, repo, listing):
     @app.get("/api/v1/tasks/{task_id}")
     async def get_task(task_id: Annotated[str, ApiPath(description='目标采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], user: User):
         authorize(user, "tasks:read", task_id)
-        return public(await repo().get("tasks", task_id))
+        item = public(await repo().get("tasks", task_id))
+        await add_task_sharing(repo(), [item])
+        return item
 
     @app.patch("/api/v1/tasks/{task_id}")
     async def edit_task(task_id: Annotated[str, ApiPath(description='目标采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], body: TaskPatch, user: User):
@@ -152,7 +156,7 @@ def install_task_routes(app, repo, listing):
         authorize(user, "tasks:write", task_id)
         authorize(user, "tasks:control", task_id)
         old = await repo().get("tasks", task_id)
-        authorize_owner(user, old)
+        await authorize_task_operation(repo(), user, old)
         if old.get("deletedAt") is not None:
             if old.get("version") != version:
                 raise HTTPException(409, "任务版本已变化或已删除，请刷新")
@@ -160,6 +164,8 @@ def install_task_routes(app, repo, listing):
         timestamp = now()
 
         async def commit(session):
+            current = await repo().db.tasks.find_one({"id": task_id}, session=session)
+            await authorize_task_operation(repo(), user, current or {}, session=session)
             changed = await repo().db.tasks.find_one_and_update(
                 {"id": task_id, "version": version, "deletedAt": None},
                 {"$set": {"deletedAt": timestamp, "deletionState": "PENDING", "desiredState": "STOPPED",

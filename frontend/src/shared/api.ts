@@ -40,7 +40,7 @@ export const idempotencyKey = (): string => {
   const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
-export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; enabled: boolean; mustChangePassword: boolean; version?: number; builtin?: boolean; deletedAt?: string | null; }
+export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; enabled: boolean; mustChangePassword: boolean; /** 仅登录、当前身份和改密响应提供；用户目录中的其它用户没有该请求专属状态。 */ hasActiveServiceToken?: boolean; version?: number; builtin?: boolean; deletedAt?: string | null; }
 export interface UserPage { items: SessionUser[]; total: number; page: number; pageSize: number; }
 export interface IpPolicy { version: number; enabled: boolean; clientIp: string; rules: { label: string; network: string; scopes: string[] }[]; }
 export interface LogGapFragment { fileId: string; sessionId?: string; start: number; end: number; }
@@ -113,7 +113,12 @@ export const usersApi = {
   create: (body: Pick<SessionUser, "username" | "displayName" | "isAdmin" | "scopes" | "enabled"> & { password: string }) => request<SessionUser>("/users", { method: "POST", body: JSON.stringify(body) }),
   update: (id: string, body: Partial<Pick<SessionUser, "displayName" | "scopes" | "enabled">> & { version: number }) => request<SessionUser>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
   resetPassword: (id: string, password: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}/reset-password`, { method: "POST", body: JSON.stringify({ password, version }) }),
-  disable: (id: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}?version=${version}`, { method: "DELETE" }),
+  disable: (id: string, version: number, resourceAction?: "DELETE" | "TRANSFER", targetUserId?: string) => {
+    const params = new URLSearchParams({ version: String(version) });
+    if (resourceAction) params.set("resourceAction", resourceAction);
+    if (targetUserId) params.set("targetUserId", targetUserId);
+    return request<void>(`/users/${encodeURIComponent(id)}?${params}`, { method: "DELETE" });
+  },
 };
 export const ipPolicyApi = { get: () => request<IpPolicy>("/admin/ip-policy"), update: (body: IpPolicy) => request<IpPolicy>("/admin/ip-policy", { method: "PATCH", body: JSON.stringify(body) }) };
 const query = (
@@ -266,6 +271,7 @@ export const api = {
     authType?: ResourceAuthType;
     enableCoredumpMonitor?: boolean;
     enableResourceMonitor?: boolean;
+    sharedUserIds?: string[];
   }) =>
     request<Resource>("/resources", {
       method: "POST",
@@ -281,6 +287,7 @@ export const api = {
     authType: ResourceAuthType;
     enableCoredumpMonitor: boolean;
     enableResourceMonitor: boolean;
+    sharedUserIds?: string[];
   }[], key: string) => request<{ items: Resource[] }>("/resources/batch", {
     method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ items }),
   }),

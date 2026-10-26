@@ -241,8 +241,26 @@ class Repository:
             ]
         )
         await self.db.tokens.create_index("tokenHash", unique=True)
+        # 当前会话每次按绑定用户、撤销状态和到期窗口判断 API 文档资格，避免扫描全部服务账号。
+        await self.db.tokens.create_index(
+            [("userId", 1), ("revoked", 1), ("expiresAt", 1)],
+            name="tokens_active_user_expiry",
+        )
         await self.db.users.create_index("id", unique=True)
-        await self.db.users.create_index("username", unique=True)
+        # 软删除用户保留审计、创建人和旧令牌归属；用户名只在活动账号中唯一，
+        # 新建同名账号必须使用新 ID，不能让旧授权或共享关系复活。
+        user_indexes = await self.db.users.index_information()
+        await self.db.users.create_index(
+            "username", unique=True, name="users_active_username",
+            partialFilterExpression={"deletedAt": None},
+        )
+        legacy_username = user_indexes.get("username_1")
+        if legacy_username and legacy_username.get("key") == [("username", 1)]:
+            try:
+                await self.db.users.drop_index("username_1")
+            except OperationFailure as error:
+                if error.code != 27:
+                    raise
         await self.db.user_sessions.create_index("tokenHash", unique=True)
         await self.db.user_sessions.create_index("expiresAt", expireAfterSeconds=0)
         await self.db.login_limits.create_index("expiresAt", expireAfterSeconds=0)
@@ -266,7 +284,7 @@ class Repository:
             raise HTTPException(404, "记录不存在")
         return doc
 
-    async def audit(self, actor, action, target, *, session=None, event_id=None):
+    async def audit(self, actor, action, target, *, session=None, event_id=None, metadata=None):
         """追加用户操作审计事件，不在事件中保存敏感请求内容。"""
         from camera_logs.common.request_context import current_request_context
 
@@ -284,6 +302,8 @@ class Repository:
         # 固定事件标识仅由事务调用方提供，用于确认本次提交，不能使用客户端请求 ID 代替。
         if event_id is not None:
             document["_id"] = event_id
+        if metadata:
+            document["metadata"] = metadata
         await self.db.audit.insert_one(document, session=session)
 
     async def idem(self, actor, key, route, payload, collection, build):

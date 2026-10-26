@@ -21,14 +21,16 @@ const scripts = [
   "browser_ssh_target_editor",
   "browser_resource_manual_authentication",
   "browser_resource_identity_filters",
-  "browser_resource_batch", "browser_request_diagnostics",
+  "browser_resource_batch", "browser_request_diagnostics", "frontend/scripts/verify-resource-sharing.mjs",
+  "browser_user_deletion",
 ];
 const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: true } });
 try {
   const address = server.httpServer.address();
   const environment = { ...process.env, BASE_URL: `http://127.0.0.1:${address.port}` };
   for (const script of scripts) {
-    const result = await promisify(execFile)(process.execPath, [`scripts/${script}.mjs`], {
+    const file = script.includes("/") ? script : `scripts/${script}.mjs`;
+    const result = await promisify(execFile)(process.execPath, [file], {
       cwd: repository,
       env: environment,
       timeout: 180_000,

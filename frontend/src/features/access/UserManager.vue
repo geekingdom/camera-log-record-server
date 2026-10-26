@@ -1,9 +1,10 @@
 <script setup lang="ts">
 // 用户账号管理：基础查看、下载和模板权限固定有效，仅维护额外功能权限及用户密码。
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { Edit3, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 import { ApiError, usersApi, type SessionUser } from "../../shared/api";
+import { userSaveFailureMessage } from "./userManagerMessages";
 
 const baseScopes = ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"];
 const baseScopeLabels: Record<string, string> = {
@@ -22,6 +23,13 @@ const resetting = ref(false);
 const loadError = ref("");
 const open = ref(false);
 const resetOpen = ref(false);
+const deleteOpen = ref(false);
+const deleting = ref(false);
+const deletingUser = ref<SessionUser>();
+const resourceAction = ref<"DELETE" | "TRANSFER" | "">("");
+const targetUserId = ref("");
+const transferTargets = ref<Pick<SessionUser, "id" | "username" | "displayName">[]>([]);
+let deleteRequestGeneration = 0;
 const editing = ref<SessionUser>();
 const form = ref({
   username: "",
@@ -87,6 +95,29 @@ function closeReset() {
   resetOpen.value = false;
   resetPassword.value = "";
 }
+const eligibleTransferTargets = computed(() => transferTargets.value.filter(item => item.id !== deletingUser.value?.id));
+async function openDelete(user: SessionUser) {
+  const generation = ++deleteRequestGeneration;
+  deletingUser.value = user;
+  resourceAction.value = "";
+  targetUserId.value = "";
+  transferTargets.value = [];
+  try {
+    const first = await usersApi.shareTargets(1, 100);
+    const pages = await Promise.all(Array.from({ length: Math.ceil(first.total / 100) - 1 }, (_, index) => usersApi.shareTargets(index + 2, 100)));
+    if (generation !== deleteRequestGeneration) return;
+    transferTargets.value = [first.items, ...pages.map(page => page.items)].flat();
+    deleteOpen.value = true;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "读取可转移用户失败");
+  }
+}
+function closeDelete() {
+  deleteRequestGeneration += 1;
+  deleteOpen.value = false;
+  deletingUser.value = undefined;
+  targetUserId.value = "";
+}
 function displayScopes(user: SessionUser) {
   return user.isAdmin ? ["*"] : [...baseScopes, ...user.scopes];
 }
@@ -128,34 +159,35 @@ async function save() {
     await load();
     ElMessage.success("用户已保存");
   } catch (error) {
-    if (error instanceof ApiError && error.status === 409)
+    if (editing.value && error instanceof ApiError && error.status === 409)
       await reloadAfterConflict("用户已被其他管理员修改，已刷新最新列表");
     else
-      ElMessage.error(error instanceof Error ? error.message : "保存用户失败");
+      ElMessage.error(userSaveFailureMessage(error, Boolean(editing.value)));
   } finally {
     form.value.password = "";
     saving.value = false;
   }
 }
 
-async function disable(user: SessionUser) {
+async function disable() {
+  const user = deletingUser.value;
+  if (!user) return;
+  if (!resourceAction.value)
+    return ElMessage.warning("请选择资源处置方式");
+  if (resourceAction.value === "TRANSFER" && !targetUserId.value)
+    return ElMessage.warning("请选择资源接收用户");
   try {
-    await ElMessageBox.confirm(
-      `确认停用用户“${user.displayName}”吗？`,
-      "确认停用",
-      { type: "warning" },
-    );
-    saving.value = true;
-    await usersApi.disable(user.id, user.version ?? 1);
+    deleting.value = true;
+    await usersApi.disable(user.id, user.version ?? 1, resourceAction.value, targetUserId.value || undefined);
+    closeDelete();
     await load();
-    ElMessage.success("用户已停用");
+    ElMessage.success("用户已删除");
   } catch (error) {
     if (error instanceof ApiError && error.status === 409)
       await reloadAfterConflict("用户已被其他管理员修改，已刷新最新列表");
-    else if (error !== "cancel" && error !== "close")
-      ElMessage.error(error instanceof Error ? error.message : "停用用户失败");
+    else ElMessage.error(error instanceof Error ? error.message : "删除用户失败");
   } finally {
-    saving.value = false;
+    deleting.value = false;
   }
 }
 function openReset(user: SessionUser) {
@@ -259,8 +291,8 @@ onMounted(() => void load());
             type="danger"
             :icon="Trash2"
             :disabled="row.builtin || !row.enabled || saving"
-            aria-label="停用用户"
-            @click="disable(row)" /></template
+            aria-label="删除用户"
+            @click="openDelete(row)" /></template
       ></el-table-column>
     </el-table>
     <el-pagination v-model:current-page="pageNumber" :page-size="20" :total="total"
@@ -337,6 +369,33 @@ onMounted(() => void load());
         ></template
       ></el-dialog
     >
+    <el-dialog
+      v-model="deleteOpen"
+      title="删除用户"
+      width="min(500px, 94vw)"
+      :close-on-click-modal="!deleting"
+      @closed="closeDelete"
+    >
+      <p>删除“{{ deletingUser?.displayName }}”后，其登录和服务令牌会立即失效。</p>
+      <el-form label-position="top">
+        <el-form-item label="该用户创建的设备资源">
+          <el-radio-group v-model="resourceAction" :disabled="deleting">
+            <el-radio value="DELETE">删除资源并停止关联采集任务</el-radio>
+            <el-radio value="TRANSFER">转移资源和本人创建的关联任务</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="resourceAction === 'TRANSFER'" label="资源接收用户" required>
+          <el-select v-model="targetUserId" filterable :disabled="deleting" placeholder="请选择有效用户" style="width: 100%">
+            <el-option v-for="target in eligibleTransferTargets" :key="target.id" :value="target.id"
+              :label="`${target.displayName}（${target.username}）`" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="deleting" @click="closeDelete">取消</el-button>
+        <el-button type="danger" :loading="deleting" @click="disable">删除用户</el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 

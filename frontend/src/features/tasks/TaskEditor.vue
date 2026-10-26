@@ -30,6 +30,7 @@ const blank = (): Task => ({
   initialCommands: [],
   scheduledCommands: [],
   resourceId: "",
+  resourceSharedUserIds: [],
   serialServerResourceId: null,
 });
 const form = ref<Task>(blank()),

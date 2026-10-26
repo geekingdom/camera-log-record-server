@@ -10,6 +10,8 @@ from camera_logs.common.models import Model
 
 class ResourceInput(Model):
     """描述一个可供任务引用的网络设备或串口服务器资源。"""
+    sharedUserIds: list[str] = Field(default_factory=list, max_length=100, description="显式共享的平台用户 ID 列表，最多100人；创建默认空列表不共享，编辑省略保留原名单，空列表撤销全部共享。共享不能提升平台权限，不能授予资源删除资格。")
+
 
     name: str | None = Field(default=None, max_length=128, description="可省略；空白时保存为规范 IP")
     kind: Literal["HIKVISION_NETWORK", "SERIAL_SERVER"] = Field(description='设备类型：HIKVISION_NETWORK 为海康网络设备，SERIAL_SERVER 为串口服务器。')
@@ -68,6 +70,8 @@ class ResourceBatchInput(Model):
 
 class ResourcePatch(Model):
     """更新资源展示名称或 HTTP 凭据时提交的完整稳定身份与乐观锁版本。"""
+    sharedUserIds: list[str] | None = Field(default=None, max_length=100, description="显式共享的平台用户 ID 列表，最多100人；创建默认空列表不共享，编辑省略保留原名单，空列表撤销全部共享。共享不能提升平台权限，不能授予资源删除资格。")
+
 
     version: int = Field(ge=1, description='当前配置版本号，用于乐观锁并发修改校验。')
     name: str = Field(min_length=1, max_length=128, description='资源、任务、模板、节点或服务账号的用户可识别名称。')

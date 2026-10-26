@@ -145,17 +145,19 @@ async def test_manual_admission_inserts_fixed_identifier_and_session_bound_field
     task = task_snapshot()
     repo, tasks, commands, actions = repository(deepcopy(task), [])
 
-    result = await admit(repo, task, "fixed-command", command_body(), "operator")
+    result = await admit(
+        repo, task, "fixed-command", command_body(), "operator", actor_username="operator-name",
+    )
 
     assert actions == ["update", "count", "insert"]
     stored = commands.documents[0]
     assert result == stored
     assert {key: stored[key] for key in (
-        "id", "taskId", "runId", "sessionId", "actor", "status", "kind", "command", "newline",
+        "id", "taskId", "runId", "sessionId", "actor", "actorUsername", "status", "kind", "command", "newline",
         "delaySeconds", "prompt", "timeoutSeconds",
     )} == {
         "id": "fixed-command", "taskId": "task", "runId": "run", "sessionId": "session",
-        "actor": "operator", "status": "QUEUED", "kind": "MANUAL", "command": "ls", "newline": "\n",
+        "actor": "operator", "actorUsername": "operator-name", "status": "QUEUED", "kind": "MANUAL", "command": "ls", "newline": "\n",
         "delaySeconds": 0, "prompt": None, "timeoutSeconds": 30,
     }
     assert "createdAt" in stored

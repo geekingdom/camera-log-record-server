@@ -23,6 +23,7 @@ SCHEDULED_COMMAND = obj("每个采集运行独立计数的周期命令快照。"
 }, ("id", "command", "newline", "delaySeconds", "timeoutSeconds", "totalExecutions", "intervalSeconds"))
 
 TASK = obj("任务公开配置和状态。", {
+    "resourceSharedUserIds": array("主设备资源当前指定的共享用户ID；空列表表示无共享操作资格，仍需对应平台权限。", field("string", "共享用户ID。")),
     "id": field("string", "任务稳定标识。"), "resourceId": field("string", "关联资源标识。", nullable=True),
     "name": field("string", "用户设置的任务名称。"),
     "protocol": field("string", "采集协议：SSH 连接安全 Shell；TELNET_DEVICE 登录网络设备；TELNET_SERIAL 读取串口服务器，且不支持暂停。"),

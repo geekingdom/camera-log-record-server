@@ -8,6 +8,7 @@ function task(overrides: Partial<Task>): Task {
   return {
     id: "task-1",
     resourceId: "resource-1",
+    resourceSharedUserIds: [],
     name: "测试任务",
     protocol: "SSH",
     initialCommands: [],

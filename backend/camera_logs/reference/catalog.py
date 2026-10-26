@@ -9,6 +9,9 @@ from camera_logs.reference.openapi_responses import openapi_response_contract, r
 from camera_logs.reference.python_examples import build_python_example
 
 GUIDES = [
+    {"title": "用户删除与资源处置", "text": "删除用户时resourceAction=DELETE同步软删除其活动资源并停止关联任务，或TRANSFER配合targetUserId转移资源及该用户创建的关联任务。目标可为任意启用且未删除的平台用户，不要求额外scope，也不提升其平台权限。无活动资源可省略策略兼容旧调用。有资源却省略返回422。日志和既有下载按保留期继续存在。已删用户名可按新配置重建，新ID不恢复旧会话、令牌和共享。"},
+    {"title": "设备指定用户共享", "text": "资源sharedUserIds默认空列表，不共享；必须显式指定一个或多个有效用户，最多100人。编辑省略保留，空列表撤销。指定共享用户可编辑认证资源、操作主设备关联任务，但不能删除资源，所有操作仍需平台对应scope。Task列表/详情resourceSharedUserIds派生自主资源当前名单。"},
+    {"title": "文档入口与命令用户名", "text": "前端API文档入口只对hasActiveServiceToken=true的当前用户显示；需关联未撤销且未过期的服务账号，管理员也不豁免，登录/me/改密刷新资格。命令记录senderUsername展示手工发送时用户名快照；系统定时命令及缺少快照的历史记录分别明确标记，不冒认同名重建用户。"},
     {"title": "时间入参约定", "text": "所有日期时间入参可直接传2026-10-19T12:00:00，无时区时统一按北京时间Asia/Shanghai解释，也兼容已有偏移或Z。响应继续保留上海时区偏移；日期仍用YYYY-MM-DD，hourIds和游标按目录返回值原样传递。"},
     {"title": "全局常用命令", "text": "管理员通过/admin/common-commands维护命令、描述和enabled，创建携带Idempotency-Key，编辑与删除携带version。所有有效用户可通过GET /api/v1/common-commands分页读取启用项，query按命令或描述做字面筛选。禁用项不返回提示；选中提示只填入手工命令输入框，不自动发送。实际发送仍要求commands:send与任务所有权，复用既有会话和命令队列。"},
     {"title": "资源看板", "text": "GET /api/v1/dashboard 需要tasks:read，days只能为7、14或30，date为可选的Asia/Shanghai截止自然日且不能晚于上海今天。响应概览只计算未删除的当前资源和任务；历史日志目录仍可按原归属汇总。所有任务可读用户都会得到overview。只有logs:read时才返回daily、topResources和coredumps；否则这些字段为null且availability.logs=false，不能将其解释为零。只有管理员才得到nodes、节点数和availability.nodes=true；离线节点的accepting固定为false。日志字节来自已登记OPEN/READY分卷的原始bytes，不读取设备正文，也不以共享压缩包archiveBytes重复计数。看板聚合以短期同权限快照合并刷新，超时返回503，调用方应保留上一份有效页面数据后重试。"},
@@ -25,7 +28,7 @@ GUIDES = [
     {"title": "认证失败与任务恢复", "text": "网络设备周期认证得到401时记录AUTH_FAILED并锁存拒绝时间；后续OFFLINE或ERROR不能覆盖该凭据拒绝事实，但authRejectedAt不是永久healthStatus=AUTH_FAILED，周期认证或人工认证得到SUCCESS都会清除该锁存。未被Worker领取的运行任务会按资源健康状态收尾；已领取的会话只在本机确认连接断开或持续10秒无输出时停止，持续输出不会因后台认证失败而被抢停。成功认证只为带有OFFLINE或AUTH_FAILED系统停止标记且仍处于STOPPED的网络任务授权恢复，由调度周期消费；用户停止或暂停的任务没有可消费标记，不会自动重启。Telnet串口不受设备HTTP认证状态和此恢复流程影响：周期或手动认证从ONLINE变为AUTH_FAILED、OFFLINE或ERROR均不停止串口任务；串口自身连接故障、用户停止、资源删除和节点隔离仍按原规则处理。"},
     {"title": "SSH主从初始化与会话保活", "text": "SSH任务的sshTarget默认HOST；SSH主机和TELNET_DEVICE的自动ASH为尽力行为，切换失败不阻塞采集。SLAVE_1至SLAVE_3连接指定内网从机后必须独立确认协议模式和目标身份，主机缓存不会替代从机验证；从机只采集自身输出，退出标记后的主机字节不会混入从机日志。初始化、手动命令、定时命令和保活共用同一会话、接收器与发送队列。从机会话每60秒经同一命令队列执行ifconfig，核对指定从机IP并排除外层主机IP；失败、超时或身份不符时关闭当前连接，重新登录并切换，不占用用户定时命令预算。SSH主机、已验证的SSH从机和TELNET_DEVICE在正常shell输入空闲60秒后才排入POSIX空操作`:`；从机保活不会新建连接，仍在其已验证的单一shell中发送。发送前再次检查连接、停止状态和PSH命令通道，失败或不可写时跳过并等待。TELNET_SERIAL不发送shell保活；暂停、停止、失败和取消都会取消保活并回收连接。"},
     {"title": "Coredump扫描周期", "text": "Worker默认每5秒扫描目录，上一轮扫描未完成时不重叠执行。显式配置COREDUMP_SCAN_INTERVAL_SECONDS可覆盖默认值；源文件稳定判断仍使用10秒观测窗口，目录扫描频率不等同于传输完成通知。Docker和原生部署使用同一默认值，需更新Worker进程后生效。"},
-    {"title": "等待隔离任务恢复", "text": "BLOCKED任务使用POST /api/v1/tasks/{task_id}/restart，正文{\"confirmIsolation\":false}，需要tasks:control且为创建者或管理员。旧Worker先关闭原连接并同步日志，关闭收据核实后释放旧运行，再建立新运行；操作保持PENDING直到COLLECTING。旧节点不可达返回409及ISOLATION_REQUIRED；节点在线但找不到可证明关闭的原实例时，已受理操作的phase为ISOLATION_REQUIRED。仅管理员可在实际隔离该任务旧实例后提交confirmIsolation=true及非空evidence，确认只影响目标任务，不代表整个节点已隔离。不得仅凭心跳或设备重新在线跳过隔离。stop可以取消恢复意图，旧运行关闭或隔离尚未证明时仍保留待收尾状态。资源activeTaskCount只统计COLLECTING且期望RUNNING的任务；unsettledTaskCount用于删除前的待收尾提示，不能当作采集中数量。"},
+    {"title": "等待隔离任务恢复", "text": "BLOCKED任务使用POST /api/v1/tasks/{task_id}/restart，正文{\"confirmIsolation\":false}，需要tasks:control且为创建者、管理员或主设备指定共享用户。旧Worker先关闭原连接并同步日志，关闭收据核实后释放旧运行，再建立新运行；操作保持PENDING直到COLLECTING。旧节点不可达返回409及ISOLATION_REQUIRED；节点在线但找不到可证明关闭的原实例时，已受理操作的phase为ISOLATION_REQUIRED。仅管理员可在实际隔离该任务旧实例后提交confirmIsolation=true及非空evidence，确认只影响目标任务，不代表整个节点已隔离。不得仅凭心跳或设备重新在线跳过隔离。stop可以取消恢复意图，旧运行关闭或隔离尚未证明时仍保留待收尾状态。资源activeTaskCount只统计COLLECTING且期望RUNNING的任务；unsettledTaskCount用于删除前的待收尾提示，不能当作采集中数量。"},
     {"title": "NFS暂停与停止卸载", "text": "Coredump开关属于海康设备资源。同资源仍有正在采集的SSH主机或Telnet设备任务时，负责人退出只移交控制而不卸载；最后一个适用任务停止或暂停、资源删除或禁用监控时，通过原连接尽力umount -l。ISAPI异常本身不触发卸载。接管沿用原NFS来源，避免跨节点误改挂载路径。仅有效资源租约的原会话可执行清理，离线或卸载超时不阻止任务停止。UNMOUNTED表示已确认挂载表分离，不表示传输文件完整落盘；UNMOUNT_FAILED表示失败或超时，UNMOUNT_SKIPPED表示跳过。操作202仅表示受理，最终PAUSED/STOPPED不等于NFS卸载成功。不会删除已接收core或关闭服务器NFS服务。"},
     {"title": "Coredump默认访问权限", "text": "有效第三方服务账号默认允许Coredump查询、导出和下载，无需额外勾选权限，也无需重新创建已有令牌。账号实时继承绑定用户的logs:read和logs:download基础权限；可查询所有可读设备资源的Coredump文件并为其创建自己的导出，单文件或批量下载均支持。导出作业查询和取消仍限创建者或管理员；已生成的导出和固定Coredump内容URL公开下载，可直接作为缺陷附件链接。平台登录用户的设备资源页同样可进入Coredump查询下载。目录、创建和管理接口仍受账号及来源IP策略控制；三个附件content接口无需登录、Token、票据或IP授权，文件是否完成及保留期仍有效。"},
     {"title": "Coredump副本到期", "text": "固定副本到期后进入RETIRING（等待读取结束），已有下载或导出继续使用其固定版本，新请求可能返回409。全部读者退出后进入DELETING（清理副本），完成后回到RECEIVING。该清理不删除设备写入的NFS源文件；源文件仍存在时可重新创建导出。大文件下载应流式写盘，续传时携带上次ETag作为If-Range，不能把不同固定版本的响应直接拼接。"},
@@ -44,8 +47,8 @@ GUIDES = [
     {"title": "实时日志", "text": "HTTP部署使用ws://<host>/api/v1/tasks/{task_id}/logs；HTTPS部署使用wss://<host>/api/v1/tasks/{task_id}/logs。连接后10秒内发送JSON首帧token及可选cursor，不能把Token放URL。服务端每次推送重验权限；data为Base64原始字节，fileId/offset用于消除重叠后再解码。gap表示实时缓冲缺口，按文件或小时归档补读。重连提交最后cursor，不保证断线期间设备输出可追回。"},
     {"title": "实时日志显示配置", "text": "GET /api/v1/display-settings 供已登录平台用户和有效第三方服务账号读取实时日志浏览器内存上限 liveLogBufferMiB。该接口只返回整数1至100的MiB上限，默认10；不返回日志保留期、节点容量、资源监控规则或其他管理员后台配置。前端应定期刷新该值并只限制本地展示缓存，不能据此删除Worker原始日志、改变采集顺序或中断下载。"},
     {"title": "手动命令", "text": "POST /tasks/{task_id}/commands提交command及可选newline/delaySeconds/prompt/timeoutSeconds，使用同一采集连接。初始化未完成或断线拒绝；通过/commands/{id}或/task的command-executions查询。最多发送次数不代表设备业务成功，UNKNOWN不自动重发。"},
-    {"title": "用户权限与所有权", "text": "有效普通用户自动拥有tasks:read、logs:read、logs:download、templates:read、templates:write和service-tokens:read；用户配置的scopes仅增加写入、控制、命令或管理能力。平台来源IP策略仍会收窄本次请求的有效权限。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态。所有人可读取资源、任务、下载和只读日志；资源和任务的编辑、删除或控制，以及向任务发送手动命令，均须具备对应scope且仅创建者或管理员可执行。创建任务可使用他人创建的资源，任务自身独立归属。"},
-    {"title": "模板共享", "text": "服务端写入模板创建者，客户端不能提交createdBy。创建者、sharedWith中的有效用户及sharedWithAll=true时的全部有效用户可读取模板；管理员可读取全部模板。仅创建者或管理员可编辑、删除模板；sharedWith中的用户必须存在、启用且未删除，sharedWithAll仅管理员可设置。模板名称按创建者唯一。任务只在创建或实际切换模板来源时校验模板可读，已保存的任务快照不会因撤销共享或删除模板失效。GET /api/v1/users/share-targets要求templates:read，返回可共享对象的最小用户列表。"},
+    {"title": "用户权限与所有权", "text": "有效普通用户自动拥有tasks:read、logs:read、logs:download、templates:read、templates:write和service-tokens:read；用户配置的scopes仅增加写入、控制、命令或管理能力。平台来源IP策略仍会收窄本次请求的有效权限。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态。所有人可读取资源、任务、下载和只读日志；资源和任务的编辑、删除或控制，以及向任务发送手动命令，均须具备对应scope；任务操作还允许主设备指定共享用户，资源删除仍仅创建者或管理员。创建任务可使用他人创建的资源，任务自身独立归属。"},
+    {"title": "模板共享", "text": "服务端写入模板创建者，客户端不能提交createdBy。创建者、sharedWith中的有效用户及sharedWithAll=true时的全部有效用户可读取模板；管理员可读取全部模板。仅创建者或管理员可编辑、删除模板；sharedWith中的用户必须存在、启用且未删除，sharedWithAll仅管理员可设置。模板名称按创建者唯一。任务只在创建或实际切换模板来源时校验模板可读，已保存的任务快照不会因撤销共享或删除模板失效。GET /api/v1/users/share-targets要求templates:read、resources:create、resources:write或admin之一，返回可共享对象的最小用户列表。"},
     {"title": "示例与运行环境", "text": "下列内容均为虚拟示例，标识需替换为实际返回值。成功响应展示代表字段，可能包含更多运行信息。文档与代码一同部署，不请求GitHub或外部CDN。这里不自动执行接口；实际调用会按权限记录审计。"},
 ]
 
@@ -59,7 +62,7 @@ SPECIAL = {"start": "启动任务", "stop": "停止任务", "pause": "暂停网�
            "authenticate": "认证设备资源", "login": "账号登录", "logout": "退出登录", "password": "修改本人密码",
            "me": "查询当前登录用户", "reset-password": "重置子账户密码", "confirm-isolation": "确认旧节点已隔离",
            "browser-session": "签发浏览器下载授权", "results": "分页查询检索结果", "log-hours": "查询任务小时日志", "log-days": "查询任务日志日期",
-           "command-executions": "查询任务命令记录", "permissions": "查询可配置权限", "share-targets": "查询模板共享对象", "display-settings": "查询实时日志显示配置", "content": "读取日志内容"}
+           "command-executions": "查询任务命令记录", "permissions": "查询可配置权限", "share-targets": "查询资源和模板共享及资源转移的有效用户", "display-settings": "查询实时日志显示配置", "content": "读取日志内容"}
 
 _OPERATION_TITLES = {
     ('GET', '/health'): '检查API服务健康状态',
@@ -147,7 +150,7 @@ def permission(path, method):
             return "无需预先认证；携带登录会话Cookie时撤销该会话"
         return "仅Cookie登录会话"
     if path == "/api/v1/users/share-targets":
-        return "templates:read"
+        return "templates:read、resources:create、resources:write 或 admin（满足任一即可）"
     if path == "/api/v1/users/creators":
         return "tasks:read 或 templates:read（最小历史创建人目录）"
     if path.endswith("/search-index-status"):
@@ -172,12 +175,12 @@ def permission(path, method):
         if method == "GET":
             return "tasks:read"
         if path.endswith("/credential"):
-            return "resources:write + 仅创建者或admin（明文凭据，不缓存）"
+            return "resources:write + 创建者、admin或指定共享用户（明文凭据，不缓存）"
         if path == "/api/v1/resources/{identifier}/authenticate" and method == "POST":
-            return "resources:write + 仅创建者或admin；空请求体另需tasks:control且非管理员不得影响他人关联任务，完整ResourceInput仅预览"
+            return "resources:write + 创建者、admin或指定共享用户；空请求体另需tasks:control，未共享资源仍受关联任务归属限制，完整ResourceInput仅预览"
         if method == "POST":
             return "resources:create"
-        return "resources:write + 仅创建者或admin" + (" + tasks:control" if method == "DELETE" else "")
+        return "resources:write + tasks:control + 仅创建者或admin" if method == "DELETE" else "resources:write + 创建者、admin或指定共享用户"
     if "/command-templates" in path:
         if method == "GET":
             return "templates:read"
@@ -189,16 +192,16 @@ def permission(path, method):
     if "/log-" in path or path.endswith("/logs"):
         return "logs:read"
     if path.endswith("/commands") and method == "POST":
-        return "commands:send + 仅任务创建者或admin"
+        return "commands:send + 任务创建者、admin或主设备指定共享用户"
     if path.endswith("/restart"):
-        return "tasks:control + 仅任务创建者或admin；confirmIsolation=true仅admin"
+        return "tasks:control + 任务创建者、admin或主设备指定共享用户；confirmIsolation=true仅admin"
     if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume")):
-        return "tasks:control + 仅任务创建者或admin"
+        return "tasks:control + 任务创建者、admin或主设备指定共享用户"
     if path == "/api/v1/tasks/{task_id}" and method == "DELETE":
-        return "tasks:write + tasks:control + 仅任务创建者或admin"
+        return "tasks:write + tasks:control + 任务创建者、admin或主设备指定共享用户"
     if path.endswith("/tasks") and method == "POST":
         return "tasks:create；autoStart=true另需tasks:control"
-    return "tasks:write + 仅任务创建者或admin" if method == "PATCH" else "tasks:read"
+    return "tasks:write + 任务创建者、admin或主设备指定共享用户" if method == "PATCH" else "tasks:read"
 
 
 def request_headers(path, method, schema, idempotent):

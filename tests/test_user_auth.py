@@ -134,6 +134,134 @@ def test_csrf_duplicate_username_builtin_protection_and_password_policy(client):
     assert "password" not in created and "passwordHash" not in created and "authVersion" not in created
 
 
+def test_deleted_username_can_be_recreated_with_new_identity_without_reviving_old_session(client):
+    """软删除账户释放用户名，新账户不能继承旧会话或身份关联。"""
+    change_initial_password(client)
+    original = create_operator(client, username="reusable-name")
+    assert client.post("/api/v1/auth/logout", headers=CSRF).status_code == 204
+    assert login(client, "reusable-name", "operator-password").status_code == 200
+    old_cookie = client.cookies.get("camera_session")
+
+    client.headers["Authorization"] = "Bearer test-bootstrap"
+    token_response = client.post("/api/v1/service-tokens", json={
+        "name": "旧用户令牌", "userId": original["id"],
+    })
+    assert token_response.status_code == 201, token_response.text
+    old_service_token = token_response.json()["token"]
+    assert client.delete(f"/api/v1/users/{original['id']}?version={original['version']}").status_code == 204
+    recreated = client.post("/api/v1/users", json={
+        "username": "REUSABLE-NAME", "displayName": "新操作员", "password": "replacement-password",
+    })
+    del client.headers["Authorization"]
+
+    assert recreated.status_code == 201, recreated.text
+    replacement = recreated.json()
+    assert replacement["id"] != original["id"]
+    assert replacement["username"] == "reusable-name"
+    client.cookies.set("camera_session", old_cookie, path="/api/v1")
+    assert client.get("/api/v1/auth/me").status_code == 401
+    assert client.get("/api/v1/users/share-targets", headers={
+        "Authorization": "Bearer " + old_service_token,
+    }).status_code == 401
+    client.cookies.delete("camera_session", path="/api/v1")
+    assert login(client, "reusable-name", "replacement-password").status_code == 200
+
+    client.headers["Authorization"] = "Bearer test-bootstrap"
+    duplicate = client.post("/api/v1/users", json={
+        "username": "reusable-name", "displayName": "仍应冲突", "password": "another-password",
+    })
+    del client.headers["Authorization"]
+    assert duplicate.status_code == 409
+
+
+def test_delete_user_requires_resource_disposition_and_reuses_resource_lifecycle(client):
+    """有活动资源的账户必须显式处置，DELETE 走资源软删除及任务停止语义。"""
+    change_initial_password(client)
+    owner = create_operator(client, username="resource-owner")
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.insert_one, {
+        "id": "owner-resource", "name": "归属资源", "kind": "SERIAL_SERVER", "ip": "192.0.2.210",
+        "version": 1, "createdBy": owner["id"], "createdByName": owner["displayName"],
+    })
+    client.portal.call(repo.db.resource_addresses.insert_one, {"_id": "192.0.2.210", "resourceId": "owner-resource"})
+    client.portal.call(repo.db.tasks.insert_one, {
+        "id": "owner-running-task", "resourceId": "owner-resource", "createdBy": owner["id"],
+        "desiredState": "RUNNING", "status": "PENDING",
+    })
+
+    missing = client.delete(f"/api/v1/users/{owner['id']}?version={owner['version']}", headers=CSRF)
+    assert missing.status_code == 422
+    assert client.portal.call(repo.db.users.find_one, {"id": owner["id"]}).get("deletedAt") is None
+
+    deleted = client.delete(
+        f"/api/v1/users/{owner['id']}?version={owner['version']}&resourceAction=DELETE", headers=CSRF,
+    )
+    assert deleted.status_code == 204, deleted.text
+    resource = client.portal.call(repo.db.resources.find_one, {"id": "owner-resource"})
+    task = client.portal.call(repo.db.tasks.find_one, {"id": "owner-running-task"})
+    assert resource["deletedAt"] is not None and resource["deletionState"] == "PENDING"
+    assert task["deletedAt"] is not None and task["desiredState"] == "STOPPED"
+    assert client.portal.call(repo.db.resource_addresses.find_one, {"_id": "192.0.2.210"}) is None
+    assert client.portal.call(repo.db.audit.count_documents, {"action": "delete_user", "targetId": owner["id"]}) == 1
+
+
+def test_delete_user_transfer_moves_only_owned_associated_tasks(client, monkeypatch):
+    """转移资源时保留审计历史，其他用户创建的关联任务不得被夺取或停止。"""
+    change_initial_password(client)
+    owner = create_operator(client, username="transfer-owner")
+    target = create_operator(client, username="transfer-target")
+    other = create_operator(client, username="transfer-other")
+    repo = client.app.state.repo
+    transfer_time = now()
+    monkeypatch.setattr("camera_logs.users.api.now", lambda: transfer_time)
+    client.portal.call(repo.db.resources.insert_one, {
+        "id": "transfer-resource", "name": "待转移资源", "kind": "SERIAL_SERVER", "ip": "192.0.2.211",
+        "version": 3, "createdBy": owner["id"], "createdByName": owner["displayName"],
+    })
+    client.portal.call(repo.db.tasks.insert_many, [
+        {"id": "move-task", "resourceId": "transfer-resource", "createdBy": owner["id"],
+         "createdByName": owner["displayName"], "version": 2, "desiredState": "RUNNING", "status": "COLLECTING"},
+        {"id": "keep-task", "resourceId": "transfer-resource", "createdBy": other["id"],
+         "createdByName": other["displayName"], "version": 2, "desiredState": "RUNNING", "status": "COLLECTING"},
+        {"id": "target-existing-task", "resourceId": "transfer-resource", "createdBy": target["id"],
+         "createdByName": target["displayName"], "version": 2, "updatedAt": transfer_time,
+         "desiredState": "RUNNING", "status": "COLLECTING"},
+    ])
+    result = client.delete(
+        f"/api/v1/users/{owner['id']}?version={owner['version']}&resourceAction=TRANSFER&targetUserId={target['id']}",
+        headers=CSRF,
+    )
+    assert result.status_code == 204, result.text
+    resource = client.portal.call(repo.db.resources.find_one, {"id": "transfer-resource"})
+    moved = client.portal.call(repo.db.tasks.find_one, {"id": "move-task"})
+    kept = client.portal.call(repo.db.tasks.find_one, {"id": "keep-task"})
+    assert resource["createdBy"] == target["id"] and resource["createdByName"] == target["displayName"]
+    assert resource["version"] == 4 and resource.get("deletedAt") is None
+    assert moved["createdBy"] == target["id"] and moved["version"] == 3
+    assert kept["createdBy"] == other["id"] and kept["desiredState"] == "RUNNING"
+    async def transfer_audit_ids():
+        return [item["targetId"] async for item in repo.db.audit.find({"action": "transfer_user_task"})]
+
+    audited_task_ids = client.portal.call(transfer_audit_ids)
+    assert audited_task_ids == ["move-task"]
+
+
+def test_delete_user_transfer_rejects_invalid_target(client):
+    """转移不能指向自己、停用或已删除账号，避免资源落入无效归属。"""
+    change_initial_password(client)
+    owner = create_operator(client, username="invalid-target-owner")
+    repo = client.app.state.repo
+    client.portal.call(repo.db.resources.insert_one, {
+        "id": "invalid-target-resource", "kind": "SERIAL_SERVER", "ip": "192.0.2.212", "version": 1,
+        "createdBy": owner["id"], "createdByName": owner["displayName"],
+    })
+    response = client.delete(
+        f"/api/v1/users/{owner['id']}?version={owner['version']}&resourceAction=TRANSFER&targetUserId={owner['id']}",
+        headers=CSRF,
+    )
+    assert response.status_code == 422
+
+
 def test_user_password_policy_accepts_eight_characters_for_create_reset_and_change(client):
     """平台用户创建、管理员重置与本人改密共享 8 至 128 位下限。"""
     assert client.post("/api/v1/auth/login", json={"username": "root.admin", "password": ADMIN_PASSWORD}).status_code == 403
@@ -174,6 +302,28 @@ def test_login_and_password_change_return_current_effective_base_scopes(client):
     }, headers=CSRF)
     assert changed.status_code == 200, changed.text
     assert set(changed.json()["user"]["scopes"]) == set(client.get("/api/v1/auth/me").json()["user"]["scopes"])
+
+
+def test_current_identity_reports_only_active_service_tokens(client):
+    """文档入口只承认当前用户未撤销且未到期的服务账号。"""
+    change_initial_password(client)
+    operator = create_operator(client, username="api-reference-user")
+    assert client.post("/api/v1/auth/logout", headers=CSRF).status_code == 204
+    assert login(client, "api-reference-user", "operator-password").json()["user"]["hasActiveServiceToken"] is False
+
+    client.headers["Authorization"] = "Bearer test-bootstrap"
+    created = client.post("/api/v1/service-tokens", json={"name": "文档账号", "userId": operator["id"]})
+    assert created.status_code == 201, created.text
+    del client.headers["Authorization"]
+    assert client.get("/api/v1/auth/me").json()["user"]["hasActiveServiceToken"] is True
+
+    client.headers["Authorization"] = "Bearer test-bootstrap"
+    assert client.delete(f"/api/v1/service-tokens/{created.json()['id']}").status_code == 204
+    expired = client.post("/api/v1/service-tokens", json={"name": "过期账号", "userId": operator["id"]})
+    client.portal.call(client.app.state.repo.db.tokens.update_one, {"id": expired.json()["id"]},
+                       {"$set": {"expiresAt": now() - timedelta(seconds=1)}})
+    del client.headers["Authorization"]
+    assert client.get("/api/v1/auth/me").json()["user"]["hasActiveServiceToken"] is False
 
 
 def test_share_targets_returns_only_active_users_for_cookie_and_service_token(client):

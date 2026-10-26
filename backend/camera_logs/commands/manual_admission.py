@@ -11,7 +11,7 @@ MANUAL_QUEUE_LIMIT = 100
 _NEW_TRANSACTION = object()
 
 
-async def admit_manual(repo, task, identifier, body, actor_id, *, session=_NEW_TRANSACTION):
+async def admit_manual(repo, task, identifier, body, actor_id, *, actor_username=None, session=_NEW_TRANSACTION):
     """原子提交一个固定 ID 的命令；并发准入通过写同一任务文档串行化。
 
     仅快照计数不能防止并发插入超额，因此必须先实际递增任务声明版本。
@@ -34,6 +34,9 @@ async def admit_manual(repo, task, identifier, body, actor_id, *, session=_NEW_T
             raise HTTPException(429, "命令队列已满")
         document = {**body, **scope, "id": identifier, "actor": actor_id,
                     "status": "QUEUED", "createdAt": now()}
+        if actor_username:
+            # 用户名只在提交时写入，历史展示不再读取可能已改名或删除的账号。
+            document["actorUsername"] = actor_username
         await repo.db.commands.insert_one(document, session=session)
         return document
 

@@ -18,7 +18,7 @@ from camera_logs.common.api_contracts.response_admin import (
     TOKEN_SECRET,
 )
 from camera_logs.common.api_contracts.response_events import EVENT_PAGE
-from camera_logs.common.api_contracts.response_identity import COMMAND, OPERATION, USER
+from camera_logs.common.api_contracts.response_identity import COMMAND, CURRENT_USER, OPERATION, USER
 from camera_logs.common.api_contracts.response_logs import (
     DOWNLOAD_HISTORY,
     INDEX_STATUS,
@@ -101,10 +101,10 @@ def _mapping() -> dict[str, dict[str, Any]]:
     add("GET", ("/health",), json(obj("健康检查。", {"status": field("string", "健康状态。")}, ("status",)), []))
     add("GET", ("/metrics",), contract("text", "Prometheus exposition 文本。", field("string", "指标文本。"), []))
     add("GET", ("/api/v1/api-reference",), json(REFERENCE))
-    add("POST", ("/api/v1/auth/login",), json(obj("登录结果。", {"user": USER}, ("user",)), PUBLIC + [(401, "用户名、密码或账号状态无效。"), (403, "请求来源不允许。"), (429, "登录尝试过于频繁。")]))
+    add("POST", ("/api/v1/auth/login",), json(obj("登录结果。", {"user": CURRENT_USER}, ("user",)), PUBLIC + [(401, "用户名、密码或账号状态无效。"), (403, "请求来源不允许。"), (429, "登录尝试过于频繁。")]))
     add("POST", ("/api/v1/auth/logout",), empty())
-    add("POST", ("/api/v1/auth/password",), json(obj("改密后的当前身份。", {"user": USER}, ("user",)), AUTH + [(400, "当前密码错误或新旧密码相同。")]))
-    add("GET", ("/api/v1/auth/me",), json(obj("当前身份。", {"user": USER}, ("user",))))
+    add("POST", ("/api/v1/auth/password",), json(obj("改密后的当前身份。", {"user": CURRENT_USER}, ("user",)), AUTH + [(400, "当前密码错误或新旧密码相同。")]))
+    add("GET", ("/api/v1/auth/me",), json(obj("当前身份。", {"user": CURRENT_USER}, ("user",))))
     add("GET", ("/api/v1/users",), json(page(USER))); add("POST", ("/api/v1/users",), json(USER, MUTATE))
     add("PATCH", ("/api/v1/users/{identifier}",), json(USER, MUTATE + [(404, "用户不存在。")]))
     add("DELETE", ("/api/v1/users/{identifier}",), empty(MUTATE + [(404, "用户不存在。")]))

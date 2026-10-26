@@ -10,6 +10,7 @@ from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
 from camera_logs.resources.health_policy import resource_health_blocks_task
+from camera_logs.users.write_gate import claim_active_user_for_resource_write
 
 
 async def _claim_resources(db, document, session):
@@ -87,6 +88,7 @@ async def create_task(repo, user, key, payload, prepare):
         current = await _confirmed(repo.db, actor, key, digest, session=session)
         if current is not None:
             return current
+        await claim_active_user_for_resource_write(repo.db, actor, session)
         claimed = await _claim_resources(repo.db, document, session)
         timestamp = now()
         task = document.copy()

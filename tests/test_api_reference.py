@@ -26,7 +26,7 @@ def test_credentials_sorting_and_progressive_search_are_documented(client):
     operations = {item["id"]: item for item in catalog["operations"]}
     credential = operations["POST /api/v1/resources/{identifier}/credential"]
     assert "resources:write" in credential["permission"]
-    assert "仅创建者" in credential["permission"]
+    assert "创建者、admin或指定共享用户" in credential["permission"]
     assert set(credential["responseExample"]) == {"username", "password"}
     for path in ("resources", "tasks"):
         parameters = {item["name"]: item for item in operations[f"GET /api/v1/{path}"]["parameters"]}
@@ -286,7 +286,7 @@ def test_reference_documents_actual_session_and_download_authentication_paths(cl
     assert "Authorization" not in content["headers"]
 
     share_targets = operations["GET /api/v1/users/share-targets"]
-    assert share_targets["permission"] == "templates:read"
+    assert share_targets["permission"] == "templates:read、resources:create、resources:write 或 admin（满足任一即可）"
     assert share_targets["responseExample"] == {
         "items": [{"id": "shared-user-example", "username": "shared-user", "displayName": "可共享用户"}],
         "total": 1,
@@ -301,7 +301,7 @@ def test_reference_distinguishes_saved_credential_authentication_from_editor_pre
     authentication = operations["POST /api/v1/resources/{identifier}/authenticate"]
     for text in ("空请求体", "已保存", "健康状态", "不停止仍有日志输出", "持续无输出", "Telnet串口不受认证状态影响", "完整 ResourceInput", "预览"):
         assert text in authentication["description"]
-    for text in ("resources:write", "tasks:control", "他人关联任务", "完整ResourceInput仅预览"):
+    for text in ("resources:write", "tasks:control", "指定共享用户", "关联任务归属限制", "完整ResourceInput仅预览"):
         assert text in authentication["permission"]
     assert operations["POST /api/v1/resources/authenticate"]["permission"] == "resources:create"
 
