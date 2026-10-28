@@ -9,17 +9,23 @@ from typing import Any
 MIB = 1024 * 1024
 DEFAULT_LOG_SEGMENT_MIB = 10
 MIN_LOG_SEGMENT_MIB = 10
-MAX_LOG_SEGMENT_MIB = 100
+MAX_LOG_SEGMENT_MIB = 512
 LOG_SEGMENT_STEP_MIB = 5
 REFRESH_INTERVAL_SECONDS = 1
 logger = logging.getLogger(__name__)
 
 
+def is_valid_log_segment_mib(value: object) -> bool:
+    """判断分片大小是否属于常规五 MiB 档位，或是允许的 512 MiB 端点。"""
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and MIN_LOG_SEGMENT_MIB <= value <= MAX_LOG_SEGMENT_MIB
+            and (value == MAX_LOG_SEGMENT_MIB
+                 or not (value - MIN_LOG_SEGMENT_MIB) % LOG_SEGMENT_STEP_MIB))
+
+
 def normalize_log_segment_mib(value: object) -> int:
     """将持久化分片配置归一为安全 MiB 值，历史损坏记录回退默认值。"""
-    if (not isinstance(value, int) or isinstance(value, bool)
-            or not MIN_LOG_SEGMENT_MIB <= value <= MAX_LOG_SEGMENT_MIB
-            or (value - MIN_LOG_SEGMENT_MIB) % LOG_SEGMENT_STEP_MIB):
+    if not is_valid_log_segment_mib(value):
         return DEFAULT_LOG_SEGMENT_MIB
     return value
 

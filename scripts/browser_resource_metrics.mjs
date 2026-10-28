@@ -1,6 +1,6 @@
 // 资源监控浏览器验收：全部 API 在页面路由层模拟，不连接真实设备或服务端采集器。
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 
 const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
@@ -9,7 +9,7 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 await context.addInitScript(() => sessionStorage.setItem("camera-log-record-token", "resource-metrics-test-token"));
 const baseUrl = process.env.BASE_URL || "http://127.0.0.1:5173";
 const resources = [
-  { id: "metrics-resource", name: "趋势设备", kind: "HIKVISION_NETWORK", ip: "192.0.2.30", username: "http", authType: "DIGEST", version: 1, enableResourceMonitor: true, healthStatus: "ONLINE" },
+  { id: "metrics-resource", name: "趋势设备-用于验证移动端图像导出标题自动换行的长设备名称", kind: "HIKVISION_NETWORK", ip: "192.0.2.30", username: "http", authType: "DIGEST", version: 1, enableResourceMonitor: true, healthStatus: "ONLINE" },
   { id: "disabled-resource", name: "未启用趋势", kind: "HIKVISION_NETWORK", ip: "192.0.2.31", version: 1, enableResourceMonitor: false },
   { id: "serial-resource", name: "串口资源", kind: "SERIAL_SERVER", ip: "192.0.2.32", version: 1, enableResourceMonitor: true },
 ];
@@ -49,8 +49,8 @@ await context.route("**/api/v1/**", async route => {
     if (failNextMetrics) { failNextMetrics = false; return json(route, { message: "模拟监控读取失败" }, 500); }
     if (!url.searchParams.get("cursor")) return json(route, {
       items: [
-        { sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 21.123456, unit: "%" }, { id: "mem-available", name: "MemAvailable", value: 504824, unit: "KB" }, { id: "slab", name: "Slab", value: 43911, unit: "KB" }, { id: "process:dsp:99", name: "Dsp_Main", pid: 99, value: 56504, unit: "KB" }, { id: "process:zero", name: "真实零内存", value: 0, unit: "KB" }] },
-        { sampledAt: "2026-09-11T00:01:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 18, unit: "%" }, { id: "proc", name: "Dsp_Main", pid: 12, value: 56000, unit: "KB" }, { id: "process:bll", name: "facesnap_bll", value: 4096, unit: "KB" }, { id: "process:zero", name: "真实零内存", value: 0, unit: "KB" }] },
+        { sampledAt: "2026-09-11T00:02:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 21.123456, unit: "%" }, { id: "mem-available", name: "MemAvailable", value: 504824, unit: "KB" }, { id: "slab", name: "Slab", value: 43911, unit: "KB" }, { id: "process:dsp:99", name: "Dsp_Main", pid: 99, value: 56504, unit: "KB" }, { id: "process:zero", name: "真实零内存", value: 0, unit: "KB" }, { id: "process:long", name: "用于验证导出图片完整图例自动换行的超长内存指标名称", value: 2048, unit: "KB" }] },
+        { sampledAt: "2026-09-11T00:01:00.000Z", status: "OK", values: [{ id: "cpu", name: "CPU", value: 18, unit: "%" }, { id: "proc", name: "Dsp_Main", pid: 12, value: 56000, unit: "KB" }, { id: "process:bll", name: "facesnap_bll", value: 4096, unit: "KB" }, { id: "process:zero", name: "真实零内存", value: 0, unit: "KB" }, { id: "process:long", name: "用于验证导出图片完整图例自动换行的超长内存指标名称", value: 1024, unit: "KB" }] },
       ], nextCursor: "next-page",
     });
     return json(route, { items: [{ sampledAt: "2026-09-11T00:00:00.000Z", status: "TIMEOUT", errorCode: "COMMAND_TIMEOUT", values: [] }], nextCursor: null });
@@ -94,6 +94,7 @@ try {
   try { await page.getByText(/内存（(KB|MB|GB)）/, { exact: true }).waitFor(); }
   catch (cause) { throw new Error(`趋势弹窗未渲染：${JSON.stringify({ dialogs: await page.getByRole("dialog").allTextContents(), errors })}`, { cause }); }
   await page.locator(".metrics-chart canvas").first().waitFor();
+  assert.equal(await page.getByRole("button", { name: "导出图片", exact: true }).isDisabled(), false, "图表就绪后必须允许导出图片");
   assert.equal(await page.getByText("Dsp_Main 最新值", { exact: true }).count(), 1, "PID变化后仅有一个同名进程摘要");
   assert.equal(await page.getByText(/Dsp_Main \(PID/).count(), 0, "进程对象不显示PID后缀");
   assert.equal(await page.locator(".metrics-summary strong").filter({ hasText: /^504,824 KB$/ }).count(), 1, "摘要保留原始 KB 数值");
@@ -149,15 +150,38 @@ try {
   delayNextMetrics = true;
   await page.getByRole("button", { name: "刷新趋势", exact: true }).click();
   await delayed;
+  assert.equal(await page.getByRole("button", { name: "导出图片", exact: true }).isDisabled(), true, "加载中的图表不得导出图片");
   await page.locator(".resource-metrics-dialog .el-dialog__headerbtn").click();
   await page.getByLabel("查看 CPU 与内存趋势").click();
   releaseDelayedMetrics();
   await page.getByText(/内存（(KB|MB|GB)）/, { exact: true }).waitFor();
   assert.ok(metricRequests >= 4, "关闭后重新打开必须发起新请求，不能被旧 loading 状态卡住");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await waitForChartLayout(390);
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "导出 CSV", exact: true }).click();
   const csv = await download;
   assert.match(await csv.suggestedFilename(), /resource-metrics\.csv$/);
+  await page.evaluate(() => {
+    const original = HTMLImageElement.prototype.decode;
+    HTMLImageElement.prototype.decode = function () {
+      HTMLImageElement.prototype.decode = original;
+      return new Promise((resolve, reject) => window.setTimeout(() => original.call(this).then(resolve, reject), 300));
+    };
+  });
+  const imageDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "导出图片", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "导出图片", exact: true }).isDisabled(), true, "图片导出进行中不得重复提交");
+  const png = await imageDownload;
+  assert.match(png.suggestedFilename(), /resource-metrics\.png$/);
+  const pngPath = await png.path();
+  assert.ok(pngPath, "PNG 导出必须生成下载文件");
+  const pngSignature = await readFile(pngPath);
+  assert.deepEqual([...pngSignature.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], "导出文件必须为 PNG");
+  assert.equal(pngSignature.readUInt32BE(16), 3200, "导出图片必须使用固定的高分辨率离屏宽度，不受移动视口限制");
+  assert.ok(pngSignature.readUInt32BE(20) > 1_700, "导出图片必须包含完整图表和动态标题区域");
+  assert.equal(await page.locator(".metrics-image-export").count(), 0, "离屏图表导出后必须释放临时 DOM");
+  await png.saveAs("output/playwright/resource-metrics-export.png");
   const beforePause = metricRequests;
   await page.getByRole("button", { name: "暂停自动刷新", exact: true }).click();
   await page.waitForTimeout(100);

@@ -28,7 +28,7 @@ def test_platform_settings_have_default_version_and_detect_conflict(client):  # 
 
 
 def test_log_segment_size_is_versioned_strict_and_preserved_when_omitted(client):  # noqa: F811
-    """日志片段大小仅接受十至百的五 MiB 步长，旧配置读取默认为十且局部编辑不重置。"""
+    """日志片段接受常规档位和512端点，旧配置读取默认为十且局部编辑不重置。"""
     initial = client.get("/api/v1/platform-settings").json()
     changed = client.patch("/api/v1/platform-settings", json={
         "retentionDays": initial["retentionDays"], "logSegmentMiB": 25, "version": initial["version"],
@@ -40,9 +40,14 @@ def test_log_segment_size_is_versioned_strict_and_preserved_when_omitted(client)
     })
     assert preserved.status_code == 200, preserved.text
     assert preserved.json()["logSegmentMiB"] == 25
-    for invalid in (9, 101, 11, 12.5, True):
+    endpoint = client.patch("/api/v1/platform-settings", json={
+        "retentionDays": 8, "logSegmentMiB": 512, "version": preserved.json()["version"],
+    })
+    assert endpoint.status_code == 200, endpoint.text
+    assert endpoint.json()["logSegmentMiB"] == 512
+    for invalid in (9, 11, 511, 513, 12.5, True):
         response = client.patch("/api/v1/platform-settings", json={
-            "retentionDays": 8, "logSegmentMiB": invalid, "version": preserved.json()["version"],
+            "retentionDays": 8, "logSegmentMiB": invalid, "version": endpoint.json()["version"],
         })
         assert response.status_code == 422
 
@@ -63,7 +68,7 @@ def test_legacy_platform_settings_default_log_segment_size_without_persisting_on
 def test_platform_settings_normalizes_invalid_historical_log_segment_size(client):  # noqa: F811
     """管理端展示必须与运行时对历史损坏分片大小的安全回退保持一致。"""
     repo = client.app.state.repo
-    for value in (None, 9, 11, 101, True, "25"):
+    for value in (None, 9, 11, 511, 513, True, "25"):
         client.portal.call(repo.db.platform_settings.delete_many, {})
         client.portal.call(repo.db.platform_settings.insert_one, {
             "id": "platform", "retentionDays": 7, "logSegmentMiB": value,

@@ -63,7 +63,7 @@ python example.py
 
 `GET /api/v1/users/creators?page=1&pageSize=20&search=名称` 提供创建用户筛选目录，包含历史已禁用和已删除用户，仅返回 `id`、`username`、`displayName`；要求 `tasks:read` 或 `templates:read`，不授予用户管理权限。
 
-`GET /api/v1/resources` 支持 `search` 跨资源名称、IP、型号、短序列号和软件版本做字面子串搜索；可分别传入 `name`、`model`、`subSerialNumber`、`softwareVersion` 做不区分大小写的字面匹配，`ip` 则为规范化 IPv4/IPv6 精确匹配。多个条件取交集。
+`GET /api/v1/resources` 支持 `search` 跨资源名称、IP、型号、短序列号和软件版本做字面子串搜索；可分别传入 `name`、`model`、`subSerialNumber`、`softwareVersion` 做不区分大小写的字面匹配，`ip` 则为规范化 IPv4/IPv6 精确匹配。工作台默认“查看全部”；`mine=true` 对应“仅查看自己”，只返回当前认证用户创建的资源和 `sharedUserIds` 包含该用户的资源，身份由服务端会话绑定，客户端不能传其他用户 ID；`createdBy` 仍可精确筛选创建者，与 `mine` 同时传递时取交集。`includeDeleted=true` 与上述范围独立组合。多个条件取交集。
 
 ```http
 GET /api/v1/resources?ip=192.0.2.10&subSerialNumber=SN-EXAMPLE&page=1&pageSize=20&taskLimit=100
@@ -467,6 +467,6 @@ Content-Type: application/json
 
 ## 日志分片与 Core 历史连续性
 
-`GET/PATCH /api/v1/platform-settings` 的 `logSegmentMiB` 表示日志分片上限，单位 MiB，默认 10，允许 10、15、20…100。PATCH 省略该字段会保留现值；越界、非 5 的倍数、布尔值、字符串及浮点数返回 422。Worker 每秒刷新配置，新打开分片生效，已打开分片按原大小收尾；已封存文件不重写。请求和响应中文释义由实际模型生成。
+`GET/PATCH /api/v1/platform-settings` 的 `logSegmentMiB` 表示日志分片上限，单位 MiB，默认 10，允许 10、15、20…510，另允许 512 MiB 上限端点。PATCH 省略该字段会保留现值；越界、非 5 MiB 档位且不是 512、布尔值、字符串及浮点数返回 422。Worker 每秒刷新配置，新打开分片生效，已打开分片按原大小收尾；已封存文件不重写。请求和响应中文释义由实际模型生成。
 
 同 IP、型号、子序列号的海康设备软删后重新认证添加，历史 Core 的 `resourceId` 关联到新资源，但 `id`、`firstSeenAt`、`receivedAt` 保持原值。列表时间筛选仍对应原始发现时刻，已有文件 ID 下载地址保持兼容；不会因此新增首次发现事件。身份不完整或不一致时不关联历史。

@@ -19,6 +19,10 @@ try {
         requestId: "diagnostic-request", method: "GET", route: "/api/v1/tasks/{task_id}/log-hours", httpStatus: 500,
         reason: "服务内部异常", errorType: "ResponseValidationError",
         responseValidation: { count: 1, truncated: false, issues: [{ location: ["response", "items", "0", "files", "0", "[未声明字段或动态键]"], type: "extra_forbidden" }] },
+      }] : url.pathname === "/api/v1/audit-events" ? [{
+        id: "login-failed", createdAt: new Date().toISOString(), summary: "用户登录失败", level: "ERROR", outcome: "FAILED",
+        actor: "anonymous", action: "login_failed", sourceKind: "ANONYMOUS", sourceName: "未认证身份",
+        metadata: { username: "audit.operator" },
       }] : [];
       return route.fulfill({ json: { items, total: items.length, page: 1, pageSize: 20, hasMore: false, nextCursor: null } });
     });
@@ -34,6 +38,13 @@ try {
     await page.getByRole("heading", { name: "响应字段校验" }).waitFor();
     assert.match(await page.locator(".audit-event-drawer").innerText(), /extra_forbidden/);
     assert.match(await page.locator(".audit-event-drawer").innerText(), /未声明字段或动态键/);
+    await page.locator(".audit-event-drawer .el-drawer__close-btn").click();
+    await page.getByRole("tab", { name: "审计记录", exact: true }).click();
+    await page.getByText("用户登录失败", { exact: true }).click();
+    const auditDrawer = page.locator(".audit-event-drawer");
+    await auditDrawer.getByText("填写用户名", { exact: true }).waitFor();
+    assert.match(await auditDrawer.innerText(), /填写用户名\s*audit\.operator/);
+    assert.match(await auditDrawer.innerText(), /anonymous/);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
     await mkdir("output/playwright", { recursive: true });
     // 等待抽屉过渡进入视口，截图必须包含诊断正文而非动画起始帧。

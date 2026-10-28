@@ -255,3 +255,51 @@ async def test_cancelled_read_and_shutdown_wait_for_thread_then_close_handles(tm
         release.set()
         await asyncio.gather(pending, *([close] if close else []), return_exceptions=True)
         await reads.close()
+
+
+def test_viewer_overlap_and_previous_page_reuse_bounded_tail(tmp_path, opened):
+    """真实查看器有128字节重叠，连续翻页及返回上一页不能重新打开整包。"""
+    data = bytes(range(256)) * 8192
+    path = archive(tmp_path / 'hour.tar.gz', data)
+    pool = ArchiveReaders()
+    try:
+        for offset in (0, 261888, 523904, 261888, 523904, 785920):
+            assert pool.read('file', path, 'part.log', offset, 262144, len(data)) == data[offset:offset + 262144]
+        assert len(opened) == 1
+    finally:
+        pool.close()
+
+
+def test_first_page_does_not_scan_archive_tail(tmp_path, monkeypatch):
+    """只读首片256KiB不得为了getmember目录扫描而解压包尾数十MiB。"""
+    import gzip
+    data = b'first log line\n' * 1_000_000
+    path = archive(tmp_path / 'hour.tar.gz', data)
+    read_bytes = [0]
+    original = gzip._GzipReader.read
+
+    def measured(self, size=-1):
+        result = original(self, size)
+        read_bytes[0] += len(result)
+        return result
+
+    monkeypatch.setattr(gzip._GzipReader, 'read', measured)
+    pool = ArchiveReaders()
+    try:
+        assert pool.read('file', path, 'part.log', 0, 262144, len(data)) == data[:262144]
+        assert read_bytes[0] < 1024 * 1024
+    finally:
+        pool.close()
+
+
+def test_tail_respects_smaller_watermark_and_eof_revisit(tmp_path, opened):
+    """缓存尾部不越过新冻结水位，读到EOF仍能回看而不重新解压。"""
+    path = archive(tmp_path / 'hour.tar.gz', b'abcdefghijklmnopqrst')
+    pool = ArchiveReaders()
+    try:
+        assert pool.read('file', path, 'part.log', 0, 20, 20) == b'abcdefghijklmnopqrst'
+        assert pool.read('file', path, 'part.log', 3, 10, 5) == b'de'
+        assert pool.read('file', path, 'part.log', 0, 20, 20) == b'abcdefghijklmnopqrst'
+        assert len(opened) == 1
+    finally:
+        pool.close()

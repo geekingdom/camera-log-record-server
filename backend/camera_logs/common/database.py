@@ -188,6 +188,36 @@ class Repository:
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
         await self.db.resources.create_index("deletionState")
+        # 默认“查看全部”与包含软删除的历史列表均按创建时刻稳定分页，不能依赖内存排序。
+        await self.db.resources.create_index(
+            [("createdAt", -1), ("id", 1)],
+            name="resources_visible_created",
+            partialFilterExpression={"deletedAt": None},
+        )
+        await self.db.resources.create_index(
+            [("createdAt", -1), ("id", 1)],
+            name="resources_created",
+        )
+        # “仅查看自己”将创建者和共享协作者作为两个可合并的查询分支；当前资源使用
+        # deletedAt:null 部分索引，包含软删除时改用对应完整历史索引。
+        await self.db.resources.create_index(
+            [("createdBy", 1), ("createdAt", -1), ("id", 1)],
+            name="resources_creator_visible_created",
+            partialFilterExpression={"deletedAt": None},
+        )
+        await self.db.resources.create_index(
+            [("sharedUserIds", 1), ("createdAt", -1), ("id", 1)],
+            name="resources_shared_visible_created",
+            partialFilterExpression={"deletedAt": None},
+        )
+        await self.db.resources.create_index(
+            [("createdBy", 1), ("createdAt", -1), ("id", 1)],
+            name="resources_creator_created",
+        )
+        await self.db.resources.create_index(
+            [("sharedUserIds", 1), ("createdAt", -1), ("id", 1)],
+            name="resources_shared_created",
+        )
         # 重添设备只关联IP、型号和序列号全部一致的历史资源，避免逐次扫描全部软删记录。
         await self.db.resources.create_index(
             [("kind", 1), ("ip", 1), ("model", 1), ("subSerialNumber", 1), ("deletedAt", 1), ("id", 1)],

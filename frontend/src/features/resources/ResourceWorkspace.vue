@@ -29,7 +29,8 @@ const coredumpOpen = ref(false), coredumpResource = ref<Resource>();
 const authenticationRecordsOpen = ref(false), authenticationRecordsResource = ref<Resource>();
 const metricsOpen = ref(false), metricsResource = ref<Resource>();
 const includeDeleted = ref(false), selectedResource = ref<Resource>(), lastLoadedAt = ref("");
-const showAll = ref(Boolean(props.isAdmin));
+const showAll = ref(true);
+const onlyMine = ref(false);
 const createdBy = ref("");
 const sortBy = ref<string>();
 const sortOrder = ref<"asc" | "desc">();
@@ -60,7 +61,8 @@ async function load() {
     kind: kind.value,
     hasCoredumps: hasCoredumps.value,
     includeDeleted: includeDeleted.value ? "true" : undefined,
-    createdBy: showAll.value ? createdBy.value || undefined : props.userId,
+    createdBy: showAll.value ? createdBy.value || undefined : undefined,
+    mine: onlyMine.value ? ("true" as const) : undefined,
     sortBy: sortBy.value,
     sortOrder: sortOrder.value,
   }; const data = await api.resources(page.value, 20, filters); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
@@ -79,6 +81,13 @@ function changeSort({ prop, order }: { prop: string; order: "ascending" | "desce
 }
 function changeScope(value: boolean | string | number) {
   showAll.value = Boolean(value);
+  onlyMine.value = !showAll.value;
+  createdBy.value = "";
+  filter();
+}
+function changeOnlyMine(value: boolean | string | number) {
+  onlyMine.value = Boolean(value);
+  showAll.value = !onlyMine.value;
   createdBy.value = "";
   filter();
 }
@@ -150,7 +159,8 @@ async function completeBatch(entries: BulkOperationEntry[]) {
 watch(page, () => { clearSelection(true); void load(); });
 watch(() => [props.userId, props.isAdmin], ([userId, isAdmin], previous) => {
   if (previous && (userId !== previous[0] || isAdmin !== previous[1])) {
-    showAll.value = Boolean(isAdmin);
+    showAll.value = true;
+    onlyMine.value = false;
     createdBy.value = "";
     filter();
   }
@@ -186,6 +196,7 @@ defineExpose({ reload: load });
     <div class="resource-toolbar-footer">
       <div class="resource-filter-options">
         <el-checkbox :model-value="showAll" @change="changeScope">查看全部</el-checkbox>
+        <el-checkbox :model-value="onlyMine" @change="changeOnlyMine">仅查看自己</el-checkbox>
         <el-checkbox v-model="includeDeleted" @change="filter">包含已删除资源</el-checkbox>
       </div>
       <div class="resource-filter-actions">

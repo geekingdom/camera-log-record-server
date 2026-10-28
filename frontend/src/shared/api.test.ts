@@ -29,6 +29,18 @@ describe("设备身份模糊筛选 API", () => {
 
     expect(new URL(fetch.mock.calls[0][0], "http://localhost").searchParams.get("hasCoredumps")).toBe("true");
   });
+
+  it("仅看自己由专用 mine 参数请求，且可独立包含已删除资源", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0 })));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.resources(2, 20, { mine: "true", includeDeleted: "true" });
+
+    expect(new URL(fetch.mock.calls[0][0], "http://localhost").searchParams).toEqual(
+      new URLSearchParams({ page: "2", pageSize: "20", mine: "true", includeDeleted: "true" }),
+    );
+  });
 });
 
 describe("资源共享 API", () => {

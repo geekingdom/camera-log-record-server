@@ -6,7 +6,7 @@ import { ElMessage } from "element-plus";
 import { ApiError } from "../../shared/api";
 import { confirmAction } from "../../shared/confirm";
 import { settingsApi, type NodeConfig, type NodeRegistration, type PerformancePolicy, type PlatformSettings } from "./api";
-import { DEFAULT_WRITE_LATENCY_LIMIT_MS, MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, MAX_WRITE_LATENCY_LIMIT_MS, MIN_WRITE_LATENCY_LIMIT_MS, normalizeCapacity } from "./settingsForm";
+import { DEFAULT_WRITE_LATENCY_LIMIT_MS, isValidLogSegmentMiB, MAX_CLUSTER_CAPACITY, MAX_LOG_SEGMENT_MIB, MAX_NODE_CAPACITY, MAX_WRITE_LATENCY_LIMIT_MS, MIN_WRITE_LATENCY_LIMIT_MS, normalizeCapacity } from "./settingsForm";
 import { formatWriteLatencyLimit } from "../../shared/nodeWriteLatency";
 import ResourceMonitorSettings from "./ResourceMonitorSettings.vue";
 import RecordRetentionSettings from "./RecordRetentionSettings.vue";
@@ -81,6 +81,10 @@ async function load() {
 
 async function savePlatformSettings() {
   if (savingRetention.value || !settings.value) return;
+  if (!isValidLogSegmentMiB(logSegmentMiB.value)) {
+    ElMessage.warning("日志分片大小应为 10 至 510 MiB 的 5 MiB 步长，或 512 MiB");
+    return;
+  }
   if (!await confirmAction(`确认保存设备日志保留 ${retentionDays.value} 天、日志分片 ${logSegmentMiB.value} MiB、服务运行日志保留 ${serviceLogRetentionDays.value} 天、集群总并发上限 ${clusterCapacity.value} 个任务、实时日志内存上限 ${liveLogBufferMiB.value} MiB 吗？`, "确认保存配置")) return;
   savingRetention.value = true;
   try {
@@ -197,8 +201,8 @@ onMounted(() => void load());
           <div class="retention-control"><el-input-number v-model="retentionDays" :min="1" :max="3650" controls-position="right" aria-label="日志保存天数" /><span>天</span></div>
         </section>
         <section class="settings-band">
-          <div><h4>日志分片大小</h4><p>新写入的原始日志达到该大小后创建下一分片。Worker每秒刷新，刷新成功后新分片生效；已打开分片按原上限收尾。下载作业启动时固定该值。取值为 10 至 100 MiB，每次调整 5 MiB；已归档分片不会改写。</p></div>
-          <div class="retention-control"><el-input-number v-model="logSegmentMiB" :min="10" :max="100" :step="5" step-strictly :precision="0" controls-position="right" aria-label="日志分片大小" /><span>MiB</span></div>
+          <div><h4>日志分片大小</h4><p>新写入的原始日志达到该大小后创建下一分片。Worker每秒刷新，刷新成功后新分片生效；已打开分片按原上限收尾。下载作业启动时固定该值。取值为 10 至 510 MiB，每次调整 5 MiB，或 512 MiB 上限端点；已归档分片不会改写。</p></div>
+          <div class="retention-control"><el-input-number v-model="logSegmentMiB" :min="10" :max="MAX_LOG_SEGMENT_MIB" :step="5" :precision="0" controls-position="right" aria-label="日志分片大小" /><span>MiB</span></div>
         </section>
         <section class="settings-band">
           <div><h4>服务运行日志保留</h4><p>API 与 Worker 按上海日期目录保存 JSONL，当天每 20 MiB 分片；达到保留期后仅清理本服务的过期日期目录。</p></div>

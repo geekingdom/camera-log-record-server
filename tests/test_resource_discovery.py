@@ -46,6 +46,31 @@ def test_resources_filter_by_creator_without_relaxing_other_filters(resource_cli
     assert {item["id"] for item in archived.json()["items"]} == {"owner-active", "owner-deleted"}
 
 
+def test_resources_mine_filter_includes_owned_and_shared_resources(resource_client):
+    """仅看自己由服务端身份绑定，同时保留共享、搜索、软删除与分页语义。"""
+    repo = resource_client.app.state.repo
+    resource_client.portal.call(repo.db.resources.insert_many, [
+        {"id": "mine-owned", "name": "我的资源", "kind": "SERIAL_SERVER", "ip": "192.0.2.41",
+         "createdBy": "bootstrap", "sharedUserIds": [], "deletedAt": None},
+        {"id": "mine-shared", "name": "我的共享资源", "kind": "SERIAL_SERVER", "ip": "192.0.2.42",
+         "createdBy": "other", "sharedUserIds": ["bootstrap"], "deletedAt": None},
+        {"id": "other-private", "name": "我的私有诱饵", "kind": "SERIAL_SERVER", "ip": "192.0.2.43",
+         "createdBy": "other", "sharedUserIds": [], "deletedAt": None},
+        {"id": "mine-deleted", "name": "已删除我的资源", "kind": "SERIAL_SERVER", "ip": "192.0.2.44",
+         "createdBy": "bootstrap", "sharedUserIds": [], "deletedAt": "2026-10-28T00:00:00Z"},
+    ])
+
+    current = resource_client.get("/api/v1/resources", params={"mine": "true", "search": "我的"})
+    assert current.status_code == 200
+    assert {item["id"] for item in current.json()["items"]} == {"mine-owned", "mine-shared"}
+    assert current.json()["total"] == 2
+
+    archived = resource_client.get("/api/v1/resources", params={"mine": "true", "includeDeleted": "true"})
+    assert archived.status_code == 200
+    assert {item["id"] for item in archived.json()["items"]} == {"mine-owned", "mine-shared", "mine-deleted"}
+    assert archived.json()["total"] == 3
+
+
 def test_user_bound_service_token_sees_all_tasks_in_shared_resource(resource_client):
     repo = resource_client.app.state.repo
     resource_client.portal.call(repo.db.resources.insert_one, {"id": "shared", "name": "共享资源"})

@@ -2,7 +2,7 @@
 // 资源监控历史按游标完整读取；图表仅渲染服务端已脱敏的结构化指标。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { Download, Pause, Play, RefreshCw } from "lucide-vue-next";
+import { Download, ImageDown, Pause, Play, RefreshCw } from "lucide-vue-next";
 import * as echarts from "echarts/core";
 import { LineChart } from "echarts/charts";
 import { DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
@@ -10,6 +10,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { api } from "../../shared/api";
 import type { Resource, ResourceMetricSample } from "../../shared/types";
 import { metricIssueCount, metricSeries, metricSummaries, metricsCsv, validMetricRange } from "./resourceMetrics";
+import { metricChartPng } from "./resourceMetricImage";
 import { memoryLabel, memoryPrecision, memoryUnit, metricAxis, percentageLabel } from "./metricAxis";
 import ResourceMetricDatePicker from "./ResourceMetricDatePicker.vue";
 import { relativeMetricSeries } from "./metricRelative";
@@ -22,11 +23,14 @@ type Preset = "30m" | "1h" | "custom";
 const preset = ref<Preset>("1h");
 const customRange = ref<[Date, Date] | null>(null);
 const calendarAnchor = ref(new Date());
+const displayedRange = ref<{ start: Date; end: Date }>();
 const samples = ref<ResourceMetricSample[]>([]);
 const loading = ref(false);
 const paused = ref(false);
 const error = ref("");
 const chartElement = ref<HTMLElement>();
+const chartReady = ref(false);
+const exportingImage = ref(false);
 const selectedUnit = ref<"KB" | "%">("KB");
 const memoryDisplayMode = ref<"absolute" | "relative">("absolute");
 const axisWindow = ref<{ start?: number; end?: number; selected?: Record<string, boolean> }>({});
@@ -97,6 +101,7 @@ function renderCharts() {
   if (!chartElement.value) return;
   chart ??= echarts.init(chartElement.value);
   chart.setOption(chartOption(activeSeries.value, activeChartUnit.value), true);
+  chartReady.value = true;
   chart.off("legendselectchanged"); chart.off("datazoom");
   chart.on("legendselectchanged", (event: unknown) => { const selected = (event as { selected?: Record<string, boolean> }).selected; axisWindow.value = { ...axisWindow.value, selected }; updateAxis(); });
   chart.on("datazoom", (event: unknown) => {
@@ -114,7 +119,7 @@ function observeCharts() {
   if (chartElement.value) observer.observe(chartElement.value);
 }
 function disposeCharts() {
-  chart?.dispose(); chart = undefined;
+  chart?.dispose(); chart = undefined; chartReady.value = false;
 }
 function scheduleRefresh() {
   if (refreshTimer) window.clearInterval(refreshTimer);
@@ -139,12 +144,13 @@ async function load() {
       pages += 1;
       if (pages >= 100) throw new Error("监控历史分页超过安全上限");
     } while (cursor);
+    displayedRange.value = { start, end };
     samples.value = items;
     await nextTick();
     if (current === generation && open.value) { renderCharts(); observeCharts(); }
   } catch (cause) {
     if (current === generation && open.value) {
-      if (items.length) { samples.value = items; await nextTick(); renderCharts(); observeCharts(); }
+      if (items.length) { displayedRange.value = { start, end }; samples.value = items; await nextTick(); renderCharts(); observeCharts(); }
       error.value = cause instanceof Error ? cause.message : "读取资源监控历史失败";
     }
   } finally {
@@ -168,6 +174,80 @@ function exportCsv() {
   anchor.href = url; anchor.download = `${props.resource?.name ?? "resource"}-resource-metrics.csv`; anchor.click();
   URL.revokeObjectURL(url);
 }
+function formatExportTime(value: Date) {
+  return value.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+}
+function imageFileName(resourceName: string) {
+  const name = resourceName.replace(/[\\/:*?"<>|]/g, "_");
+  return `${name}-resource-metrics.png`;
+}
+/** 复用当前 ECharts 状态，连同标题和查询范围生成可离线查看的高分辨率 PNG。 */
+async function exportChartImage() {
+  if (exportingImage.value || loading.value || !hasMetrics.value || !chartReady.value || !chart || !props.resource) return;
+  // getDataURL 与元信息在第一个 await 前一起冻结，避免刷新或切换后图文错配。
+  const resource = { name: props.resource.name, ip: props.resource.ip };
+  const range = displayedRange.value ?? selectedRange();
+  const title = selectedUnit.value === "KB"
+    ? (memoryDisplayMode.value === "relative" ? "内存比率（初始有效值 = 100%）" : `内存（${activeDisplayUnit.value}）`)
+    : "CPU（%）";
+  exportingImage.value = true;
+  try {
+    const sourceUrl = await exportChartPng(chart);
+    const anchor = document.createElement("a");
+    anchor.href = await metricChartPng(sourceUrl, {
+      title: `${resource.name} · ${title}`,
+      device: `设备：${resource.name} · ${resource.ip}`,
+      range: `时间范围（北京时间）：${formatExportTime(range.start)} 至 ${formatExportTime(range.end)}`,
+    });
+    anchor.download = imageFileName(resource.name);
+    anchor.click();
+  } catch (cause) {
+    ElMessage.error(cause instanceof Error ? cause.message : "导出趋势图片失败");
+  } finally {
+    exportingImage.value = false;
+  }
+}
+/** 使用固定宽度的离屏图表保留当前缩放和隐藏系列，并让完整图例不受移动端画布限制。 */
+async function exportChartPng(sourceChart: echarts.ECharts) {
+  const host = document.createElement("div");
+  host.className = "metrics-image-export";
+  host.style.cssText = "position:fixed;left:-10000px;top:0;width:1600px;height:860px;pointer-events:none";
+  document.body.append(host);
+  const exportChart = echarts.init(host, undefined, { renderer: "canvas", width: 1600, height: 860 });
+  try {
+    // ECharts getOption 已返回独立数据；其中 formatter 函数不可 structuredClone，故仅替换导出专用分支。
+    const option = sourceChart.getOption() as Record<string, unknown>;
+    const legend = Array.isArray(option.legend) ? option.legend[0] : option.legend;
+    const grid = Array.isArray(option.grid) ? option.grid[0] : option.grid;
+    const measurement = document.createElement("canvas").getContext("2d");
+    if (!measurement) throw new Error("浏览器不支持趋势图片图例排版");
+    measurement.font = "14px sans-serif";
+    const legendWidth = 1504;
+    const names = (option.series as Array<{ name?: unknown }> ?? []).flatMap(item => typeof item.name === "string" ? [item.name] : []);
+    let rows = 1, occupied = 0;
+    for (const name of names) {
+      const width = 42 + measurement.measureText(name).width;
+      if (occupied && occupied + width > legendWidth) { rows += 1; occupied = 0; }
+      occupied += width;
+    }
+    const gridTop = Math.max(112, 28 + rows * 32);
+    const height = Math.max(860, gridTop + 650);
+    host.style.height = `${height}px`;
+    exportChart.resize({ width: 1600, height });
+    option.animation = false;
+    option.legend = [{ ...(typeof legend === "object" && legend ? legend : {}), type: "plain", left: 48, right: 48, top: 12, width: 1504 }];
+    option.grid = [{ ...(typeof grid === "object" && grid ? grid : {}), left: 72, right: 44, top: gridTop, bottom: 72 }];
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error("趋势图片渲染超时")), 5_000);
+      exportChart.on("finished", () => { window.clearTimeout(timeout); resolve(); });
+      exportChart.setOption(option, true);
+    });
+    return exportChart.getDataURL({ type: "png", pixelRatio: 2, backgroundColor: "#ffffff" });
+  } finally {
+    exportChart.dispose();
+    host.remove();
+  }
+}
 watch(() => [open.value, props.resource?.id] as const, ([visible]) => {
   generation += 1;
   if (visible) {
@@ -178,7 +258,7 @@ watch(() => [open.value, props.resource?.id] as const, ([visible]) => {
     void nextTick(observeCharts);
     loading.value = false; reload();
   } else {
-    loading.value = false; samples.value = []; error.value = ""; disposeCharts(); observer?.disconnect(); observer = undefined;
+    loading.value = false; samples.value = []; displayedRange.value = undefined; error.value = ""; disposeCharts(); observer?.disconnect(); observer = undefined;
   }
   scheduleRefresh();
 }, { immediate: true });
@@ -200,6 +280,7 @@ onBeforeUnmount(() => { generation += 1; if (refreshTimer) window.clearInterval(
         <el-tooltip content="刷新趋势"><el-button circle :icon="RefreshCw" aria-label="刷新趋势" :loading="loading" @click="load" /></el-tooltip>
         <el-tooltip v-if="!props.resource?.deletedAt" :content="paused ? '恢复自动刷新' : '暂停自动刷新'"><el-button circle :icon="paused ? Play : Pause" :aria-label="paused ? '恢复自动刷新' : '暂停自动刷新'" @click="togglePause" /></el-tooltip>
         <el-tooltip content="导出原始采样值，不受图表比率展示影响"><el-button :icon="Download" :disabled="!samples.length" @click="exportCsv">导出 CSV</el-button></el-tooltip>
+        <el-tooltip content="导出当前图表、标题和时间范围为 PNG 图片"><el-button :icon="ImageDown" :loading="exportingImage" :disabled="exportingImage || loading || !hasMetrics || !chartReady" @click="exportChartImage">导出图片</el-button></el-tooltip>
       </div>
     </div>
     <div v-if="preset === 'custom'" class="metrics-custom-range"><ResourceMetricDatePicker v-if="props.resource" v-model="customRange" :resource-id="props.resource.id" :anchor="calendarAnchor" /><el-button type="primary" @click="applyCustomRange">查询</el-button></div>

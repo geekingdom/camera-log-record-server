@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_WRITE_LATENCY_LIMIT_MS, MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, MAX_WRITE_LATENCY_LIMIT_MS, MIN_WRITE_LATENCY_LIMIT_MS, normalizeCapacity } from "./settingsForm";
+import { DEFAULT_WRITE_LATENCY_LIMIT_MS, isValidLogSegmentMiB, MAX_CLUSTER_CAPACITY, MAX_NODE_CAPACITY, MAX_WRITE_LATENCY_LIMIT_MS, MIN_WRITE_LATENCY_LIMIT_MS, normalizeCapacity } from "./settingsForm";
 
 describe("后台容量配置", () => {
   it("允许节点容量超过旧的 100 上限并限制在平台最大值内", () => {
@@ -18,5 +18,13 @@ describe("后台容量配置", () => {
     expect(MIN_WRITE_LATENCY_LIMIT_MS).toBe(1);
     expect(MAX_WRITE_LATENCY_LIMIT_MS).toBe(60_000);
     expect(DEFAULT_WRITE_LATENCY_LIMIT_MS).toBe(200);
+  });
+
+  it("允许日志分片五 MiB 档位和 512 MiB 上限端点", () => {
+    expect(isValidLogSegmentMiB(10)).toBe(true);
+    expect(isValidLogSegmentMiB(510)).toBe(true);
+    expect(isValidLogSegmentMiB(512)).toBe(true);
+    expect(isValidLogSegmentMiB(511)).toBe(false);
+    expect(isValidLogSegmentMiB(513)).toBe(false);
   });
 });

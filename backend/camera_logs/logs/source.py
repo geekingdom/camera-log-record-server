@@ -64,7 +64,7 @@ def _published_member(path: Path) -> tuple[Path, int, str]:
 
 
 @contextmanager
-def open_log_source(path: Path, member_name: str | None = None):
+def open_log_source(path: Path, member_name: str | None = None, first_match: bool = False):
     """原文件打开失败时读已发布的同名分卷；所有句柄随本次读取退出而关闭。
 
     压缩发布在删除原文件之前完成。先打开原文件可保留其 inode；若删除抢先完成，
@@ -86,8 +86,11 @@ def open_log_source(path: Path, member_name: str | None = None):
         version = file_version(os.fstat(archive_file.fileno()))
         archive = stack.enter_context(tarfile.open(fileobj=archive_file, mode="r:gz"))
         try:
-            member = archive.getmember(member_name) if member_name else next(
-                (item for item in archive if item.isfile() and item.name.endswith(".log")), None)
+            # 交互读取使用已发布目录的唯一成员名，找到即停，避免getmember扫描整包
+            # 再回卷解压；其他调用保留tar标准的同名末项语义。
+            member = archive.getmember(member_name) if member_name and not first_match else next(
+                (item for item in archive if item.isfile() and item.name.endswith(".log")
+                 and (member_name is None or item.name == member_name)), None)
         except KeyError:
             member = None
         if member is None or not member.isfile() or not member.name.endswith(".log"):

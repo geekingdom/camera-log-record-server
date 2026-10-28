@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 归档阅读器只保存当前有界段；切换、关闭和跳段均取消旧请求并以代次隔离迟到响应。
+// 归档阅读器最多缓存八个已封存片段；切换、关闭均清空并隔离迟到响应。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowLeft, ArrowRight, RotateCcw, Search } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
@@ -23,6 +23,7 @@ const matches = computed(() => findTextMatches(text.value, findQuery.value, Infi
 const activeStart = computed(() => matches.value[activeMatch.value]?.start);
 let generation = 0;
 let controller: AbortController | undefined;
+const segmentCache = new Map<number, Awaited<ReturnType<typeof api.fileContent>>>();
 
 function cancelRead() {
   generation += 1;
@@ -36,6 +37,7 @@ function clampOffset(value: number) {
 }
 
 function resetSegment() {
+  segmentCache.clear();
   start.value = 0;
   end.value = 0;
   requestedOffset.value = 0;
@@ -53,7 +55,7 @@ function findIndexNearCharacter(value: number) {
     Math.abs(match.start - value) < Math.abs(matches.value[nearest].start - value) ? index : nearest, 0);
 }
 
-async function read(offset: number, focusOffset?: number) {
+async function read(offset: number, focusOffset?: number, refresh = false) {
   if (!props.file) return;
   cancelRead();
   const current = generation;
@@ -64,11 +66,19 @@ async function read(offset: number, focusOffset?: number) {
   controller = activeController;
   busy.value = true;
   try {
-    const result = await api.fileContent(props.file.id, from, FILE_SEGMENT_BYTES, activeController.signal);
+    // 只复用不可追加的READY正文；手动重新读取绕过并清除缓存，保留故障复验能力。
+    if (refresh) segmentCache.clear();
+    const cached = props.file.status === 'READY' ? segmentCache.get(from) : undefined;
+    const result = cached ?? await api.fileContent(props.file.id, from, FILE_SEGMENT_BYTES, activeController.signal);
     if (current !== generation || activeController.signal.aborted) return;
     const bytes = Uint8Array.from(atob(result.data), value => value.charCodeAt(0));
     validateSegmentResponse(result.fileId, props.file.id, from, result.nextOffset, bytes.length,
       FILE_SEGMENT_BYTES, result.sessionId, props.file.sessionId);
+    if (props.file.status === 'READY') {
+      segmentCache.delete(from);
+      segmentCache.set(from, result);
+      if (segmentCache.size > 8) segmentCache.delete(segmentCache.keys().next().value!);
+    }
     // 单次段独立解码，避免跳转时带入上一段尾部 UTF-8 或终端控制码状态。
     const firstComplete = firstCompleteUtf8Offset(bytes);
     const completeLength = completeUtf8Length(bytes);
@@ -141,7 +151,7 @@ onBeforeUnmount(cancelRead);
     <div class="file-viewer-tools">
       <el-button :icon="ArrowLeft" :disabled="busy || start === 0" @click="previousSegment">上一段</el-button>
       <el-button :icon="ArrowRight" :disabled="busy || eof" @click="nextSegment">下一段</el-button>
-      <el-button :icon="RotateCcw" :loading="busy" @click="read(requestedOffset)">重新读取</el-button>
+      <el-button :icon="RotateCcw" :loading="busy" @click="read(requestedOffset, undefined, true)">重新读取</el-button>
       <el-button :icon="Search" :type="findOpen ? 'primary' : 'default'" @click="findOpen = true">段内查找</el-button>
       <span class="segment-size">每段最多 256 KiB</span>
     </div>

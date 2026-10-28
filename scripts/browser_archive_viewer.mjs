@@ -169,7 +169,10 @@ try {
   await dialog.getByRole("button", { name: "下一段", exact: true }).click();
   await page.waitForTimeout(80);
   const initialRequest = Math.max(0, matchOffset - 8 * 1024 - 128);
-  assert.deepEqual(contentRequests.slice(0, 3), [initialRequest, 0, initialRequest], "前后翻段必须恢复命中原始锚点");
+  assert.deepEqual(contentRequests, [initialRequest, 0], "返回已浏览封存片段应命中有界缓存，不重复网络读取");
+  await dialog.getByRole("button", { name: "重新读取", exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.file-viewer-content .el-loading-mask'));
+  assert.deepEqual(contentRequests, [initialRequest, 0, initialRequest], "显式重新读取必须绕过缓存并保留原锚点");
   await dialog.getByRole("button", { name: "段内查找", exact: true }).click({ force: true });
   await page.waitForTimeout(100);
   await page.locator(".log-find-bar input").fill(keyword);

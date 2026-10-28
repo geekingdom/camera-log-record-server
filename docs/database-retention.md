@@ -219,3 +219,7 @@ python scripts/backfill_runtime_event_time.py --apply
 当前身份的 API 文档资格不保存派生标记：每次登录、`/auth/me` 与改密均以服务器时间查询 `tokens(userId,revoked,expiresAt)`，接受未撤销且 `expiresAt` 为 null/缺失或未来的至少一条服务账号。启动创建命名复合索引 `tokens_active_user_expiry(userId,revoked,expiresAt)`；`expiresAt: null` 的 Mongo 匹配同时覆盖缺失字段，因此查询不增加重复 `$exists` 分支。该索引不改变令牌保存、轮换、撤销或保留策略；令牌仍随用户软删除保留审计归属，不能增加 TTL。
 
 真实副本集 Explain 由 `scripts/verify_service_token_eligibility_index.py` 在随机测试库执行。脚本要求获胜计划包含 `tokens_active_user_expiry`，并分别验证未来到期、显式 null、缺失 `expiresAt` 的有效账号均返回1条且至多扫描1份令牌文档；仅有过期/已撤销账号的用户返回0条且扫描0键/0文档。本机 `sharing` 副本集（`127.0.0.1:27119`）实测未来到期分支扫描1键/1文档、无有效账号扫描0键/0文档；脚本结束后删除随机测试库和临时日志目录，不触及业务库。
+
+资源工作台默认“查看全部”，“仅查看自己”不保存派生可见名单：每次列表请求只以当前身份在 `createdBy` 和 `sharedUserIds` 两个分支匹配，`includeDeleted` 仍独立控制软删除范围。部分索引 `resources_visible_created(createdAt,id)`、`resources_creator_visible_created(createdBy,createdAt,id)` 和多键 `resources_shared_visible_created(sharedUserIds,createdAt,id)` 只收录 `deletedAt:null` 的当前资源；`resources_created(createdAt,id)`、`resources_creator_created(createdBy,createdAt,id)`、`resources_shared_created(sharedUserIds,createdAt,id)` 覆盖包含软删除的历史范围。它们只增加资源创建、编辑共享名单和软删除时的索引维护，不新建集合、TTL或持续历史记录。真实副本集的 `scripts/verify_resource_sharing_transactions.py` 对默认与“仅查看自己”的四种软删除范围和默认排序执行 Explain，要求相应分支命中索引、分页不阻塞排序，并在结束后删除随机测试库。
+
+归档交互阅读新增纯内存有界尾部：每个空闲归档句柄最多512KiB，128句柄最多64MiB，另有4个在用读取线程；空闲30秒回收，节点退出关闭。浏览器最多8个256KiB正文响应（Base64约2.67MiB），关闭/切换清空，不写Mongo或本地持久缓存，不影响权威归档与既有保留期。

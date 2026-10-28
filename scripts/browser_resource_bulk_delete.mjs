@@ -34,8 +34,9 @@ try {
     if (method === "GET" && path === "/api/v1/resources") {
       requests.lists.push(Object.fromEntries(url.searchParams));
       const creator = url.searchParams.get("createdBy");
+      const mine = url.searchParams.get("mine") === "true";
       const includeDeleted = url.searchParams.get("includeDeleted") === "true";
-      return json(route, pageOf(resources.filter(item => (includeDeleted || !item.deletedAt) && (!creator || item.createdBy === creator))));
+      return json(route, pageOf(resources.filter(item => (includeDeleted || !item.deletedAt) && (!creator || item.createdBy === creator) && (!mine || item.createdBy === actor().id || item.sharedUserIds?.includes(actor().id)))));
     }
     if (method === "GET" && path === "/api/v1/users/creators") {
       requests.creators += 1;
@@ -70,7 +71,7 @@ try {
   assert.equal(requests.lists.at(-1).createdBy, "owner", "创建人筛选必须传给资源列表接口");
   await page.getByText("查看全部", { exact: true }).click();
   await page.waitForTimeout(100);
-  assert.equal(requests.lists.at(-1).createdBy, "admin", "关闭查看全部后管理员也只查询本人资源");
+  assert.equal(requests.lists.at(-1).mine, "true", "关闭查看全部后查询本人及共享资源");
   await page.getByText("查看全部", { exact: true }).click();
   await page.waitForTimeout(100);
   await page.getByText("包含已删除资源", { exact: true }).click();
@@ -95,10 +96,12 @@ try {
 
   operatorMode = true; controlAllowed = true; await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
-  assert.equal(requests.lists.at(-1).createdBy, "owner", "普通用户默认只查询本人资源");
-  assert.equal(await page.getByRole("row").filter({ hasText: "外部资源" }).count(), 0, "普通用户默认范围不得显示他人资源");
+  assert.equal(requests.lists.at(-1).createdBy, undefined, "普通用户默认查看全部资源");
+  assert.equal(await page.getByRole("row").filter({ hasText: "外部资源" }).count(), 1, "普通用户默认显示全部资源");
+  await page.getByText("仅查看自己", { exact: true }).click(); await page.waitForTimeout(100);
+  assert.equal(requests.lists.at(-1).mine, "true");
+  assert.equal(await row("外部资源").count(), 0);
   await page.getByText("查看全部", { exact: true }).click(); await page.waitForTimeout(100);
-  assert.equal(requests.lists.at(-1).createdBy, undefined, "普通用户可切换至全部可见资源范围");
   assert.equal(await row("外部资源").locator("input[type=checkbox]").isDisabled(), true, "非创建者不得被批量选择");
   controlAllowed = false; await page.reload({ waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();

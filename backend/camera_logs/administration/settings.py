@@ -31,9 +31,9 @@ from camera_logs.common.retention_config import RecordRetentionConfig, retention
 from camera_logs.common.security import actor, authorize
 from camera_logs.logs.segment_size import (
     DEFAULT_LOG_SEGMENT_MIB,
-    LOG_SEGMENT_STEP_MIB,
     MAX_LOG_SEGMENT_MIB,
     MIN_LOG_SEGMENT_MIB,
+    is_valid_log_segment_mib,
     normalize_log_segment_mib,
 )
 from camera_logs.node.health import fresh
@@ -79,11 +79,19 @@ class PlatformSettingsPatch(SettingsModel):
     serviceLogRetentionDays: int | None = Field(default=None, ge=1, le=MAX_SERVICE_LOG_RETENTION_DAYS,
                                                  strict=True, description="API 和 Worker 服务运行 JSONL 的保留天数")
     logSegmentMiB: int | None = Field(default=None, ge=MIN_LOG_SEGMENT_MIB, le=MAX_LOG_SEGMENT_MIB,
-                                      multiple_of=LOG_SEGMENT_STEP_MIB, strict=True,
-                                      description="单个原始日志分片最大大小，单位MiB；取值为10至100的5 MiB步长。Worker每秒刷新，刷新成功后新分片生效；已打开分片按原上限收尾；下载作业启动时固定该值。")
+                                      strict=True,
+                                      description="单个原始日志分片最大大小，单位MiB；取值为10至510的5 MiB步长，或512。Worker每秒刷新，刷新成功后新分片生效；已打开分片按原上限收尾；下载作业启动时固定该值。")
     resourceMonitor: ResourceMonitorConfig | None = Field(default=None, description='管理员维护的设备 CPU 与内存采样配置，保存后下一轮采样生效。')
     recordRetention: RecordRetentionConfig | None = Field(default=None, description='审计、运行事件及已结束运行明细的保留天数；0禁用对应维护，活动及不确定引用继续保护。')
     version: int = Field(ge=1, strict=True, description='当前配置版本号，用于乐观锁并发修改校验。')
+
+    @field_validator("logSegmentMiB")
+    @classmethod
+    def validate_log_segment_mib(cls, value):
+        """允许常规五 MiB 档位及物理分片支持的 512 MiB 上限端点。"""
+        if value is not None and not is_valid_log_segment_mib(value):
+            raise ValueError("日志分片大小必须为10至510的5 MiB步长，或512 MiB")
+        return value
 
 
 class NodeRegistration(SettingsModel):

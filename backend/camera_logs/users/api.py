@@ -48,6 +48,11 @@ async def _login_budget(repo, username, address):
             raise HTTPException(429, "登录尝试过于频繁，请稍后再试")
 
 
+async def _record_login_failure(repo, submitted_username: str) -> None:
+    """记录认证失败的提交账号；主体保持匿名且绝不携带密码或请求正文。"""
+    await repo.audit("anonymous", "login_failed", None, metadata={"username": submitted_username})
+
+
 def install_user_routes(app):
     """安装 cookie 登录与用户管理；第三方令牌保留独立鉴权入口。"""
     User = Annotated[dict, Depends(actor)]
@@ -59,7 +64,12 @@ def install_user_routes(app):
     async def login(body: Login, request: Request, response: Response):
         check_origin(request, write=True)
         username = body.username.strip().lower()
-        await _login_budget(repo(), username, request.client.host if request.client else "unknown")
+        try:
+            await _login_budget(repo(), username, request.client.host if request.client else "unknown")
+        except HTTPException as error:
+            if error.status_code == 429:
+                await _record_login_failure(repo(), body.username)
+            raise
         # 软删除账号保留历史归属且允许同名新建；登录只选择当前活动身份，
         # 不能让旧文档抢先匹配并把新账号误判为不可用。
         user = await repo().db.users.find_one({"username": username, "deletedAt": None})
@@ -69,7 +79,7 @@ def install_user_routes(app):
             await password_work(repo(), hash_password, body.password)
             valid = False
         if not valid or not user or not user.get("enabled") or user.get("deletedAt"):
-            await repo().audit("anonymous", "login_failed", None)
+            await _record_login_failure(repo(), body.username)
             raise HTTPException(401, "用户名或密码错误，或账号不可用")
         # 登录入口没有 actor 依赖，只在凭据校验成功后绑定访问日志主体。
         request.state.actor = {"id": user["id"]}

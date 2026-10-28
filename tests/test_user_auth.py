@@ -1,5 +1,6 @@
 """验证内置管理员、浏览器会话和子账户管理的安全边界。"""
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -44,6 +45,31 @@ def change_initial_password(client, password="changed-admin-password"):
     }, headers=CSRF)
     assert result.status_code == 200, result.text
     return password
+
+
+def test_login_failure_audit_keeps_submitted_username_without_credentials(client, monkeypatch):
+    """登录失败及限流仍是匿名主体，只保留用户实际填写的账号。"""
+    async def failed_password_work(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr("camera_logs.users.api.password_work", failed_password_work)
+    submitted_username = "Audit.User "
+    for _ in range(10):
+        response = login(client, submitted_username, "never-store-this-password")
+        assert response.status_code == 401, response.text
+    limited = login(client, submitted_username, "never-store-this-password")
+    assert limited.status_code == 429, limited.text
+
+    async def failure_audits():
+        return [row async for row in client.app.state.repo.db.audit.find({"action": "login_failed"})]
+
+    audits = client.portal.call(failure_audits)
+    assert len(audits) == 11
+    for audit in audits:
+        assert audit["actor"] == "anonymous"
+        assert audit["metadata"] == {"username": submitted_username}
+        serialized = json.dumps(audit, default=str)
+        assert "password" not in serialized and "passwordHash" not in serialized
 
 
 def create_operator(client, *, username="operator", scopes=None):

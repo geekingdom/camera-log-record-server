@@ -16,10 +16,11 @@ EVENT = obj(
         "sourceKind": field("string", "来源类别：SYSTEM、ANONYMOUS、BOOTSTRAP、USER、SERVICE_TOKEN、NODE、TASK_RUNTIME、SYSTEM_RUNTIME、UNAUTHENTICATED_HTTP、REQUEST_IDENTITY_MISSING 或 HISTORICAL。"),
         "sourceName": field("string", "主体来源展示名。"),
         "sourceDetail": field("string", "主体来源详情。", nullable=True),
-        "metadata": obj("用户删除触发的资源或任务处置审计上下文；只保存归属用户标识。", {
+        "metadata": obj("用户删除资源处置或登录失败审计的上下文；不保存密码、哈希或原始请求正文。", {
             "createdBy": field("string", "处置前的资源或任务归属用户ID，即被删除的用户。"),
             "targetUserId": field("string", "转移后的接收用户ID；同步删除资源时省略。"),
-        }, ("createdBy",)),
+            "username": field("string", "登录失败时用户在请求 username 字段中实际填写的账号；不用于认证身份归属。"),
+        }, ()),
         "action": field("string", "审计动作代码。", nullable=True),
         "targetId": field("string", "受操作对象标识。", nullable=True),
         "targetName": field("string", "对象展示名。", nullable=True),

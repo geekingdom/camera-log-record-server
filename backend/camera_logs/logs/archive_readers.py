@@ -17,13 +17,16 @@ class _Reader:
     stack: ExitStack
     source: LogSource
     touched: float
+    tail: bytes = b""
+    tail_start: int = 0
 
 
 class ArchiveReaders:
     """最多保留 128 个空闲句柄，另有受上层四线程限制的在用句柄。
 
-    缓存键包含采集文件身份、路径版本、精确成员和下一字节偏移。借用时从缓存
-    移除，返回时重新登记；重复或交错查询不能共享一个正在移动的解压游标。
+    缓存键包含采集文件身份、路径版本、精确成员和解压游标。每个句柄最多保存
+    512KiB尾部，支持查看器重叠及上一段；空闲正文最多64MiB。在用条目独占，
+    借用时从缓存移除，重复或交错查询不能共享正在移动的解压游标。
     """
 
     def __init__(self, capacity=128, idle_seconds=30):
@@ -58,7 +61,14 @@ class ArchiveReaders:
             stale = [old for old in self._idle if old[1] == key[1] and old[2] != key[2]]
             for old in stale:
                 self._idle.pop(old).stack.close()
-            return self._idle.pop(key, None)
+            entry = self._idle.pop(key, None)
+            if entry is not None:
+                return entry
+            # 仅借用包含目标偏移的有界尾部，不让小范围回看触发gzip全前缀重放。
+            candidate = next((old for old, value in reversed(self._idle.items())
+                              if old[:-1] == key[:-1]
+                              and value.tail_start <= key[-1] <= old[-1]), None)
+            return self._idle.pop(candidate) if candidate is not None else None
 
     def _put(self, key, entry):
         with self._lock:
@@ -82,7 +92,7 @@ class ArchiveReaders:
         if entry is None:
             stack = ExitStack()
             try:
-                source = stack.enter_context(open_log_source(path, member))
+                source = stack.enter_context(open_log_source(path, member, True))
             except BaseException:
                 stack.close()
                 raise
@@ -98,17 +108,24 @@ class ArchiveReaders:
                 read_limiter.consume(len(data))
                 return data
             position = source.stream.tell()
-            stream = LimitedReader(source.stream, cap - position)
+            size = min(limit, cap - offset)
+            cached = entry.tail[max(0, offset - entry.tail_start):max(0, offset - entry.tail_start) + size] if offset < position else b""
+            stream = LimitedReader(source.stream, max(0, cap - position))
             remaining = offset - position
             while remaining > 0:
                 skipped = stream.read(min(262144, remaining))
                 if not skipped:
                     return b""
                 remaining -= len(skipped)
-            data = stream.read(limit)
-            next_offset = offset + len(data)
+            fresh = stream.read(size - len(cached)) if len(cached) < size else b""
+            data = cached + fresh
+            if fresh:
+                previous = entry.tail if offset <= position else b""
+                entry.tail = (previous + fresh)[-524288:]
+                entry.tail_start = source.stream.tell() - len(entry.tail)
+            next_offset = source.stream.tell()
             # 原路径回退的临时归档句柄不缓存；只复用已确认版本且仍有正文的归档。
-            if archived and source.version == version and data and next_offset < source.size:
+            if archived and source.version == version and data:
                 self._put(key[:-1] + (next_offset,), entry)
                 entry = None
             return data

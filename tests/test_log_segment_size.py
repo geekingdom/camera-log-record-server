@@ -16,13 +16,17 @@ from camera_logs.logs.storage import HourlyWriter
 
 
 def test_segment_size_validation_defaults_legacy_or_invalid_values():
-    """旧配置、布尔值、越界值和非五 MiB 步长均只能回退为十 MiB。"""
+    """旧配置、布尔值、越界值和非法档位均只能回退为十 MiB。"""
     mib = 1024 * 1024
     assert log_segment_bytes(None) == 10 * mib
     assert log_segment_bytes(True) == 10 * mib
     assert log_segment_bytes(9) == 10 * mib
     assert log_segment_bytes(11) == 10 * mib
     assert log_segment_bytes(25) == 25 * mib
+    assert log_segment_bytes(510) == 510 * mib
+    assert log_segment_bytes(512) == 512 * mib
+    assert log_segment_bytes(511) == 10 * mib
+    assert log_segment_bytes(513) == 10 * mib
 
 
 async def test_shared_cache_refresh_keeps_previous_value_when_database_fails():

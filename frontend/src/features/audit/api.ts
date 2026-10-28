@@ -5,6 +5,13 @@ export type EventLevel = "INFO" | "WARNING" | "ERROR";
 export type EventOutcome =
   "SUCCEEDED" | "FAILED" | "PENDING" | "CANCELLED" | "UNKNOWN";
 
+/** 审计事件的公开上下文；失败登录只保留提交账号，不包含密码或哈希。 */
+export interface EventMetadata {
+  createdBy?: string;
+  targetUserId?: string;
+  username?: string;
+}
+
 export interface EventBase {
   responseValidation?: {
     count: number;
@@ -33,13 +40,14 @@ export interface EventBase {
   httpStatus?: number;
   status?: number | string;
   durationMs?: number;
+  action?: string;
+  metadata?: EventMetadata;
   [key: string]: unknown;
 }
 
 export interface AuditEvent extends EventBase {
   actor?: string;
   actorName?: string;
-  action?: string;
   targetId?: string;
   targetName?: string;
 }

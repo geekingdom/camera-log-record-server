@@ -18,12 +18,17 @@ const ownerResource = {
   id: "owner-resource", name: "所有者资源", kind: "SERIAL_SERVER", ip: "192.0.2.101",
   createdBy: "owner", createdByName: "资源所有者", sharedUserIds: ["share-a"], version: 3,
 };
+const foreignResource = {
+  id: "foreign-resource", name: "其他人的资源", kind: "SERIAL_SERVER", ip: "192.0.2.103",
+  createdBy: "other-user", createdByName: "其他用户", sharedUserIds: [], version: 1,
+};
 const sharedResource = {
   id: "shared-resource", name: "共享网络资源", kind: "HIKVISION_NETWORK", ip: "192.0.2.102",
   username: "device", authType: "DIGEST", healthStatus: "ONLINE", createdBy: "owner",
   createdByName: "资源所有者", sharedUserIds: ["share-user"], version: 4,
 };
 const writes = [];
+const resourceQueries = [];
 let mode = "owner";
 let navigationGeneration = 0;
 let currentUser = {
@@ -37,7 +42,7 @@ async function json(route, body, status = 200) {
 }
 
 function resources() {
-  return mode === "owner" ? [ownerResource] : [sharedResource];
+  return mode === "owner" ? [ownerResource, foreignResource] : [sharedResource];
 }
 
 await context.route("**/api/v1/**", async route => {
@@ -48,7 +53,13 @@ await context.route("**/api/v1/**", async route => {
   const payload = request.postData() ? request.postDataJSON() : {};
   if (method === "GET" && path === "/api/v1/auth/me") return json(route, { user: currentUser });
   if (method === "GET" && path === "/api/v1/dashboard") return json(route, dashboardFixture(undefined, 7, currentUser.isAdmin, currentUser.scopes.includes("logs:read")));
-  if (method === "GET" && path === "/api/v1/resources") return json(route, { items: resources(), total: resources().length, page: 1, pageSize: 20 });
+  if (method === "GET" && path === "/api/v1/resources") {
+    resourceQueries.push(url.search);
+    const items = url.searchParams.get("mine") === "true"
+      ? resources().filter(item => item.createdBy === currentUser.id || item.sharedUserIds.includes(currentUser.id))
+      : resources();
+    return json(route, { items, total: items.length, page: 1, pageSize: 20 });
+  }
   if (method === "GET" && path === "/api/v1/users/share-targets") return json(route, { items: shareTargets, total: shareTargets.length, page: 1, pageSize: 100 });
   if (method === "GET" && path === `/api/v1/resources/${ownerResource.id}`) return json(route, ownerResource);
   if (method === "GET" && path === `/api/v1/resources/${sharedResource.id}`) return json(route, sharedResource);
@@ -97,6 +108,37 @@ try {
   await mkdir(screenshots, { recursive: true });
   await reload();
   await page.getByRole("heading", { name: "设备资源", exact: true }).waitFor();
+
+  // 所有用户默认查看全部；仅看自己由服务端身份范围筛选，软删除开关不改变该范围。
+  const showAll = page.getByRole("checkbox", { name: "查看全部", exact: true });
+  const onlyMine = page.getByRole("checkbox", { name: "仅查看自己", exact: true });
+  const includeDeleted = page.getByRole("checkbox", { name: "包含已删除资源", exact: true });
+  assert.equal(await showAll.isChecked(), true, "所有用户进入资源页默认查看全部");
+  assert.equal(await onlyMine.isChecked(), false, "默认查看全部时不应同时仅查看自己");
+  await page.getByText(foreignResource.name, { exact: true }).waitFor();
+  await Promise.all([
+    page.waitForRequest(request => new URL(request.url()).pathname === "/api/v1/resources" && new URL(request.url()).searchParams.get("mine") === "true"),
+    page.getByText("仅查看自己", { exact: true }).click(),
+  ]);
+  await page.getByText(foreignResource.name, { exact: true }).waitFor({ state: "detached" });
+  assert.equal(await showAll.isChecked(), false, "仅查看自己必须取消查看全部");
+  assert.equal(await onlyMine.isChecked(), true, "仅查看自己必须保持勾选");
+  await Promise.all([
+    page.waitForRequest(request => {
+      const query = new URL(request.url()).searchParams;
+      return new URL(request.url()).pathname === "/api/v1/resources" && query.get("mine") === "true" && query.get("includeDeleted") === "true";
+    }),
+    page.getByText("包含已删除资源", { exact: true }).click(),
+  ]);
+  await Promise.all([
+    page.waitForRequest(request => new URL(request.url()).pathname === "/api/v1/resources" && new URL(request.url()).searchParams.get("mine") === "true" && !new URL(request.url()).searchParams.has("includeDeleted")),
+    page.getByText("包含已删除资源", { exact: true }).click(),
+  ]);
+  await Promise.all([
+    page.waitForRequest(request => new URL(request.url()).pathname === "/api/v1/resources" && !new URL(request.url()).searchParams.has("mine")),
+    page.getByText("查看全部", { exact: true }).click(),
+  ]);
+  assert.equal(resourceQueries.some(query => new URLSearchParams(query).get("mine") === "true"), true, "仅查看自己必须请求 mine=true");
 
   // 默认不共享的单台创建及一人、多人的选择都必须将显式 ID 发送给 API。
   await page.getByRole("button", { name: "新建资源", exact: true }).click();

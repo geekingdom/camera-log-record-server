@@ -56,8 +56,8 @@ def test_platform_log_segment_size_is_documented_with_a_valid_example(client):
     operations = {item["id"]: item for item in reference["operations"]}
     field = reference["schemas"]["PlatformSettingsPatch"]["properties"]["logSegmentMiB"]
     numeric = next(item for item in field["anyOf"] if item.get("type") == "integer")
-    assert numeric["minimum"] == 10 and numeric["maximum"] == 100 and numeric["multipleOf"] == 5
-    assert "5 MiB" in field["description"]
+    assert numeric["minimum"] == 10 and numeric["maximum"] == 512
+    assert "10至510" in field["description"] and "或512" in field["description"]
     assert "Worker每秒刷新，刷新成功后新分片生效" in field["description"]
     assert "已打开分片按原上限收尾" in field["description"]
     assert "下载作业启动时固定" in field["description"]

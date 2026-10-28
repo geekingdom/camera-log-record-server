@@ -69,3 +69,34 @@ async def test_initialize_creates_due_network_health_index(tmp_path):
 
     index = (await database.resources.index_information())["kind_1_deletedAt_1_nextHealthCheckAt_1"]
     assert index["key"] == [("kind", 1), ("deletedAt", 1), ("nextHealthCheckAt", 1)]
+
+
+async def test_resource_mine_list_indexes_cover_owner_and_shared_branches(tmp_path):
+    """默认排序的本人资源分页分别覆盖创建者和多键共享用户分支。"""
+    database = AsyncMongoMockClient().db
+    repo = Repository(database, Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+
+    await repo.initialize()
+
+    indexes = await database.resources.index_information()
+    assert indexes["resources_visible_created"]["key"] == [
+        ("createdAt", -1), ("id", 1),
+    ]
+    assert indexes["resources_visible_created"]["partialFilterExpression"] == {"deletedAt": None}
+    assert indexes["resources_created"]["key"] == [
+        ("createdAt", -1), ("id", 1),
+    ]
+    assert indexes["resources_creator_visible_created"]["key"] == [
+        ("createdBy", 1), ("createdAt", -1), ("id", 1),
+    ]
+    assert indexes["resources_creator_visible_created"]["partialFilterExpression"] == {"deletedAt": None}
+    assert indexes["resources_shared_visible_created"]["key"] == [
+        ("sharedUserIds", 1), ("createdAt", -1), ("id", 1),
+    ]
+    assert indexes["resources_shared_visible_created"]["partialFilterExpression"] == {"deletedAt": None}
+    assert indexes["resources_creator_created"]["key"] == [
+        ("createdBy", 1), ("createdAt", -1), ("id", 1),
+    ]
+    assert indexes["resources_shared_created"]["key"] == [
+        ("sharedUserIds", 1), ("createdAt", -1), ("id", 1),
+    ]

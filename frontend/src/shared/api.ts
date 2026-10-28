@@ -180,7 +180,7 @@ export const api = {
   resources: (
     page?: number,
     pageSize?: number,
-    filters?: { search?: string; model?: string; subSerialNumber?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string; hasCoredumps?: "true" | "false"; sortBy?: string; sortOrder?: "asc" | "desc" },
+    filters?: { search?: string; model?: string; subSerialNumber?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string; mine?: "true"; hasCoredumps?: "true" | "false"; sortBy?: string; sortOrder?: "asc" | "desc" },
   ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
   resource: (id: string) => request<Resource>(`/resources/${id}`),
   /** 按上海自然月查询有采样的日期，不读取整月指标明细。 */

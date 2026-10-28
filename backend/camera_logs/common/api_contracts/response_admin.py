@@ -57,7 +57,7 @@ PLATFORM_SETTINGS = obj(
         "clusterCapacity": field("integer", "集群任务容量上限。"),
         "liveLogBufferMiB": field("integer", "浏览器实时日志保留上限，单位 MiB。"),
         "serviceLogRetentionDays": field("integer", "API/Worker 运行日志保留天数。"),
-        "logSegmentMiB": field("integer", "单个原始日志分片最大大小，单位 MiB；10 至 100，每 5 MiB 一档。Worker每秒刷新，刷新成功后新分片生效；已打开分片按原上限收尾；下载作业启动时固定该值。"),
+        "logSegmentMiB": field("integer", "单个原始日志分片最大大小，单位 MiB；10 至 510 每 5 MiB 一档，另允许 512 MiB 上限端点。Worker每秒刷新，刷新成功后新分片生效；已打开分片按原上限收尾；下载作业启动时固定该值。"),
         "resourceMonitor": MONITOR,
         "recordRetention": obj(
             "数据库增长记录保留策略；有效引用仍受保护。",

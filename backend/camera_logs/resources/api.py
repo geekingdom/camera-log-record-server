@@ -143,7 +143,8 @@ def install_resource_routes(app, repo, listing):
     @app.get("/api/v1/resources")
     async def resources(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
                         kind: Annotated[str | None, Query(description='按设备类型精确筛选：HIKVISION_NETWORK（海康网络设备）或 SERIAL_SERVER（串口服务器）。')] = None, search: str | None = Query(None, max_length=256, description='按资源名称、地址、型号、序列号或软件版本进行综合检索。'),
-                        createdBy: str | None = Query(None, max_length=128, description='按资源、任务或模板的创建用户标识筛选。'),
+                        createdBy: str | None = Query(None, max_length=128, description='按资源创建用户标识精确筛选；与 mine 同时传递时取交集。'),
+                        mine: Annotated[bool, Query(description='是否仅返回当前认证用户创建或已被显式共享给该用户的资源；服务端只使用当前身份，不能指定其他用户。')] = False,
                         includeDeleted: Annotated[bool, Query(description='是否包含已软删除的设备资源；默认 false，true 同时包含正常和已删除资源。')] = False, taskLimit: int = Query(100, ge=1, le=500, description='资源列表中每个资源内嵌任务摘要的最大返回数量。'),
                         name: str | None = Query(None, max_length=128, description='按资源名称或 Coredump 文件名的字面子串筛选。'), ip: Annotated[IPvAnyAddress | None, Query(description='按设备资源或节点的精确网络地址筛选。')] = None,
                         model: str | None = Query(None, max_length=256, description='按海康设备型号的字面子串筛选资源。'),
@@ -153,24 +154,28 @@ def install_resource_routes(app, repo, listing):
         """资源发现：search跨名称/IP/型号/序列号/软件版本搜索；独立字段取交集，IP精确匹配。
 
         返回授权范围内任务摘要，默认最多100条；tasksTruncated为true时使用tasksUrl分页读取。
-        createdBy 是创建用户 ID 的精确筛选，用于工作台“仅看自己”和创建用户目录筛选。
+        createdBy 是创建用户 ID 的精确筛选，用于创建用户目录筛选；mine 由服务端当前身份
+        同时匹配创建者和 sharedUserIds，不能用客户端传入的创建者标识模拟共享可见范围。
         除IP外均按不区分大小写的字面子串匹配，不解释正则表达式。
         """
         authorize(user, "tasks:read")
-        query = {} if includeDeleted else {"deletedAt": None}
+        conditions = [] if includeDeleted else [{"deletedAt": None}]
         if kind:
-            query["kind"] = kind
+            conditions.append({"kind": kind})
         if createdBy:
-            query["createdBy"] = createdBy
+            conditions.append({"createdBy": createdBy})
+        if mine:
+            conditions.append({"$or": [{"createdBy": user["id"]}, {"sharedUserIds": user["id"]}]})
         if search:
-            query["$or"] = [{field: {"$regex": re.escape(search), "$options": "i"}}
-                            for field in ("name", "ip", "model", "subSerialNumber", "softwareVersion")]
+            conditions.append({"$or": [{field: {"$regex": re.escape(search), "$options": "i"}}
+                                for field in ("name", "ip", "model", "subSerialNumber", "softwareVersion")]})
         for field, value in (("name", name), ("model", model), ("subSerialNumber", subSerialNumber),
                              ("softwareVersion", softwareVersion)):
             if value:
-                query[field] = {"$regex": re.escape(value), "$options": "i"}
+                conditions.append({field: {"$regex": re.escape(value), "$options": "i"}})
         if ip is not None:
-            query["ip"] = str(ip)
+            conditions.append({"ip": str(ip)})
+        query = {} if not conditions else conditions[0] if len(conditions) == 1 else {"$and": conditions}
         result = await page_resources(repo().db, query, page, pageSize, has_coredumps=hasCoredumps,
                                       sort_by=sortBy, sort_order=sortOrder)
         if hasCoredumps is None:

@@ -75,6 +75,19 @@ def test_user_resource_disposition_audit_metadata_is_documented(client):
     assert_documented(rows[0], EVENT)
 
 
+def test_login_failed_audit_username_metadata_is_documented(client):
+    """失败登录审计展示提交账号，但合同不要求资源处置专有字段。"""
+    repo = client.app.state.repo
+
+    async def produce():
+        await repo.audit("anonymous", "login_failed", None, metadata={"username": "Audit.User"})
+        return await present_events(repo.db, [row async for row in repo.db.audit.find({})])
+
+    rows = client.portal.call(produce)
+    assert rows[0]["metadata"] == {"username": "Audit.User"}
+    assert_documented(rows[0], EVENT)
+
+
 def test_runtime_event_producers_have_documented_fields(client):
     """实际从机、调试和时钟回拨写入器生成事件，再经公开展示器核对嵌套字段。"""
     from types import SimpleNamespace

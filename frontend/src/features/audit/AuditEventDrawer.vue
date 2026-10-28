@@ -15,6 +15,10 @@ const open = defineModel<boolean>({ default: false });
 const timestamp = computed(() => formatTime(props.row?.createdAt ?? props.row?.detectedAt));
 const raw = computed(() => JSON.stringify(props.row, null, 2));
 const hasReason = computed(() => Boolean(props.row?.reason));
+const submittedUsername = computed(() => {
+  const username = props.row?.metadata?.username;
+  return props.row?.action === "login_failed" && typeof username === "string" && username ? username : undefined;
+});
 
 function value(input: unknown) {
   return input === undefined || input === null || input === "" ? "-" : String(input);
@@ -101,6 +105,7 @@ async function copyRequestId() {
           <dt>操作者/来源</dt><dd>{{ eventSource(row).name }}</dd>
           <dt>来源说明</dt><dd>{{ eventSource(row).detail }}</dd>
           <dt>操作者</dt><dd>{{ value(row.actorName || row.actor) }}</dd>
+          <template v-if="submittedUsername"><dt>填写用户名</dt><dd>{{ submittedUsername }}</dd></template>
           <dt>来源 IP</dt><dd>{{ value(row.clientIp) }}</dd>
           <dt>路由</dt><dd>{{ value(row.route) }}</dd>
           <dt>方法</dt><dd>{{ value(row.method) }}</dd>
