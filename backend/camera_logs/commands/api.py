@@ -13,7 +13,6 @@ from camera_logs.common.security import actor, authorize
 from camera_logs.node.health import measurements, node_health
 from camera_logs.node.input_admission import input_rate_limit
 from camera_logs.node.write_pressure import write_latency_limit
-from camera_logs.resources.sharing import authorize_task_operation
 from camera_logs.users.service_tokens import (
     create_service_token,
     public_token,
@@ -31,7 +30,6 @@ def install_command_routes(app, repo, listing):
     async def command(task_id: Annotated[str, ApiPath(description='要写入手动命令的采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], body: InitialCommand, request: Request, user: User):
         """将手动命令加入当前采集会话队列，并限制每任务待执行数量。"""
         authorize(user, "commands:send", task_id)
-        await authorize_task_operation(repo(), user, await repo().get("tasks", task_id))
         return public(await submit_manual(repo(), user["id"], task_id,
                                           request.headers.get("Idempotency-Key"), body.model_dump(), identity=user))
 
@@ -78,7 +76,7 @@ def install_command_routes(app, repo, listing):
         """创建绑定用户的一次性令牌，后续权限始终跟随该用户的实时状态。"""
         authorize(user, "admin")
         response.headers["Cache-Control"] = "no-store"
-        return await create_service_token(repo(), user["id"], body)
+        return await create_service_token(repo(), user["id"], body, identity=user)
 
     @app.get("/api/v1/service-tokens")
     async def service_tokens(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。')):
@@ -104,17 +102,17 @@ def install_command_routes(app, repo, listing):
         """管理员修改令牌名称或绑定用户；下一次 Bearer 认证立即使用新用户权限。"""
         authorize(user, "admin")
         from camera_logs.users.service_tokens import update_service_token
-        return await update_service_token(repo(), user["id"], identifier, body)
+        return await update_service_token(repo(), user["id"], identifier, body, identity=user)
 
     @app.post("/api/v1/service-tokens/{identifier}/rotate")
     async def rotate_token(identifier: Annotated[str, ApiPath(description='要轮换的一次性服务令牌 ID，可由创建服务令牌响应或服务令牌列表返回。')], body: TokenRotate, response: Response, user: User):
         """管理员以版本锁生成新令牌，旧令牌在事务提交后立即失效。"""
         authorize(user, "admin")
         response.headers["Cache-Control"] = "no-store"
-        return await rotate_service_token(repo(), user["id"], identifier, body.version)
+        return await rotate_service_token(repo(), user["id"], identifier, body.version, identity=user)
 
     @app.delete("/api/v1/service-tokens/{identifier}", status_code=204)
     async def revoke_token(identifier: Annotated[str, ApiPath(description='要撤销的服务令牌 ID，可由创建服务令牌响应或服务令牌列表返回。')], user: User):
         """撤销服务令牌并追加审计，不删除历史令牌记录。"""
         authorize(user, "admin")
-        await revoke_service_token(repo(), user["id"], identifier)
+        await revoke_service_token(repo(), user["id"], identifier, identity=user)

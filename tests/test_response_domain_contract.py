@@ -136,10 +136,14 @@ def test_log_hour_download_search_and_gap_responses_are_documented(client):
     _assert_response(client, "GET /api/v1/tasks/{task_id}/log-hours", client.get(f"/api/v1/tasks/{task['id']}/log-hours"))
     download = client.post("/api/v1/downloads", headers={"Idempotency-Key": "contract-download"}, json={"taskId": task["id"], "hourIds": [stamp.isoformat()], "allowPartial": False})
     _assert_response(client, "POST /api/v1/downloads", download)
+    assert download.json()["createdBy"] == download.json()["actor"]
+    assert isinstance(download.json()["createdByName"], str)
     _assert_response(client, "GET /api/v1/downloads/{identifier}", client.get(f"/api/v1/downloads/{download.json()['id']}"))
     client.portal.call(repo.db.jobs.update_one, {"id": download.json()["id"]}, {"$set": {
         "status": "SUCCEEDED", "progress": 100, "startedAt": stamp, "completedAt": stamp,
         "filename": "contract.tar.gz", "bytes": 12, "missing": ["contract-log-b"], "outputLockProtocol": 1,
+        "artifactLogSegments": [{"fileId": "contract-log-a", "hour": stamp.isoformat(),
+                                 "firstReceivedAt": stamp.isoformat(), "lastReceivedAt": stamp.isoformat()}],
     }})
     _assert_response(client, "GET /api/v1/downloads/{identifier}", client.get(f"/api/v1/downloads/{download.json()['id']}"))
     _assert_response(client, "GET /api/v1/tasks/{task_id}/downloads", client.get(f"/api/v1/tasks/{task['id']}/downloads"))

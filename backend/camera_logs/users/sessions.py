@@ -7,9 +7,10 @@ from fastapi import HTTPException
 
 from camera_logs.common.database import now
 from camera_logs.users.passwords import hash_password, password_work
+from camera_logs.users.roles import FIXED_SCOPES, effective_scopes, permission_state
 
 COOKIE = "camera_session"
-BASE_READ_SCOPES = frozenset({"tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"})
+BASE_READ_SCOPES = FIXED_SCOPES  # 保留导入兼容；基础权限现由角色模块统一定义。
 
 PUBLIC_FIELDS = ("id", "username", "displayName", "isAdmin", "builtin", "scopes",
                  "enabled", "mustChangePassword", "version", "createdAt", "updatedAt", "deletedAt")
@@ -17,12 +18,13 @@ PUBLIC_FIELDS = ("id", "username", "displayName", "isAdmin", "builtin", "scopes"
 
 def public_user(user):
     """账号只能通过白名单序列化，哈希和会话版本永不返回客户端。"""
-    return {key: user.get(key) for key in PUBLIC_FIELDS}
+    return {**{key: user.get(key) for key in PUBLIC_FIELDS}, **permission_state(user)}
 
 
 def public_current_user(identity):
     """当前会话响应额外公开服务账号资格，不将该请求专属状态带入用户目录。"""
-    return {**public_user(identity), "hasActiveServiceToken": bool(identity.get("hasActiveServiceToken"))}
+    return {**public_user(identity), "isAdmin": identity.get("isAdmin", False),
+            "hasActiveServiceToken": bool(identity.get("hasActiveServiceToken"))}
 
 
 def required_login():
@@ -57,7 +59,7 @@ async def initialize_admin(repo):
         raise RuntimeError("ADMIN_USERNAME 格式无效")
     document = {"id": "builtin-admin", "username": username, "displayName": "系统管理员",
                 "passwordHash": await password_work(repo, hash_password, password),
-                "isAdmin": True, "builtin": True, "scopes": ["*"], "resourceIds": None,
+                "isAdmin": True, "role": "SUPER_ADMIN", "builtin": True, "scopes": ["*"], "resourceIds": None,
                 "enabled": True, "mustChangePassword": True, "version": 1, "authVersion": 1,
                 "createdAt": now(), "updatedAt": now()}
     await repo.db.users.update_one({"id": "builtin-admin"}, {"$setOnInsert": document}, upsert=True)
@@ -65,7 +67,7 @@ async def initialize_admin(repo):
 
 async def user_identity(repo, user):
     """构造实时用户身份；服务账号资格在每次会话身份读取时以服务器时间重新判断。"""
-    scopes = ["*"] if user["isAdmin"] else sorted(set(user.get("scopes", [])) | BASE_READ_SCOPES)
+    scopes = effective_scopes(user)
     active_token = await repo.db.tokens.find_one({
         "userId": user["id"], "revoked": False,
         "$or": [

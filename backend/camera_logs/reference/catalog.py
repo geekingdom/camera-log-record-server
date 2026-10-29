@@ -9,11 +9,13 @@ from camera_logs.reference.openapi_responses import openapi_response_contract, r
 from camera_logs.reference.python_examples import build_python_example
 
 GUIDES = [
+    {"title": "账户角色与权限期限", "text": "内置admin为SUPER_ADMIN；新用户默认USER，可设置ADMIN。管理员具有全部功能但不能编辑删除其他管理员（含重置密码、禁用和服务凭据接管）。permissionsExpiresOn为YYYY-MM-DD或null长期，北京时间截止日结束后额外权限失效，Cookie和服务账号实时生效。固定权限保留原六项并增加commands:send，目录fixed标识；到期后仍能编辑删除本人资源和任务，不得新增或控制共享对象，来源IP限制不变。"},
+    {"title": "下载记录元数据", "text": "下载历史返回创建人快照及实际制品分卷时间；部分导出只列出实际写入文件，不能把离散时间合并成连续范围。列表artifactLogSegments最多8项、artifactLogSegmentCount为总数，完整时间明细通过GET /downloads/{id}按需读取；旧记录未知字段不猜测。"},
     {"title": "用户删除与资源处置", "text": "删除用户时resourceAction=DELETE同步软删除其活动资源并停止关联任务，或TRANSFER配合targetUserId转移资源及该用户创建的关联任务。目标可为任意启用且未删除的平台用户，不要求额外scope，也不提升其平台权限。无活动资源可省略策略兼容旧调用。有资源却省略返回422。日志和既有下载按保留期继续存在。已删用户名可按新配置重建，新ID不恢复旧会话、令牌和共享。"},
     {"title": "设备指定用户共享", "text": "资源sharedUserIds默认空列表，不共享；必须显式指定一个或多个有效用户，最多100人。编辑省略保留，空列表撤销。指定共享用户可编辑认证资源、操作主设备关联任务，但不能删除资源，所有操作仍需平台对应scope。Task列表/详情resourceSharedUserIds派生自主资源当前名单。"},
     {"title": "文档入口与命令用户名", "text": "前端API文档入口只对hasActiveServiceToken=true的当前用户显示；需关联未撤销且未过期的服务账号，管理员也不豁免，登录/me/改密刷新资格。命令记录senderUsername展示手工发送时用户名快照；系统定时命令及缺少快照的历史记录分别明确标记，不冒认同名重建用户。"},
     {"title": "时间入参约定", "text": "所有日期时间入参可直接传2026-10-19T12:00:00，无时区时统一按北京时间Asia/Shanghai解释，也兼容已有偏移或Z。响应继续保留上海时区偏移；日期仍用YYYY-MM-DD，hourIds和游标按目录返回值原样传递。"},
-    {"title": "全局常用命令", "text": "管理员通过/admin/common-commands维护命令、描述和enabled，创建携带Idempotency-Key，编辑与删除携带version。所有有效用户可通过GET /api/v1/common-commands分页读取启用项，query按命令或描述做字面筛选。禁用项不返回提示；选中提示只填入手工命令输入框，不自动发送。实际发送仍要求commands:send与任务所有权，复用既有会话和命令队列。"},
+    {"title": "全局常用命令", "text": "管理员通过/admin/common-commands维护命令、描述和enabled，创建携带Idempotency-Key，编辑与删除携带version。所有有效用户可通过GET /api/v1/common-commands分页读取启用项，query按命令或描述做字面筛选。禁用项不返回提示；选中提示只填入手工命令输入框，不自动发送。commands:send是所有有效用户的固定基础权限，不限制任务创建者或共享关系；发送仍校验任务可交互状态和来源IP策略，复用既有会话和命令队列，并原子记录提交者和审计。"},
     {"title": "资源看板", "text": "GET /api/v1/dashboard 需要tasks:read，days只能为7、14或30，date为可选的Asia/Shanghai截止自然日且不能晚于上海今天。响应概览只计算未删除的当前资源和任务；历史日志目录仍可按原归属汇总。所有任务可读用户都会得到overview。只有logs:read时才返回daily、topResources和coredumps；否则这些字段为null且availability.logs=false，不能将其解释为零。只有管理员才得到nodes、节点数和availability.nodes=true；离线节点的accepting固定为false。日志字节来自已登记OPEN/READY分卷的原始bytes，不读取设备正文，也不以共享压缩包archiveBytes重复计数。看板聚合以短期同权限快照合并刷新，超时返回503，调用方应保留上一份有效页面数据后重试。"},
     {"title": "批量添加设备资源", "text": "新建资源的name可省略或留空，服务端使用规范IP作为名称。控制台支持同一地址族的起止IP生成最多256台海康网络设备，共用HTTP认证和监控配置，逐行名称与密码可修改。先调用POST /api/v1/resources/authenticate逐台认证，再通过POST /api/v1/resources/batch提交items列表及Idempotency-Key。保存时服务端重新认证全部设备，全部成功后在同一事务提交资源、IP占用和审计；认证失败或IP冲突不会部分添加。提交结果未知时保留原请求和同一幂等键重试；修改请求后使用新键。密码仅用于输入，不在创建响应中返回。"},
     {"title": "节点性能推荐与手动调整", "text": "GET /api/v1/admin/nodes的每个节点包含performanceRecommendation：available表示当前能否推荐，reason说明依据或不可用原因，policy为可应用的完整性能策略，resources为有效CPU与可用内存，reportedAt为依据心跳时间。只用新鲜节点遥测计算保守建议，容器配额优先于宿主总资源；不测算磁盘最佳吞吐。获取推荐不会修改已有配置；将policy按需编辑后通过PATCH /api/v1/admin/nodes/{node_id}携带version与performance保存，Worker后续心跳热应用。performance为管理员保存值，performanceStatus.effective为实际受资源约束后的值，三者不等同。"},
@@ -47,7 +49,7 @@ GUIDES = [
     {"title": "实时日志", "text": "HTTP部署使用ws://<host>/api/v1/tasks/{task_id}/logs；HTTPS部署使用wss://<host>/api/v1/tasks/{task_id}/logs。连接后10秒内发送JSON首帧token及可选cursor，不能把Token放URL。服务端每次推送重验权限；data为Base64原始字节，fileId/offset用于消除重叠后再解码。gap表示实时缓冲缺口，按文件或小时归档补读。重连提交最后cursor，不保证断线期间设备输出可追回。"},
     {"title": "实时日志显示配置", "text": "GET /api/v1/display-settings 供已登录平台用户和有效第三方服务账号读取实时日志浏览器内存上限 liveLogBufferMiB。该接口只返回整数1至100的MiB上限，默认10；不返回日志保留期、节点容量、资源监控规则或其他管理员后台配置。前端应定期刷新该值并只限制本地展示缓存，不能据此删除Worker原始日志、改变采集顺序或中断下载。"},
     {"title": "手动命令", "text": "POST /tasks/{task_id}/commands提交command及可选newline/delaySeconds/prompt/timeoutSeconds，使用同一采集连接。初始化未完成或断线拒绝；通过/commands/{id}或/task的command-executions查询。最多发送次数不代表设备业务成功，UNKNOWN不自动重发。"},
-    {"title": "用户权限与所有权", "text": "有效普通用户自动拥有tasks:read、logs:read、logs:download、templates:read、templates:write和service-tokens:read；用户配置的scopes仅增加写入、控制、命令或管理能力。平台来源IP策略仍会收窄本次请求的有效权限。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态。所有人可读取资源、任务、下载和只读日志；资源和任务的编辑、删除或控制，以及向任务发送手动命令，均须具备对应scope；任务操作还允许主设备指定共享用户，资源删除仍仅创建者或管理员。创建任务可使用他人创建的资源，任务自身独立归属。"},
+    {"title": "用户权限与所有权", "text": "有效普通用户自动拥有tasks:read、logs:read、logs:download、templates:read、templates:write和service-tokens:read；用户配置的scopes仅增加写入、控制、命令或管理能力。平台来源IP策略仍会收窄本次请求的有效权限。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态。所有人可读取资源、任务、下载和只读日志；资源和任务的编辑、删除或控制，均须具备对应scope；任务操作还允许主设备指定共享用户，资源删除仍仅创建者或管理员。创建任务可使用他人创建的资源，任务自身独立归属。"},
     {"title": "模板共享", "text": "服务端写入模板创建者，客户端不能提交createdBy。创建者、sharedWith中的有效用户及sharedWithAll=true时的全部有效用户可读取模板；管理员可读取全部模板。仅创建者或管理员可编辑、删除模板；sharedWith中的用户必须存在、启用且未删除，sharedWithAll仅管理员可设置。模板名称按创建者唯一。任务只在创建或实际切换模板来源时校验模板可读，已保存的任务快照不会因撤销共享或删除模板失效。GET /api/v1/users/share-targets要求templates:read、resources:create、resources:write或admin之一，返回可共享对象的最小用户列表。"},
     {"title": "示例与运行环境", "text": "下列内容均为虚拟示例，标识需替换为实际返回值。成功响应展示代表字段，可能包含更多运行信息。文档与代码一同部署，不请求GitHub或外部CDN。这里不自动执行接口；实际调用会按权限记录审计。"},
 ]
@@ -160,7 +162,11 @@ def permission(path, method):
     if path == "/api/v1/common-commands":
         return "有效Token或登录会话（仅返回启用的全局常用命令）"
     if "/service-tokens" in path and (method == "GET" or path.endswith("/reveal")):
-        return "service-tokens:read + 仅绑定用户本人或admin"
+        return "service-tokens:read + 绑定用户本人或管理员；查看明文时普通管理员不能访问其他管理员的凭据"
+    if "/users" in path and method in {"PATCH", "DELETE", "POST"}:
+        return "admin；不能编辑、删除或重置其他管理员及超级管理员；内置账号仅本人改密"
+    if "/service-tokens" in path and method != "GET":
+        return "admin；普通管理员不能操作其他管理员的服务凭据"
     if any(part in path for part in ("/users", "/service-tokens", "/admin/", "/nodes", "-events", "/platform-settings")) or path == "/metrics":
         return "admin"
     if "api-reference" in path:
@@ -180,7 +186,8 @@ def permission(path, method):
             return "resources:write + 创建者、admin或指定共享用户；空请求体另需tasks:control，未共享资源仍受关联任务归属限制，完整ResourceInput仅预览"
         if method == "POST":
             return "resources:create"
-        return "resources:write + tasks:control + 仅创建者或admin" if method == "DELETE" else "resources:write + 创建者、admin或指定共享用户"
+        return ("resources:write + tasks:control + 仅创建者或admin；权限到期用户可删除本人资源" if method == "DELETE"
+                else "resources:write + 创建者、admin或指定共享用户；权限到期用户可编辑本人资源")
     if "/command-templates" in path:
         if method == "GET":
             return "templates:read"
@@ -192,16 +199,16 @@ def permission(path, method):
     if "/log-" in path or path.endswith("/logs"):
         return "logs:read"
     if path.endswith("/commands") and method == "POST":
-        return "commands:send + 任务创建者、admin或主设备指定共享用户"
+        return "commands:send（固定基础权限）+ 当前可交互会话；不限制任务所有者"
     if path.endswith("/restart"):
         return "tasks:control + 任务创建者、admin或主设备指定共享用户；confirmIsolation=true仅admin"
     if any(path.endswith("/" + action) for action in ("start", "stop", "pause", "resume")):
         return "tasks:control + 任务创建者、admin或主设备指定共享用户"
     if path == "/api/v1/tasks/{task_id}" and method == "DELETE":
-        return "tasks:write + tasks:control + 任务创建者、admin或主设备指定共享用户"
+        return "tasks:write + tasks:control + 任务创建者、admin或主设备指定共享用户；权限到期用户可删除本人任务"
     if path.endswith("/tasks") and method == "POST":
         return "tasks:create；autoStart=true另需tasks:control"
-    return "tasks:write + 任务创建者、admin或主设备指定共享用户" if method == "PATCH" else "tasks:read"
+    return "tasks:write + 任务创建者、admin或主设备指定共享用户；权限到期用户可编辑本人任务" if method == "PATCH" else "tasks:read"
 
 
 def request_headers(path, method, schema, idempotent):

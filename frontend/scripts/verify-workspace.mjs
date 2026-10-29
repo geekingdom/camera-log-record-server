@@ -22,7 +22,7 @@ const scripts = [
   "browser_resource_manual_authentication",
   "browser_resource_identity_filters",
   "browser_resource_batch", "browser_request_diagnostics", "frontend/scripts/verify-resource-sharing.mjs",
-  "browser_user_deletion",
+  "browser_user_deletion", "browser_user_auth",
 ];
 const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: true } });
 try {

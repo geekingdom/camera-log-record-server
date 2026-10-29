@@ -6,7 +6,11 @@ USER = obj("账号公开资料；不包含密码哈希、会话代次或令牌�
     "id": field("string", "用户稳定标识。"),
     "username": field("string", "登录用户名。"),
     "displayName": field("string", "用户展示名称。"),
-    "isAdmin": field("boolean", "是否管理员。"),
+    "isAdmin": field("boolean", "当前是否具有管理员能力；权限到期后为 false，登录响应还受来源 IP 权限交集限制。"),
+    "role": field("string", "配置角色：SUPER_ADMIN 内置超级管理员、ADMIN 管理员、USER 普通用户；到期仍保留配置便于续期。", enum=["SUPER_ADMIN", "ADMIN", "USER"]),
+    "effectiveRole": field("string", "当前生效角色；额外权限到期后降为 USER，内置超级管理员不受期限影响。", enum=["SUPER_ADMIN", "ADMIN", "USER"]),
+    "permissionsExpiresOn": field("string", "额外权限有效截止日期，YYYY-MM-DD；北京时间该日结束后到期，null 表示长期有效。", nullable=True),
+    "permissionsExpired": field("boolean", "额外权限是否已到期；到期仅保留固定基础权限及本人资源和任务编辑删除例外。"),
     "builtin": field("boolean", "是否部署初始化的内置账号。"),
     "scopes": array("账号权限；登录响应会应用来源 IP 权限交集。", field("string", "权限标识。")),
     "enabled": field("boolean", "账号是否启用。"),
@@ -15,7 +19,7 @@ USER = obj("账号公开资料；不包含密码哈希、会话代次或令牌�
     "createdAt": field("string", "账号创建时间。"),
     "updatedAt": field("string", "最近修改时间。"),
     "deletedAt": field("string", "软删除时间；未删除为 null。", nullable=True),
-}, ("id", "username", "displayName", "isAdmin", "builtin", "scopes", "enabled",
+}, ("id", "username", "displayName", "isAdmin", "role", "effectiveRole", "permissionsExpiresOn", "permissionsExpired", "builtin", "scopes", "enabled",
     "mustChangePassword", "version", "createdAt", "updatedAt", "deletedAt"))
 
 CURRENT_USER = obj("当前登录身份；不包含令牌数量、标识、名称或到期时间。", {

@@ -56,6 +56,7 @@ function createSession(loadInitial = vi.fn(async () => undefined)) {
 
 beforeEach(() => {
   vi.stubGlobal("window", new EventTarget());
+  vi.stubGlobal("document", Object.assign(new EventTarget(), { visibilityState: "visible" }));
   vi.mocked(authApi.logout).mockResolvedValue(undefined);
   vi.mocked(confirmAction).mockResolvedValue(true);
 });
@@ -140,5 +141,20 @@ describe("usePlatformSession", () => {
     expect(session.passwordOpen.value).toBe(false);
     expect(session.passwordSaving.value).toBe(false);
     expect(refreshWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("页面重新可见时刷新当前身份，以收回跨截止日失效的管理员权限", async () => {
+    const { session } = createSession();
+    vi.mocked(authApi.me)
+      .mockResolvedValueOnce({ user: { ...account, role: "ADMIN", effectiveRole: "ADMIN", isAdmin: true } })
+      .mockResolvedValueOnce({ user: { ...account, role: "ADMIN", effectiveRole: "USER", isAdmin: false, permissionsExpired: true } });
+
+    session.start();
+    await vi.waitFor(() => expect(session.user.value?.effectiveRole).toBe("ADMIN"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.waitFor(() => expect(session.user.value).toMatchObject({
+      effectiveRole: "USER", isAdmin: false, permissionsExpired: true,
+    }));
+    session.stop();
   });
 });

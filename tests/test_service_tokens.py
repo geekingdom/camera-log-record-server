@@ -70,7 +70,7 @@ def test_service_tokens_load_bound_user_permissions_live_and_record_token_audit(
 
     client.portal.call(client.app.state.repo.db.users.update_one, {"id": user["id"]}, {"$set": {"scopes": []}})
     identity = client.portal.call(authenticate, client.app.state.repo, token["token"])
-    assert "commands:send" not in identity["scopes"]
+    assert "commands:send" in identity["scopes"]  # 固定基础权限不随显式配置移除。
     # 模板读写是所有有效用户的基础权限，移除显式权限后仍可继续创建个人模板。
     assert client.post("/api/v1/command-templates", headers=headers | {"Idempotency-Key": "default-template"},
                        json={"name": "默认模板"}).status_code == 201
@@ -106,7 +106,7 @@ def test_service_token_reading_is_limited_to_bound_user_and_patch_switches_bindi
     assert changed.json()["version"] == 2 and changed.json()["userId"] == second["id"]
     identity = client.portal.call(authenticate, client.app.state.repo, token["token"])
     assert identity["id"] == second["id"]
-    assert "commands:send" not in identity["scopes"]
+    assert "commands:send" in identity["scopes"]  # 固定基础权限不随显式配置移除。
     assert client.get("/api/v1/service-tokens", headers=ordinary).json()["items"] == [changed.json()]
     assert [item["id"] for item in client.get("/api/v1/service-tokens", headers=observer_headers).json()["items"]] == [observer["id"]]
     assert client.post(f"/api/v1/service-tokens/{token['id']}/reveal", headers=observer_headers).status_code == 403

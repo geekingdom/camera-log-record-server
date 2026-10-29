@@ -111,7 +111,7 @@ def _mapping() -> dict[str, dict[str, Any]]:
     add("POST", ("/api/v1/users/{identifier}/reset-password",), json(USER, MUTATE + [(404, "用户不存在。")]))
     summary = obj("用户摘要。", {"id": field("string", "用户标识。"), "username": field("string", "登录名。"), "displayName": field("string", "展示名。")}, ("id", "username", "displayName"))
     add("GET", ("/api/v1/users/creators", "/api/v1/users/share-targets"), json(page(summary)))
-    add("GET", ("/api/v1/users/permissions",), json(obj("可授权权限。", {"scopes": array("权限枚举。", obj("权限项。", {"value": field("string", "权限值。"), "label": field("string", "中文名称。")}, ("value", "label")))}, ("scopes",))))
+    add("GET", ("/api/v1/users/permissions",), json(obj("可授权权限。", {"scopes": array("权限枚举。", obj("权限项。", {"value": field("string", "权限值。"), "label": field("string", "中文名称。"), "fixed": field("boolean", "是否所有有效账户始终拥有的固定基础权限；不受额外权限有效期控制。")}, ("value", "label", "fixed")))}, ("scopes",))))
     add("GET", ("/api/v1/tasks",), json(page(TASK))); add("POST", ("/api/v1/tasks",), json(TASK, MUTATE))
     add("GET", ("/api/v1/tasks/{task_id}",), json(TASK, NOT_FOUND)); add("PATCH", ("/api/v1/tasks/{task_id}",), json(TASK, MUTATE + [(404, "任务不存在。")]))
     add("DELETE", ("/api/v1/tasks/{task_id}",), json(TASK, MUTATE + [(404, "任务不存在。")], ["成功码为 202；deletionState 表示连接回收状态，日志与归档仍按保留期可读。"] ))

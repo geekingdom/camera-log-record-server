@@ -214,6 +214,8 @@ jobs:
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_address.py
       - name: 验证用户删除资源处置与事务围栏
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_user_deletion_transactions.py
+      - name: 验证账户角色围栏与手工命令真实事务
+        run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_account_roles.py
       - name: 验证海康批量资源事务与未知提交恢复
         run: docker compose --env-file .env --project-name "$COMPOSE_PROJECT_NAME" --file deploy/docker-compose.yml exec -T api python < scripts/verify_resource_batch.py
       - name: 验证手动设备认证历史与审计原子提交

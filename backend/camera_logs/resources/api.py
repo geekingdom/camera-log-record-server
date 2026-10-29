@@ -12,6 +12,7 @@ from pymongo import ReturnDocument
 from camera_logs.common.api_time import parse_api_datetime
 from camera_logs.common.audited_mutations import audited_create, audited_mutation
 from camera_logs.common.database import now, public
+from camera_logs.common.expired_ownership import authorize_expired_owned
 from camera_logs.common.security import actor, authorize, authorize_owner
 from camera_logs.coredumps.presence import (
     coredump_presence_by_resource_ids,
@@ -403,8 +404,8 @@ def install_resource_routes(app, repo, listing):
     @app.patch("/api/v1/resources/{identifier}")
     async def edit_resource(identifier: Annotated[str, ApiPath(description='路径中指定要按版本更新的设备资源标识。')], body: ResourcePatch, user: User):
         """以版本条件更新名称、HTTP 凭据和认证身份，资源 IP 与类型不可修改。"""
-        authorize(user, "resources:write")
         old = await repo().get("resources", identifier)
+        authorize_expired_owned(user, "resources:write", old)
         authorize_resource_operation(user, old)
         if old.get("deletedAt") is not None:
             raise HTTPException(409, "资源已删除，不能编辑")
@@ -440,6 +441,7 @@ def install_resource_routes(app, repo, listing):
         async def commit(session):
             """版本 CAS 与审计共享会话；凭据和设备元信息已在事务外准备。"""
             current = await repo().db.resources.find_one({"id": identifier}, session=session)
+            authorize_expired_owned(user, "resources:write", current or {})
             authorize_resource_operation(user, current or {})
             await validate_share_users(repo(), update.get("sharedUserIds", []), session=session)
             changed = await repo().db.resources.find_one_and_update(
@@ -469,9 +471,9 @@ def install_resource_routes(app, repo, listing):
     @app.delete("/api/v1/resources/{identifier}", status_code=202)
     async def delete_resource(identifier: Annotated[str, ApiPath(description='路径中指定要软删除并回收关联任务的设备资源标识。')], user: User, version: int = Query(ge=1, description='删除或更新对象时必须提供的当前版本号。')):
         """软删除资源并请求所有关联任务受控停止，保留任务、文件和历史目录。"""
-        authorize(user, "resources:write")
-        authorize(user, "tasks:control")
         old = await repo().get("resources", identifier)
+        authorize_expired_owned(user, "resources:write", old)
+        authorize_expired_owned(user, "tasks:control", old)
         authorize_owner(user, old)
         if old.get("deletedAt") is not None:
             result = await reconcile_resource_deletion(repo(), identifier)
@@ -480,6 +482,10 @@ def install_resource_routes(app, repo, listing):
 
         async def commit(session):
             """资源、关联任务和审计必须同一事务可见；连接收尾仍交给持有节点。"""
+            current = await repo().db.resources.find_one({"id": identifier}, session=session)
+            authorize_expired_owned(user, "resources:write", current or {})
+            authorize_expired_owned(user, "tasks:control", current or {})
+            authorize_owner(user, current or {})
             if not user.get("isAdmin") and "*" not in user["scopes"]:
                 foreign = {"$and": [task_resource_query(identifier), {"createdBy": {"$ne": user["id"]}}]}
                 if await repo().db.tasks.find_one(foreign, session=session):

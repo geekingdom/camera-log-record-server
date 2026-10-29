@@ -1,8 +1,9 @@
-"""严格校验账号输入，子账户不能通过作用域或角色字段提升为管理员。"""
+"""严格校验账户角色、额外权限和日期输入，超级管理员不允许通过接口创建。"""
 
+from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PERMISSIONS = {
     "tasks:read": "查看设备与任务", "tasks:write": "编辑采集任务",
@@ -25,12 +26,36 @@ class Login(Input):
     password: str = Field(min_length=1, max_length=128, description='平台账号登录密码，不是设备登录密码。')
 
 
-class UserCreate(Input):
+class PermissionExpiry(Input):
+    """权限截止日仅接受日期；null 明确表示长期有效。"""
+    permissionsExpiresOn: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="额外权限有效截止日期，格式 YYYY-MM-DD，例如 2026-10-13；北京时间当天结束后收回额外权限，null 表示长期有效。")
+
+    @field_validator("permissionsExpiresOn")
+    @classmethod
+    def validate_expiry(cls, value):
+        """拒绝时间戳和非规范日期，避免日期被浏览器时区偏移。"""
+        if value is not None and (len(value) != 10 or date.fromisoformat(value).isoformat() != value):
+            raise ValueError("权限截止日期必须为 YYYY-MM-DD")
+        return value
+
+
+class UserCreate(PermissionExpiry):
     username: str = Field(pattern=r"^[a-zA-Z0-9_.-]{3,64}$", description='登录设备或平台账户使用的用户名。')
     displayName: str = Field(min_length=1, max_length=128, description='平台账户在界面和审计记录中显示的名称。')
     password: str = Field(min_length=8, max_length=128, description='新平台账号的初始密码；普通查询不会返回密码或哈希。')
-    isAdmin: Literal[False] = Field(default=False, description='账户是否为管理员；创建普通子账户时只能为 false。')
-    scopes: list[str] = Field(default_factory=list, max_length=32, description='授予平台账号的权限标识列表；可选值由 GET /api/v1/users/permissions 返回，普通用户另有系统基础读取权限。')
+    role: Literal['USER', 'ADMIN'] = Field(default='USER', description='配置角色：USER 普通用户（默认），ADMIN 管理员；不能创建超级管理员。')
+    isAdmin: bool | None = Field(default=None, description='兼容旧客户端的管理员标记；推荐使用 role，同时传入时必须一致。')
+
+    @model_validator(mode='after')
+    def resolve_role(self):
+        """兼容历史布尔输入，但拒绝与明确角色冲突。"""
+        if self.isAdmin is not None:
+            legacy = 'ADMIN' if self.isAdmin else 'USER'
+            if 'role' in self.model_fields_set and self.role != legacy:
+                raise ValueError('role 与 isAdmin 不一致')
+            self.role = legacy
+        return self
+    scopes: list[str] = Field(default_factory=list, max_length=32, description='授予平台账号的权限标识列表；可选值由 GET /api/v1/users/permissions 返回，固定基础权限由权限目录 fixed 标记，不受此列表和有效期限制。')
     enabled: bool = Field(default=True, description='新平台账号是否可以登录和使用绑定的服务令牌。')
 
     @field_validator("username")
@@ -56,10 +81,11 @@ class UserCreate(Input):
         return value
 
 
-class UserPatch(Input):
+class UserPatch(PermissionExpiry):
+    role: Literal["USER", "ADMIN"] | None = Field(default=None, description="要设置的配置角色：USER 普通用户，ADMIN 管理员；省略不变，不允许 null 或超级管理员。")
     version: int = Field(ge=1, description='当前配置版本号，用于乐观锁并发修改校验。')
     displayName: str | None = Field(default=None, min_length=1, max_length=128, description='平台账户在界面和审计记录中显示的名称。')
-    scopes: list[str] | None = Field(default=None, max_length=32, description='授予平台账号的权限标识列表；可选值由 GET /api/v1/users/permissions 返回，普通用户另有系统基础读取权限。')
+    scopes: list[str] | None = Field(default=None, max_length=32, description='授予平台账号的权限标识列表；可选值由 GET /api/v1/users/permissions 返回，固定基础权限由权限目录 fixed 标记，不受此列表和有效期限制。')
     enabled: bool | None = Field(default=None, description='是否允许该平台账号继续登录和使用绑定的服务令牌；省略保持原值。')
 
 

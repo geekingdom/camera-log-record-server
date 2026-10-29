@@ -112,4 +112,4 @@ async def test_client_policy_never_reads_resource_or_collector_target_addresses(
     request = SimpleNamespace(client=SimpleNamespace(host="192.0.2.9"), headers={})
     identity = {"id": "operator", "scopes": ["tasks:write"], "resourceIp": "203.0.113.77",
                 "serialServerIp": "2001:db8:ffff::20", "isAdmin": False}
-    assert await apply_ip_permissions(repo, request, identity) == identity
+    assert await apply_ip_permissions(repo, request, identity) == identity | {"ipAllowedScopes": ["tasks:write"]}

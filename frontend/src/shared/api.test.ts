@@ -1,9 +1,41 @@
 // API 边界必须保留服务端的隔离错误码，并按专用路径提交管理员确认。
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { api, usersApi } from "./api";
 
 afterEach(() => vi.unstubAllGlobals());
+
+describe("用户角色与权限有效期 API 合同", () => {
+  it("创建用户提交配置角色和额外权限的截止日", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "user-1" })));
+    vi.stubGlobal("fetch", fetch);
+
+    await usersApi.create({
+      username: "operator", displayName: "操作员", password: "password-123", enabled: true,
+      role: "ADMIN", scopes: ["tasks:write"], permissionsExpiresOn: "2026-10-13",
+    });
+
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      username: "operator", displayName: "操作员", password: "password-123", enabled: true,
+      role: "ADMIN", scopes: ["tasks:write"], permissionsExpiresOn: "2026-10-13",
+    });
+  });
+
+  it("编辑用户以 null 表示额外权限长期有效", async () => {
+    vi.stubGlobal("sessionStorage", { getItem: () => null });
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "user-1" })));
+    vi.stubGlobal("fetch", fetch);
+
+    await usersApi.update("user-1", {
+      version: 4, role: "USER", scopes: ["tasks:write"], permissionsExpiresOn: null,
+    });
+
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      version: 4, role: "USER", scopes: ["tasks:write"], permissionsExpiresOn: null,
+    });
+  });
+});
 
 describe("设备身份模糊筛选 API", () => {
   it("独立编码型号、序列号和 coredump 存在状态，并保留已有组合条件", async () => {

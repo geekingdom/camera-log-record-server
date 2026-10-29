@@ -8,8 +8,9 @@ from pymongo.errors import PyMongoError
 
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
+from camera_logs.common.expired_ownership import authorize_expired_owned
 from camera_logs.common.models import TaskCreate, new_id
-from camera_logs.common.security import authorize, authorize_resource
+from camera_logs.common.security import authorize_resource
 from camera_logs.resources.sharing import authorize_resource_operation, authorize_task_operation
 from camera_logs.tasks.resource_binding import bind_resource
 
@@ -106,7 +107,8 @@ async def _confirm_queued_task_is_idle(db, task, session):
 
 async def edit_task(repo, user, task_id, body):
     """原子编辑任务；有归属的运行先停止重启，无归属的安全排队任务保留启动意图。"""
-    authorize(user, "tasks:write", task_id)
+    scope_target = await repo.get("tasks", task_id)
+    authorize_expired_owned(user, "tasks:write", scope_target)
     _old, updates, clear, document, resource_snapshots = await _prepared(repo, user, task_id, body)
     behavioral = set(updates) - {"name", "description"}
     restart = bool(behavioral or clear)
@@ -120,6 +122,7 @@ async def edit_task(repo, user, task_id, body):
         )
         if current is None:
             raise HTTPException(409, "配置版本已变化或设备资源已删除，请刷新")
+        authorize_expired_owned(user, "tasks:write", current)
         await authorize_task_operation(repo, user, current, session=session)
         if (current["desiredState"] == "PAUSED" or current["status"] in {"PAUSED", "PAUSING"}) and behavioral | ({"clearPassword"} if clear else set()):
             raise HTTPException(409, "暂停期间只能修改名称和说明；修改连接或命令前请停止任务")
@@ -131,7 +134,7 @@ async def edit_task(repo, user, task_id, body):
                 await _confirm_queued_task_is_idle(repo.db, current, session)
                 changes.update(desiredState="RUNNING", restartRequested=False)
             else:
-                authorize(user, "tasks:control", task_id)
+                authorize_expired_owned(user, "tasks:control", current)
                 await repo.db.operations.update_many(
                     {"taskId": task_id, "desiredState": {"$ne": "STOPPED"}, "status": "PENDING"},
                     {"$set": {"status": "CANCELLED", "completedAt": timestamp}}, session=session,

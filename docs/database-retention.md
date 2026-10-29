@@ -223,3 +223,8 @@ python scripts/backfill_runtime_event_time.py --apply
 资源工作台默认“查看全部”，“仅查看自己”不保存派生可见名单：每次列表请求只以当前身份在 `createdBy` 和 `sharedUserIds` 两个分支匹配，`includeDeleted` 仍独立控制软删除范围。部分索引 `resources_visible_created(createdAt,id)`、`resources_creator_visible_created(createdBy,createdAt,id)` 和多键 `resources_shared_visible_created(sharedUserIds,createdAt,id)` 只收录 `deletedAt:null` 的当前资源；`resources_created(createdAt,id)`、`resources_creator_created(createdBy,createdAt,id)`、`resources_shared_created(sharedUserIds,createdAt,id)` 覆盖包含软删除的历史范围。它们只增加资源创建、编辑共享名单和软删除时的索引维护，不新建集合、TTL或持续历史记录。真实副本集的 `scripts/verify_resource_sharing_transactions.py` 对默认与“仅查看自己”的四种软删除范围和默认排序执行 Explain，要求相应分支命中索引、分页不阻塞排序，并在结束后删除随机测试库。
 
 归档交互阅读新增纯内存有界尾部：每个空闲归档句柄最多512KiB，128句柄最多64MiB，另有4个在用读取线程；空闲30秒回收，节点退出关闭。浏览器最多8个256KiB正文响应（Base64约2.67MiB），关闭/切换清空，不写Mongo或本地持久缓存，不影响权威归档与既有保留期。
+
+
+2026-10-29账户角色与权限有效期复用 `users` 文档：配置 `role`、`permissionsExpiresOn`，旧账户缺失字段按既有管理员标记和长期有效兼容读取。权限过期按认证时的北京时间自然日计算，不逐日生成记录、不设账户TTL、不删除资源任务或历史引用。事务内账号管理、命令提交和服务账号操作仅递增同一用户文档的围栏计数，与账号禁用、角色变更和删除写冲突重试；不新增增长集合及查询索引，审计沿用已有保留策略。
+
+下载元数据复用 `jobs`：每个下载作业保存创建人ID/展示名快照，成功时每个实际写入制品的分卷增加一条 fileId、逻辑小时和首末接收时间摘要及总数，不保存正文、不新增集合。增长与已有冻结files目录同阶，单作业受168小时和20GB下载预算限制；复用jobs现有保留/恢复规则，不能为此对历史jobs增加TTL。普通历史列表只投影前8条摘要和总数，完整明细按用户展开时读取既有作业详情，避免列表批量传输全部目录。

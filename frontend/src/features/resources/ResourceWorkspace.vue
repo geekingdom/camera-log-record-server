@@ -18,7 +18,7 @@ const loadAuthenticationRecords = () => import("./AuthenticationRecordsDialog.vu
 const loadResourceMetrics = () => import("./ResourceMetricsDialog.vue");
 
 const emit = defineEmits<{ tasks: [Resource]; createTask: [Resource] }>();
-const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean }>();
+const props = defineProps<{ canWrite?: boolean; canCreate?: boolean; canCreateTask?: boolean; canControl?: boolean; permissionsExpired?: boolean; userId?: string; isAdmin?: boolean }>();
 const resources = ref<Resource[]>([]); const total = ref(0); const page = ref(1); const search = ref(""); const kind = ref<ResourceKind | undefined>();
 const model = ref("");
 const subSerialNumber = ref("");
@@ -101,11 +101,13 @@ function healthTone(value?: Resource["healthStatus"]) {
   return ({ ONLINE: "success", AUTH_FAILED: "danger", OFFLINE: "warning", ERROR: "danger" }[value ?? ""] ?? "info");
 }
 function owns(resource?: Resource) { return Boolean(resource && canManageOwnedRecord(props.userId, props.isAdmin, resource.createdBy)); }
-function permitted(resource?: Resource) { return Boolean(resource && props.canWrite && canManageSharedResourceRecord(props.userId, props.isAdmin, resource.createdBy, resource.sharedUserIds)); }
+function expiredOwn(resource?: Resource) { return Boolean(resource && props.permissionsExpired && resource.createdBy === props.userId); }
+function permitted(resource?: Resource) { return Boolean(resource && (expiredOwn(resource) || (props.canWrite && canManageSharedResourceRecord(props.userId, props.isAdmin, resource.createdBy, resource.sharedUserIds)))); }
 function canAuthenticate(resource?: Resource) {
   return Boolean(resource && resource.kind === "HIKVISION_NETWORK" && !resource.deletedAt && permitted(resource) && props.canControl);
 }
-function canBulkDelete(resource?: Resource) { return Boolean(!batchDeleting.value && resource && !resource.deletedAt && owns(resource) && props.canWrite && props.canControl); }
+function canDelete(resource?: Resource) { return Boolean(resource && !resource.deletedAt && owns(resource) && (expiredOwn(resource) || (props.canWrite && props.canControl))); }
+function canBulkDelete(resource?: Resource) { return Boolean(!batchDeleting.value && canDelete(resource)); }
 function updateSelection(items: Resource[]) { selected.value = items.filter(canBulkDelete); }
 function canCreateTask(resource: Resource) { return Boolean(props.canCreateTask && !resource.deletedAt); }
 function edit(resource?: Resource) { if (resource && !permitted(resource)) return; selectedResource.value = resource; editorOpen.value = true; }
@@ -114,7 +116,7 @@ function viewAuthenticationRecords(resource: Resource) { authenticationRecordsRe
 /** 资源列表已由读取权限过滤，趋势入口不要求资源配置写权限。 */
 function viewMetrics(resource: Resource) { metricsResource.value = resource; metricsOpen.value = true; }
 async function remove(resource: Resource) {
-  if (!props.canWrite || !props.canControl || !owns(resource)) return;
+  if (!canDelete(resource)) return;
   if (batchDeleting.value || deleting.value.has(resource.id)) return;
   deleting.value = new Set(deleting.value).add(resource.id);
   try {
@@ -224,7 +226,7 @@ defineExpose({ reload: load });
       <el-tooltip v-if="row.kind === 'HIKVISION_NETWORK' && (row.enableResourceMonitor || row.deletedAt)" content="查看 CPU 与内存趋势"><el-button text :icon="ChartLine" aria-label="查看 CPU 与内存趋势" @click="viewMetrics(row)" /></el-tooltip>
       <el-tooltip v-if="canCreateTask(row)" content="新建采集任务"><el-button text type="primary" :icon="Plus" aria-label="新建采集任务" @click="emit('createTask', row)" /></el-tooltip>
       <el-tooltip v-if="!row.deletedAt && permitted(row)" content="编辑资源"><el-button text :icon="Edit3" aria-label="编辑资源" @click="edit(row)" /></el-tooltip>
-      <el-tooltip v-if="!row.deletedAt && owns(row) && props.canWrite && props.canControl" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="batchDeleting || deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
+      <el-tooltip v-if="canDelete(row)" content="删除资源"><el-button text type="danger" :icon="Trash2" aria-label="删除资源" :disabled="batchDeleting || deleting.has(row.id)" @click="remove(row)" /></el-tooltip>
     </div></template></el-table-column>
   </el-table>
   <el-pagination v-model:current-page="page" :page-size="20" :total="total" layout="total, prev, pager, next" />
@@ -232,7 +234,7 @@ defineExpose({ reload: load });
     v-if="editorOpen"
     overlay
     :loader="loadResourceEditor"
-    :component-props="{ modelValue: editorOpen, resource: selectedResource, canEdit: !selectedResource || permitted(selectedResource) }"
+    :component-props="{ modelValue: editorOpen, resource: selectedResource, canEdit: !selectedResource || permitted(selectedResource), permissionsExpired: props.permissionsExpired }"
     :listeners="{ 'update:modelValue': (value: boolean) => editorOpen = value, saved: () => load() }"
   />
   <AsyncView v-if="coredumpOpen" overlay :loader="loadCoredumpFiles"

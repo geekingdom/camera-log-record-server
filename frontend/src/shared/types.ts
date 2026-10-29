@@ -403,7 +403,14 @@ export interface CoredumpExport {
   etag?: string;
   error?: string;
 }
-/** 下载作业历史仅暴露审计与制品可用性字段，不包含节点路径或写入租约。 */
+/** 实际写入下载制品的单个日志分卷，不将不连续片段伪装为连续时间覆盖。 */
+export interface DownloadArtifactLogSegment {
+  fileId: string;
+  hour: string;
+  firstReceivedAt?: string;
+  lastReceivedAt?: string;
+}
+/** 下载作业历史仅暴露审计、制品实际分卷和可用性字段，不包含节点路径或写入租约。 */
 export interface DownloadHistoryItem {
   id: string;
   taskId: string;
@@ -414,6 +421,13 @@ export interface DownloadHistoryItem {
   bytes?: number;
   progress?: number;
   error?: string;
+  /** 创建时保存的身份快照；旧下载作业可能未保存。 */
+  createdBy?: string;
+  createdByName?: string;
+  /** 仅成功制品包含，按分卷逐项展示，不可据首尾时间推断连续覆盖。 */
+  artifactLogSegments?: DownloadArtifactLogSegment[];
+  /** 成功制品的完整分卷数；列表响应可只返回前若干段作为摘要。 */
+  artifactLogSegmentCount?: number;
   /** 服务端在保留期和清理状态边界统一计算，前端不可自行推断。 */
   downloadAvailable: boolean;
 }

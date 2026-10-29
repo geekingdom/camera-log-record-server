@@ -196,7 +196,8 @@ function viewResourceTasks(resource: Resource) {
   navigation.viewResourceTasks(resource);
 }
 function editTask(task: Task) {
-  if (!hasScope("tasks:write") || !owns(task) || task.deletedAt || task.resourceDeleted) return;
+  const retainedOwner = Boolean(user.value?.permissionsExpired && task.createdBy === user.value.id);
+  if ((!hasScope("tasks:write") && !retainedOwner) || !owns(task) || task.deletedAt || task.resourceDeleted) return;
   selectedWorkspace.value = "config";
   selectedTask.value = task;
   taskEditorOpen.value = true;
@@ -389,6 +390,7 @@ onBeforeUnmount(() => {
                 items: tasks,
                 loading: busy,
                 canWrite: hasScope('tasks:write'),
+                permissionsExpired: user?.permissionsExpired,
                 canControl: hasScope('tasks:control'),
                 userId: user?.id,
                 isAdmin: user?.isAdmin,
@@ -412,6 +414,7 @@ onBeforeUnmount(() => {
             :loader="loadResourceWorkspace"
             :component-props="{
               canWrite: hasScope('resources:write'),
+              permissionsExpired: user?.permissionsExpired,
               canCreate: hasScope('resources:create'),
               canCreateTask: hasScope('tasks:create'),
               canControl: hasScope('tasks:control'),
@@ -461,7 +464,7 @@ onBeforeUnmount(() => {
           <AsyncView
             v-else-if="activeTab === 'access'"
             :loader="loadAccessManager"
-            :component-props="{ isAdmin: Boolean(user?.isAdmin) }"
+            :component-props="{ isAdmin: Boolean(user?.isAdmin), currentUser: user }"
           />
           <AsyncView
             v-else-if="activeTab === 'audit'"
@@ -503,6 +506,7 @@ onBeforeUnmount(() => {
         initialResource: selectedResource,
         templates,
         canEdit: !selectedTask || owns(selectedTask),
+        permissionsExpired: user?.permissionsExpired,
         userId: user?.id,
       }"
       :listeners="{

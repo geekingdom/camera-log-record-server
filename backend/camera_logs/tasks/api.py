@@ -12,6 +12,7 @@ from pymongo import ReturnDocument
 
 from camera_logs.common.audited_mutations import audited_mutation
 from camera_logs.common.database import now, public
+from camera_logs.common.expired_ownership import authorize_expired_owned
 from camera_logs.common.models import BlockedRestart, TaskCreate, TaskPatch, new_id
 from camera_logs.common.security import actor, authorize
 from camera_logs.resources.lifecycle import reconcile_task_deletion
@@ -153,9 +154,9 @@ def install_task_routes(app, repo, listing):
     @app.delete("/api/v1/tasks/{task_id}", status_code=202)
     async def delete_task(task_id: Annotated[str, ApiPath(description='目标采集任务 ID，可由创建任务响应或查询采集任务列表返回。')], user: User, version: int = Query(ge=1, description='删除或更新对象时必须提供的当前版本号。')):
         """软删除任务并请求持有节点回收连接；日志、归档和下载制品继续按保留期存在。"""
-        authorize(user, "tasks:write", task_id)
-        authorize(user, "tasks:control", task_id)
         old = await repo().get("tasks", task_id)
+        authorize_expired_owned(user, "tasks:write", old)
+        authorize_expired_owned(user, "tasks:control", old)
         await authorize_task_operation(repo(), user, old)
         if old.get("deletedAt") is not None:
             if old.get("version") != version:
@@ -165,6 +166,8 @@ def install_task_routes(app, repo, listing):
 
         async def commit(session):
             current = await repo().db.tasks.find_one({"id": task_id}, session=session)
+            authorize_expired_owned(user, "tasks:write", current or {})
+            authorize_expired_owned(user, "tasks:control", current or {})
             await authorize_task_operation(repo(), user, current or {}, session=session)
             changed = await repo().db.tasks.find_one_and_update(
                 {"id": task_id, "version": version, "deletedAt": None},

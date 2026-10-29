@@ -264,7 +264,8 @@ def test_reference_documents_reusable_credentials_and_admin_only_rotation(client
     rotate = operations["POST /api/v1/service-tokens/{identifier}/rotate"]
     assert "service-tokens:read" in listing["permission"] and "绑定用户本人" in reveal["permission"]
     assert reveal["responseExample"] == {"token": "<SERVICE_TOKEN>"}
-    assert rotate["permission"] == "admin" and rotate["requestExample"]["version"] >= 1
+    assert rotate["permission"].startswith("admin") and "其他管理员" in rotate["permission"]
+    assert rotate["requestExample"]["version"] >= 1
     assert "token" not in listing["responseExample"]["items"][0]
     assert "token" not in operations["PATCH /api/v1/service-tokens/{identifier}"]["responseExample"]
 
@@ -311,7 +312,7 @@ def test_reference_response_examples_preserve_route_specific_contracts(client):
     operations = {item["id"]: item for item in client.get("/api/v1/api-reference").json()["operations"]}
 
     assert operations["GET /api/v1/users/permissions"]["responseExample"] == {
-        "scopes": [{"value": "tasks:read", "label": "查看设备与任务"}]
+        "scopes": [{"value": "tasks:read", "label": "查看设备与任务", "fixed": True}]
     }
     assert operations["POST /api/v1/auth/logout"]["responseStatus"] == 204
     assert operations["POST /api/v1/auth/logout"]["responseExample"] is None

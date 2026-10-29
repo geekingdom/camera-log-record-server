@@ -10,8 +10,8 @@ RESOURCE = {"id": "resource-example", "name": "大厅设备", "kind": "HIKVISION
             "createdBy": "user-example", "createdByName": "集成账号",
             "taskCount": 1, "activeTaskCount": 0, "unsettledTaskCount": 0, "tasks": [TASK], "tasksTruncated": False,
             "tasksUrl": "/api/v1/tasks?resourceId=resource-example", "version": 1}
-USER = {"id": "user-example", "username": "integration-user", "displayName": "集成账号", "isAdmin": False,
-        "enabled": True, "scopes": ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"], "version": 1}
+USER = {"id": "user-example", "username": "integration-user", "displayName": "集成账号", "isAdmin": False, "role": "USER", "effectiveRole": "USER", "permissionsExpiresOn": None, "permissionsExpired": False,
+        "enabled": True, "scopes": ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read", "commands:send"], "version": 1}
 TEMPLATE = {"id": "template-example", "name": "日志模板", "description": "示例", "version": 1,
             "createdBy": "user-example", "createdByName": "集成账号", "sharedWith": ["shared-user-example"],
             "sharedWithAll": False, "initialCommands": [{"command": "ls"}], "scheduledCommands": []}
@@ -203,7 +203,7 @@ def response_example(path, method, status):
                 "totalExecutions": 5, "intervalSeconds": 60, "attempts": 2}],
         }
     if path.endswith("/users/permissions"):
-        return {"scopes": [{"value": "tasks:read", "label": "查看设备与任务"}]}
+        return {"scopes": [{"value": "tasks:read", "label": "查看设备与任务", "fixed": True}]}
     if path.endswith("/users/share-targets"):
         return page({"id": "shared-user-example", "username": "shared-user", "displayName": "可共享用户"})
     if "/common-commands" in path:

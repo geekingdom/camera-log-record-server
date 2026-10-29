@@ -25,6 +25,9 @@ export function usePlatformSession(options: SessionOptions) {
   const passwordOpen = ref(false);
   const passwordSaving = ref(false);
   const generation = ref(0);
+  let identityRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let identityRefreshing = false;
+  let monitoringIdentity = false;
 
   const reportError = (value: unknown) =>
     ElMessage.error(value instanceof Error ? value.message : "请求失败");
@@ -37,6 +40,45 @@ export function usePlatformSession(options: SessionOptions) {
     options.clearWorkspace();
   }
 
+  /** 按上海自然日计算下一个零点，权限截止日只精确到天，不能依赖浏览器所在时区。 */
+  function millisecondsUntilShanghaiMidnight(now = new Date()) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Shanghai", year: "numeric", month: "numeric", day: "numeric",
+    }).formatToParts(now);
+    const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+    const nextMidnight = Date.UTC(value("year"), value("month") - 1, value("day") + 1) - 8 * 60 * 60 * 1000;
+    return Math.max(1_000, nextMidnight - now.getTime());
+  }
+
+  /** 只刷新身份快照；导航会响应 isAdmin 与 scope 的变化，具体资源操作仍由服务端再次鉴权。 */
+  async function refreshIdentity() {
+    if (!authenticated.value || identityRefreshing) return;
+    const current = generation.value;
+    identityRefreshing = true;
+    try {
+      const refreshed = await authApi.me();
+      if (current !== generation.value) return;
+      user.value = refreshed.user;
+      passwordOpen.value = refreshed.user.mustChangePassword;
+    } catch {
+      // request() 在认证失效时已派发 auth-required；这里避免将网络瞬态误当作本地退出。
+    } finally {
+      identityRefreshing = false;
+    }
+  }
+
+  function scheduleIdentityRefresh() {
+    if (identityRefreshTimer) clearTimeout(identityRefreshTimer);
+    if (!monitoringIdentity || !authenticated.value) return;
+    identityRefreshTimer = setTimeout(() => {
+      void refreshIdentity().finally(scheduleIdentityRefresh);
+    }, millisecondsUntilShanghaiMidnight());
+  }
+
+  function refreshIdentityWhenVisible() {
+    if (document.visibilityState === "visible") void refreshIdentity();
+  }
+
   async function establish(sessionUser: SessionUser, current: number) {
     if (current !== generation.value) return false;
     user.value = sessionUser;
@@ -45,6 +87,7 @@ export function usePlatformSession(options: SessionOptions) {
       await options.loadInitial(sessionUser, current);
     if (current !== generation.value) return false;
     authenticated.value = true;
+    scheduleIdentityRefresh();
     return true;
   }
 
@@ -133,11 +176,17 @@ export function usePlatformSession(options: SessionOptions) {
   }
 
   function start() {
+    monitoringIdentity = true;
     void restore();
     window.addEventListener("auth-required", logout);
+    document.addEventListener("visibilitychange", refreshIdentityWhenVisible);
   }
   function stop() {
+    monitoringIdentity = false;
+    if (identityRefreshTimer) clearTimeout(identityRefreshTimer);
+    identityRefreshTimer = undefined;
     window.removeEventListener("auth-required", logout);
+    document.removeEventListener("visibilitychange", refreshIdentityWhenVisible);
   }
 
   return {

@@ -52,6 +52,40 @@ def test_task_download_history_pages_only_download_jobs_and_exposes_safe_availab
     assert "resultPath" not in item and "outputReaders" not in item and "files" not in item
 
 
+def test_download_history_exposes_creator_snapshot_and_discrete_artifact_log_segments(client):
+    """历史行展示创建人和实际进入制品的离散分卷，不能用首尾伪造连续日志范围。"""
+    repo = client.app.state.repo
+    stamp = now()
+    client.portal.call(repo.db.tasks.insert_one, {"id": "metadata-task", "name": "制品元数据任务"})
+    client.portal.call(repo.db.jobs.insert_many, [
+        _job("recorded", "metadata-task", stamp,
+             createdBy="operator-id", createdByName="值班操作员",
+             artifactLogSegments=[
+                 {"fileId": "part-01", "hour": "2026-10-29T00:00:00+00:00",
+                  "firstReceivedAt": "2026-10-29T00:02:03+00:00", "lastReceivedAt": "2026-10-29T00:08:09+00:00"},
+                 {"fileId": "part-03", "hour": "2026-10-29T02:00:00+00:00",
+                  "firstReceivedAt": "2026-10-29T02:30:00+00:00", "lastReceivedAt": "2026-10-29T02:31:00+00:00"},
+             ]),
+        _job("legacy", "metadata-task", stamp - timedelta(minutes=1)),
+    ])
+
+    response = client.get("/api/v1/tasks/metadata-task/downloads")
+
+    assert response.status_code == 200
+    recorded, legacy = response.json()["items"]
+    assert recorded["createdBy"] == "operator-id"
+    assert recorded["createdByName"] == "值班操作员"
+    assert recorded["artifactLogSegments"] == [
+        {"fileId": "part-01", "hour": "2026-10-29T08:00:00+08:00",
+         "firstReceivedAt": "2026-10-29T08:02:03+08:00", "lastReceivedAt": "2026-10-29T08:08:09+08:00"},
+        {"fileId": "part-03", "hour": "2026-10-29T10:00:00+08:00",
+         "firstReceivedAt": "2026-10-29T10:30:00+08:00", "lastReceivedAt": "2026-10-29T10:31:00+08:00"},
+    ]
+    assert legacy.get("createdBy") is None
+    assert legacy.get("createdByName") is None
+    assert legacy.get("artifactLogSegments") is None
+
+
 def test_expired_artifact_is_not_listed_as_available_or_downloadable(client, monkeypatch):
     """到期制品不能再签浏览器票据或跨 Worker 代理，历史行仍保留可审计。"""
     from camera_logs.logs import api
@@ -108,3 +142,22 @@ def test_artifact_retention_snapshots_current_log_retention_days(client):
         "artifactRetentionDays": 3,
         "expiresAt": created + timedelta(days=3),
     }
+
+
+def test_history_bounds_segment_preview_and_keeps_actor_for_legacy_creator(client):
+    """数千分卷不进入普通列表；详情仍完整，历史actor可作为可靠创建人标识。"""
+    repo = client.app.state.repo
+    client.portal.call(repo.db.tasks.insert_one, {'id': 'bounded-task'})
+    segments = [{'fileId': f'part-{index}', 'hour': '2026-10-29T00:00:00+00:00',
+                 'firstReceivedAt': None, 'lastReceivedAt': None} for index in range(120)]
+    client.portal.call(repo.db.jobs.insert_one, _job('bounded', 'bounded-task', now(),
+        actor='historical-user-id', artifactLogSegments=segments, artifactLogSegmentCount=len(segments)))
+    response = client.get('/api/v1/tasks/bounded-task/downloads')
+    assert response.status_code == 200, response.text
+    record = response.json()['items'][0]
+    assert record['createdBy'] == 'historical-user-id'
+    assert record['artifactLogSegmentCount'] == 120
+    assert len(record['artifactLogSegments']) == 8
+    detail = client.get('/api/v1/downloads/bounded')
+    assert detail.status_code == 200, detail.text
+    assert len(detail.json()['artifactLogSegments']) == 120

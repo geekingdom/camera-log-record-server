@@ -1,5 +1,6 @@
 """日志作业、文件保护和操作审计共同提交；数据库异常后只读恢复。"""
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 
 from fastapi import HTTPException
@@ -104,8 +105,18 @@ def _validate_files(files, body, kind):
         raise HTTPException(422, "预计下载超过20GB，请拆分小时")
 
 
-async def submit_job(repo, actor_id, key, body, kind):
+def _creator_snapshot(actor):
+    """从当前登录主体冻结下载创建人；旧内部调用仅保留既有主体标识。"""
+    if not isinstance(actor, Mapping):
+        return str(actor), {}
+    actor_id = str(actor["id"])
+    name = actor.get("displayName") or actor.get("username") or actor_id
+    return actor_id, {"createdBy": actor_id, "createdByName": str(name)}
+
+
+async def submit_job(repo, actor, key, body, kind):
     """冻结目录水位、保护文件、发布作业与审计共享同一事务及固定幂等 ID。"""
+    actor_id, creator = _creator_snapshot(actor)
     if not key or len(key) > 128:
         raise HTTPException(422, "必须提供不超过128字符的 Idempotency-Key")
     if kind == "DOWNLOAD":
@@ -140,7 +151,8 @@ async def submit_job(repo, actor_id, key, body, kind):
                 raise HTTPException(409, "日志片段正在清理，请刷新后重试")
         document = body.model_dump() | bounds | {
             "id": identifier, "kind": kind, "status": "QUEUED", "progress": 0,
-            "actor": actor_id, "files": files, "nodeId": task.get("nodeId") or files[0]["nodeId"],
+            "actor": actor_id, **(creator if kind == "DOWNLOAD" else {}), "files": files,
+            "nodeId": task.get("nodeId") or files[0]["nodeId"],
             "taskName": task["name"], "taskIp": task["ip"], "createdAt": timestamp,
             # 排队和执行沿用 24 小时上限；成功后覆盖 expiresAt，使下载保留期从
             # 制品真实创建完成而非提交排队时刻开始计算。

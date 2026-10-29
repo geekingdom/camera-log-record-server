@@ -225,7 +225,7 @@ def install_log_routes(app):
     async def create_job(body, request, user, kind):
         """冻结任务文件目录，申请保留期保护，并通过幂等键提交后台作业。"""
         authorize(user, "logs:download" if kind == "DOWNLOAD" else "logs:read", body.taskId)
-        return public_job(await submit_job(repo(), user["id"], request.headers.get("Idempotency-Key"), body, kind))
+        return public_job(await submit_job(repo(), user, request.headers.get("Idempotency-Key"), body, kind))
 
     @app.post("/api/v1/downloads", status_code=202, description='创建日志下载作业。taskId必填；hourIds与start/end二选一。时间不带时区时按北京时间解释，开始向下取整至小时、结束向上取整至小时（结束恰为整点不扩展）。例如12:18:41至15:10:08覆盖12:00至16:00的四个小时。最多168小时；默认缺片失败，allowPartial=true才允许部分导出。')
     async def download(body: DownloadCreate, request: Request, user: User):
@@ -258,11 +258,16 @@ def install_log_routes(app):
         # 列表不携带作业冻结的数千分卷目录，避免分页行数有限但响应体无限放大。
         fields = {key: 1 for key in ("id", "kind", "taskId", "nodeId", "status", "createdAt", "updatedAt",
             "expiresAt", "artifactCreatedAt", "artifactRetentionDays", "filename", "bytes", "progress", "error",
-            "resultPath", "outputExecutionState", "outputCleanupState")}
+            "resultPath", "outputExecutionState", "outputCleanupState", "createdBy", "createdByName",
+            "actor", "artifactLogSegmentCount")}
+        fields["artifactLogSegments"] = {"$slice": 8}
         cursor = repo().db.jobs.find(query, fields).sort([("createdAt", -1), ("id", -1)]).skip((page - 1) * pageSize).limit(pageSize)
         items = []
         async for document in cursor:
             item = public_job(document)
+            if not item.get("createdBy") and document.get("actor"):
+                item["createdBy"] = document["actor"]
+            item.pop("actor", None)  # 历史内部主体已映射为公开创建人字段，避免重复公开。
             item["downloadAvailable"] = download_available(document)
             items.append(item)
         return {"items": items, "total": total, "page": page, "pageSize": pageSize}

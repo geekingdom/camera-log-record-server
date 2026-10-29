@@ -40,8 +40,8 @@ try {
       else if (path === "/api/v1/tasks") body = pageOf([]);
       else if (path === "/api/v1/nodes") body = pageOf([]);
       else if (path === "/api/v1/users/permissions") body = { scopes: [
-        { value: "tasks:read", label: "查看设备与任务" }, { value: "logs:read", label: "查看日志" }, { value: "logs:download", label: "下载日志" },
-        { value: "templates:read", label: "查看模板" }, { value: "templates:write", label: "管理模板" }, { value: "commands:send", label: "发送命令" },
+        { value: "tasks:read", label: "查看设备与任务", fixed: true }, { value: "logs:read", label: "查看日志", fixed: true }, { value: "logs:download", label: "下载日志", fixed: true },
+        { value: "templates:read", label: "查看模板", fixed: true }, { value: "templates:write", label: "管理模板", fixed: true }, { value: "service-tokens:read", label: "查看我的服务账号", fixed: true }, { value: "commands:send", label: "发送命令", fixed: true },
       ] };
       else if (path === "/api/v1/users/share-targets") body = pageOf(users.map(({ id, username, displayName }) => ({ id, username, displayName })));
       else if (path === "/api/v1/users" && method === "GET") body = pageOf(users);

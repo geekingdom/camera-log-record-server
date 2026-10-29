@@ -53,7 +53,7 @@ await context.route("**/api/v1/**", async route => {
     assert.equal(request.headers()["x-requested-with"], "XMLHttpRequest", `${method} ${pathname} 缺少 CSRF 请求头`);
   if (pathname === "/api/v1/auth/me") return json(route, { user: {
     id: "admin", username: "admin", displayName: "验收管理员", isAdmin: true, enabled: true,
-    mustChangePassword: false, scopes: ["*"], version: 1,
+    mustChangePassword: false, scopes: ["*"], role: "SUPER_ADMIN", effectiveRole: "SUPER_ADMIN", version: 1,
   } });
   if (pathname === "/api/v1/users/permissions") return json(route, { scopes: [] });
   if (pathname === "/api/v1/users" && method === "GET")

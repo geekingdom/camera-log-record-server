@@ -40,7 +40,9 @@ export const idempotencyKey = (): string => {
   const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
-export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; enabled: boolean; mustChangePassword: boolean; /** 仅登录、当前身份和改密响应提供；用户目录中的其它用户没有该请求专属状态。 */ hasActiveServiceToken?: boolean; version?: number; builtin?: boolean; deletedAt?: string | null; }
+export type UserRole = "SUPER_ADMIN" | "ADMIN" | "USER";
+/** 会话与用户目录共用的账号快照；role 为配置角色，effectiveRole 为截至当前上海自然日的生效角色。 */
+export interface SessionUser { id: string; username: string; displayName: string; isAdmin: boolean; scopes: string[]; enabled: boolean; mustChangePassword: boolean; role?: UserRole; effectiveRole?: UserRole; permissionsExpiresOn?: string | null; permissionsExpired?: boolean; /** 仅登录、当前身份和改密响应提供；用户目录中的其它用户没有该请求专属状态。 */ hasActiveServiceToken?: boolean; version?: number; builtin?: boolean; deletedAt?: string | null; }
 export interface UserPage { items: SessionUser[]; total: number; page: number; pageSize: number; }
 export interface IpPolicy { version: number; enabled: boolean; clientIp: string; rules: { label: string; network: string; scopes: string[] }[]; }
 export interface LogGapFragment { fileId: string; sessionId?: string; start: number; end: number; }
@@ -108,10 +110,10 @@ export const authApi = {
 };
 export const usersApi = {
   list: (page = 1, pageSize = 20) => request<UserPage>(`/users?page=${page}&pageSize=${pageSize}`),
-  permissions: () => request<{ scopes: { value: string; label: string }[] }>("/users/permissions"),
+  permissions: () => request<{ scopes: { value: string; label: string; fixed?: boolean }[] }>("/users/permissions"),
   shareTargets: (page = 1, pageSize = 100) => request<Page<Pick<SessionUser, "id" | "username" | "displayName">>>(`/users/share-targets${query(page, pageSize)}`),
-  create: (body: Pick<SessionUser, "username" | "displayName" | "isAdmin" | "scopes" | "enabled"> & { password: string }) => request<SessionUser>("/users", { method: "POST", body: JSON.stringify(body) }),
-  update: (id: string, body: Partial<Pick<SessionUser, "displayName" | "scopes" | "enabled">> & { version: number }) => request<SessionUser>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  create: (body: Pick<SessionUser, "username" | "displayName" | "scopes" | "enabled" | "role" | "permissionsExpiresOn"> & { password: string }) => request<SessionUser>("/users", { method: "POST", body: JSON.stringify(body) }),
+  update: (id: string, body: Partial<Pick<SessionUser, "displayName" | "scopes" | "enabled" | "role" | "permissionsExpiresOn">> & { version: number }) => request<SessionUser>(`/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
   resetPassword: (id: string, password: string, version: number) => request<void>(`/users/${encodeURIComponent(id)}/reset-password`, { method: "POST", body: JSON.stringify({ password, version }) }),
   disable: (id: string, version: number, resourceAction?: "DELETE" | "TRANSFER", targetUserId?: string) => {
     const params = new URLSearchParams({ version: String(version) });
@@ -382,6 +384,9 @@ export const api = {
       filename?: string;
       progress?: number;
       error?: string;
+      /** 单作业详情保留完整分卷数组，供列表摘要按需展开。 */
+      artifactLogSegments?: DownloadHistoryItem["artifactLogSegments"];
+      artifactLogSegmentCount?: number;
     }>(`/downloads/${id}`),
   taskDownloads: (taskId: string, page = 1) =>
     request<Page<DownloadHistoryItem>>(`/tasks/${encodeURIComponent(taskId)}/downloads${query(page, 20)}`),

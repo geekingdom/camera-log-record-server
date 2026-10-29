@@ -17,7 +17,7 @@ import { sshTargetLabel } from "./sshTarget";
 
 const loadTaskDiagnostics = () => import("./TaskDiagnostics.vue");
 
-const props = defineProps<{ items: Task[]; loading: boolean; canWrite?: boolean; canControl?: boolean; userId?: string; isAdmin?: boolean; createdBy?: string; showAll?: boolean; includeDeleted?: boolean; selectionKey?: string }>();
+const props = defineProps<{ items: Task[]; loading: boolean; canWrite?: boolean; canControl?: boolean; permissionsExpired?: boolean; userId?: string; isAdmin?: boolean; createdBy?: string; showAll?: boolean; includeDeleted?: boolean; selectionKey?: string }>();
 const emit = defineEmits<{ edit: [Task]; view: [Task]; changed: []; filters: [filters: { createdBy: string; showAll: boolean; includeDeleted: boolean }]; sort: [sort: { sortBy?: string; sortOrder?: "asc" | "desc" }] }>();
 const pendingIds = ref(new Set<string>());
 const diagnosticId = ref<string>();
@@ -51,9 +51,9 @@ function label(value: string | undefined, labels: Record<string, string>) {
 function busy(task: Task) {
   return pendingIds.value.has(task.id);
 }
-function owns(task: Task) {
-  return canManageSharedResourceRecord(props.userId, props.isAdmin, task.createdBy, task.resourceSharedUserIds);
-}
+function owns(task: Task) { return props.permissionsExpired ? task.createdBy === props.userId : canManageSharedResourceRecord(props.userId, props.isAdmin, task.createdBy, task.resourceSharedUserIds); }
+function canEdit(task: Task) { return Boolean(owns(task) && (props.canWrite || props.permissionsExpired)); }
+function canDelete(task: Task) { return Boolean(canEdit(task) && (props.canControl || props.permissionsExpired)); }
 function showsAction(task: Task, action: TaskAction) {
   return !task.resourceDeleted && availableTaskActions(task).includes(action);
 }
@@ -179,7 +179,7 @@ async function state(
 }
 // 删除提交绑定已确认的任务版本，轮询不会改变用户确认的目标。
 async function remove(task: Task) {
-  if (!props.canWrite || !props.canControl || deleting.value || !owns(task) || task.deletedAt || task.resourceDeleted || busy(task) || task.version == null) return;
+  if (!canDelete(task) || deleting.value || task.deletedAt || task.resourceDeleted || busy(task) || task.version == null) return;
   const { id, name, version } = task;
   if (!await confirmAction(`确认删除任务“${name}”吗？任务将停止采集并从默认列表隐藏。已有日志及下载文件仍按原保留期保留，已分享的下载链接不因删除任务而失效。`, "确认删除采集任务")) return;
   if (!mounted || busy(task)) return;
@@ -251,11 +251,11 @@ const rows = computed(() => props.items);
     <el-table-column label="资源删除时间" prop="resourceDeletedAt" sortable="custom" min-width="180"><template #default="{ row }">{{ row.resourceDeletedAt ? new Date(row.resourceDeletedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) : '-' }}</template></el-table-column>
     <el-table-column label="操作" width="250" fixed="right"
       ><template #default="{ row }">
-        <el-tooltip v-if="props.canWrite && props.canControl && owns(row) && !row.deletedAt && !row.resourceDeleted" content="删除任务，保留历史日志"><el-button text type="danger" :icon="Trash2" aria-label="删除采集任务" :disabled="busy(row) || deleting || applying || row.version == null" @click="remove(row)" /></el-tooltip>
+        <el-tooltip v-if="canDelete(row) && !row.deletedAt && !row.resourceDeleted" content="删除任务，保留历史日志"><el-button text type="danger" :icon="Trash2" aria-label="删除采集任务" :disabled="busy(row) || deleting || applying || row.version == null" @click="remove(row)" /></el-tooltip>
         <el-tooltip :content="`查看任务状态 · ID: ${row.id}`">
           <el-button text :icon="Info" aria-label="查看任务状态" @click="showDiagnostics(row)" />
         </el-tooltip>
-        <el-tooltip v-if="props.canWrite && owns(row) && !row.resourceDeleted && !row.deletedAt" :content="`编辑任务 · ID: ${row.id}`"
+        <el-tooltip v-if="canEdit(row) && !row.resourceDeleted && !row.deletedAt" :content="`编辑任务 · ID: ${row.id}`"
           ><el-button
             text
             :icon="Edit3"

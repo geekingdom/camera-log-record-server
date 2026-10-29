@@ -19,6 +19,7 @@ from camera_logs.common.security import actor, authorize
 from camera_logs.resources.lifecycle import mark_resource_deletion, reconcile_resource_deletion
 from camera_logs.users.models import PERMISSIONS, Login, PasswordChange, PasswordReset, UserCreate, UserPatch
 from camera_logs.users.passwords import hash_password, password_work, verify_password
+from camera_logs.users.roles import FIXED_SCOPES, authorize_user_target, claim_account_manager
 from camera_logs.users.session_mutations import revoke_session, rotate_session
 from camera_logs.users.sessions import (
     COOKIE,
@@ -126,7 +127,7 @@ def install_user_routes(app):
     @app.get("/api/v1/users/permissions")
     async def permissions(user: User):
         authorize(user, "admin")
-        return {"scopes": [{"value": value, "label": label} for value, label in PERMISSIONS.items()]}
+        return {"scopes": [{"value": value, "label": label, "fixed": value in FIXED_SCOPES} for value, label in PERMISSIONS.items()]}
 
     @app.get("/api/v1/users/creators")
     async def creators(user: User, page: int = Query(1, ge=1, description='从 1 开始的分页页码。'), pageSize: int = Query(20, ge=1, le=100, description='每页返回的记录数，受接口允许的最大值限制。'),
@@ -163,7 +164,8 @@ def install_user_routes(app):
     @app.post("/api/v1/users", status_code=201)
     async def create(body: UserCreate, user: User):
         authorize(user, "admin")
-        doc = body.model_dump(exclude={"password"}) | {
+        doc = body.model_dump(exclude={"password", "isAdmin"}) | {
+            "isAdmin": body.role == "ADMIN",
             "id": new_id(), "builtin": False, "version": 1, "authVersion": 1,
             "passwordHash": await password_work(repo(), hash_password, body.password),
             "mustChangePassword": True, "createdAt": now(), "updatedAt": now(),
@@ -171,6 +173,7 @@ def install_user_routes(app):
 
         async def commit(session):
             """账户插入与创建审计使用同一会话，重名错误不会产生成功审计。"""
+            await claim_account_manager(repo(), user, session=session)
             await repo().db.users.insert_one(doc, session=session)
             return doc
 
@@ -184,10 +187,11 @@ def install_user_routes(app):
         """版本控制防止覆盖；内置管理员保护不依赖前端按钮。"""
         authorize(user, "admin")
         old = await repo().get("users", identifier)
-        if old.get("builtin"):
-            raise HTTPException(403, "内置管理员仅能自行修改密码")
+        authorize_user_target(user, old)
         async def commit(session):
             """账号 CAS 未命中时整体回滚，不能单独留下编辑或删除审计。"""
+            current_target = await repo().db.users.find_one({"id": identifier}, session=session)
+            await claim_account_manager(repo(), user, session=session, target=current_target or old)
             changed = await repo().db.users.find_one_and_update(
                 {"id": identifier, "version": version, "deletedAt": None, "builtin": False},
                 {"$set": updates | {"updatedAt": now()}, "$inc": {"version": 1, "authVersion": 1}},
@@ -205,6 +209,10 @@ def install_user_routes(app):
     async def edit(identifier: Annotated[str, ApiPath(description='要编辑的平台用户 ID，可由创建用户响应、用户列表或创建人列表返回。')], body: UserPatch, user: User):
         authorize(user, "admin")
         values = body.model_dump(exclude_unset=True, exclude={"version"})
+        if "role" in values:
+            if values["role"] is None:
+                raise HTTPException(422, "角色不能为空")
+            values["isAdmin"] = values["role"] == "ADMIN"
         if "scopes" in values:
             if values["scopes"] is None or set(values["scopes"]) - PERMISSIONS.keys():
                 raise HTTPException(422, "权限配置无效")
@@ -232,14 +240,15 @@ def install_user_routes(app):
         """软删除用户，并在同一事务中处置其活动资源和受影响任务。"""
         authorize(user, "admin")
         old = await repo().get("users", identifier)
-        if old.get("builtin"):
-            raise HTTPException(403, "内置管理员仅能自行修改密码")
+        authorize_user_target(user, old)
         timestamp = now()
         deleted_resources: list[str] = []
 
         async def commit(session):
             """用户 CAS、资源归属变更与任务停止意图必须共同提交。"""
             nonlocal deleted_resources
+            current_target = await repo().db.users.find_one({"id": identifier}, session=session)
+            await claim_account_manager(repo(), user, session=session, target=current_target or old)
             resources = [item async for item in repo().db.resources.find(
                 {"createdBy": identifier, "deletedAt": None}, {"id": 1}, session=session,
             )]

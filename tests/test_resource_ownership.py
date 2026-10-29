@@ -57,8 +57,18 @@ def test_other_users_can_read_but_not_mutate_and_owner_is_not_client_controlled(
     assert client.patch(f'/api/v1/tasks/{own_task["id"]}', json={"version": 1, "name": "不允许"}).status_code == 403
     for action in ("start", "stop", "pause", "resume"):
         assert client.post(f'/api/v1/tasks/{own_task["id"]}/{action}').status_code == 403
-    assert client.post(f'/api/v1/tasks/{own_task["id"]}/commands', json={"command": "ls"},
-                       headers={"Idempotency-Key": "foreign-command"}).status_code == 403
+    # 手工命令是所有有效用户的固定基础权限，且须在真实可交互会话中验证而不是接受 409。
+    client.portal.call(client.app.state.repo.db.tasks.update_one, {"id": own_task["id"]}, {"$set": {
+        "status": "COLLECTING", "desiredState": "RUNNING", "sessionId": "foreign-session", "runId": "foreign-run",
+    }})
+    foreign_command = client.post(f'/api/v1/tasks/{own_task["id"]}/commands', json={"command": "ls"},
+                                  headers={"Idempotency-Key": "foreign-command"})
+    assert foreign_command.status_code == 202, foreign_command.text
+    assert foreign_command.json()["actor"] == "bob"
+    assert foreign_command.json()["actorUsername"] == "bob"
+    assert client.portal.call(client.app.state.repo.db.audit.count_documents, {
+        "actor": "bob", "action": f'command:{own_task["id"]}',
+    }) == 1
     body = {"version": 1, "name": "不允许", "kind": "SERIAL_SERVER", "ip": "192.0.2.71"}
     assert client.patch(f'/api/v1/resources/{created["id"]}', json=body).status_code == 403
     assert client.delete(f'/api/v1/resources/{created["id"]}?version=1').status_code == 403

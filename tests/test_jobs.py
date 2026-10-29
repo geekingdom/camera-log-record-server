@@ -42,6 +42,25 @@ def test_snapshot_enforces_compressed_byte_limit_before_write(tmp_path):
     assert target.stat().st_size <= 32
 
 
+def test_download_artifact_segments_keep_only_successful_discrete_frozen_sources():
+    """制品元数据只保留实际导出的离散分卷，不能根据小时首尾补出不存在的时间。"""
+    segments = jobs._artifact_log_segments([
+        ({"id": "first", "hour": "2026-10-29T00:00:00+00:00",
+          "firstReceivedAt": "2026-10-29T00:03:00+00:00", "lastReceivedAt": "2026-10-29T00:04:00+00:00"},
+         {}, Path("/tmp/first"), False),
+        ({"id": "third", "hour": "2026-10-29T02:00:00+00:00",
+          "firstReceivedAt": "2026-10-29T02:10:00+00:00", "lastReceivedAt": "2026-10-29T02:11:00+00:00"},
+         {}, Path("/tmp/third"), False),
+    ])
+
+    assert segments == [
+        {"fileId": "first", "hour": "2026-10-29T00:00:00+00:00",
+         "firstReceivedAt": "2026-10-29T00:03:00+00:00", "lastReceivedAt": "2026-10-29T00:04:00+00:00"},
+        {"fileId": "third", "hour": "2026-10-29T02:00:00+00:00",
+         "firstReceivedAt": "2026-10-29T02:10:00+00:00", "lastReceivedAt": "2026-10-29T02:11:00+00:00"},
+    ]
+
+
 async def test_remote_snapshot_checks_limit_before_writing_chunk(tmp_path, monkeypatch):
     """远端返回超额正文时，不允许把导致越界的数据块写入临时文件。"""
     class Chunks(httpx.AsyncByteStream):

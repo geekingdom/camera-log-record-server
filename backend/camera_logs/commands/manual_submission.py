@@ -11,7 +11,6 @@ from camera_logs.commands.manual_admission import admit_manual
 from camera_logs.common import audited_mutations
 from camera_logs.common.database import now
 from camera_logs.common.models import new_id
-from camera_logs.resources.sharing import authorize_task_operation
 
 
 async def _confirmed(database, actor, key, digest, *, session=None):
@@ -48,9 +47,14 @@ async def submit_manual(repo, actor, task_id, key, body, *, identity=None):
         previous = await _confirmed(repo.db, actor_id, key, digest, session=session)
         if previous is not None:
             return previous
-        if identity is not None:
-            # 与共享撤销写入同一资源，事务重试时必须以最新授权重新决定是否入队。
-            await authorize_task_operation(repo, identity, task, session=session)
+        if identity is not None and identity.get("kind") in {"session", "service-token"}:
+            # 账号停用/删除写入同一文档，使已通过HTTP认证的迟到提交不能留下可发送命令。
+            active = await repo.db.users.find_one_and_update(
+                {"id": actor_id, "enabled": True, "deletedAt": None},
+                {"$inc": {"commandSubmissionVersion": 1}}, session=session,
+            )
+            if active is None:
+                raise HTTPException(403, "账户已停用或删除，不能提交手工命令")
         timestamp = now()
         await repo.db.idempotency.insert_one({
             "actor": actor_id, "key": key, "digest": digest, "resourceId": identifier,

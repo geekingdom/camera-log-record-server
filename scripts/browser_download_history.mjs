@@ -12,7 +12,16 @@ const tasks = [
   { id: "task-one", name: "下载历史任务一", protocol: "SSH", ip: "192.0.2.41", port: 22, status: "STOPPED", desiredState: "STOPPED", initialCommands: [], scheduledCommands: [], version: 1 },
   { id: "task-two", name: "下载历史任务二", protocol: "SSH", ip: "192.0.2.42", port: 22, status: "STOPPED", desiredState: "STOPPED", initialCommands: [], scheduledCommands: [], version: 1 },
 ];
-const ready = { id: "ready-download", taskId: "task-one", status: "SUCCEEDED", createdAt: "2026-10-16T01:00:00Z", expiresAt: "2026-10-20T01:00:00Z", bytes: 3_145_728, filename: "ready.tar.gz", progress: 100, downloadAvailable: true };
+const completeReadySegments = [
+  { fileId: "segment-01", hour: "2026-10-16T01:00:00Z", firstReceivedAt: "2026-10-16T01:02:03Z", lastReceivedAt: "2026-10-16T01:08:09Z" },
+  { fileId: "segment-03", hour: "2026-10-16T03:00:00Z", firstReceivedAt: "2026-10-16T03:30:00Z", lastReceivedAt: "2026-10-16T03:31:00Z" },
+  ...Array.from({ length: 8 }, (_, index) => {
+    const hour = String(index + 4).padStart(2, "0");
+    return { fileId: `segment-${hour}`, hour: `2026-10-16T${hour}:00:00Z`, firstReceivedAt: `2026-10-16T${hour}:30:00Z`, lastReceivedAt: `2026-10-16T${hour}:31:00Z` };
+  }),
+];
+// 列表只携带服务端有界摘要；详情接口才返回十段完整制品元数据。
+const ready = { id: "ready-download", taskId: "task-one", status: "SUCCEEDED", createdAt: "2026-10-16T01:00:00Z", createdBy: "operator-1", createdByName: "下载操作员", expiresAt: "2026-10-20T01:00:00Z", bytes: 3_145_728, filename: "ready.tar.gz", progress: 100, downloadAvailable: true, artifactLogSegmentCount: completeReadySegments.length, artifactLogSegments: completeReadySegments.slice(0, 8) };
 const expired = { id: "expired-download", taskId: "task-one", status: "SUCCEEDED", createdAt: "2026-10-01T01:00:00Z", expiresAt: "2026-10-08T01:00:00Z", bytes: 2_048, filename: "expired.tar.gz", progress: 100, downloadAvailable: false };
 const taskTwoRecords = Array.from({ length: 21 }, (_, index) => ({
   id: `task-two-${index + 1}`, taskId: "task-two", status: index === 0 ? "RUNNING" : "FAILED",
@@ -21,6 +30,7 @@ const taskTwoRecords = Array.from({ length: 21 }, (_, index) => ({
   error: index === 0 ? undefined : "归档缺少可用片段", downloadAvailable: false,
 }));
 let historyRequests = 0;
+let downloadDetailRequests = 0;
 let delayedRefresh = false;
 let delayedStarted;
 let releaseDelayed;
@@ -43,6 +53,10 @@ await context.route("**/api/v1/**", async route => {
     if (taskId === "task-one") return json(route, page([ready, expired]));
     const current = Number(url.searchParams.get("page") || "1");
     return json(route, page(taskTwoRecords.slice((current - 1) * 20, current * 20), current, taskTwoRecords.length));
+  }
+  if (method === "GET" && path === "/api/v1/downloads/ready-download") {
+    downloadDetailRequests += 1;
+    return json(route, { ...ready, artifactLogSegments: completeReadySegments });
   }
   if (method === "GET" && /^\/api\/v1\/tasks\/[^/]+\/search-index-status$/.test(path)) {
     const taskId = decodeURIComponent(path.split("/")[4]);
@@ -80,6 +94,15 @@ try {
   await pageUi.getByRole("button", { name: "查看实时打印 · 下载历史任务一" }).click();
   await pageUi.getByRole("tab", { name: "下载记录", exact: true }).click();
   await pageUi.getByText("制品可重新下载", { exact: true }).waitFor();
+  await pageUi.getByText("下载操作员", { exact: true }).waitFor();
+  assert.equal(await pageUi.getByText("2026/10/16 09:02:03 至 2026/10/16 09:08:09", { exact: true }).count(), 1, "首个实际分卷时间必须单独显示");
+  assert.equal(await pageUi.getByText("2026/10/16 11:30:00 至 2026/10/16 11:31:00", { exact: true }).count(), 1, "不连续分卷不能合并成首尾连续范围");
+  assert.equal(await pageUi.getByText("2026/10/16 19:30:00 至 2026/10/16 19:31:00", { exact: true }).count(), 0, "列表摘要不能预先渲染详情才有的后续分卷");
+  await pageUi.getByRole("button", { name: "展开全部 10 段", exact: true }).click();
+  await pageUi.getByText("2026/10/16 19:30:00 至 2026/10/16 19:31:00", { exact: true }).waitFor();
+  assert.equal(downloadDetailRequests, 1, "展开摘要时只读取一次完整制品元数据");
+  await pageUi.getByRole("button", { name: "收起分卷", exact: true }).click();
+  assert.equal(await pageUi.getByText("2026/10/16 19:30:00 至 2026/10/16 19:31:00", { exact: true }).count(), 0, "收起后只保留前两段摘要");
   assert.equal(await pageUi.getByText("已完成", { exact: true }).count(), 1, "成功制品必须显示已完成状态");
   assert.equal(await pageUi.getByText("已过期", { exact: true }).count(), 1, "成功但过期的制品必须明确标记为已过期");
   const expiredButton = pageUi.getByLabel("重新下载 expired-download");

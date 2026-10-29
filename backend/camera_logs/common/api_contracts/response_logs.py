@@ -63,11 +63,19 @@ TIME_RANGE_RESULT = obj("无关键词时间范围查询返回的原始日志字�
 
 SEARCH_RESULT_ITEM = {"oneOf": [SEARCH_RESULT, TIME_RANGE_RESULT], "description": "关键词检索命中行，或无关键词时间范围查询的原始字节片段。"}
 
+ARTIFACT_LOG_SEGMENT = obj("实际写入下载制品的单个冻结日志分卷；数组顺序仅为制品写入顺序，不表示其时间连续。", {
+    "fileId": field("string", "冻结日志分卷标识。"),
+    "hour": field("string", "该分卷所属的逻辑小时目录标识。"),
+    "firstReceivedAt": field("string", "该分卷实际首条日志的服务器接收时间；历史分卷未保存时为 null。", nullable=True),
+    "lastReceivedAt": field("string", "该分卷实际末条日志的服务器接收时间；历史分卷未保存时为 null。", nullable=True),
+}, ("fileId", "hour"))
+
 JOB = obj("异步下载或检索作业公开投影。", {
     "id": field("string", "作业标识。"), "kind": field("string", "DOWNLOAD 或 SEARCH。"),
     "status": field("string", "作业状态：QUEUED 等待节点领取，RUNNING 正在执行，SUCCEEDED 已成功生成结果，FAILED 执行失败，CANCELLED 已取消，EXPIRED 在执行期限内未完成。"),
     "progress": field("integer", "执行进度百分比，范围 0 至 100；终态成功为 100。"),
-    "actor": field("string", "提交者标识。"), "taskId": field("string", "所属任务。"),
+    "actor": field("string", "提交者标识。"), "createdBy": field("string", "下载任务创建人标识快照；旧作业可能为空。", nullable=True),
+    "createdByName": field("string", "下载任务创建人展示名快照；后续改名或删除不回写，旧作业可能为空。", nullable=True), "taskId": field("string", "所属任务。"),
     "nodeId": field("string", "处理节点。"), "taskName": field("string", "冻结任务名。"),
     "taskIp": field("string", "冻结任务 IP。"), "createdAt": field("string", "创建时间。"),
     "expiresAt": field("string", "下载制品到期时间；检索作业或尚未分配制品保留期时为 null 或省略。", nullable=True),
@@ -84,6 +92,8 @@ JOB = obj("异步下载或检索作业公开投影。", {
     "filename": field("string", "产物文件名。", nullable=True), "bytes": field("integer", "产物字节数。", nullable=True),
     "artifactCreatedAt": field("string", "产物创建时间。", nullable=True),
     "artifactRetentionDays": field("integer", "产物保留天数。", nullable=True),
+    "artifactLogSegmentCount": field("integer", "实际写入下载制品的日志分卷总数；旧作业没有此快照时省略。", minimum=0),
+    "artifactLogSegments": array("实际写入下载制品的离散日志分卷及各自接收时间；未成功生成制品或旧作业时为空或省略，不能把数组首尾解释为连续覆盖范围。", ARTIFACT_LOG_SEGMENT, nullable=True),
     "outputLockProtocol": field("integer", "输出制品写入与清理锁协议版本；Worker 已领取输出时出现，旧作业可省略。"),
     "missing": array("成功的部分下载中未能读取的冻结文件标识；非部分下载或尚未完成时省略。", field("string", "未能读取的文件标识。")),
     "error": field("string", "失败或取消错误码。", nullable=True), "errorMessage": field("string", "失败说明。", nullable=True),
@@ -94,10 +104,14 @@ DOWNLOAD_HISTORY = obj("下载历史行，不含冻结文件目录。", {
     "taskId": field("string", "任务标识。"), "nodeId": field("string", "处理节点标识。", nullable=True),
     "status": field("string", "下载作业状态：QUEUED、RUNNING、SUCCEEDED、FAILED、CANCELLED 或 EXPIRED。"),
     "createdAt": field("string", "创建时间。"),
+    "createdBy": field("string", "下载任务创建人标识快照；旧作业可使用已保存的actor标识，均未保存时为null或省略。", nullable=True),
+    "createdByName": field("string", "下载任务创建人展示名快照；后续改名或删除不回写，旧作业未保存时为 null。", nullable=True),
     "updatedAt": field("string", "最近处理时间。", nullable=True), "expiresAt": field("string", "到期时间。", nullable=True),
     "artifactCreatedAt": field("string", "产物创建时间。", nullable=True), "artifactRetentionDays": field("integer", "产物保留天数。", nullable=True),
     "filename": field("string", "产物文件名。", nullable=True), "bytes": field("integer", "产物字节数。", nullable=True),
     "progress": field("integer", "执行进度。"), "error": field("string", "失败或取消错误码。", nullable=True),
+    "artifactLogSegmentCount": field("integer", "实际写入下载制品的日志分卷总数；旧作业没有此快照时省略。", minimum=0),
+    "artifactLogSegments": array("实际写入制品的前8个日志分卷预览；总数由artifactLogSegmentCount给出，完整数组通过GET /api/v1/downloads/{id}按需读取。每项独立时间不能合并解释为连续覆盖；旧作业或尚未成功时为null或省略。", ARTIFACT_LOG_SEGMENT, nullable=True),
     "downloadAvailable": field("boolean", "产物当前是否可下载。"),
 }, ("id", "kind", "taskId", "status", "createdAt", "downloadAvailable"))
 

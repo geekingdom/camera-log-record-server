@@ -11,11 +11,11 @@ import ResourceBatchEditor from "./ResourceBatchEditor.vue";
 import ResourceShareRecipients from "./ResourceShareRecipients.vue";
 
 const open = defineModel<boolean>({ required: true });
-const props = defineProps<{ resource?: Resource; canEdit?: boolean }>();
+const props = defineProps<{ resource?: Resource; canEdit?: boolean; permissionsExpired?: boolean }>();
 const emit = defineEmits<{ saved: [] }>();
 const permissions = usePermissions();
 const canSave = computed(() => props.resource
-  ? Boolean(props.canEdit) && permissions.can("resources:write")
+  ? Boolean(props.canEdit) && (permissions.can("resources:write") || props.permissionsExpired)
   : permissions.can("resources:create"));
 const blank = () => ({ name: "", kind: "HIKVISION_NETWORK" as ResourceKind, ip: "", username: "", password: "", authType: "DIGEST" as ResourceAuthType, enableCoredumpMonitor: false, enableResourceMonitor: false, sharedUserIds: [] as string[] });
 const form = ref(blank());
@@ -26,6 +26,8 @@ const loading = ref(false);
 const editVersion = ref(1);
 const formRef = ref<FormInstance>();
 const isNetwork = computed(() => form.value.kind === "HIKVISION_NETWORK");
+// 到期本人编辑仍由 PATCH 实际认证；预览接口要求创建权限，不能阻断已存在资源的修正。
+const requiresAuthenticationPreview = computed(() => isNetwork.value && (!props.resource || !props.permissionsExpired));
 const createMode = ref<"SINGLE" | "BATCH">("SINGLE");
 const batchSaving = ref(false);
 const showBatch = computed(() => !props.resource && isNetwork.value && createMode.value === "BATCH");
@@ -121,7 +123,7 @@ async function save() {
   const current = formGeneration;
   if (!(await formRef.value?.validate().catch(() => false))) return;
   if (current !== formGeneration || !open.value || saving.value) return;
-  if (isNetwork.value && (!authenticated.value || verifiedFingerprint !== fingerprint.value)) {
+  if (requiresAuthenticationPreview.value && (!authenticated.value || verifiedFingerprint !== fingerprint.value)) {
     ElMessage.warning("请先使用当前凭据完成认证"); return;
   }
   saving.value = true;
@@ -172,7 +174,7 @@ async function save() {
         <el-form-item label="共享用户"><ResourceShareRecipients v-model="form.sharedUserIds" :disabled="saving || loading" /></el-form-item>
       </section>
       <section v-if="isNetwork" class="form-section resource-editor-section">
-        <div class="resource-section-heading resource-auth-heading"><span class="resource-section-icon verified"><ShieldCheck :size="18" /></span><div><h2>设备 HTTP 认证</h2><p>认证结果用于确认网络设备身份，不作为采集登录凭据</p></div><el-button :loading="authenticating" :icon="KeyRound" @click="authenticate">点击认证</el-button></div>
+        <div class="resource-section-heading resource-auth-heading"><span class="resource-section-icon verified"><ShieldCheck :size="18" /></span><div><h2>设备 HTTP 认证</h2><p>认证结果用于确认网络设备身份，不作为采集登录凭据</p></div><el-button v-if="requiresAuthenticationPreview" :loading="authenticating" :icon="KeyRound" @click="authenticate">点击认证</el-button></div>
         <div class="form-grid">
           <el-form-item label="用户名" prop="username"><el-input v-model="form.username" autocomplete="off" /></el-form-item>
           <el-form-item :label="props.resource ? '密码（留空保持原值）' : '密码'" prop="password"><el-input v-model="form.password" type="password" show-password autocomplete="new-password" /></el-form-item>
@@ -182,7 +184,7 @@ async function save() {
         <div v-if="authenticated && verifiedFingerprint === fingerprint" class="resource-auth-result" role="status"><div class="resource-auth-title"><ShieldCheck :size="17" /><strong>本次认证结果</strong></div><div><span>设备型号</span><strong>{{ authenticated.model || "未返回" }}</strong></div><div><span>设备序列号</span><strong>{{ authenticated.subSerialNumber || "未返回" }}</strong></div><div><span>软件版本</span><strong>{{ authenticated.softwareVersion || "未返回" }}</strong></div></div>
       </section>
     </el-form>
-    <template #footer><el-button @click="open = false">关闭</el-button><el-button v-if="!showBatch" type="primary" :loading="saving" :disabled="loading || (isNetwork && (!authenticated || verifiedFingerprint !== fingerprint))" @click="save">保存资源</el-button></template>
+    <template #footer><el-button @click="open = false">关闭</el-button><el-button v-if="!showBatch" type="primary" :loading="saving" :disabled="loading || (requiresAuthenticationPreview && (!authenticated || verifiedFingerprint !== fingerprint))" @click="save">保存资源</el-button></template>
   </el-drawer>
 </template>
 <style scoped>

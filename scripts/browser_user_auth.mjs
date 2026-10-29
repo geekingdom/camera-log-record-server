@@ -19,6 +19,8 @@ const admin = {
   username: "admin",
   displayName: "系统管理员",
   isAdmin: true,
+  role: "SUPER_ADMIN",
+  effectiveRole: "SUPER_ADMIN",
   scopes: ["*"],
   resourceIds: null,
   enabled: true,
@@ -31,6 +33,8 @@ const force = {
   username: "force",
   displayName: "需改密用户",
   isAdmin: false,
+  role: "USER",
+  effectiveRole: "USER",
   scopes: ["tasks:read"],
   resourceIds: ["resource"],
   enabled: true,
@@ -41,11 +45,30 @@ const reader = {
   username: "reader",
   displayName: "只读用户",
   isAdmin: false,
+  role: "ADMIN",
+  effectiveRole: "USER",
+  permissionsExpiresOn: "2026-10-13",
+  permissionsExpired: true,
   scopes: ["tasks:read", "logs:read"],
   resourceIds: ["resource"],
   enabled: true,
   mustChangePassword: false,
 };
+const expiredResources = [
+  { id: "reader-resource", name: "到期本人资源", kind: "SERIAL_SERVER", ip: "192.0.2.61", version: 1,
+    createdBy: "reader", createdByName: "只读用户", sharedUserIds: [] },
+  { id: "shared-resource", name: "到期共享资源", kind: "SERIAL_SERVER", ip: "192.0.2.62", version: 1,
+    createdBy: "owner", createdByName: "资源所有者", sharedUserIds: ["reader"] },
+];
+const expiredTasks = [
+  { id: "reader-task", name: "到期本人任务", ip: "192.0.2.61", port: 10002, version: 1,
+    status: "STOPPED", desiredState: "STOPPED", protocol: "TELNET_SERIAL", resourceId: "reader-resource",
+    createdBy: "reader", createdByName: "只读用户", resourceSharedUserIds: [] },
+  { id: "shared-task", name: "到期共享任务", ip: "192.0.2.62", port: 10002, version: 1,
+    status: "STOPPED", desiredState: "STOPPED", protocol: "TELNET_SERIAL", resourceId: "shared-resource",
+    createdBy: "owner", createdByName: "资源所有者", resourceSharedUserIds: ["reader"] },
+];
+const expiredMutations = [];
 let ipPolicy = { version: 1, enabled: false, clientIp: "127.0.0.1", rules: [] };
 
 async function json(route, body, status = 200, headers = {}) {
@@ -95,7 +118,7 @@ await context.route("**/api/v1/**", async (route) => {
     return json(route, dashboardFixture(undefined, 7, Boolean(current?.isAdmin), current?.scopes.includes("*") || current?.scopes.includes("logs:read")));
   if (path === "/api/v1/tasks")
     return json(route, {
-      items: [
+      items: current?.id === "reader" ? expiredTasks : [
         {
           id: "task",
           name: "只读任务",
@@ -107,13 +130,13 @@ await context.route("**/api/v1/**", async (route) => {
           resourceId: "resource",
         },
       ],
-      total: 1,
+      total: current?.id === "reader" ? expiredTasks.length : 1,
       page: 1,
       pageSize: 20,
     });
   if (path === "/api/v1/resources")
     return json(route, {
-      items: [
+      items: current?.id === "reader" ? expiredResources : [
         {
           id: "resource",
           name: "授权资源",
@@ -122,15 +145,42 @@ await context.route("**/api/v1/**", async (route) => {
           version: 1,
         },
       ],
-      total: 1,
+      total: current?.id === "reader" ? expiredResources.length : 1,
       page: 1,
       pageSize: 20,
     });
+  if (path.startsWith("/api/v1/resources/") && method === "GET") {
+    const resource = expiredResources.find(item => item.id === path.split("/").pop());
+    return json(route, resource || { detail: "not found" }, resource ? 200 : 404);
+  }
+  if (path === "/api/v1/resources/reader-resource" && method === "PATCH") {
+    expiredMutations.push({ method, path, payload });
+    Object.assign(expiredResources[0], payload, { version: 2 });
+    return json(route, expiredResources[0]);
+  }
+  if (path === "/api/v1/tasks/reader-task" && method === "GET")
+    return json(route, expiredTasks[0]);
   if (path === "/api/v1/command-templates" || path === "/api/v1/nodes")
     return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (path === "/api/v1/users/permissions")
     return json(route, {
-      scopes: [{ value: "tasks:read", label: "查看任务" }],
+      scopes: [
+        { value: "tasks:read", label: "查看设备与任务", fixed: true },
+        { value: "logs:read", label: "查看日志与 Coredump", fixed: true },
+        { value: "logs:download", label: "下载日志与 Coredump", fixed: true },
+        { value: "templates:read", label: "查看命令模板", fixed: true },
+        { value: "templates:write", label: "创建命令模板", fixed: true },
+        { value: "service-tokens:read", label: "查看我的服务账号", fixed: true },
+        { value: "tasks:write", label: "编辑任务", fixed: false },
+        { value: "commands:send", label: "发送命令", fixed: true },
+      ],
+    });
+  if (path === "/api/v1/users/share-targets")
+    return json(route, {
+      items: [{ id: "reader", username: "reader", displayName: "只读用户" }],
+      total: 1,
+      page: 1,
+      pageSize: 100,
     });
   if (path === "/api/v1/users")
     return json(route, {
@@ -139,6 +189,7 @@ await context.route("**/api/v1/**", async (route) => {
       page: 1,
       pageSize: 20,
     });
+  if (path === "/api/v1/users/creators") return json(route, { items: [], total: 0, page: 1, pageSize: 100 });
   if (path === "/api/v1/admin/ip-policy" && method === "GET")
     return json(route, ipPolicy);
   if (path === "/api/v1/admin/ip-policy" && method === "PATCH") {
@@ -186,14 +237,21 @@ try {
   await page.getByRole("tab", { name: "账号管理", exact: true }).click();
   await page.getByRole("tab", { name: "用户账号", exact: true }).click();
   await page.getByText("全部权限", { exact: true }).waitFor();
-  await page.getByText("启用", { exact: true }).first().waitFor();
+  await page.getByText("超级管理员", { exact: true }).waitFor();
+  await page.getByText("管理员", { exact: true }).waitFor();
+  await page.getByText("当前：普通用户", { exact: true }).waitFor();
+  await page.getByText("已到期", { exact: true }).waitFor();
   await waitForUserTags();
-  assert.deepEqual(
-    await page
-      .locator(".user-manager .el-table__body-wrapper .el-tag")
-      .allTextContents(),
-    ["全部权限", "启用", "查看设备与任务", "查看日志与 Coredump", "下载日志与 Coredump", "查看命令模板", "创建命令模板", "查看我的服务账号", "查看设备与任务", "查看日志与 Coredump", "启用"],
-  );
+  for (const label of ["查看设备与任务", "查看日志与 Coredump", "下载日志与 Coredump", "查看命令模板", "创建命令模板", "查看我的服务账号", "发送命令"])
+    assert.equal(await page.getByText(label, { exact: true }).count() > 0, true, `到期账号应保留固定基础权限：${label}`);
+  assert.equal(await page.getByRole("button", { name: "编辑用户" }).nth(1).isDisabled(), false, "超级管理员应能管理非内建管理员");
+  await page.getByRole("button", { name: "新建用户", exact: true }).click();
+  const userDialog = page.getByRole("dialog", { name: "新建用户", exact: true });
+  await userDialog.getByText("普通用户", { exact: true }).waitFor();
+  await userDialog.getByText("长期", { exact: true }).waitFor();
+  await userDialog.getByText("指定截止日", { exact: true }).click();
+  await userDialog.getByPlaceholder("选择截止日期").waitFor();
+  await userDialog.getByRole("button", { name: "取消", exact: true }).click();
   await page.getByRole("button", { name: "新建用户", exact: true }).waitFor();
   await page.screenshot({
     path: `${output}/user-auth-admin-desktop.png`,
@@ -256,6 +314,24 @@ try {
     await page.getByRole("button", { name: "新建资源", exact: true }).count(),
     0,
   );
+  const ownResourceRow = page.getByRole("row").filter({ hasText: "到期本人资源" });
+  const sharedResourceRow = page.getByRole("row").filter({ hasText: "到期共享资源" });
+  await ownResourceRow.getByRole("button", { name: "编辑资源", exact: true }).click();
+  await page.getByRole("dialog", { name: "编辑设备资源", exact: true }).waitFor();
+  await page.getByLabel("资源名称", { exact: true }).fill("到期本人资源已编辑");
+  await page.getByRole("button", { name: "保存资源", exact: true }).click();
+  await page.getByRole("dialog", { name: "确认编辑资源", exact: true }).getByRole("button", { name: "确认", exact: true }).click();
+  await page.getByText("资源已保存", { exact: true }).waitFor();
+  assert.equal(expiredMutations.length, 1, "到期本人资源应可保存");
+  assert.equal(await sharedResourceRow.getByRole("button", { name: "编辑资源", exact: true }).count(), 0);
+  assert.equal(await sharedResourceRow.getByRole("button", { name: "删除资源", exact: true }).count(), 0);
+  await page.getByRole("tab", { name: "采集任务", exact: true }).click();
+  const ownTaskRow = page.getByRole("row").filter({ hasText: "到期本人任务" });
+  const sharedTaskRow = page.getByRole("row").filter({ hasText: "到期共享任务" });
+  await ownTaskRow.getByRole("button", { name: "编辑任务", exact: true }).waitFor();
+  await ownTaskRow.getByRole("button", { name: "删除采集任务", exact: true }).waitFor();
+  for (const name of ["编辑任务", "删除采集任务", "启动任务", "停止任务"])
+    assert.equal(await sharedTaskRow.getByRole("button", { name, exact: true }).count(), 0, `到期共享任务不应显示${name}`);
   await page.screenshot({
     path: `${output}/user-auth-reader-desktop.png`,
     fullPage: true,

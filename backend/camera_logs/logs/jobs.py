@@ -359,7 +359,8 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             result_path = destination
         if size > OUTPUT_LIMIT:
             raise ValueError("export output exceeds 20GB limit")
-        return {"resultPath": str(result_path), "filename": filename, "missing": missing, "bytes": size}
+        return {"resultPath": str(result_path), "filename": filename, "missing": missing, "bytes": size,
+                "artifactLogSegments": _artifact_log_segments(sources), "artifactLogSegmentCount": len(sources)}
     except BaseException:
         await job_thread(shutil.rmtree, output, True)
         raise
@@ -368,6 +369,16 @@ async def _download(repo: Any, job: dict[str, Any]) -> dict[str, Any]:
             await job_thread(shutil.rmtree, scratch, True)
         finally:
             await _release_temp(job["id"])
+
+
+def _artifact_log_segments(sources: list[Source]) -> list[dict[str, object]]:
+    """从已写入制品的冻结来源逐项保留时间，禁止将不连续分卷合并为连续范围。"""
+    return [{
+        "fileId": str(frozen["id"]),
+        "hour": str(frozen.get("hour") or file.get("hour") or ""),
+        "firstReceivedAt": frozen.get("firstReceivedAt"),
+        "lastReceivedAt": frozen.get("lastReceivedAt"),
+    } for frozen, file, _path, _temporary in sources]
 
 
 def _scan_archive(path: Path, scanner: StreamSearch, file: dict, cancelled, archive_member: str | None = None):

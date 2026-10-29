@@ -292,7 +292,7 @@ PATCH  /api/v1/service-tokens/{tokenId}
 DELETE /api/v1/service-tokens/{tokenId}
 ```
 
-`expiresInDays` 省略时为 30 天，传 `null` 创建永久令牌。编辑请求须携带当前 `version`，可任选 `name`、`userId` 和 `expiresInDays`；编辑中的 `expiresInDays: null` 将已有令牌改为永久，未提供该字段则保持有效期。有效普通用户自动拥有 `tasks:read`、`logs:read`、`logs:download`、`templates:read`、`templates:write` 和 `service-tokens:read`；用户配置的 `scopes` 仅增加写入、控制、命令或管理能力。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态，平台来源 IP 策略仍会收窄本次请求的有效权限；用户或令牌不再用资源/任务 ID 白名单收窄可见范围。
+`expiresInDays` 省略时为 30 天，传 `null` 创建永久令牌。编辑请求须携带当前 `version`，可任选 `name`、`userId` 和 `expiresInDays`；编辑中的 `expiresInDays: null` 将已有令牌改为永久，未提供该字段则保持有效期。有效普通用户自动拥有 `tasks:read`、`logs:read`、`logs:download`、`templates:read`、`templates:write`、`service-tokens:read` 和 `commands:send`；用户配置的 `scopes` 仅增加额外写入和控制能力（管理员角色另有全部平台功能）。服务令牌实时继承绑定用户当前权限、管理员身份和启用状态，平台来源 IP 策略仍会收窄本次请求的有效权限；用户或令牌不再用资源/任务 ID 白名单收窄可见范围。
 
 管理员可查询操作审计、运行事件和请求排障事件。三个接口均支持 `page`（从 1 开始）和 `pageSize`（最多 100）：
 
@@ -470,3 +470,16 @@ Content-Type: application/json
 `GET/PATCH /api/v1/platform-settings` 的 `logSegmentMiB` 表示日志分片上限，单位 MiB，默认 10，允许 10、15、20…510，另允许 512 MiB 上限端点。PATCH 省略该字段会保留现值；越界、非 5 MiB 档位且不是 512、布尔值、字符串及浮点数返回 422。Worker 每秒刷新配置，新打开分片生效，已打开分片按原大小收尾；已封存文件不重写。请求和响应中文释义由实际模型生成。
 
 同 IP、型号、子序列号的海康设备软删后重新认证添加，历史 Core 的 `resourceId` 关联到新资源，但 `id`、`firstSeenAt`、`receivedAt` 保持原值。列表时间筛选仍对应原始发现时刻，已有文件 ID 下载地址保持兼容；不会因此新增首次发现事件。身份不完整或不一致时不关联历史。
+
+
+## 账户角色与额外权限有效期
+
+用户创建和编辑使用 `role`：`USER` 普通用户（新增默认值）、`ADMIN` 管理员。`SUPER_ADMIN` 仅供内置 admin 身份使用，不接受接口创建或提升。响应同时提供配置 `role`、当前 `effectiveRole` 和 `isAdmin`；旧的 `isAdmin` 创建参数兼容保留，与明确传入的 role 冲突时返回422。管理员拥有所有平台功能，但不能编辑、删除、禁用或重置其他管理员及超级管理员的账户，也不能通过操作对方服务凭据绕过此限制。超级管理员可管理其他账户，内置账户保持仅本人改密保护。
+
+`permissionsExpiresOn` 接受 `YYYY-MM-DD` 日期（例如 `2026-10-13`），北京时间该日结束后额外权限失效；传 null 为长期有效，编辑省略保持原值，旧账户无此字段按长期处理。`permissionsExpired` 表示当前是否到期。到期判断在认证时执行，Cookie会话及服务令牌均实时生效，账号不被禁用。管理员到期后生效角色降为普通用户。
+
+固定基础权限保留原有 `tasks:read`、`logs:read`、`logs:download`、`templates:read`、`templates:write`、`service-tokens:read`，新增 `commands:send`。`GET /users/permissions` 每项 `fixed` 标明是否固定。到期后仍保留这些基础权限，另允许对本人创建的设备资源和采集任务编辑、删除及必要收尾；不能新增，不能用此例外编辑共享或他人对象，独立启停控制不会因此开放，IP权限交集仍有效。
+
+所有有效用户均可向已有可交互采集任务发送手工命令，无需任务所有者或共享资格；命令记录保存提交用户名快照和执行状态，操作审计与入队同事务提交，幂等重试不重复发送。已删除、已停止或没有有效会话的任务不接受新命令。
+
+下载历史新增 `createdBy`、`createdByName`、`artifactLogSegmentCount` 和 `artifactLogSegments`。创建人展示名冻结于提交；旧作业可用既有actor标识展示归属，缺少快照不猜测名称。成功制品按实际写入来源记录每段的fileId、hour、firstReceivedAt和lastReceivedAt，部分导出不包含缺失源；旧段缺少首末接收时间时仅展示已知逻辑小时。历史列表只返回前8段，完整数组由既有 `GET /api/v1/downloads/{id}` 读取。

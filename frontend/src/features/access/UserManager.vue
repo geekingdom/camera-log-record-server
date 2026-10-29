@@ -1,22 +1,21 @@
 <script setup lang="ts">
-// 用户账号管理：基础查看、下载和模板权限固定有效，仅维护额外功能权限及用户密码。
+// 用户账号管理：固定基础权限由目录标识，额外权限与管理员角色可按上海自然日到期收回。
 import { computed, onMounted, ref } from "vue";
 import { Edit3, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
-import { ApiError, usersApi, type SessionUser } from "../../shared/api";
+import { ApiError, usersApi, type SessionUser, type UserRole } from "../../shared/api";
 import { userSaveFailureMessage } from "./userManagerMessages";
+import {
+  canManageUser,
+  formPermissionScopes,
+  permissionGroups,
+  roleLabel,
+  type PermissionDirectoryItem,
+} from "./userManagerPermissions";
 
-const baseScopes = ["tasks:read", "logs:read", "logs:download", "templates:read", "templates:write", "service-tokens:read"];
-const baseScopeLabels: Record<string, string> = {
-  "tasks:read": "查看设备与任务",
-  "logs:read": "查看日志与 Coredump",
-  "logs:download": "下载日志与 Coredump",
-  "templates:read": "查看命令模板",
-  "templates:write": "创建命令模板",
-  "service-tokens:read": "查看我的服务账号",
-};
+const props = defineProps<{ currentUser?: SessionUser }>();
 const users = ref<SessionUser[]>([]);
-const scopes = ref<{ value: string; label: string }[]>([]);
+const scopes = ref<PermissionDirectoryItem[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 const resetting = ref(false);
@@ -36,8 +35,11 @@ const form = ref({
   displayName: "",
   password: "",
   scopes: [] as string[],
+  role: "USER" as Exclude<UserRole, "SUPER_ADMIN">,
+  permissionsExpiresOn: null as string | null,
   enabled: true,
 });
+const expirationMode = ref<"permanent" | "date">("permanent");
 const resetPassword = ref("");
 const pageNumber = ref(1);
 const total = ref(0);
@@ -53,7 +55,7 @@ async function load() {
     ]);
     users.value = page.items;
     total.value = page.total;
-    scopes.value = permissions.scopes.filter(scope => !baseScopes.includes(scope.value));
+    scopes.value = permissions.scopes;
   } catch (error) {
     loadError.value =
       error instanceof Error ? error.message : "读取用户账号失败";
@@ -68,8 +70,11 @@ function resetForm() {
     displayName: "",
     password: "",
     scopes: [],
+    role: "USER",
+    permissionsExpiresOn: null,
     enabled: true,
   };
+  expirationMode.value = "permanent";
 }
 function openCreate() {
   editing.value = undefined;
@@ -77,14 +82,18 @@ function openCreate() {
   open.value = true;
 }
 function openEdit(user: SessionUser) {
+  if (!canManage(user)) return;
   editing.value = user;
   form.value = {
     username: user.username,
     displayName: user.displayName,
     password: "",
-    scopes: [...user.scopes],
+    scopes: formPermissionScopes(user.scopes, scopes.value),
+    role: user.role === "ADMIN" ? "ADMIN" : "USER",
+    permissionsExpiresOn: user.permissionsExpiresOn ?? null,
     enabled: user.enabled,
   };
+  expirationMode.value = user.permissionsExpiresOn ? "date" : "permanent";
   open.value = true;
 }
 function closeEditor() {
@@ -97,6 +106,7 @@ function closeReset() {
 }
 const eligibleTransferTargets = computed(() => transferTargets.value.filter(item => item.id !== deletingUser.value?.id));
 async function openDelete(user: SessionUser) {
+  if (!canManage(user)) return;
   const generation = ++deleteRequestGeneration;
   deletingUser.value = user;
   resourceAction.value = "";
@@ -118,8 +128,23 @@ function closeDelete() {
   deletingUser.value = undefined;
   targetUserId.value = "";
 }
+const currentEffectiveRole = computed<UserRole | undefined>(() => props.currentUser?.effectiveRole ?? props.currentUser?.role);
+const fixedScopes = computed(() => permissionGroups(scopes.value).fixed);
+const additionalScopes = computed(() => permissionGroups(scopes.value).additional);
 function displayScopes(user: SessionUser) {
-  return user.isAdmin ? ["*"] : [...baseScopes, ...user.scopes];
+  if (user.effectiveRole === "SUPER_ADMIN" || user.effectiveRole === "ADMIN" || (!user.effectiveRole && user.isAdmin)) return ["*"];
+  const additional = user.permissionsExpired ? [] : formPermissionScopes(user.scopes, scopes.value);
+  return [...fixedScopes.value.map((scope) => scope.value), ...additional];
+}
+function scopeLabel(scope: string) {
+  return scope === "*" ? "全部权限" : scopes.value.find((item) => item.value === scope)?.label ?? scope;
+}
+function canManage(user: SessionUser) {
+  return canManageUser(props.currentUser?.id, currentEffectiveRole.value, user);
+}
+function expirationLabel(user: SessionUser) {
+  if (user.permissionsExpired) return "已到期";
+  return user.permissionsExpiresOn ?? "长期";
 }
 async function reloadAfterConflict(message: string) {
   await load();
@@ -139,10 +164,15 @@ async function save() {
     return ElMessage.warning("请填写用户名，初始密码需为 8 至 128 位");
   saving.value = true;
   try {
+    const permissionsExpiresOn = expirationMode.value === "date" ? form.value.permissionsExpiresOn : null;
+    if (expirationMode.value === "date" && !permissionsExpiresOn)
+      return ElMessage.warning("请选择额外权限截止日期");
     if (editing.value)
       await usersApi.update(editing.value.id, {
         displayName: form.value.displayName.trim(),
         scopes: form.value.scopes,
+        role: form.value.role,
+        permissionsExpiresOn,
         enabled: form.value.enabled,
         version: editing.value.version ?? 1,
       });
@@ -151,8 +181,9 @@ async function save() {
         username: form.value.username.trim(),
         displayName: form.value.displayName.trim(),
         password: form.value.password,
-        isAdmin: false,
+        role: form.value.role,
         scopes: form.value.scopes,
+        permissionsExpiresOn,
         enabled: true,
       });
     closeEditor();
@@ -171,7 +202,7 @@ async function save() {
 
 async function disable() {
   const user = deletingUser.value;
-  if (!user) return;
+  if (!user || !canManage(user)) return;
   if (!resourceAction.value)
     return ElMessage.warning("请选择资源处置方式");
   if (resourceAction.value === "TRANSFER" && !targetUserId.value)
@@ -191,12 +222,14 @@ async function disable() {
   }
 }
 function openReset(user: SessionUser) {
+  if (!canManage(user)) return;
   editing.value = user;
   resetPassword.value = "";
   resetOpen.value = true;
 }
 // 密码重置后立即清空值，关闭弹窗同样清空，避免密码残留在组件状态中。
 async function reset(user: SessionUser) {
+  if (!canManage(user)) return;
   if (resetPassword.value.length < 8 || resetPassword.value.length > 128)
     return ElMessage.warning("新密码需为 8 至 128 位");
   resetting.value = true;
@@ -260,10 +293,21 @@ onMounted(() => void load());
           ><span class="access-id">{{ row.username }}</span></template
         ></el-table-column
       >
+      <el-table-column label="角色" width="120"
+        ><template #default="{ row }"
+          ><el-tag :type="row.effectiveRole === 'SUPER_ADMIN' ? 'danger' : row.effectiveRole === 'ADMIN' || (!row.effectiveRole && row.isAdmin) ? 'warning' : 'info'">{{ roleLabel(row.role) }}</el-tag
+          ><span v-if="row.effectiveRole && row.effectiveRole !== row.role" class="access-id">当前：{{ roleLabel(row.effectiveRole) }}</span></template
+        ></el-table-column
+      >
+      <el-table-column label="额外权限有效期" width="132"
+        ><template #default="{ row }"
+          ><el-tag :type="row.permissionsExpired ? 'warning' : 'info'">{{ expirationLabel(row) }}</el-tag></template
+        ></el-table-column
+      >
       <el-table-column label="权限" min-width="210"
         ><template #default="{ row }"
           ><el-tag v-for="scope in displayScopes(row)" :key="scope">{{
-            scope === '*' ? '全部权限' : baseScopeLabels[scope] ?? scopes.find(item => item.value === scope)?.label ?? scope
+            scopeLabel(scope)
           }}</el-tag></template
         ></el-table-column
       >
@@ -279,18 +323,18 @@ onMounted(() => void load());
           ><el-button
             text
             :icon="Edit3"
-            :disabled="row.builtin || saving"
+            :disabled="!canManage(row) || saving"
             aria-label="编辑用户"
             @click="openEdit(row)" /><el-button
             text
             :icon="KeyRound"
-            :disabled="row.builtin || saving"
+            :disabled="!canManage(row) || saving"
             aria-label="重置密码"
             @click="openReset(row)" /><el-button
             text
             type="danger"
             :icon="Trash2"
-            :disabled="row.builtin || !row.enabled || saving"
+            :disabled="!canManage(row) || !row.enabled || saving"
             aria-label="删除用户"
             @click="openDelete(row)" /></template
       ></el-table-column>
@@ -320,9 +364,15 @@ onMounted(() => void load());
             show-password
             :disabled="saving"
         /></el-form-item>
+        <el-form-item label="角色" required>
+          <el-radio-group v-model="form.role" :disabled="saving">
+            <el-radio value="USER">普通用户</el-radio>
+            <el-radio value="ADMIN">管理员</el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="固定基础权限"
-          ><el-tag v-for="scope in baseScopes" :key="scope" type="info" effect="plain">{{ baseScopeLabels[scope] }}</el-tag
-          ><p class="access-muted">所有有效用户均拥有基础查看、下载和模板权限，不能移除。</p>
+          ><el-tag v-for="scope in fixedScopes" :key="scope.value" type="info" effect="plain">{{ scope.label }}</el-tag
+          ><p class="access-muted">固定基础权限由服务端统一配置，不能在此移除。</p>
         </el-form-item>
         <el-form-item label="额外功能权限"
           ><el-select
@@ -332,15 +382,33 @@ onMounted(() => void load());
             :disabled="saving"
             style="width: 100%"
             ><el-option
-              v-for="scope in scopes"
+              v-for="scope in additionalScopes"
               :key="scope.value"
               :label="scope.label"
               :value="scope.value" /></el-select
         ></el-form-item>
+        <el-form-item label="额外权限有效期">
+          <el-radio-group v-model="expirationMode" :disabled="saving">
+            <el-radio value="permanent">长期</el-radio>
+            <el-radio value="date">指定截止日</el-radio>
+          </el-radio-group>
+          <el-date-picker
+            v-if="expirationMode === 'date'"
+            v-model="form.permissionsExpiresOn"
+            type="date"
+            value-format="YYYY-MM-DD"
+            format="YYYY年MM月DD日"
+            :disabled="saving"
+            :disabled-date="(date: Date) => date.getTime() < new Date(new Date().toDateString()).getTime()"
+            placeholder="选择截止日期"
+            style="width: 100%; margin-top: 8px"
+          />
+          <p class="access-muted">截止日按北京时间当天结束计算；到期后仅保留固定基础权限。</p>
+        </el-form-item>
         <el-form-item v-if="editing" label="启用"
           ><el-switch
             v-model="form.enabled"
-            :disabled="editing.builtin || saving"
+            :disabled="!canManage(editing) || saving"
         /></el-form-item>
       </el-form>
       <template #footer

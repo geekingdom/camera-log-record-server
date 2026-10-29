@@ -14,6 +14,7 @@ from camera_logs.common.database import now, public
 from camera_logs.common.errors import StableCodeHTTPException
 from camera_logs.common.models import new_id
 from camera_logs.common.presentation_time import utc_instant, utc_now
+from camera_logs.users.roles import protect_service_account
 
 
 def _effective_status(document, user):
@@ -48,6 +49,7 @@ async def readable_service_token(repo, identity, identifier):
         raise HTTPException(404, "服务令牌不存在")
     if not identity.get("isAdmin") and "*" not in identity["scopes"] and document.get("userId") != identity["id"]:
         raise HTTPException(403, "无权查看此服务令牌")
+    await protect_service_account(repo, identity, document.get("userId"))
     return document
 
 
@@ -90,7 +92,7 @@ async def _commit(repo, callback, confirmation):
         raise HTTPException(503, "服务令牌提交结果未知，请查询令牌列表确认") from error
 
 
-async def create_service_token(repo, actor_id, body):
+async def create_service_token(repo, actor_id, body, *, identity=None):
     """将固定凭据绑定到有效既有用户，权限不写入令牌而在认证时实时读取。"""
     user = await repo.db.users.find_one({"id": body.userId, "enabled": True, "deletedAt": None})
     if user is None:
@@ -111,6 +113,7 @@ async def create_service_token(repo, actor_id, body):
         )
         if current_user is None:
             raise HTTPException(422, "绑定用户不存在或已停用")
+        await protect_service_account(repo, identity, document["userId"], session=session)
         await repo.db.tokens.insert_one(document, session=session)
         await repo.audit(actor_id, "create_token", document["id"], session=session)
         return document
@@ -119,12 +122,13 @@ async def create_service_token(repo, actor_id, body):
     return public_token(result, user) | {"token": token}
 
 
-async def revoke_service_token(repo, actor_id, identifier):
+async def revoke_service_token(repo, actor_id, identifier, *, identity=None):
     """只有首次撤销产生状态审计；并发或重试仍返回相同已撤销结果。"""
     async def commit(session):
         token = await repo.db.tokens.find_one({"id": identifier}, session=session)
         if token is None:
             raise HTTPException(404, "服务令牌不存在")
+        await protect_service_account(repo, identity, token.get("userId"), session=session)
         if token.get("revoked"):
             return token
         await repo.db.tokens.update_one({"id": identifier}, {"$set": {"revoked": True}}, session=session)
@@ -134,7 +138,7 @@ async def revoke_service_token(repo, actor_id, identifier):
     await _commit(repo, commit, {"id": identifier, "revoked": True})
 
 
-async def update_service_token(repo, actor_id, identifier, body):
+async def update_service_token(repo, actor_id, identifier, body, *, identity=None):
     """以版本锁更新令牌元数据；过期令牌不能借有效期编辑恢复认证。"""
     values = body.model_dump(exclude={"version"}, exclude_unset=True)
     if not values:
@@ -147,12 +151,14 @@ async def update_service_token(repo, actor_id, identifier, body):
         current = await repo.db.tokens.find_one({"id": identifier}, session=session)
         if current is None:
             raise HTTPException(404, "服务令牌不存在")
+        await protect_service_account(repo, identity, current.get("userId"), session=session)
         if current["version"] != body.version:
             raise HTTPException(409, "服务令牌版本已变化，请刷新")
         expires_at = current.get("expiresAt")
         if has_expiry_change and expires_at is not None and utc_instant(expires_at) <= utc_now():
             raise HTTPException(409, "服务令牌已过期，不能修改有效期")
         if "userId" in values:
+            await protect_service_account(repo, identity, values["userId"], session=session)
             user = await repo.db.users.find_one(
                 {"id": values["userId"], "enabled": True, "deletedAt": None}, session=session
             )
@@ -188,7 +194,7 @@ async def update_service_token(repo, actor_id, identifier, body):
     return public_token(changed, user)
 
 
-async def rotate_service_token(repo, actor_id, identifier, version):
+async def rotate_service_token(repo, actor_id, identifier, version, *, identity=None):
     """原子替换令牌密文与散列，提交不明时只确认本次固定凭据和审计。"""
     token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -199,6 +205,7 @@ async def rotate_service_token(repo, actor_id, identifier, version):
         current = await repo.db.tokens.find_one({"id": identifier}, session=session)
         if current is None:
             raise HTTPException(404, "服务令牌不存在")
+        await protect_service_account(repo, identity, current.get("userId"), session=session)
         if current["version"] != version:
             raise HTTPException(409, "服务令牌版本已变化，请刷新")
         changed = await repo.db.tokens.find_one_and_update(

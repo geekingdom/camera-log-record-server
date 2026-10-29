@@ -57,7 +57,8 @@ def restrict_identity(identity, policy_scopes):
         scopes = set(policy_scopes)
     else:
         scopes = current & set(policy_scopes)
-    return {**identity, "scopes": sorted(scopes), "isAdmin": "*" in scopes or "admin" in scopes}
+    return {**identity, "scopes": sorted(scopes), "isAdmin": "*" in scopes or "admin" in scopes,
+            "ipAllowedScopes": sorted(policy_scopes)}
 
 
 async def apply_ip_permissions(repo, request, identity):

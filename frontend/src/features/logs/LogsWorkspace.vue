@@ -10,7 +10,6 @@ import DownloadHistory from "./DownloadHistory.vue";
 import CommandHistory from "../commands/CommandHistory.vue";
 import LogTaskPicker from "./LogTaskPicker.vue";
 import { taskStatusLabel, taskStatusTone } from "../tasks/taskStatus";
-import { canManageSharedResourceRecord } from "../../shared/ownership";
 const selected = defineModel<string>({ default: "" });
 const props = defineProps<{ canDownload?: boolean; canSend?: boolean; userId?: string; isAdmin?: boolean }>();
 const tab = ref("live");
@@ -23,8 +22,7 @@ let stateTimer: number | undefined;
 
 const hasCurrentSnapshot = computed(() => currentTask.value?.id === selected.value);
 const canSendCurrent = computed(() => Boolean(
-  props.canSend && currentTask.value &&
-  canManageSharedResourceRecord(props.userId, props.isAdmin, currentTask.value.createdBy, currentTask.value.resourceSharedUserIds),
+  props.canSend && currentTask.value,
 ));
 const target = computed(() => {
   const task = currentTask.value;

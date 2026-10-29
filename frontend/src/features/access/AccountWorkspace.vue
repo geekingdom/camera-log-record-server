@@ -3,13 +3,14 @@ import { ref } from "vue";
 import UserManager from "./UserManager.vue";
 import AccessManager from "./AccessManager.vue";
 import IpPolicyManager from "./IpPolicyManager.vue";
-defineProps<{ isAdmin: boolean }>();
+import type { SessionUser } from "../../shared/api";
+defineProps<{ isAdmin: boolean; currentUser?: SessionUser }>();
 const tab = ref("users");
 </script>
 <template>
   <section v-if="isAdmin">
     <el-tabs v-model="tab"
-      ><el-tab-pane label="用户账号" name="users"><UserManager /></el-tab-pane
+      ><el-tab-pane label="用户账号" name="users"><UserManager :current-user="currentUser" /></el-tab-pane
       ><el-tab-pane label="第三方服务账号" name="tokens"
         ><AccessManager /></el-tab-pane
       ><el-tab-pane label="IP 访问控制" name="ip"
