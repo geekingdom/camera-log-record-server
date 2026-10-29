@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dashboardFixture } from "./dashboard_fixture.mjs";
 import { mkdir } from "node:fs/promises";
 
-const baseUrl = process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
+const baseUrl = process.env.BASE_URL || process.env.BROWSER_BASE_URL || "http://127.0.0.1:5173";
 const output = process.env.BROWSER_SCREENSHOTS || "output/playwright";
 const playwrightModule = await import(
   process.env.PLAYWRIGHT_MODULE || "playwright"
