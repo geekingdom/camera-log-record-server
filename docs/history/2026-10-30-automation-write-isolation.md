@@ -76,4 +76,4 @@ API访问完成和请求事件副写结果合为一条记录：业务耗时在�
 
 ## CI闭环
 
-首轮 `a8a4c15` 的 [CI41109453080](https://github.com/geekingdom/camera-log-record-server/actions/runs/41109453080) 八项通过，container-smoke在真实数据库目录尾部水位脚本失败：脚本用object.__new__绕过SessionRuntime构造器，遗漏tail_changed条件锁。补齐测试夹具后，专属真实Mongo验证OPEN upsert、尾部水位与READY发布均通过，Ruff和差异检查通过。正式构造器已初始化该锁，未在业务路径增加吞错兼容；该专属测试库和进程已清理。最终交付仍须等待修复提交完整CI。
+首轮 `a8a4c15` 的 [CI41109453080](https://github.com/geekingdom/camera-log-record-server/actions/runs/41109453080) 八项通过，container-smoke在真实数据库目录尾部水位脚本失败：脚本用object.__new__绕过SessionRuntime构造器，遗漏tail_changed条件锁。补齐测试夹具后，专属真实Mongo验证OPEN upsert、尾部水位与READY发布均通过，Ruff和差异检查通过。正式构造器已初始化该锁，未在业务路径增加吞错兼容；该专属测试库和进程已清理。修复提交 `e943c67` 的 [CI41114714925](https://github.com/geekingdom/camera-log-record-server/actions/runs/41114714925) 九项全部成功：后端、前端、完整容器、组件、原生、跨Worker、NFS、Elasticsearch与中文提交规范。该轮容器首次因Mongo健康检查未就绪而未启动应用，同SHA重跑后包括目录水位与多路真实协议完整性均成功；没有跳过测试。验收记录提交仍按工程规范等待其自身完整CI后交付。
