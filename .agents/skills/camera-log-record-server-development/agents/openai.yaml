@@ -1,0 +1,6 @@
+interface:
+  display_name: "CameraLogRecordServer 工程规范"
+  short_description: "工程默认工作流：上下文恢复、CodeGraph、子代理、验证及中文提交与完整CI交付"
+  default_prompt: "使用 $camera-log-record-server-development 继承工程规范，核对当前目标并继续本工程工作。"
+policy:
+  allow_implicit_invocation: true

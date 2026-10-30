@@ -1,5 +1,12 @@
 # 工程约定
 
+## 默认工程Skill（所有相关对话必读）
+
+- 本工程后续所有相关对话（新对话、实现、排障、审查、文档、状态询问及上下文恢复）默认使用`camera-log-record-server-development`，先读取[Skill入口](.agents/skills/camera-log-record-server-development/SKILL.md)及其[完整开发规范](.agents/skills/camera-log-record-server-development/references/development-rules.md)，再按本轮范围执行；无需用户重复指定。
+- Skill以工程内文件为唯一源，包含十六类开发规范。用户本轮明确要求及后续更正优先；纯咨询不触发代码提交。业务功能以现行源码/模型及专项文档为准，不将业务参数或一次性授权混入开发规范。
+- 工程变更交付必须完成中文提交、推送并等待最终提交全部CI成功；失败修复后重新验收。子代理使用、CodeGraph、上下文衔接及验证收尾按Skill执行；模型和槽位受运行时限制，不得虚报。
+
+
 ## 工作方式
 
 - 当前状态唯一入口为 `docs/implementation-status.md`。恢复上下文时依次核对最新业务消息、总表、`git status --short`、最新提交及相关源码/验证产物。摘要仅为线索，推测必须重新验证；生成摘要不是用户业务任务。
