@@ -1,11 +1,13 @@
 # 当前状态总表
 
-| 当前需求（2026-10-30，本机验收完成，等待CI） | 实现位置 | 验证证据 | 未完成与下一步 |
+| 当前需求（2026-10-30，功能提交完整CI通过） | 实现位置 | 验证证据 | 未完成与下一步 |
 | --- | --- | --- | --- |
 | 自动化并发后资源慢、反复加载、刷新回登录 | logs/live_subscription、logs/api；会话恢复、资源请求合并/取消和静默刷新 | 完整遍历API 6,969,813行、Worker 145,386行及HAR；旧版本并发回归失败，修复版48次CRUD/订阅断开与删除后无残留tail；身份成功不受业务初始化阻塞 | 公司部署及长时负载复验；详见[故障调查](history/2026-10-30-production-concurrency-incident.md) |
-| 数据库查询与索引 | resources/listing、common/database、users/sessions、security、access_policy | 两个任务关联部分索引与一个待处理操作部分索引；真实Mongo升级/重复初始化及获胜计划验证；省略非UI路径令牌目录查询，同HTTP复用IP策略，WS及下一请求仍重查授权 | 公司实际索引目录/profile未提供；最终Mongo7 CI待确认 |
+| 数据库查询与索引 | resources/listing、common/database、users/sessions、security、access_policy | 两个任务关联部分索引与一个待处理操作部分索引；真实Mongo升级/重复初始化及获胜计划验证；省略非UI路径令牌目录查询，同HTTP复用IP策略，WS及下一请求仍重查授权 | Mongo7 CI已确认扫描2000→500；公司实际索引目录/profile未提供 |
 | Worker收尾及日志优化 | ssh_admission/runtime/worker、runtime_events、maintenance/storage、observability | 预建连未知申请按端点代次围栏及运行身份精确回收；真实Mongo竞争通过；重复ASH成功去重且失败后状态可恢复；候选spool消失不误报，引用内容丢失仍报警；HTTP INFO降噪及失败requestId关联 | 已建立连接未知关闭仍隔离；3条历史InvalidOperation缺栈无法定因，已补脱敏栈诊断 |
-| API合同、回归与交付 | 实际WebSocket帧模型、动态文档、README/API/运维/数据库文档、CI | 后端2176项、前端225项、构建/Ruff、35组生产构建浏览器全部通过；真实Worker/WS/小时下载通过，1440/390截图目检 | 提交推送并等待完整CI；公司环境本轮未部署 |
+| API合同、回归与交付 | 实际WebSocket帧模型、动态文档、README/API/运维/数据库文档、CI | 后端2176项、前端225项、构建/Ruff、35组生产构建浏览器全部通过；真实Worker/WS/小时下载通过，1440/390截图目检 | 功能提交6d86792的九项CI全部通过；公司环境本轮未部署 |
+
+功能提交 `6d86792` 的 [CI41009273392](https://github.com/geekingdom/camera-log-record-server/actions/runs/41009273392) 九项全部成功，含NFS、前端35组浏览器、后端、Mongo7真实聚合Explain/并发回收及容器/原生部署验收。专属Mongo仅剩系统库后已关闭，随机库和自建日志目录已清理；原始公司证据未改动。
 
 本轮针对用户已部署公司的版本排查，以下历史记录中的“未部署”只描述各轮当时状态，不代表当前现场。本轮修改尚未部署公司服务器。
 
