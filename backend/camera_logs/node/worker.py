@@ -91,7 +91,8 @@ class Worker:
             if action == "isolate":
                 if not already_stopped:
                     await runtime.stop()
-                if getattr(runtime, "collector", None) is not None:
+                if (getattr(runtime, "collector", None) is not None
+                        and not getattr(runtime, "preconnect_slot_reconciled", False)):
                     await record_closed_receipt(
                         self.repo, runtime.task, self.instance_id, runtime.collector.session_id,
                     )
@@ -124,7 +125,7 @@ class Worker:
         """显式恢复先确认旧连接关闭并固化收据，历史运行错误不能否决新的恢复意图。"""
         await runtime.stop()
         collector = getattr(runtime, "collector", None)
-        if collector is None:
+        if collector is None or getattr(runtime, "preconnect_slot_reconciled", False):
             raise RuntimeError("阻塞恢复缺少已关闭会话，不能确认旧运行")
         current = await self.repo.db.tasks.find_one(owner_filter(runtime.task), {"sessionId": 1})
         if current is None or current.get("sessionId") != collector.session_id:
@@ -248,7 +249,7 @@ class Worker:
         task = runtime.task
         if not already_stopped:
             await runtime.stop()
-        if getattr(runtime, "collector", None) is not None:
+        if getattr(runtime, "collector", None) is not None and not getattr(runtime, "preconnect_slot_reconciled", False):
             await record_closed_receipt(self.repo, task, self.instance_id, runtime.collector.session_id)
         failed = runtime.error or runtime.background_failure()
         update = {"nodeId": None, "status": "ERROR" if failed else "STOPPED", "error": str(failed) if failed else None, "updatedAt": now()}

@@ -187,6 +187,23 @@ class Repository:
         await self.db.operations.create_index([("desiredState", 1), ("status", 1)])
         await self.db.tasks.create_index("resourceId")
         await self.db.tasks.create_index("serialServerResourceId")
+        # 两个关联字段分别覆盖资源摘要 $or 的完整分支。部分索引不收录软删历史；
+        # 查询中的 deletedAt:null 保留旧任务缺少该字段时仍属当前任务的既有语义。
+        await self.db.tasks.create_index(
+            [("resourceId", 1)], name="tasks_resource_visible_summary",
+            partialFilterExpression={"deletedAt": None},
+        )
+        await self.db.tasks.create_index(
+            [("serialServerResourceId", 1)], name="tasks_serial_resource_visible_summary",
+            partialFilterExpression={"deletedAt": None},
+        )
+        # 软删除只取消仍待执行的操作；终态历史不进入此索引，任务和状态先缩小候选，
+        # desiredState 保留给非 STOPPED 条件的索引内过滤。
+        await self.db.operations.create_index(
+            [("taskId", 1), ("status", 1), ("desiredState", 1)],
+            name="operations_task_pending_intent",
+            partialFilterExpression={"status": "PENDING"},
+        )
         await self.db.resources.create_index("deletionState")
         # 默认“查看全部”与包含软删除的历史列表均按创建时刻稳定分页，不能依赖内存排序。
         await self.db.resources.create_index(

@@ -11,7 +11,7 @@ const props = defineProps<{
 }>();
 
 const view = shallowRef<Component>();
-const componentRef = ref<{ reload?: () => unknown }>();
+const componentRef = ref<{ reload?: (quiet?: boolean) => unknown }>();
 const loading = ref(false);
 const failed = ref(false);
 let generation = 0;
@@ -36,9 +36,9 @@ watch(() => props.loader, () => void load());
 onMounted(() => void load());
 onBeforeUnmount(() => { mounted = false; generation++; });
 
-async function reload() {
+async function reload(quiet = false) {
   if (loading.value || failed.value) return;
-  if (view.value && componentRef.value?.reload) await componentRef.value.reload();
+  if (view.value && componentRef.value?.reload) await componentRef.value.reload(quiet);
   else if (!view.value) await load();
 }
 

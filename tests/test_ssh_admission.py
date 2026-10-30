@@ -10,12 +10,14 @@ from camera_logs.collection.ssh_admission import (
     SshSlotUncertain,
     normalize_ssh_address,
     normalize_ssh_endpoint,
+    reconcile_preconnect_uncertain_slot,
     release_task_slots,
 )
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository
 from cryptography.fernet import Fernet
 from mongomock_motor import AsyncMongoMockClient
+from pymongo import ReturnDocument
 from pymongo.errors import AutoReconnect
 
 
@@ -107,6 +109,9 @@ async def test_unknown_admission_result_never_retries_or_allows_socket_creation(
         def __init__(self):
             self.calls = 0
 
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
         async def find_one_and_update(self, *_args, **_kwargs):
             self.calls += 1
             raise AutoReconnect("connection reset")
@@ -122,9 +127,54 @@ async def test_unknown_admission_result_never_retries_or_allows_socket_creation(
 
 
 @pytest.mark.asyncio
+async def test_preconnect_uncertain_slot_reconciliation_removes_only_exact_token():
+    """预建连提交未知时只处理同一运行同一 token，绝不凭任务 ID 清空他人名额。"""
+    repo = await _repo()
+    task = _task(1)
+    own = {"taskId": task["id"], "runId": task["runId"], "generation": task["generation"],
+           "nodeId": task["nodeId"], "token": "unknown-token", "port": task["port"]}
+    other = {"taskId": "other", "runId": "other-run", "generation": 1,
+             "nodeId": "other-node", "token": "other-token", "port": 22}
+    await repo.db.ssh_connection_slots.insert_one({"_id": task["ip"], "claims": [own, other]})
+
+    assert await reconcile_preconnect_uncertain_slot(repo, task, SshSlotUncertain(
+        task["ip"], "unknown-token", preconnect=True,
+    ))
+
+    slot = await repo.db.ssh_connection_slots.find_one({"_id": task["ip"]})
+    assert slot["claims"] == [other]
+
+
+@pytest.mark.asyncio
+async def test_preconnect_reconciliation_blocks_a_late_old_epoch_acquire(tmp_path):
+    """协调递增准入代次，迟到的旧 CAS 不能在 pull 后重新占位。"""
+
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        _env_file=None, encryption_key=Fernet.generate_key().decode(), log_root=tmp_path,
+    ))
+    await repo.initialize()
+    task = _task(1)
+    assert await reconcile_preconnect_uncertain_slot(repo, task, SshSlotUncertain(
+        task["ip"], "late-token", preconnect=True, admission_epoch=0,
+    ))
+    late_claim = {"taskId": task["id"], "runId": task["runId"], "generation": task["generation"],
+                  "nodeId": task["nodeId"], "token": "late-token", "port": task["port"],
+                  "admissionEpoch": 0}
+    late = await repo.db.ssh_connection_slots.find_one_and_update(
+        {"_id": task["ip"], "admissionEpoch": 0, "claims.4": {"$exists": False}},
+        {"$push": {"claims": late_claim}}, return_document=ReturnDocument.AFTER,
+    )
+    assert late is None
+    assert await repo.db.ssh_connection_slots.count_documents({"claims.token": "late-token"}) == 0
+
+
+@pytest.mark.asyncio
 async def test_cancelled_admission_is_converted_to_unknown_slot_result():
     """数据库调用被取消时服务端是否已写入未知，必须禁止继续建连。"""
     class CancelledSlots:
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
         async def find_one_and_update(self, *_args, **_kwargs):
             raise asyncio.CancelledError()
 

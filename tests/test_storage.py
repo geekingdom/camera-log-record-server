@@ -233,6 +233,26 @@ async def test_deferred_archive_catalog_callback_times_out_without_retaining_not
     assert writer._archive_notification_task is None
 
 
+async def test_deferred_archive_catalog_failure_logs_safe_error_frames(tmp_path, caplog):
+    """目录登记异常保留安全定位帧，不把异常正文或局部变量写入服务日志。"""
+    import logging
+
+    async def on_archive(_archive):
+        raise RuntimeError("password=must-not-log")
+
+    caplog.set_level(logging.WARNING, logger="camera_logs.logs.storage")
+    writer = HourlyWriter("task", "run", "session", tmp_path, storage_identity="device", on_archive=on_archive)
+    archive = HourArchive("task", "run", "session", datetime(2026, 9, 8, 1, tzinfo=UTC),
+                          tmp_path / "failure.tar.gz", 1, "digest", 1, 1)
+    writer._queue_archive_notifications((archive,))
+    assert writer._archive_notification_task is not None
+    await writer._archive_notification_task
+
+    record = next(item for item in caplog.records if item.message.startswith("后台归档目录登记失败"))
+    assert record.errorFrames and all(set(frame) == {"file", "line", "function"} for frame in record.errorFrames)
+    assert "must-not-log" not in record.getMessage()
+
+
 async def test_deferred_archive_catalog_notifies_every_member_of_large_hour_batch(tmp_path, monkeypatch):
     """单小时超过八个分卷时，完整批次仍逐项登记为 READY，不能按分卷丢弃。"""
     completed = asyncio.get_running_loop().create_future()

@@ -156,6 +156,9 @@ async def test_request_event_persistence_failure_does_not_mask_business_failure(
     assert len(persistence) == 1
     assert persistence[0].context["errorType"] == "OSError"
     assert persistence[0].context["errorFrames"]
+    assert persistence[0].context["requestId"] == request_scope["state"]["request_id"]
+    assert persistence[0].context["route"] == "/api/v1/write"
+    assert persistence[0].context["method"] == "GET"
     assert persistence[0].exc_info is None
     assert private_error not in observability.JsonLineFormatter().format(persistence[0])
 

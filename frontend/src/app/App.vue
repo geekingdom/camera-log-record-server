@@ -57,11 +57,14 @@ const activeTab = ref(window.location.hash.slice(1) || DEFAULT_WORKSPACE),
 const {
   authenticated,
   busy,
+  restoring,
+  restoreError,
   user,
   passwordOpen,
   passwordSaving,
   generation: sessionGeneration,
   login,
+  retryRestore,
   logout,
   changePassword,
   start: startSession,
@@ -152,7 +155,7 @@ async function refresh(quiet = false) {
     if (activeTab.value === "dashboard")
       return;
     else if (activeTab.value === "resources")
-      await resourceWorkspace.value?.reload();
+      await resourceWorkspace.value?.reload(quiet);
     else if (activeTab.value === "tasks") await loadTasks();
     else if (activeTab.value === "templates") await loadTemplates();
     else if (activeTab.value === "nodes") await loadNodes();
@@ -289,8 +292,12 @@ onBeforeUnmount(() => {
         @open-password="passwordOpen = true"
         @logout="logout"
       >
-        <LoginPanel v-if="!authenticated" :busy="busy" :login="login" />
+        <LoginPanel v-if="!authenticated" :busy="busy" :restoring="restoring" :restore-error="restoreError" :login="login" :retry-restore="retryRestore" />
         <section v-else-if="!user?.mustChangePassword" class="workspace" :class="{ 'logs-workspace-shell': activeTab === 'logs' }">
+          <div v-if="restoreError" class="workspace-recovery-error" role="alert">
+            <span>初始资料加载失败：{{ restoreError }}</span>
+            <el-button size="small" :loading="restoring" @click="retryRestore">重试</el-button>
+          </div>
           <el-empty
             v-if="activeTab === 'empty'"
             description="当前账号没有可用的平台权限"
@@ -539,3 +546,6 @@ onBeforeUnmount(() => {
     @logout="logout"
   />
 </template>
+<style scoped>
+.workspace-recovery-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--el-color-warning-light-5); background: var(--el-color-warning-light-9); color: var(--el-color-warning-dark-2); }
+</style>

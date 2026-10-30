@@ -24,6 +24,8 @@
 | 审计与排障事件 | `audit`、`events`、`request_events` | `audit`、`events`按后台策略限量维护；请求事件固定30天 TTL | 审计删除前写入固定字段 gzip 摘要；管理页必须限定时间范围、稳定排序和最大返回量；事件正文不得保存密码、令牌、命令密文或日志正文 |
 | 短租约及临时产物 | 登录会话、幂等键、下载会话、导出/快照 claim 与产物 | 以 `expiresAt` TTL 或既有租约收尾 | TTL 只负责无业务依赖的临时数据；物理文件删除须由拥有者确认，不能仅依赖 TTL 回调 |
 
+`ssh_connection_slots` 是端点级当前状态：每个已见 SSH 端点至多一份文档，`claims` 最多五项，并以 `_id` 精确读取和原子更新，不新增索引。预建连申请结果未知时，文档上的标量 `admissionEpoch` 只递增，不追加 token 墓碑或历史数组；申请把读到的代次带入 CAS，协调先递增代次再按不可变任务/运行/代次/node/token 精确移除旧 claim。旧代次的迟到写入不能提交，先提交的旧 claim 被精确移除。该字段不设置 TTL，因为活跃 claim 与未知关闭结果仍是连接隔离和恢复依据；增长上界是每端点一个整数和五项 claim，而非重试次数。历史缺失该字段按代次0兼容，首次成功申请会补齐。
+
 认证记录只是这一策略的第一类落地对象。新增类似“每分钟探测”或“周期性巡检”功能时，默认采用固定时间桶、连续状态边界和计数汇总，保留状态变更、失败、人工操作及设备身份变化的单独事件。每个桶必须保存首见、末见、次数、版本和不可变过期时间；不能通过更新 TTL 让长期连续成功的单条记录永久存在。
 
 调试模式与NFS例行检查在同一采集会话中只记录首次正常确认，连续相同的`ALREADY_ASH`和`MOUNTED`不再生成分钟事件；任务健康字段和NFS检查时间继续更新。去重缓存仅在事件成功写入后推进，新会话、失败、恢复和实际重挂开启新的状态边界，失败重试仍逐次保留。不清理历史重复记录，不改变命令执行审计，也不增加集合或TTL。
@@ -113,7 +115,9 @@ Coredump 每个已登记文件版本只生成一次 `COREDUMP_DISCOVERED`，记�
 | `audit` | 默认`createdAt,_id`倒序，action/actor/targetId/requestId筛选与同样排序 |
 | `request_events` | 默认时间倒序，taskId/httpStatus/route/clientIp/requestId筛选与稳定排序；保留30天TTL |
 | `events` | 默认`createdAt,_id`倒序，以及taskId/nodeId/type/requestId筛选及相同排序；未迁移时间兼容限制见下文 |
-| 任务、文件、作业、命令 | 任务默认列表使用`tasks_visible_created(deletedAt,createdAt,id)`，调度使用`tasks_visible_scheduler(deletedAt,desiredState,nodeId,status)`，软删除收尾使用`tasks_deleted_reconcile(deletedAt,deletionState)`；文件、作业、命令沿用任务小时、作业租约、命令预算及历史查询索引 |
+| 任务、文件、作业、命令 | 任务默认列表使用`tasks_visible_created(deletedAt,createdAt,id)`，调度使用`tasks_visible_scheduler(deletedAt,desiredState,nodeId,status)`，软删除收尾使用`tasks_deleted_reconcile(deletedAt,deletionState)`；资源页当前页摘要使用`tasks_resource_visible_summary(resourceId)`与`tasks_serial_resource_visible_summary(serialServerResourceId)`两个`deletedAt:null`部分索引；软删取消待处理操作使用`operations_task_pending_intent(taskId,status,desiredState)`部分索引；文件、作业、命令沿用任务小时、作业租约、命令预算及历史查询索引 |
+
+资源页摘要索引仅收录未删除任务，操作取消索引仅收录`PENDING`操作：二者的增长上界分别是当前可见任务数与未结算控制操作数，不随软删任务、已归档操作或日志正文持续累积。资源列表将可见条件明确写入两条关联分支，软删事务按任务ID取消未完成的非停止意图；没有新增集合、TTL或背景扫描。`scripts/verify_database_hot_paths.py` 在随机真实副本集库中以20个资源、每资源100条可见和200条软删任务（含缺失`deletedAt`的旧记录）验证5资源页返回500条时检查不超过510键/500文档，500条待处理取消操作检查500键/500文档，均无阻塞排序；本机 MongoDB 8.0 实测资源摘要为504键/500文档。该短时样本不替代生产索引大小、写入P99或长期容量验收。
 
 事件索引集中在 `common/event_indexes.py`，认证与既有索引在 `common/database.py`。2026-09-11本机数据库已实际安装新增索引，15条无过期时间的旧认证记录完成回填，复跑待处理数为0。旧前缀索引保留，不能只因新复合索引有相同前缀就无依据删除。
 

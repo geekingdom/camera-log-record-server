@@ -105,7 +105,7 @@ describe("usePlatformSession", () => {
     session.stop();
   });
 
-  it("恢复后的领域加载失败会清除半完成身份", async () => {
+  it("恢复后的领域加载失败保留已确认身份并提供重试", async () => {
     const { session, clearWorkspace } = createSession(
       vi.fn(async () => {
         throw new Error("初始加载失败");
@@ -114,13 +114,49 @@ describe("usePlatformSession", () => {
     vi.mocked(authApi.me).mockResolvedValue({ user: account });
 
     session.start();
-    await vi.waitFor(() => expect(clearWorkspace).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(session.restoreError.value).toBe("初始加载失败"));
 
-    expect(session.user.value).toBeUndefined();
+    expect(session.user.value).toEqual(account);
+    expect(session.authenticated.value).toBe(true);
+    expect(session.restoring.value).toBe(false);
+    expect(clearWorkspace).not.toHaveBeenCalled();
+    expect(clearToken).not.toHaveBeenCalled();
+    session.stop();
+  });
+
+  it("会话恢复的网络失败保留可重试状态而不伪造退出", async () => {
+    const { session, clearWorkspace } = createSession();
+    vi.mocked(authApi.me)
+      .mockRejectedValueOnce(new Error("网络暂时不可用"))
+      .mockResolvedValueOnce({ user: account });
+
+    session.start();
+    await vi.waitFor(() => expect(session.restoreError.value).toBe("网络暂时不可用"));
+
     expect(session.authenticated.value).toBe(false);
-    expect(session.passwordOpen.value).toBe(false);
-    expect(clearWorkspace).toHaveBeenCalledOnce();
-    expect(clearToken).toHaveBeenCalledOnce();
+    expect(session.restoring.value).toBe(false);
+    expect(clearWorkspace).not.toHaveBeenCalled();
+    expect(clearToken).not.toHaveBeenCalled();
+
+    await session.retryRestore();
+    expect(session.authenticated.value).toBe(true);
+    expect(session.restoreError.value).toBeUndefined();
+    session.stop();
+  });
+
+  it("认证失效事件会结束恢复状态并走现有退出路径", async () => {
+    const pending = deferred<{ user: SessionUser }>();
+    const { session, clearWorkspace } = createSession();
+    vi.mocked(authApi.me).mockReturnValue(pending.promise);
+
+    session.start();
+    expect(session.restoring.value).toBe(true);
+    window.dispatchEvent(new Event("auth-required"));
+
+    await vi.waitFor(() => expect(clearWorkspace).toHaveBeenCalledOnce());
+    expect(session.authenticated.value).toBe(false);
+    expect(session.restoring.value).toBe(false);
+    pending.resolve({ user: account });
     session.stop();
   });
 

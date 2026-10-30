@@ -23,11 +23,13 @@ const scripts = [
   "browser_resource_identity_filters",
   "browser_resource_batch", "browser_request_diagnostics", "frontend/scripts/verify-resource-sharing.mjs",
   "browser_user_deletion", "browser_user_auth",
+  "browser_ansi", "browser_live_socket_lifecycle", "browser_session_recovery", "browser_resource_quiet_refresh",
 ];
 const server = await preview({ root, preview: { host: "127.0.0.1", port: 0, strictPort: true } });
 try {
   const address = server.httpServer.address();
-  const environment = { ...process.env, BASE_URL: `http://127.0.0.1:${address.port}` };
+  const environment = { ...process.env, BASE_URL: `http://127.0.0.1:${address.port}`,
+    PLAYWRIGHT_MODULE: process.env.PLAYWRIGHT_MODULE || "/Users/geekingdommac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.js" };
   for (const script of scripts) {
     const file = script.includes("/") ? script : `scripts/${script}.mjs`;
     const result = await promisify(execFile)(process.execPath, [file], {

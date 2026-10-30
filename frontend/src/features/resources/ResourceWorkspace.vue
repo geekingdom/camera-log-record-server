@@ -25,6 +25,9 @@ const subSerialNumber = ref("");
 // 空值表示不限制；字符串保留 API 布尔查询的 true/false 原值。
 const hasCoredumps = ref<"true" | "false" | undefined>();
 const loading = ref(false); const editorOpen = ref(false); let generation = 0;
+const refreshError = ref("");
+let hasLoaded = false;
+let activeLoad: { key: string; controller: AbortController; promise: Promise<void> } | undefined;
 const coredumpOpen = ref(false), coredumpResource = ref<Resource>();
 const authenticationRecordsOpen = ref(false), authenticationRecordsResource = ref<Resource>();
 const metricsOpen = ref(false), metricsResource = ref<Resource>();
@@ -52,22 +55,49 @@ function kindIcon(value: ResourceKind) { return value === "HIKVISION_NETWORK" ? 
 const networkCount = computed(() => resources.value.filter(resource => resource.kind === "HIKVISION_NETWORK").length);
 const serialServerCount = computed(() => resources.value.filter(resource => resource.kind === "SERIAL_SERVER").length);
 const deletedOnPage = computed(() => resources.value.filter(resource => resource.deletedAt).length);
-async function load() {
-  const current = ++generation; loading.value = true;
-  try { const filters = {
-    search: search.value.trim() || undefined,
-    model: model.value.trim() || undefined,
-    subSerialNumber: subSerialNumber.value.trim() || undefined,
-    kind: kind.value,
-    hasCoredumps: hasCoredumps.value,
-    includeDeleted: includeDeleted.value ? "true" : undefined,
-    createdBy: showAll.value ? createdBy.value || undefined : undefined,
-    mine: onlyMine.value ? ("true" as const) : undefined,
-    sortBy: sortBy.value,
-    sortOrder: sortOrder.value,
-  }; const data = await api.resources(page.value, 20, filters); if (current !== generation) return; resources.value = data.items; total.value = data.total; lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false }); }
-  catch (error) { if (current === generation) ElMessage.error(error instanceof Error ? error.message : "读取资源失败"); }
-  finally { if (current === generation) loading.value = false; }
+function load(quiet = false, force = false): Promise<void> {
+  const filters = {
+      search: search.value.trim() || undefined,
+      model: model.value.trim() || undefined,
+      subSerialNumber: subSerialNumber.value.trim() || undefined,
+      kind: kind.value,
+      hasCoredumps: hasCoredumps.value,
+      includeDeleted: includeDeleted.value ? "true" : undefined,
+      createdBy: showAll.value ? createdBy.value || undefined : undefined,
+      mine: onlyMine.value ? ("true" as const) : undefined,
+      sortBy: sortBy.value,
+      sortOrder: sortOrder.value,
+  };
+  const key = JSON.stringify({ page: page.value, filters });
+  // 同一快照共享读取；筛选变化时取消旧请求，旧响应不能回写当前列表。
+  if (!force && activeLoad?.key === key) return activeLoad.promise;
+  activeLoad?.controller.abort();
+  const controller = new AbortController();
+  const current = ++generation;
+  const showLoading = !quiet || !hasLoaded;
+  if (showLoading) loading.value = true;
+  refreshError.value = "";
+  const pending = (async () => {
+    try {
+      const data = await api.resources(page.value, 20, filters, controller.signal);
+      if (current !== generation) return;
+      resources.value = data.items;
+      total.value = data.total;
+      hasLoaded = true;
+      lastLoadedAt.value = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    } catch (error) {
+      if (current !== generation || controller.signal.aborted) return;
+      const message = error instanceof Error ? error.message : "读取资源失败";
+      if (quiet && hasLoaded) refreshError.value = `后台更新失败：${message}，当前列表保持不变`;
+      else ElMessage.error(message);
+    }
+    finally {
+      if (current === generation) loading.value = false;
+      if (activeLoad?.controller === controller) activeLoad = undefined;
+    }
+  })();
+  activeLoad = { key, controller, promise: pending };
+  return pending;
 }
 function clearSelection(invalidate = false) {
   if (invalidate) selectionGeneration.value += 1;
@@ -121,7 +151,7 @@ async function remove(resource: Resource) {
   deleting.value = new Set(deleting.value).add(resource.id);
   try {
     const latest = await api.resource(resource.id);
-    if (latest.deletedAt) { await load(); return; }
+    if (latest.deletedAt) { await load(false, true); return; }
     const count = latest.taskCount ?? 0, unsettled = latest.unsettledTaskCount ?? 0;
     const message = count
       ? `资源“${latest.name}”关联 ${count} 个采集任务，其中 ${unsettled} 个尚未收束。删除后将停止并软删除所有关联任务，已有日志文件保留，可继续查询和下载。确认删除？`
@@ -130,7 +160,7 @@ async function remove(resource: Resource) {
     if (!(await confirmAction(`${message}${ownerNotice}`, "确认删除设备资源"))) return;
     await api.deleteResource(latest.id, latest.version ?? 1);
     ElMessage.success("资源已标记删除，已有日志保留");
-    await load();
+    await load(false, true);
   } catch (error) { ElMessage.error(error instanceof Error ? error.message : "删除资源失败"); }
   finally { const next = new Set(deleting.value); next.delete(resource.id); deleting.value = next; }
 }
@@ -141,18 +171,18 @@ async function authenticate(resource: Resource) {
   try {
     await api.authenticateSavedResource(resource.id);
     ElMessage.success(`设备资源“${resource.name}”认证成功`);
-    await load();
+    await load(false, true);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "设备认证失败");
     // 手动认证失败同样由服务端更新健康状态与关联任务，列表必须立即反映最终状态。
-    await load();
+    await load(false, true);
   } finally {
     const next = new Set(authenticating.value); next.delete(resource.id); authenticating.value = next;
   }
 }
 async function completeBatch(entries: BulkOperationEntry[]) {
   const failed = new Set(entries.filter(entry => entry.status !== "success").map(entry => entry.id));
-  await load();
+  await load(false, true);
   selected.value = resources.value.filter(resource => failed.has(resource.id) && canBulkDelete(resource));
   await nextTick();
   table.value?.clearSelection();
@@ -174,6 +204,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   generation += 1;
+  activeLoad?.controller.abort();
+  activeLoad = undefined;
   narrowViewportQuery.removeEventListener("change", syncViewport);
   clearSelection(true);
 });
@@ -181,7 +213,7 @@ defineExpose({ reload: load });
 </script>
 <template>
   <section class="resource-summary" aria-label="设备资源概况">
-    <div class="resource-summary-title"><span class="resource-summary-icon"><Server :size="20" /></span><div><h2>设备资源目录</h2><p>上次刷新 {{ lastLoadedAt || '--:--:--' }}</p></div></div>
+    <div class="resource-summary-title"><span class="resource-summary-icon"><Server :size="20" /></span><div><h2>设备资源目录</h2><p>上次刷新 {{ lastLoadedAt || '--:--:--' }}<span v-if="refreshError" class="resource-refresh-error"> · {{ refreshError }}</span></p></div></div>
     <div class="resource-stat"><span>资源总数</span><strong>{{ total.toLocaleString() }}</strong><small>当前筛选</small></div>
     <div class="resource-stat"><span>本页网络设备</span><strong class="resource-stat-active">{{ networkCount.toLocaleString() }}</strong><small>当前页资源</small></div>
     <div class="resource-stat"><span>本页串口服务器</span><strong>{{ serialServerCount.toLocaleString() }}</strong><small>{{ deletedOnPage }} 项已删除</small></div>
@@ -235,7 +267,7 @@ defineExpose({ reload: load });
     overlay
     :loader="loadResourceEditor"
     :component-props="{ modelValue: editorOpen, resource: selectedResource, canEdit: !selectedResource || permitted(selectedResource), permissionsExpired: props.permissionsExpired }"
-    :listeners="{ 'update:modelValue': (value: boolean) => editorOpen = value, saved: () => load() }"
+    :listeners="{ 'update:modelValue': (value: boolean) => editorOpen = value, saved: () => load(false, true) }"
   />
   <AsyncView v-if="coredumpOpen" overlay :loader="loadCoredumpFiles"
     :component-props="{ modelValue: coredumpOpen, resource: coredumpResource }"
@@ -250,6 +282,7 @@ defineExpose({ reload: load });
 <style scoped>
 /* 按工具栏实际可用宽度换行，侧栏折叠与窄屏都不能压缩按钮或覆盖相邻控件。 */
 .resource-toolbar { display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
+.resource-refresh-error { color: var(--el-color-warning); }
 .resource-filter-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 10px; min-width: 0; }
 .resource-filter-fields > .el-input, .resource-filter-fields > .el-select, .resource-filter-fields > :deep(.creator-filter) { width: 100%; min-width: 0; }
 .resource-filter-fields :deep(.creator-filter .el-select) { width: 100%; }

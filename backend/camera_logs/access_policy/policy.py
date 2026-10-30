@@ -36,13 +36,23 @@ def matching_scopes(policy, address):
 
 
 async def enforce_ip(repo, request):
-    """返回命中规则权限；停用策略返回 None，启用后无命中立即拒绝。"""
+    """HTTP仅在本次请求内复用规则快照；WebSocket每轮重查，禁止跨请求授权缓存。"""
+    scope = getattr(request, "scope", {})
+    state = scope.setdefault("state", {}) if scope.get("type") == "http" else None
+    cache_key = "_evaluated_ip_policy_scopes"
+    if state is not None and cache_key in state:
+        cached = state[cache_key]
+        return None if cached is None else set(cached)
     policy = await repo.db.ip_policy.find_one({"id": POLICY_ID})
     if not policy or not policy.get("enabled", False):
+        if state is not None:
+            state[cache_key] = None
         return None
     scopes = matching_scopes(policy, client_ip(request))
     if not scopes:
         raise HTTPException(403, "当前客户端 IP 不在平台访问白名单内")
+    if state is not None:
+        state[cache_key] = frozenset(scopes)
     return scopes
 
 

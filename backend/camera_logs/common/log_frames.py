@@ -31,14 +31,14 @@ class GapFrame(StrictResponseModel):
 
 
 class StatusFrame(StrictResponseModel):
-    """任务尚无分配节点时发送的当前任务状态。"""
+    """未结束且尚无分配节点的任务状态；暂停订阅保持连接等待恢复。"""
 
     type: Literal["status"] = Field(description="固定为 status，表示没有可转发的实时数据。")
-    status: str = Field(description="当前任务状态，供客户端展示或决定后续重连时机。")
+    status: str = Field(description="当前未结束任务状态；PAUSED 表示订阅保持连接等待恢复。软删除或已物理停止的任务不发送此帧，而以 WebSocket 1000 正常关闭。")
 
 
 class SubscribeFrame(StrictResponseModel):
-    """客户端建立实时日志订阅时发送的唯一首帧。"""
+    """客户端建立实时日志订阅时发送的唯一首帧；后续断开立即取消上游操作。"""
 
     token: str | None = Field(default=None, description="可选服务令牌；省略或空字符串时使用现有 Cookie 会话鉴权。")
     cursor: str | None = Field(default="", description="可选不透明续传游标；null 或省略时从当前实时缓冲的起点订阅。")

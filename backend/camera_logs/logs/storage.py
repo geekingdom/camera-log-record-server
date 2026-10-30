@@ -18,6 +18,7 @@ from itertools import pairwise
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from camera_logs.common.observability import _error_frames
 from camera_logs.logs.archive_spool import persist as persist_archive_spool
 from camera_logs.logs.compression import compress_spool, schedule_pending_archive
 from camera_logs.logs.naming import safe_device_address, safe_filename_component, segment_name_from_source
@@ -560,7 +561,8 @@ class HourlyWriter:
                                        ARCHIVE_CATALOG_CALLBACK_TIMEOUT_SECONDS)
                     except Exception as error:  # noqa: BLE001 - 归档已原子发布，目录异常交由既有维护恢复。
                         logger.warning("后台归档目录登记失败 task=%s run=%s archive=%s errorType=%s",
-                                       archive.task_id, archive.run_id, archive.path, type(error).__name__)
+                                       archive.task_id, archive.run_id, archive.path, type(error).__name__,
+                                       extra={"errorFrames": _error_frames(error)})
         finally:
             self._archive_notification_task = None
 

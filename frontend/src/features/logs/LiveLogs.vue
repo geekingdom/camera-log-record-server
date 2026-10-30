@@ -19,12 +19,18 @@ import LogFindBar from "./LogFindBar.vue";
 import LogText from "./LogText.vue";
 import { findTextMatches } from "./logText";
 import { appendCommandHistory, commandSuggestionItems, readCommandHistory, writeCommandHistory } from "./liveCommandHistory";
+import { shouldReconnectLiveSocket } from "./liveSocketClose";
 
 const props = defineProps<{ taskId: string; userId?: string; canSend?: boolean }>();
 const emit = defineEmits<{ history: [] }>();
 const buffer = new LiveLogBuffer();
 const lines = ref<string[]>([]);
 const connected = ref(false);
+const closedForStoppedTask = ref(false);
+const connectionLabel = computed(() => {
+  if (connected.value) return "实时连接中";
+  return closedForStoppedTask.value ? "任务已停止，实时日志已关闭" : "正在重连";
+});
 const taskState = ref<Task>();
 let debugNotice: ReturnType<typeof ElNotification> | undefined;
 let lastDebugNotice = "";
@@ -53,6 +59,16 @@ async function readTaskState(current: number) {
     if (current === stateGeneration) {
       taskState.value = state;
       showDebugNotice(state);
+      // 已停止任务的 1000 是终态；同一任务再次启动时由状态读取显式恢复订阅。
+      if (closedForStoppedTask.value && !state.deletedAt && state.desiredState === "RUNNING" &&
+        state.version !== stoppedTaskVersion) {
+        closedForStoppedTask.value = false;
+        stoppedTaskVersion = undefined;
+        generation += 1;
+        window.clearTimeout(retry);
+        socket = undefined;
+        openSocket(generation);
+      }
     }
   } catch { /* 短时状态请求失败不影响已建立的日志订阅。 */ }
   finally {
@@ -116,6 +132,8 @@ const bottomSpacer = computed(() => ({
 let socket: WebSocket | undefined;
 let generation = 0;
 let retry: number | undefined;
+let stoppedTaskVersion: number | undefined;
+let localTransportFailure = false;
 let syncTimer: number | undefined;
 let forceViewRefresh = false;
 let displaySettingsTimer: number | undefined;
@@ -203,6 +221,8 @@ function close() {
   retry = undefined;
   syncTimer = undefined;
   forceViewRefresh = false;
+  closedForStoppedTask.value = false;
+  stoppedTaskVersion = undefined;
   socket?.close();
   socket = undefined;
   connected.value = false;
@@ -227,12 +247,14 @@ function socketUrl() {
 }
 // generation 防止旧任务的延迟 socket 回调污染新任务视图；cursor 用于断线恢复。
 function openSocket(current: number) {
+  localTransportFailure = false;
   socket = new WebSocket(socketUrl());
   socket.onopen = () => {
     if (current !== generation) return;
     // Cookie 会话同源建立后无需在帧中重复发送凭据；保留 Bearer 工具兼容值。
     socket?.send(JSON.stringify({ token: getToken(), cursor: buffer.cursor }));
     connected.value = true;
+    closedForStoppedTask.value = false;
   };
   socket.onmessage = ({ data }) => {
     if (current !== generation) return;
@@ -243,18 +265,31 @@ function openSocket(current: number) {
       // 忽略格式不完整的传输帧。
     }
   };
-  socket.onclose = () => {
+  socket.onclose = ({ code }) => {
     if (current !== generation) return;
     connected.value = false;
+    socket = undefined;
+    const retryAfterLocalFailure = localTransportFailure;
+    localTransportFailure = false;
+    if (!shouldReconnectLiveSocket(code, retryAfterLocalFailure)) {
+      closedForStoppedTask.value = true;
+      stoppedTaskVersion = taskState.value?.version;
+      return;
+    }
     retry = window.setTimeout(() => openSocket(current), 1000);
   };
   socket.onerror = () => {
-    if (current === generation) socket?.close();
+    if (current === generation) {
+      localTransportFailure = true;
+      socket?.close();
+    }
   };
 }
 function connect() {
   close();
   resetForTask();
+  closedForStoppedTask.value = false;
+  stoppedTaskVersion = undefined;
   openSocket(generation);
 }
 function toggleView() {
@@ -366,9 +401,7 @@ onBeforeUnmount(() => { debugNotice?.close(); stateGeneration++; commandGenerati
     <div class="section-heading runtime-heading">
       <h2>运行日志</h2>
       <div class="log-tools">
-        <el-tag :type="connected ? 'success' : 'info'">{{
-          connected ? "实时连接中" : "正在重连"
-        }}</el-tag>
+        <el-tag :type="connected ? 'success' : 'info'">{{ connectionLabel }}</el-tag>
         <el-tooltip :content="pausedView ? '继续视图' : '暂停视图'"
           ><el-button
             text

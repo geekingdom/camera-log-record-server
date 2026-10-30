@@ -33,6 +33,15 @@ def test_non_data_frames_are_strictly_discriminated(frame):
         model.model_validate({**frame, "type": "data"})
 
 
+def test_live_frame_schema_documents_terminal_close_and_paused_subscription_behavior():
+    """站内 WebSocket 合同从实际帧模型生成，必须说明终态关闭与暂停保持的差异。"""
+    status_description = StatusFrame.model_json_schema()["properties"]["status"]["description"]
+    subscribe_description = SubscribeFrame.model_json_schema()["description"]
+
+    assert "PAUSED" in status_description and "WebSocket 1000" in status_description
+    assert "唯一首帧" in subscribe_description and "断开立即取消" in subscribe_description
+
+
 def test_subscribe_frame_preserves_cookie_and_empty_cursor_defaults_but_forbids_unknown_input():
     """订阅首帧允许省略令牌走 Cookie，并把未提供游标规范为当前订阅起点。"""
     subscribe = SubscribeFrame.model_validate({})

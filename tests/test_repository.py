@@ -100,3 +100,20 @@ async def test_resource_mine_list_indexes_cover_owner_and_shared_branches(tmp_pa
     assert indexes["resources_shared_created"]["key"] == [
         ("sharedUserIds", 1), ("createdAt", -1), ("id", 1),
     ]
+
+
+async def test_resource_summary_and_pending_operation_indexes_exclude_history(tmp_path):
+    """资源页摘要和软删取消只索引当前任务与待结算操作，历史增长不放大热索引。"""
+    database = AsyncMongoMockClient().db
+    repo = Repository(database, Settings(encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+
+    await repo.initialize()
+
+    task_indexes = await database.tasks.index_information()
+    assert task_indexes["tasks_resource_visible_summary"]["key"] == [("resourceId", 1)]
+    assert task_indexes["tasks_resource_visible_summary"]["partialFilterExpression"] == {"deletedAt": None}
+    assert task_indexes["tasks_serial_resource_visible_summary"]["key"] == [("serialServerResourceId", 1)]
+    assert task_indexes["tasks_serial_resource_visible_summary"]["partialFilterExpression"] == {"deletedAt": None}
+    operation_index = (await database.operations.index_information())["operations_task_pending_intent"]
+    assert operation_index["key"] == [("taskId", 1), ("status", 1), ("desiredState", 1)]
+    assert operation_index["partialFilterExpression"] == {"status": "PENDING"}

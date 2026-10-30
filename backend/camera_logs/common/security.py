@@ -24,7 +24,10 @@ async def authenticate(repo, token):
     user = await repo.db.users.find_one({"id": record.get("userId"), "enabled": True, "deletedAt": None})
     if user is None:
         raise required_login()
-    return await user_identity(repo, user) | {"kind": "service-token", "serviceTokenId": record["id"]}
+    # 刚验证的当前令牌已证明入口资格，无需在每次实时轮询中再查该用户的令牌目录。
+    return await user_identity(repo, user, include_service_token=False) | {
+        "kind": "service-token", "serviceTokenId": record["id"], "hasActiveServiceToken": True,
+    }
 
 
 async def actor(request: Request):
@@ -36,7 +39,10 @@ async def actor(request: Request):
         raise required_login()
     else:
         check_origin(request, write=request.method not in {"GET", "HEAD", "OPTIONS"})
-        identity = await session_identity(request.app.state.repo, request.cookies.get(COOKIE, ""))
+        identity = await session_identity(
+            request.app.state.repo, request.cookies.get(COOKIE, ""),
+            include_service_token=request.url.path == "/api/v1/auth/me",
+        )
         if identity.get("mustChangePassword") and request.url.path not in {
             "/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout"
         }:

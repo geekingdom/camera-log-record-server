@@ -24,6 +24,8 @@ export function usePlatformSession(options: SessionOptions) {
   const user = ref<SessionUser>();
   const passwordOpen = ref(false);
   const passwordSaving = ref(false);
+  const restoring = ref(false);
+  const restoreError = ref<string>();
   const generation = ref(0);
   let identityRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   let identityRefreshing = false;
@@ -37,7 +39,14 @@ export function usePlatformSession(options: SessionOptions) {
     authenticated.value = false;
     user.value = undefined;
     passwordOpen.value = false;
+    restoring.value = false;
+    restoreError.value = undefined;
     options.clearWorkspace();
+  }
+
+  /** 会话恢复中的资料加载错误保留给界面重试，不能把已确认身份误报为退出。 */
+  function recoveryMessage(value: unknown) {
+    return value instanceof Error ? value.message : "初始资料加载失败，请重试";
   }
 
   /** 按上海自然日计算下一个零点，权限截止日只精确到天，不能依赖浏览器所在时区。 */
@@ -83,10 +92,18 @@ export function usePlatformSession(options: SessionOptions) {
     if (current !== generation.value) return false;
     user.value = sessionUser;
     passwordOpen.value = sessionUser.mustChangePassword;
-    if (!sessionUser.mustChangePassword)
-      await options.loadInitial(sessionUser, current);
     if (current !== generation.value) return false;
     authenticated.value = true;
+    restoreError.value = undefined;
+    if (!sessionUser.mustChangePassword) {
+      try {
+        await options.loadInitial(sessionUser, current);
+      } catch (value) {
+        if (current !== generation.value) return false;
+        restoreError.value = recoveryMessage(value);
+      }
+    }
+    if (current !== generation.value) return false;
     scheduleIdentityRefresh();
     return true;
   }
@@ -99,6 +116,7 @@ export function usePlatformSession(options: SessionOptions) {
     }
     busy.value = true;
     const current = ++generation.value;
+    restoreError.value = undefined;
     try {
       const loggedIn = await authApi.login(username.trim(), password);
       return await establish(loggedIn.user, current);
@@ -115,15 +133,26 @@ export function usePlatformSession(options: SessionOptions) {
 
   async function restore() {
     const current = ++generation.value;
+    restoring.value = true;
+    restoreError.value = undefined;
     try {
       const restored = await authApi.me();
       await establish(restored.user, current);
-    } catch {
+    } catch (value) {
       if (current === generation.value) {
-        clearToken();
-        clearLocalSession();
+        // 明确的认证失效会由 request() 触发 auth-required 并进入 logout()；
+        // 其它网络或初始化问题必须保留为可重试状态，不能擅自清除会话。
+        restoreError.value = recoveryMessage(value);
       }
+    } finally {
+      if (current === generation.value) restoring.value = false;
     }
+  }
+
+  /** 用户可在暂态失败后重新读取当前会话，不必重新输入凭据。 */
+  async function retryRestore() {
+    if (restoring.value) return;
+    await restore();
   }
 
   /** 本地状态优先失效，确保退出后的延迟响应不能重新打开编辑器或污染列表。 */
@@ -177,8 +206,8 @@ export function usePlatformSession(options: SessionOptions) {
 
   function start() {
     monitoringIdentity = true;
-    void restore();
     window.addEventListener("auth-required", logout);
+    void restore();
     document.addEventListener("visibilitychange", refreshIdentityWhenVisible);
   }
   function stop() {
@@ -195,8 +224,11 @@ export function usePlatformSession(options: SessionOptions) {
     user,
     passwordOpen,
     passwordSaving,
+    restoring,
+    restoreError,
     generation,
     login,
+    retryRestore,
     logout,
     changePassword,
     start,

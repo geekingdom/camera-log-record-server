@@ -69,7 +69,7 @@ async def _ticket_actor(request: Request, target_type: str):
             "$or": [{"expiresAt": None}, {"expiresAt": {"$gt": now()}}],
         }):
             raise HTTPException(401, "访问令牌已失效")
-        identity = await user_identity(repo, user)
+        identity = await user_identity(repo, user, include_service_token=False)
         if document.get("serviceTokenId"):
             identity |= {"kind": "service-token", "serviceTokenId": document["serviceTokenId"]}
     else:

@@ -31,15 +31,21 @@ async def record_debug_event(runtime: Any, event: str, details: dict[str, Any]) 
     diagnostic = diagnostic if isinstance(diagnostic, dict) else None
     session_id = runtime.collector.session_id
     confirmation = (session_id, details["mode"], debug_error, command_blocked)
-    repeated = event == "ALREADY_ASH" and confirmation == getattr(runtime, "last_already_ash", None)
-    # 数据库等待前保留关联诊断，外层取消或数据库不可用也不会丢失已发生的失败阶段。
-    logger.info("设备调试模式交互", extra={"context": {
-        "taskId": runtime.task["id"], "runId": runtime.task["runId"], "sessionId": session_id,
-        "nodeId": runtime.repo.settings.node_id, "phase": event, "mode": details["mode"],
-        "commandBlocked": command_blocked, "debugError": debug_error, "debugDiagnostic": diagnostic,
-    }})
-    event_written = repeated
-    if not repeated:
+    completed = event == "ALREADY_ASH" and confirmation == getattr(runtime, "last_already_ash", None)
+    # 只有事件与任务状态均已提交的确认才可完全跳过。事件先成功、任务状态暂时失败时，
+    # 后续回调必须只重试任务状态，不能重复写审计事件或 INFO 日志。
+    if completed:
+        return
+    event_written = event == "ALREADY_ASH" and confirmation == getattr(
+        runtime, "last_already_ash_event", None,
+    )
+    if not event_written:
+        # 数据库等待前保留关联诊断，外层取消或数据库不可用也不会丢失已发生的失败阶段。
+        logger.info("设备调试模式交互", extra={"context": {
+            "taskId": runtime.task["id"], "runId": runtime.task["runId"], "sessionId": session_id,
+            "nodeId": runtime.repo.settings.node_id, "phase": event, "mode": details["mode"],
+            "commandBlocked": command_blocked, "debugError": debug_error, "debugDiagnostic": diagnostic,
+        }})
         try:
             await asyncio.wait_for(runtime.repo.db.events.insert_one({
                 "taskId": runtime.task["id"], "runId": runtime.task["runId"],
@@ -53,9 +59,12 @@ async def record_debug_event(runtime: Any, event: str, details: dict[str, Any]) 
                 type(error).__name__)
         else:
             event_written = True
-        # 写入失败必须保留旧确认值，下次仍可尝试记录；其他阶段开启新的确认周期。
-        if event_written:
-            runtime.last_already_ash = confirmation if event == "ALREADY_ASH" else None
+            if event == "ALREADY_ASH":
+                runtime.last_already_ash_event = confirmation
+            else:
+                runtime.last_already_ash_event = None
+                runtime.last_already_ash = None
+    task_written = False
     if not getattr(runtime, "retired", False):
         try:
             await asyncio.wait_for(runtime.repo.db.tasks.update_one(owner_filter(runtime.task), {
@@ -65,6 +74,14 @@ async def record_debug_event(runtime: Any, event: str, details: dict[str, Any]) 
         except Exception as error:  # noqa: BLE001 - 状态库故障不得中断设备调试。
             logger.error("设备调试状态更新失败 task=%s phase=%s errorType=%s", runtime.task["id"], event,
                          type(error).__name__)
+        else:
+            task_written = True
+            # 事件审计失败不应阻止任务状态已确认的转换。保留审计去重缓存，
+            # 但后续 ASH 确认仍须能够把任务状态从当前非 ASH 阶段恢复。
+            if event != "ALREADY_ASH":
+                runtime.last_already_ash = None
+    if event == "ALREADY_ASH" and event_written and task_written:
+        runtime.last_already_ash = confirmation
 
 
 async def _current_owner(runtime: Any) -> bool:

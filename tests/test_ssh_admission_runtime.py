@@ -13,7 +13,7 @@ from mongomock_motor import AsyncMongoMockClient
 
 
 @pytest.mark.asyncio
-async def test_unknown_factory_reservation_never_produces_closed_receipt(tmp_path):
+async def test_unknown_factory_reservation_reconciles_preconnect_slot_without_closed_receipt(tmp_path):
     settings = Settings(_env_file=None, encryption_key=Fernet.generate_key().decode(),
                         log_root=tmp_path, node_id="node-a")
     repo = Repository(AsyncMongoMockClient().db, settings)
@@ -24,18 +24,23 @@ async def test_unknown_factory_reservation_never_produces_closed_receipt(tmp_pat
             "desiredState": "RUNNING", "status": "PENDING"}
     await repo.db.tasks.insert_one(task)
 
+    await repo.db.ssh_connection_slots.insert_one({"_id": "192.0.2.1", "claims": [{
+        "taskId": task["id"], "runId": task["runId"], "generation": task["generation"],
+        "nodeId": task["nodeId"], "token": "unknown-token", "port": task["port"],
+    }]})
+
     async def unknown(_config):
-        raise SshSlotUncertain("192.0.2.1", "unknown-token")
+        raise SshSlotUncertain("192.0.2.1", "unknown-token", preconnect=True)
 
     runtime = SessionRuntime(repo, task, unknown)
     worker = Worker(repo)
     worker.active[task["id"]] = runtime
     await asyncio.wait_for(runtime.background, 2)
-    with pytest.raises(SshSlotUncertain):
-        await worker.finish_runtime(runtime, "release")
+    await worker.finish_runtime(runtime, "release")
     saved = await repo.db.tasks.find_one({"id": task["id"]})
-    assert saved["status"] == "BLOCKED" and saved["nodeId"] == "node-a"
+    assert saved["status"] == "STOPPED" and saved["nodeId"] is None
     assert not saved.get("closedReceipt")
+    assert await repo.db.ssh_connection_slots.count_documents({"claims.taskId": task["id"]}) == 0
     assert runtime.catalog_task.done()
 
 

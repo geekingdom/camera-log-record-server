@@ -121,8 +121,13 @@ async def _add_task_summaries(db: Any, resources: list[dict[str, Any]]) -> None:
     identifiers = [resource["id"] for resource in resources]
     if not identifiers:
         return
+    # 将可见条件保留在每个 $or 分支中，Mongo 才能分别使用两个关联索引；同时
+    # ``deletedAt: None`` 继续兼容历史文档中该字段缺失的当前任务。
     cursor = db.tasks.aggregate([
-        {"$match": {"deletedAt": None, "$or": [{"resourceId": {"$in": identifiers}}, {"serialServerResourceId": {"$in": identifiers}}]}},
+        {"$match": {"$or": [
+            {"deletedAt": None, "resourceId": {"$in": identifiers}},
+            {"deletedAt": None, "serialServerResourceId": {"$in": identifiers}},
+        ]}},
         {"$project": {"id": 1, "resourceId": 1, "serialServerResourceId": 1, "status": 1, "desiredState": 1, "nodeId": 1}},
     ])
     if inspect.isawaitable(cursor):

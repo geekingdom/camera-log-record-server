@@ -18,12 +18,15 @@ from uuid import uuid4
 from camera_logs.collection.ssh_admission import (
     SshAdmission,
     SshCapacityError,
+    SshSlotUncertain,
+    reconcile_preconnect_uncertain_slot,
     release_task_slots,
 )
 from camera_logs.common.config import Settings
 from camera_logs.common.database import Repository, now
 from cryptography.fernet import Fernet
-from pymongo import AsyncMongoClient
+from pymongo import AsyncMongoClient, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 
 def task(identifier: str, *, address: str, port: int, run: str | None = None,
@@ -134,9 +137,40 @@ async def verify(uri: str) -> dict[str, object]:
         isolated = await repo.db.ssh_connection_slots.find_one({"_id": "198.51.100.21"})
         if not isolated or [claim["token"] for claim in isolated.get("claims", [])] != [successor_token]:
             raise AssertionError(f"旧运行释放影响了后继名额 slot={isolated!r}")
+
+        # 预建连结果未知的协调使用端点标量代次，而不是无限 token 墓碑。先验证
+        # 已提交旧 claim 只会精确移除自身，再用真实 upsert 重放模拟迟到的旧 CAS。
+        epoch_task = task("epoch-owner", address="198.51.100.22", port=22, run="epoch-run", generation=9)
+        old_claim = {"taskId": epoch_task["id"], "runId": epoch_task["runId"],
+                     "generation": epoch_task["generation"], "nodeId": epoch_task["nodeId"],
+                     "token": "epoch-token", "port": 22, "admissionEpoch": 0}
+        other_claim = {"taskId": "other", "runId": "other-run", "generation": 1,
+                       "nodeId": "other-node", "token": "other-token", "port": 22}
+        await repo.db.ssh_connection_slots.insert_one({"_id": "198.51.100.22", "admissionEpoch": 0,
+                                                        "claims": [old_claim, other_claim]})
+        uncertainty = SshSlotUncertain("198.51.100.22", "epoch-token", preconnect=True, admission_epoch=0)
+        await reconcile_preconnect_uncertain_slot(repo, epoch_task, uncertainty)
+        epoch_slot = await repo.db.ssh_connection_slots.find_one({"_id": "198.51.100.22"})
+        if not epoch_slot or epoch_slot.get("admissionEpoch") != 1 or epoch_slot.get("claims") != [other_claim]:
+            raise AssertionError(f"预建连协调没有精确回收旧 claim slot={epoch_slot!r}")
+        try:
+            await repo.db.ssh_connection_slots.find_one_and_update(
+                {"_id": "198.51.100.22", "admissionEpoch": 0, "claims.4": {"$exists": False}},
+                {"$push": {"claims": old_claim}}, upsert=True, return_document=ReturnDocument.AFTER,
+            )
+        except DuplicateKeyError:
+            pass
+        else:
+            raise AssertionError("迟到的旧代次 upsert 没有被唯一键和 CAS 联合阻止")
+        # 隔离收尾重试只能继续推进同一端点代次并精确 pull，不能清除无关 claim。
+        await reconcile_preconnect_uncertain_slot(repo, epoch_task, uncertainty)
+        retried_slot = await repo.db.ssh_connection_slots.find_one({"_id": "198.51.100.22"})
+        if not retried_slot or retried_slot.get("admissionEpoch") != 2 or retried_slot.get("claims") != [other_claim]:
+            raise AssertionError(f"预建连隔离重试影响其它 claim slot={retried_slot!r}")
         return {"passed": True, "temporaryDatabase": database_name, "crossProcess": True,
                 "endpointPort": 18080, "independentPort": 18081, "unknownClaimsRetained": True,
-                "exactReleaseIsolation": True, "noDeviceAccess": True}
+                "exactReleaseIsolation": True, "epochLateUpsertBlocked": True,
+                "epochRetryPreservesOtherClaim": True, "noDeviceAccess": True}
     finally:
         for process in processes:
             if process.is_alive():

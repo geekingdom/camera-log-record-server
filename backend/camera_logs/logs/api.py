@@ -28,6 +28,7 @@ from camera_logs.logs.download_availability import download_available
 from camera_logs.logs.gap_catalog import catalog_cursor_page, catalog_gap_fragments
 from camera_logs.logs.hour_catalog import summarize_hours
 from camera_logs.logs.job_submission import cancel_job, submit_job
+from camera_logs.logs.live_subscription import await_live_operation, watch_disconnect
 from camera_logs.logs.public import public_job
 from camera_logs.users.sessions import COOKIE, check_origin, session_identity
 
@@ -302,14 +303,23 @@ def install_log_routes(app):
 
     @app.websocket("/api/v1/tasks/{task_id}/logs")
     async def live(ws: WebSocket, task_id: str):
-        """首帧鉴权后按游标推送字节块；发送超时关闭慢连接，正文可通过文件接口补读。"""
+        """首帧鉴权后按游标推送字节块；断开即取消鉴权和节点轮询。"""
         await ws.accept()
+        disconnected = None
+
+        async def close_socket(code: int, reason: str | None = None) -> None:
+            """客户端已先断开时关闭会抛 RuntimeError；外层取消仍须继续传播。"""
+            try:
+                await ws.close(code=code, reason=reason)
+            except RuntimeError:
+                pass
+
         try:
             try:
                 hello = SubscribeFrame.model_validate(await asyncio.wait_for(ws.receive_json(), timeout=10))
             except ValidationError:
                 ws.state.failure_type = "ValidationError"
-                await ws.close(code=4408, reason="订阅首帧格式无效")
+                await close_socket(4408, "订阅首帧格式无效")
                 return
 
             async def current_identity():
@@ -317,49 +327,70 @@ def install_log_routes(app):
                 if hello.token:
                     return await apply_ip_permissions(repo(), ws, await authenticate(repo(), hello.token))
                 check_origin(ws)
-                identity = await session_identity(repo(), ws.cookies.get(COOKIE, ""))
+                identity = await session_identity(repo(), ws.cookies.get(COOKIE, ""), include_service_token=False)
                 if identity.get("mustChangePassword"):
                     raise HTTPException(403, "请先修改初始密码")
                 return await apply_ip_permissions(repo(), ws, identity)
 
-            user = await current_identity()
+            # 首帧之后立刻开始接收断开事件，避免后续鉴权或 tail 长轮询成为孤儿任务。
+            disconnected = asyncio.create_task(watch_disconnect(ws))
+            user = await await_live_operation(current_identity(), disconnected)
             # 中间件只读取已鉴权的主体标识，绝不保留客户端首帧中的原始令牌。
             bind_websocket_actor(ws.scope, user)
             authorize(user, "logs:read", task_id)
-            await repo().audit(user["id"], "live_subscribe", task_id)
+            await await_live_operation(repo().audit(user["id"], "live_subscribe", task_id), disconnected)
             cursor = hello.cursor
             while True:
-                user = await current_identity()
+                user = await await_live_operation(current_identity(), disconnected)
                 authorize(user, "logs:read", task_id)
-                task = await repo().get("tasks", task_id)
+                task = await await_live_operation(repo().get("tasks", task_id), disconnected)
+                # 删除已被提交后，日志与归档仍可通过 HTTP 查询，但实时订阅必须终止。
+                if task.get("deletedAt") is not None:
+                    await close_socket(1000, "任务已删除")
+                    return
+                # 停止已物理完成时不再维持空闲订阅；PAUSED 没有新日志不属于结束。
+                if (task.get("desiredState") == "STOPPED" and task.get("status") == "STOPPED"
+                        and task.get("nodeId") is None):
+                    await close_socket(1000, "任务已停止")
+                    return
                 if not task.get("nodeId"):
-                    await ws.send_json(StatusFrame(type="status", status=task["status"]).model_dump(mode="json"))
+                    await await_live_operation(
+                        asyncio.wait_for(
+                            ws.send_json(StatusFrame(type="status", status=task["status"]).model_dump(mode="json")),
+                            timeout=5,
+                        ),
+                        disconnected,
+                    )
                 else:
-                    data = await node_request(repo(), task["nodeId"], f"/internal/tail/{task_id}",
-                                              {"cursor": cursor or ""}, client=ws.app.state.node_http)
+                    data = await await_live_operation(
+                        node_request(repo(), task["nodeId"], f"/internal/tail/{task_id}",
+                                     {"cursor": cursor or ""}, client=ws.app.state.node_http),
+                        disconnected,
+                    )
                     if data.get("gap"):
-                        await ws.send_json(GapFrame(
+                        await await_live_operation(asyncio.wait_for(ws.send_json(GapFrame(
                             type="gap", message="实时缓冲已过期，请通过小时归档补读",
-                        ).model_dump(mode="json"))
+                        ).model_dump(mode="json")), timeout=5), disconnected)
                     for frame in data["frames"]:
-                        await asyncio.wait_for(ws.send_json(frame), timeout=5)
+                        await await_live_operation(asyncio.wait_for(ws.send_json(frame), timeout=5), disconnected)
                         cursor = frame["cursor"]
-                await asyncio.sleep(.1)
+                await await_live_operation(asyncio.sleep(.1), disconnected)
         except TimeoutError:
             ws.state.failure_type = "TimeoutError"
-            await ws.close(code=4408, reason="订阅交互超时")
+            await close_socket(4408, "订阅交互超时")
         except WebSocketDisconnect:
             # 正常断开由 WebSocket 中间件依据 closeCode 记录，不重复写错误事件。
             pass
         except HTTPException as exc:
             ws.state.failure_type = "HTTPException"
             code = {401: 4401, 403: 4403}.get(exc.status_code, 1013)
-            await ws.close(code=code, reason=str(exc.detail)[:120])
+            await close_socket(code, str(exc.detail)[:120])
         except Exception as exc:
             ws.state.failure_type = type(exc).__name__
             import logging
             logging.getLogger(__name__).exception("实时订阅异常 task=%s", task_id)
-            try:
-                await ws.close(code=1011)
-            except RuntimeError:
-                pass
+            await close_socket(1011)
+        finally:
+            if disconnected is not None:
+                disconnected.cancel()
+                await asyncio.gather(disconnected, return_exceptions=True)

@@ -72,6 +72,8 @@ class SessionRuntime:
         self.liveness = RuntimeLiveness()
         self.resource_monitor_task = None
         self.last_already_ash = None
+        self.last_already_ash_event = None
+        self.preconnect_slot_reconciled = False
         self.started_at = now()
         self.debug_passwords = PshPasswordProvider(repo.settings)
         # 目录水位不能只依赖下一块日志触发；设备停止输出后的尾块同样需要发布。
@@ -494,7 +496,10 @@ class SessionRuntime:
             except SshSlotUncertain as exc:
                 # 只保存不带栈的身份快照；反复抛同一异常会累加历史帧并耗尽日志轮转。
                 logger.exception("SSH名额结果未知，保持隔离 task=%s", self.task["id"])
-                self.connection_uncertain = SshSlotUncertain(exc.address, exc.token)
+                self.connection_uncertain = SshSlotUncertain(
+                    exc.address, exc.token, preconnect=exc.preconnect,
+                    admission_epoch=exc.admission_epoch,
+                )
                 self.error = str(exc)
                 break
             except SshCapacityError as exc:
@@ -583,9 +588,19 @@ class SessionRuntime:
         if failure:
             raise failure
         if getattr(self, "connection_uncertain", None):
-            # 工厂可能尚未返回连接对象，不能用空collector连接伪造关闭收据。
+            # acquire 阶段尚未返回 socket；只按同一 token 和运行身份精确协调占位。
+            # 非预建连异常不能据此推断物理连接不存在，仍由关闭/隔离证明路径处理。
             uncertainty = self.connection_uncertain
-            raise SshSlotUncertain(uncertainty.address, uncertainty.token) from None
+            from camera_logs.collection.ssh_admission import reconcile_preconnect_uncertain_slot
+            if not uncertainty.preconnect:
+                raise SshSlotUncertain(uncertainty.address, uncertainty.token,
+                                       admission_epoch=uncertainty.admission_epoch) from None
+            await reconcile_preconnect_uncertain_slot(self.repo, self.task, uncertainty)
+            self.connection_uncertain = None
+            # 工厂在 acquire 前抛出，Collector 没有得到连接对象；协调成功不是关闭收据。
+            self.preconnect_slot_reconciled = True
+            if self.error == str(uncertainty):
+                self.error = None
 
     async def _stop_collector(self):
         """握手失败在连接和文件已关闭后作为运行错误返回，不误标为隔离失败。"""

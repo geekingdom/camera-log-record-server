@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises";
 const imported = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const { chromium } = imported.default || imported;
 const output = "output/playwright";
+const baseUrl = process.env.BASE_URL || "http://127.0.0.1:5173";
 const token = "synthetic-ansi-token";
 const task = {
   id: "ansi-task", name: "ANSI 显示验证任务", protocol: "TELNET_SERIAL",
@@ -45,6 +46,8 @@ async function json(route, body, status = 200) {
 await context.route("**/api/v1/**", async (route) => {
   const request = route.request();
   const path = new URL(request.url()).pathname;
+  if (request.method() === "GET" && path === "/api/v1/auth/me")
+    return json(route, { user: { id: "ansi-user", username: "fixture", displayName: "ANSI 验收", isAdmin: true, enabled: true, mustChangePassword: false, scopes: ["*"] } });
   if (request.method() === "GET" && path === "/api/v1/tasks")
     return json(route, { items: [task], total: 1, page: 1, pageSize: 100 });
   if (request.method() === "GET" && path === "/api/v1/resources")
@@ -70,11 +73,16 @@ await context.route("**/api/v1/**", async (route) => {
 
 let socketHello;
 let socketConnections = 0;
+let normalCloseScheduled = false;
 await context.routeWebSocket(`**/api/v1/tasks/${task.id}/logs`, (socket) => {
   socketConnections += 1;
   socket.onMessage((message) => {
     socketHello = JSON.parse(String(message));
     for (const frame of frames) socket.send(JSON.stringify(frame));
+    if (!normalCloseScheduled) {
+      normalCloseScheduled = true;
+      setTimeout(() => socket.close({ code: 1000, reason: "任务已停止" }), 50);
+    }
   });
 });
 
@@ -83,12 +91,12 @@ page.setDefaultTimeout(10000);
 const issues = [];
 try {
   await mkdir(output, { recursive: true });
-  await page.goto("http://127.0.0.1:5173/#resources", { waitUntil: "networkidle" });
+  await page.goto(`${baseUrl}/#logs`, { waitUntil: "networkidle" });
   await page.getByRole("tab", { name: "日志工作台", exact: true }).click();
-  await page.getByRole("heading", { name: "日志工作台", exact: true }).waitFor();
-  await page.getByRole("combobox", { name: "选择日志任务", exact: true }).click();
-  await page.getByRole("option", { name: /ANSI 显示验证任务/ }).click();
-  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "选择任务", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "选择日志任务", exact: true });
+  await picker.getByText(task.name, { exact: true }).click();
+  await picker.getByRole("button", { name: "确认切换", exact: true }).click();
 
   const consoleOutput = page.locator(".log-console");
   await consoleOutput.getByText(expected[3], { exact: true }).waitFor();
@@ -137,6 +145,11 @@ try {
     issues.push(`侧栏切换后实时日志丢失：${JSON.stringify(preservedLines)}`);
   if (socketConnections !== 1)
     issues.push(`侧栏切换创建了额外 WebSocket 连接：${socketConnections}`);
+
+  await page.getByText("任务已停止，实时日志已关闭", { exact: true }).waitFor();
+  await page.waitForTimeout(1200);
+  if (socketConnections !== 1)
+    issues.push(`任务正常关闭后仍重连：${socketConnections}`);
 
   console.log(JSON.stringify({
     passed: issues.length === 0, issues, socketHello, socketConnections, lines, preservedLines,

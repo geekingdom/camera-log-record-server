@@ -433,3 +433,32 @@ async def test_normal_isolation_preserves_exact_self_fenced_receipt(tmp_path):
     await worker.finish_runtime(runtime, "isolate")
     receipt = (await repo.db.tasks.find_one({"id": task["id"]}))["closedReceipt"]
     assert receipt["reason"] == AUTO_FAILOVER_FENCED
+
+
+async def test_preconnect_reconciled_isolation_never_writes_closed_receipt(tmp_path):
+    """预建连未知已用名额代次协调时，即使保留了会话对象也不能伪造关闭证明。"""
+    repo = await _repository(tmp_path)
+    worker = Worker(repo)
+    task = _task() | {"status": "COLLECTING"}
+    await repo.db.tasks.insert_one(task)
+    runtime = SimpleNamespace(task=task, collector=SimpleNamespace(session_id="not-connected"), stop=AsyncMock(),
+                              retired=False, stopping=False, preconnect_slot_reconciled=True)
+
+    await worker.finish_runtime(runtime, "isolate")
+
+    assert not (await repo.db.tasks.find_one({"id": task["id"]})).get("closedReceipt")
+
+
+async def test_preconnect_reconciled_recovery_rejects_synthetic_closed_receipt(tmp_path):
+    """恢复路径同样不能把仅构造的采集器对象当作已经关闭的 socket。"""
+    repo = await _repository(tmp_path)
+    worker = Worker(repo)
+    task = _task() | {"status": "BLOCKED", "sessionId": "not-connected"}
+    await repo.db.tasks.insert_one(task)
+    runtime = SimpleNamespace(task=task, collector=SimpleNamespace(session_id="not-connected"), stop=AsyncMock(),
+                              preconnect_slot_reconciled=True)
+
+    with pytest.raises(RuntimeError, match="缺少已关闭会话"):
+        await worker.recover_blocked_runtime(runtime)
+
+    assert not (await repo.db.tasks.find_one({"id": task["id"]})).get("closedReceipt")

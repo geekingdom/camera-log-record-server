@@ -29,10 +29,15 @@ class SshCapacityError(RuntimeError):
 class SshSlotUncertain(RuntimeError):
     """Mongo 提交结果未知，调用方不得建立 socket 或主动重试占位。"""
 
-    def __init__(self, address: str, token: str) -> None:
+    def __init__(self, address: str, token: str, *, preconnect: bool = False,
+                 admission_epoch: int | None = None) -> None:
         super().__init__(f"SSH 连接名额占位结果未知 address={address}")
         self.address = address
         self.token = token
+        # 仅 acquire 在建立 socket 前设置。release 的未知结果绝不能据此推断连接不存在。
+        self.preconnect = preconnect
+        # 申请绑定的端点准入代次；协调递增后，迟到的旧代次写入不能重新占位。
+        self.admission_epoch = admission_epoch
 
 
 def normalize_ssh_address(value: Any) -> str:
@@ -58,16 +63,29 @@ def normalize_ssh_endpoint(value: Any, port: Any = 22) -> str:
     return f"[{address}]:{number}" if ":" in address else f"{address}:{number}"
 
 
-def _owner(task: dict[str, Any], token: str) -> dict[str, Any]:
+def _owner(task: dict[str, Any], token: str, admission_epoch: int | None = None) -> dict[str, Any]:
     """固定占位身份，旧运行和旧节点永远不能释放新运行的连接名额。"""
     required = ("id", "runId", "generation", "nodeId")
     if any(task.get(key) is None for key in required):
         raise ValueError("SSH 连接名额需要任务、运行、代次和节点身份")
-    return {
+    claim = {
         "taskId": str(task["id"]), "runId": str(task["runId"]),
         "generation": task["generation"], "nodeId": str(task["nodeId"]),
         "token": token, "port": int(task.get("port", 22)), "claimedAt": now(),
     }
+    if admission_epoch is not None:
+        claim["admissionEpoch"] = admission_epoch
+    return claim
+
+
+def _epoch_filter(endpoint: str, admission_epoch: int) -> dict[str, Any]:
+    """构造绑定端点准入代次的 CAS 条件，兼容未迁移的历史槽位文档。"""
+    condition: dict[str, Any] = {"_id": endpoint}
+    if admission_epoch == 0:
+        condition["$or"] = [{"admissionEpoch": 0}, {"admissionEpoch": {"$exists": False}}]
+    else:
+        condition["admissionEpoch"] = admission_epoch
+    return condition
 
 
 class SshAdmission:
@@ -90,11 +108,20 @@ class SshAdmission:
             return self._claim["token"]
         token = new_id()
         claim = _owner(self.task, token)
+        admission_epoch: int | None = None
         for attempt in range(_INITIAL_UPSERT_RETRIES):
             try:
+                state = await self.repo.db.ssh_connection_slots.find_one(
+                    {"_id": self.endpoint}, {"admissionEpoch": 1},
+                )
+                admission_epoch = int(state.get("admissionEpoch", 0)) if state else 0
+                claim = _owner(self.task, token, admission_epoch)
+                condition = _epoch_filter(self.endpoint, admission_epoch)
+                condition[f"claims.{MAX_SSH_CONNECTIONS_PER_DEVICE - 1}"] = {"$exists": False}
                 slot = await self.repo.db.ssh_connection_slots.find_one_and_update(
-                    {"_id": self.endpoint, f"claims.{MAX_SSH_CONNECTIONS_PER_DEVICE - 1}": {"$exists": False}},
-                    {"$push": {"claims": claim}, "$set": {"updatedAt": now()}},
+                    condition,
+                    {"$push": {"claims": claim}, "$set": {"updatedAt": now(),
+                                                              "admissionEpoch": admission_epoch}},
                     upsert=True, return_document=ReturnDocument.AFTER,
                 )
             except DuplicateKeyError:
@@ -105,11 +132,28 @@ class SshAdmission:
             except asyncio.CancelledError as error:
                 # 取消可能发生在服务端已接收更新之后；按结果未知处理，绝不能建 socket。
                 self._claim, self._uncertain = claim, True
-                raise SshSlotUncertain(self.endpoint, token) from error
+                raise SshSlotUncertain(self.endpoint, token, preconnect=True,
+                                       admission_epoch=admission_epoch) from error
             except (PyMongoError, TimeoutError) as error:
                 self._claim, self._uncertain = claim, True
-                raise SshSlotUncertain(self.endpoint, token) from error
+                raise SshSlotUncertain(self.endpoint, token, preconnect=True,
+                                       admission_epoch=admission_epoch) from error
             if slot is None:
+                # 同一端点的协调刚递增代次时，当前已确认失败的申请可用同 token 重新
+                # 绑定新代次；提交未知的申请会在异常分支进入隔离，绝不重读后复活。
+                try:
+                    current = await self.repo.db.ssh_connection_slots.find_one(
+                        {"_id": self.endpoint}, {"admissionEpoch": 1},
+                    )
+                except asyncio.CancelledError as error:
+                    self._claim, self._uncertain = claim, True
+                    raise SshSlotUncertain(self.endpoint, token, preconnect=True) from error
+                except (PyMongoError, TimeoutError) as error:
+                    self._claim, self._uncertain = claim, True
+                    raise SshSlotUncertain(self.endpoint, token, preconnect=True,
+                                           admission_epoch=admission_epoch) from error
+                if current is not None and int(current.get("admissionEpoch", 0)) != admission_epoch:
+                    continue
                 raise SshCapacityError(f"设备端点 {self.endpoint} 的 SSH 连接名额已满")
             self._claim = claim
             return token
@@ -135,6 +179,39 @@ class SshAdmission:
         self._claim = None
         self._uncertain = False
         return bool(result.modified_count)
+
+
+async def reconcile_preconnect_uncertain_slot(repo: Any, task: dict[str, Any], uncertainty: SshSlotUncertain) -> bool:
+    """精确回收尚未建立 socket 的未知申请，结果仍未知时保持隔离。
+
+    该路径先原子递增端点的准入代次，再按运行身份精确 $pull。Mongo 单文档操作串行化：
+    先提交的旧代次 acquire 会被随后 $pull 移除，后提交的旧代次 acquire 因 CAS 不匹配
+    无法写入。代次为单个整数，不保留无限增长的 token 墓碑。
+    """
+    if not uncertainty.preconnect:
+        raise ValueError("非预建连 SSH 未知结果不能自动协调")
+    endpoint = normalize_ssh_endpoint(task.get("ip"), task.get("port", 22))
+    claim = _owner(task, uncertainty.token, uncertainty.admission_epoch)
+    # claimedAt 是调用本地时间，协调时不能重建后要求相等；其余身份和 token 不可省略。
+    exact = {key: value for key, value in claim.items() if key != "claimedAt"}
+    try:
+        await repo.db.ssh_connection_slots.update_one(
+            {"_id": endpoint},
+            {"$inc": {"admissionEpoch": 1}, "$set": {"updatedAt": now()}},
+            upsert=True,
+        )
+        await repo.db.ssh_connection_slots.update_one(
+            {"_id": endpoint},
+            {"$pull": {"claims": exact}, "$set": {"updatedAt": now()}},
+        )
+    except asyncio.CancelledError as error:
+        raise SshSlotUncertain(endpoint, uncertainty.token, preconnect=True) from error
+    except DuplicateKeyError as error:
+        # acquire 与围栏首次建文档竞争时，无法确认围栏是否已经落库，保持隔离。
+        raise SshSlotUncertain(endpoint, uncertainty.token, preconnect=True) from error
+    except (PyMongoError, TimeoutError) as error:
+        raise SshSlotUncertain(endpoint, uncertainty.token, preconnect=True) from error
+    return True
 
 
 async def release_task_slots(repo: Any, task: dict[str, Any], session: Any = None) -> int:

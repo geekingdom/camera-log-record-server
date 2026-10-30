@@ -375,6 +375,9 @@ def setup_logging(log_dir: Path, *, retention_days: int = DEFAULT_SERVICE_LOG_RE
     queue_handler = ExceptionPreservingQueueHandler(log_queue)
     root = logging.getLogger()
     root.setLevel(logging.INFO)
+    # 实时订阅与健康检查频繁调用 HTTP；逐次成功日志会放大队列和磁盘负担。
+    # 平台访问审计保持 INFO，上游失败仍由调用边界记录，并保留依赖的告警。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     root.handlers.clear()
     root.addHandler(queue_handler)
     listener = logging.handlers.QueueListener(log_queue, stdout_handler, file_handler, respect_handler_level=True)
@@ -541,6 +544,9 @@ class RequestLoggingMiddleware:
                 raise
             except Exception as error:  # noqa: BLE001 - 排障写入不得覆盖原请求结果或异常传播。
                 logging.getLogger("camera_logs.access").warning("请求事件持久化失败", extra={"context": {
+                    # 数据库不可用时仍可按同一请求编号在 JSONL 中关联原始访问记录。
+                    "requestId": request.state.request_id, "method": request.method,
+                    "route": getattr(scope.get("route"), "path", None) or request.url.path,
                     "errorType": type(error).__name__, "errorFrames": _error_frames(error),
                 }})
             finally:

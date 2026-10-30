@@ -220,6 +220,45 @@ async def test_recovery_queues_immutable_spool_without_waiting_for_publication(t
     assert spool.exists()
 
 
+async def test_pending_archive_pump_ignores_stale_spool_removed_after_scan(tmp_path, monkeypatch, caplog):
+    """扫描后被发布器移除的 spool 是正常竞态，不能反复记成维护异常。"""
+    import logging
+
+    repo = repository(tmp_path)
+    stale = tmp_path / "stale.tar.gz.pending.json"
+    stale.write_text("{}")
+    monkeypatch.setattr("camera_logs.logs.maintenance._scanned_pending_archives",
+                        lambda _root: ([stale], [], {}, []))
+
+    def missing(_path):
+        stale.unlink()
+        raise FileNotFoundError("published concurrently")
+
+    monkeypatch.setattr("camera_logs.logs.maintenance.load_archive_spool", missing)
+    caplog.set_level(logging.ERROR, logger="camera_logs.logs.maintenance")
+
+    assert await pump_pending_archives(repo) == 0
+    assert not [record for record in caplog.records if record.message == "归档持久清单补充登记失败 path=%s"]
+
+
+async def test_pending_archive_pump_reports_missing_content_when_candidate_still_exists(tmp_path, monkeypatch, caplog):
+    """候选仍存在而其实际归档源缺失时，不能被扫描竞态分支吞掉。"""
+    import logging
+
+    repo = repository(tmp_path)
+    source = tmp_path / "present.tar.gz.pending.json"
+    source.write_text("{}")
+    monkeypatch.setattr("camera_logs.logs.maintenance._scanned_pending_archives",
+                        lambda _root: ([source], [], {source: source.stat().st_mtime}, []))
+    monkeypatch.setattr("camera_logs.logs.maintenance.load_archive_spool",
+                        lambda _path: (_ for _ in ()).throw(FileNotFoundError("archive source missing")))
+    caplog.set_level(logging.ERROR, logger="camera_logs.logs.maintenance")
+
+    assert await pump_pending_archives(repo) == 0
+    assert [record for record in caplog.records
+            if record.getMessage().startswith("归档持久清单补充登记失败 path=")]
+
+
 async def test_pending_archive_pump_admits_later_spools_after_completed_batch(tmp_path, monkeypatch):
     """轻量 pump 不等完整归档恢复；首批发布后下批 spool 在下一轮公平补入。"""
     spools = [tmp_path / f"hour-{number}.tar.gz.pending.{number}.json" for number in range(12)]

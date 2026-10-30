@@ -286,3 +286,17 @@ if '中文异常结尾' not in result or len(result.encode()) > o.MAX_EXCEPTION_
     raise RuntimeError('exception truncation lost tail or exceeded budget')
 """
     subprocess.run([sys.executable, "-c", code], check=True, timeout=5)
+
+
+def test_successful_http_client_polling_does_not_flood_service_logs(tmp_path):
+    """高频内部读取不逐次入队；告警与平台访问审计仍保留。"""
+    listener = observability.setup_logging(tmp_path)
+    try:
+        logging.getLogger("httpx").info("HTTP Request: GET http://worker/internal/tail/task HTTP/1.1 200 OK")
+        logging.getLogger("httpx").warning("upstream warning")
+        logging.getLogger("camera_logs.access").info("request completed", extra={"context": {"requestId": "kept"}})
+    finally:
+        listener.stop()
+    rows = _read_lines(next(tmp_path.glob("*T00-00-00/camera-logs.jsonl")))
+    assert [row["message"] for row in rows] == ["upstream warning", "request completed"]
+    assert rows[-1]["context"]["requestId"] == "kept"

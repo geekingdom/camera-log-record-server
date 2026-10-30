@@ -57,6 +57,10 @@ jobs:
         run: python scripts/verify_node_heartbeat_clock.py
       - name: 验证Coredump发现幂等及资源存在筛选索引
         run: python scripts/verify_coredump_discovery.py
+      - name: 验证自动化并发CRUD和空日志订阅断开回收
+        run: python scripts/verify_automation_churn.py
+      - name: 验证资源摘要与软删除收尾查询索引升级
+        run: python scripts/verify_database_hot_paths.py
       - name: 验证全部认证结果的连续聚合与并发状态边界
         run: python scripts/verify_authentication_history_concurrency.py
       - name: 验证ISAPI异常时继续收集日志并在输出消失后停止

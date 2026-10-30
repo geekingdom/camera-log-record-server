@@ -183,7 +183,8 @@ export const api = {
     page?: number,
     pageSize?: number,
     filters?: { search?: string; model?: string; subSerialNumber?: string; kind?: ResourceKind; includeDeleted?: string; createdBy?: string; mine?: "true"; hasCoredumps?: "true" | "false"; sortBy?: string; sortOrder?: "asc" | "desc" },
-  ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`),
+    signal?: AbortSignal,
+  ) => request<Page<Resource>>(`/resources${query(page, pageSize, filters)}`, { signal }),
   resource: (id: string) => request<Resource>(`/resources/${id}`),
   /** 按上海自然月查询有采样的日期，不读取整月指标明细。 */
   resourceMetricDates: (resourceId: string, month: string) => request<{ days: string[] }>(`/resources/${encodeURIComponent(resourceId)}/resource-metric-dates?month=${encodeURIComponent(month)}`),

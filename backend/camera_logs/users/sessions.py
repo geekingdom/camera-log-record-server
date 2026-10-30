@@ -65,9 +65,13 @@ async def initialize_admin(repo):
     await repo.db.users.update_one({"id": "builtin-admin"}, {"$setOnInsert": document}, upsert=True)
 
 
-async def user_identity(repo, user):
-    """构造实时用户身份；服务账号资格在每次会话身份读取时以服务器时间重新判断。"""
+async def user_identity(repo, user, *, include_service_token=True):
+    """构造实时身份；仅UI身份响应查询服务账号入口资格，不缓存授权结果。"""
     scopes = effective_scopes(user)
+    identity = {**public_user(user), "kind": "session", "scopes": scopes,
+                "resourceIds": None, "taskIds": None}
+    if not include_service_token:
+        return identity
     active_token = await repo.db.tokens.find_one({
         "userId": user["id"], "revoked": False,
         "$or": [
@@ -75,11 +79,10 @@ async def user_identity(repo, user):
             {"expiresAt": {"$gt": now()}},
         ],
     }, {"_id": 1})
-    return {**public_user(user), "kind": "session", "scopes": scopes,
-            "resourceIds": None, "taskIds": None, "hasActiveServiceToken": active_token is not None}
+    return {**identity, "hasActiveServiceToken": active_token is not None}
 
 
-async def session_identity(repo, token):
+async def session_identity(repo, token, *, include_service_token=True):
     """会话撤销、账号禁用、重置密码和权限变更均即时生效，无权限缓存。"""
     if not token:
         raise required_login()
@@ -91,7 +94,7 @@ async def session_identity(repo, token):
                                          "authVersion": session["authVersion"]})
     if not user:
         raise required_login()
-    return await user_identity(repo, user)
+    return await user_identity(repo, user, include_service_token=include_service_token)
 
 
 def set_session_cookie(repo, token, request, response):

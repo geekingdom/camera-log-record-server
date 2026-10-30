@@ -196,6 +196,67 @@ async def test_debug_already_ash_deduplicates_only_unchanged_session_confirmatio
     assert (await repo.get("tasks", task["id"]))["debugPhase"] == "ALREADY_ASH"
 
 
+async def test_repeated_persisted_already_ash_skips_task_update_and_info_log(tmp_path, caplog):
+    """同会话确认已成功后，重复通知不得继续放大任务写入或服务日志。"""
+    import logging
+
+    repo, task = await repository(tmp_path)
+    updates = 0
+    original_update = repo.db.tasks.update_one
+
+    async def tracked_update(*args, **kwargs):
+        nonlocal updates
+        updates += 1
+        return await original_update(*args, **kwargs)
+
+    runtime = object.__new__(SessionRuntime)
+    runtime.task = task
+    runtime.collector = SimpleNamespace(session_id="debug-session")
+    runtime.repo = SimpleNamespace(settings=repo.settings, db=SimpleNamespace(
+        events=repo.db.events, tasks=SimpleNamespace(update_one=tracked_update),
+    ))
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.runtime_events")
+    confirmation = {"mode": "ASH", "commandBlocked": False, "debugError": None}
+
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+
+    assert updates == 1
+    assert [record.message for record in caplog.records if record.message == "设备调试模式交互"] == ["设备调试模式交互"]
+
+
+async def test_already_ash_retries_task_state_without_repeating_persisted_event(tmp_path, caplog):
+    """events 已成功而任务状态失败时，仅重试状态，不能再写重复审计。"""
+    import logging
+
+    repo, task = await repository(tmp_path)
+    attempts = 0
+    original_update = repo.db.tasks.update_one
+
+    async def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("模拟任务状态失败")
+        return await original_update(*args, **kwargs)
+
+    runtime = object.__new__(SessionRuntime)
+    runtime.task = task
+    runtime.collector = SimpleNamespace(session_id="debug-session")
+    runtime.repo = SimpleNamespace(settings=repo.settings, db=SimpleNamespace(
+        events=repo.db.events, tasks=SimpleNamespace(update_one=fail_once),
+    ))
+    caplog.set_level(logging.INFO, logger="camera_logs.collection.runtime_events")
+    confirmation = {"mode": "ASH", "commandBlocked": False, "debugError": None}
+
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+
+    assert attempts == 2
+    assert await repo.db.events.count_documents({"taskId": task["id"], "phase": "ALREADY_ASH"}) == 1
+    assert [record.message for record in caplog.records if record.message == "设备调试模式交互"] == ["设备调试模式交互"]
+
+
 async def test_debug_already_ash_retries_after_event_insert_failure(tmp_path):
     """确认事件写入失败不得占用去重缓存，下一次通知必须重试持久化。"""
     repo, task = await repository(tmp_path)
@@ -221,6 +282,35 @@ async def test_debug_already_ash_retries_after_event_insert_failure(tmp_path):
     await runtime.on_debug("ALREADY_ASH", confirmation)
 
     assert calls == 2
+    assert await repo.db.events.count_documents({"taskId": task["id"], "phase": "ALREADY_ASH"}) == 1
+
+
+async def test_already_ash_restores_task_state_after_intermediate_event_write_failure(tmp_path):
+    """非ASH审计失败但状态已变更后，确认回调仍须恢复任务状态。"""
+    repo, task = await repository(tmp_path)
+    runtime = object.__new__(SessionRuntime)
+    runtime.collector = SimpleNamespace(session_id="debug-session")
+    original_insert = repo.db.events.insert_one
+
+    async def insert_one(document):
+        if document["phase"] == "FAILED":
+            raise OSError("模拟失败阶段审计存储失败")
+        return await original_insert(document)
+
+    runtime.repo = SimpleNamespace(
+        settings=repo.settings,
+        db=SimpleNamespace(events=SimpleNamespace(insert_one=insert_one), tasks=repo.db.tasks),
+    )
+    runtime.task = task
+    confirmation = {"mode": "ASH", "commandBlocked": False, "debugError": None}
+
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+    await runtime.on_debug("FAILED", {"mode": "PSH", "commandBlocked": True, "debugError": "调试失败"})
+    await runtime.on_debug("ALREADY_ASH", confirmation)
+
+    stored = await repo.get("tasks", task["id"])
+    assert stored["debugPhase"] == "ALREADY_ASH"
+    assert stored["commandBlocked"] is False
     assert await repo.db.events.count_documents({"taskId": task["id"], "phase": "ALREADY_ASH"}) == 1
 
 
