@@ -105,10 +105,12 @@ def runtime_for_callbacks(tmp_path):
     runtime.frames, runtime.paths = deque(), {}
     runtime.catalog_dirty, runtime.catalog_ready = {}, set()
     runtime.catalog_lock = asyncio.Lock()
+    runtime.tail_changed = asyncio.Condition()
     runtime.frame_bytes = runtime.frame_number = runtime.input_bytes = 0
     runtime.last_catalog = 0.0
     runtime.started_at = datetime(2026, 9, 8, tzinfo=UTC)
     runtime.stopping = False
+    runtime.retired = False
     return runtime
 
 
@@ -589,6 +591,48 @@ def test_live_tail_returns_all_continuous_high_frequency_frames(tmp_path):
     assert tail["frames"][0]["cursor"] == "run-a:1"
     assert tail["frames"][-1]["cursor"] == "run-a:1200"
     assert tail["gap"] is False
+
+
+def test_wait_tail_reads_before_wait_and_is_woken_by_next_frame(tmp_path):
+    """空读后等待与 on_log 共享条件锁，下一帧不能落在检查和等待之间丢失。"""
+    async def scenario():
+        runtime = runtime_for_callbacks(tmp_path)
+        waiting = asyncio.create_task(runtime.wait_tail("run-a:0", .5))
+        await asyncio.sleep(0)
+        path = tmp_path / "task-a/run-a/session/2026/09/08/09/part-001.log"
+        await runtime.on_log(LogChunk("task-a", "run-a", "session", 1, b"new", 0, str(path)))
+        result = await asyncio.wait_for(waiting, .1)
+        assert [frame["cursor"] for frame in result["frames"]] == ["run-a:1"]
+
+    asyncio.run(scenario())
+
+
+def test_wait_tail_stopping_runtime_wakes_without_full_timeout(tmp_path):
+    """停止开始后必须唤醒节点内部 tail，旧实例不应额外占用一秒等待窗口。"""
+    async def scenario():
+        runtime = runtime_for_callbacks(tmp_path)
+        waiting = asyncio.create_task(runtime.wait_tail("run-a:0", .5))
+        await asyncio.sleep(0)
+        runtime.stopping = True
+        await runtime._wake_tail_waiters()
+        assert await asyncio.wait_for(waiting, .1) == {"frames": [], "gap": False}
+
+    asyncio.run(scenario())
+
+
+def test_hundred_waiting_tails_cancel_without_orphan_tasks(tmp_path):
+    """百个空闲订阅并发等待时，客户端取消必须全部即时结束，不能留下后台轮询。"""
+    async def scenario():
+        runtime = runtime_for_callbacks(tmp_path)
+        waiting = [asyncio.create_task(runtime.wait_tail("run-a:0", 1)) for _ in range(100)]
+        await asyncio.sleep(0)
+        for task in waiting:
+            task.cancel()
+        results = await asyncio.gather(*waiting, return_exceptions=True)
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task() and not task.done()]
+
+    asyncio.run(scenario())
 
 
 def test_hour_from_path_supports_new_and_legacy_layouts(tmp_path):

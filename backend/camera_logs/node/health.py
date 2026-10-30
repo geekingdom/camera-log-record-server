@@ -75,6 +75,7 @@ def node_health(node, current=None):
         return {"status": "OFFLINE", "reasons": [heartbeat_reason]}
     critical, warnings, unknown = [], [], []
     performance = node.get("performanceStatus") or {}
+    admission = node.get("writeAdmission") or {}
     if performance.get("admissionBlocked"):
         critical.append("节点有效内存不足或采集缓冲积压，暂停新任务准入")
     if (performance.get("archives") or {}).get("oldestSeconds", 0) >= 300:
@@ -100,6 +101,10 @@ def node_health(node, current=None):
         value = number(source.get(key))
         if value is None:
             unknown.append(f"{label}暂无有效数据")
+        elif key == "writeLatencyMs" and value > limit and isinstance(admission, dict) \
+                and admission.get("blocked") is False and admission.get("scope") == "SESSION" \
+                and admission.get("limitMs") == limit and not write_latency_blocked(node):
+            warnings.append(f"{label}由少数会话升高（{value:.1f}ms），节点仍保留写入余量")
         elif (value > limit if key == "writeLatencyMs" else value >= limit):
             critical.append(f"{label}过高（{value:.1f}{'ms' if key == 'writeLatencyMs' else '%'}）")
         elif value >= warning:

@@ -21,7 +21,8 @@ from camera_logs.node.manual_queue import next_manual_command
 from camera_logs.node.recovery import finalize_closed_task, record_closed_receipt
 from camera_logs.node.shutdown import mark_unavailable_for_shutdown, shutdown_runtimes
 from camera_logs.node.telemetry_runtime import TelemetryRuntime
-from camera_logs.node.write_pressure import WritePressure, write_latency_blocked, write_latency_limit
+from camera_logs.node.write_diagnostics import EventLoopWatchdog, WritePressureDiagnostics
+from camera_logs.node.write_pressure import WritePressure, write_admission, write_latency_limit
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,9 @@ class Worker:
         self.self_fence_pending = {}
         self.disk_level = "NORMAL"
         self.write_pressure = WritePressure()
+        # 运行日志诊断独立于持久准入事件；仅保存有界数值样本，不能接触设备正文。
+        self.write_diagnostics = WritePressureDiagnostics()
+        self.event_loop_watchdog = EventLoopWatchdog()
         self.coredump_scanner = None
         self.coredump_scan_task = None
         self.last_coredump_scan = 0.0
@@ -176,6 +180,44 @@ class Worker:
             "writeIoLatencySamples": sum(int(snapshot["samples"]) for snapshot in io_snapshots),
             "writeIoLatencyPendingMs": io_pending_ms,
             "writeIoLatencyWindowSeconds": 60,
+        }
+
+    def write_diagnostic_snapshot(self):
+        """关联当前最慢会话与共享队列快照，供限流运行日志解释全局还是单会话压力。"""
+        from camera_logs.collection import buffering
+        from camera_logs.logs import write_io
+
+        candidates, slow_sessions, normal_sessions = [], 0, 0
+        for runtime in self.active.values():
+            collector = getattr(runtime, "collector", None)
+            tracker = getattr(collector, "write_latency", None)
+            if tracker is None:
+                continue
+            total = tracker.snapshot()
+            io_tracker = getattr(collector, "write_io_latency", None)
+            io = io_tracker.snapshot() if io_tracker is not None else {
+                "p99Ms": 0, "pendingMs": 0, "samples": 0, "windowSeconds": 60}
+            task = getattr(runtime, "task", {}) or {}
+            total_value = max(float(total["pendingMs"]), float(total["p99Ms"]))
+            if total_value > getattr(self, "_write_latency_limit", 200):
+                slow_sessions += 1
+            elif int(total.get("samples", 0)) > 0:
+                normal_sessions += 1
+            candidates.append((total_value,
+                               max(float(io["pendingMs"]), float(io["p99Ms"])),
+                               str(task.get("id") or ""), task, collector, total, io))
+        selected = max(candidates, default=None, key=lambda value: value[:3])
+        if selected is None:
+            task, collector, total, io = {}, None, {"p99Ms": 0, "pendingMs": 0, "samples": 0, "windowSeconds": 60}, {"p99Ms": 0, "pendingMs": 0, "samples": 0, "windowSeconds": 60}
+        else:
+            _, _, _, task, collector, total, io = selected
+        return {
+            "task": {"taskId": task.get("id"), "runId": task.get("runId"),
+                     "sessionId": getattr(collector, "session_id", None)},
+            "endToEnd": dict(total), "io": dict(io), "buffer": buffering.snapshot(),
+            "writeExecutor": write_io.snapshot(), "eventLoop": self.event_loop_watchdog.snapshot(),
+            "sessions": {"activeSessions": len(candidates), "slowSessions": slow_sessions,
+                         "normalSessions": normal_sessions},
         }
 
     async def report_disk_pressure(self, percent):
@@ -359,13 +401,19 @@ class Worker:
         # 管理员登记的节点容量是运行时权威配置；环境变量只为首次未登记节点
         # 提供兜底值。不能用较小的环境默认值静默截断已保存的后台配置。
         config = await self.repo.db.node_configs.find_one({"id": self.repo.settings.node_id}) or {}
+        self._write_latency_limit = write_latency_limit(config)
         capacity = config.get("capacity", self.repo.settings.node_capacity)
         mismatch = bool(config.get("url") and config["url"].rstrip("/") != self.repo.settings.node_url.rstrip("/"))
         reported = await self.repo.db.nodes.find_one({"id": self.repo.settings.node_id}) or {}
         write_latency = self.write_latency()
+        write_diagnostic = self.write_diagnostic_snapshot()
+        admission = write_admission(write_latency, write_diagnostic, config)
         from camera_logs.node.performance_runtime import update_performance
         performance_status = await update_performance(self, config, write_latency, disk_percent)
-        await self.write_pressure.report(self.repo.db, self.repo.settings.node_id, write_latency, config)
+        await self.write_pressure.report(self.repo.db, self.repo.settings.node_id, write_latency, config, admission)
+        self.write_diagnostics.report(
+            self.repo.settings.node_id, write_latency, self._write_latency_limit, write_diagnostic, admission,
+        )
         accepting = (
             disk_percent < 90
             and config.get("accepting", True)
@@ -373,7 +421,7 @@ class Worker:
             and not reported.get("deletedAt")
             and not mismatch
             and not reported.get("isolated", False)
-            and not write_latency_blocked(write_latency, config)
+            and not admission["blocked"]
             and not resource_pressure({"telemetry": self.telemetry.value})
             and not performance_status.get("admissionBlocked")
         )
@@ -387,6 +435,7 @@ class Worker:
             "performanceStatus": performance_status,
             "inputRateLimitMiB": input_rate_limit(config),
             "writeLatencyLimitMs": write_latency_limit(config),
+            "writeAdmission": admission,
             "diskPercent": disk_percent, "diskFreeBytes": disk.free, "inputBytesPerSecond": rate,
             **write_latency,
             "configurationMismatch": mismatch,
@@ -577,6 +626,7 @@ class Worker:
 
     async def run(self):
         """持续执行节点周期；长期失去数据库联系时主动关闭本机连接。"""
+        self.event_loop_watchdog.start()
         while True:
             try:
                 await asyncio.wait_for(self.tick(), timeout=10)
@@ -594,6 +644,7 @@ class Worker:
 
     async def close(self):
         """进程退出时回收本机连接，并保留已确认的任务控制意图。"""
+        await self.event_loop_watchdog.close()
         try:
             await mark_unavailable_for_shutdown(self)
         except Exception:

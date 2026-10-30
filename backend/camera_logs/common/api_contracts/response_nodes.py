@@ -7,7 +7,7 @@ BUDGET_FIELDS = {
     "writeConcurrency": field("integer", "实时写入线程并发上限。"),
     "batchKiB": field("integer", "单次日志写入批量上限，单位 KiB。"),
     "flushIntervalMs": field("integer", "批量写入最长等待，单位毫秒。"),
-    "readMiBPerSecond": field("integer", "后台归档和读取的总速率预算，单位 MiB/s。"),
+    "readMiBPerSecond": field("integer", "节点逻辑读取预算，单位 MiB/s；后台归档使用80%、索引使用20%，搜索与快照读取使用独立的同值限速器；不是跨进程全盘总带宽上限。"),
 }
 BUDGET = obj("当前资源约束下的性能预算。", BUDGET_FIELDS, ())
 PERFORMANCE_POLICY = obj(
@@ -101,6 +101,15 @@ PERFORMANCE_STATUS = obj(
     },
     (),
 ) | {"nullable": True}
+WRITE_ADMISSION = obj("Worker 根据最差会话、会话分布、写槽和缓冲作出的新任务准入结论；旧 Worker 可省略，调用方须保守按最差会话阈值判断。", {
+    "blocked": field("boolean", "是否因写入压力拒绝新任务；不停止已建立会话。"),
+    "reason": field("string", "准入原因枚举：WITHIN_LIMIT（未超限）；ISOLATED_SLOW_SESSIONS（少数慢会话但仍有余量）；SINGLE_SESSION（唯一会话缓慢）；TOO_MANY_SLOW_SESSIONS（慢会话数量过多）；MULTI_SESSION_PRESSURE（多数会话缓慢或无正常样本）；EXECUTOR_SATURATED（写入执行器已满或有等待）；BUFFER_BACKPRESSURE（缓冲接近上限）；INCOMPLETE_DIAGNOSTICS（诊断不完整）；LEGACY_WORST_LATENCY（旧指标仅按最差会话判断）。"),
+    "scope": field("string", "NODE 表示节点整体结论：blocked=true 阻断，WITHIN_LIMIT 时 blocked=false；SESSION 仅表示 ISOLATED_SLOW_SESSIONS 的少数慢会话告警，blocked=false 且不阻断新任务。"),
+    "limitMs": field("integer", "Worker 生成该结论所用的当前最差会话延迟阈值，单位毫秒；配置阈值不一致的旧心跳结论不可直接采用。"),
+    "slowSessions": field("integer", "超过阈值的活动会话数；仅完整会话诊断且需要会话分布时返回，否则省略；历史心跳显式 null 表示无可信计数，不能按0推断。", nullable=True),
+    "normalSessions": field("integer", "有近期成功写入样本且未超阈值的活动会话数；零样本不计正常；仅完整会话诊断且需要会话分布时返回，否则省略；历史心跳显式 null 表示无可信计数，不能按0推断。", nullable=True),
+    "activeSessions": field("integer", "参与本轮写入诊断的活动会话数；仅完整会话诊断且需要会话分布时返回，否则省略；历史心跳显式 null 表示无可信计数，不能按0推断。", nullable=True),
+}, ("blocked", "reason", "scope", "limitMs")) | {"nullable": True}
 TELEMETRY = obj(
     "资源遥测；过期时为无字段对象，未知值不代表零。",
     {
@@ -145,7 +154,7 @@ NODE_CONFIG_FIELDS = {
     "version": field("integer", "管理配置乐观锁版本；未登记发现项为 0。"),
     "registered": field("boolean", "是否已有管理员登记配置。"),
     "inputRateLimitMiB": field("integer", "输入速率准入阈值，MiB/s；0 表示禁用。"),
-    "writeLatencyLimitMs": field("integer", "写入延迟准入阈值，毫秒；超限阻止新会话。"),
+    "writeLatencyLimitMs": field("integer", "最差会话写入延迟阈值，毫秒；少数慢会话且写槽/缓冲有余量仅告警，执行器/缓冲或多会话整体压力才阻断。旧节点缺少 writeAdmission 时保守按最差会话超限阻断。"),
     "isGeneralNode": field("boolean", "是否为允许一般资源接入的通用节点。"),
     "resourceNetworks": array("允许节点接入的资源地址或 CIDR 白名单；空数组时仅通用节点规则决定是否可分配。", field("string", "标准化 IP 地址或 CIDR 网段。")),
     "performance": PERFORMANCE_POLICY,
@@ -157,6 +166,7 @@ NODE_CONFIG_FIELDS = {
     "activeTasks": field("integer", "Worker 当前持有的运行实例数。"),
     "diskPercent": field("number", "日志存储所在磁盘使用率百分比。", nullable=True),
     "performanceStatus": PERFORMANCE_STATUS,
+    "writeAdmission": WRITE_ADMISSION,
 }
 NODE_CONFIG = obj(
     "管理节点配置；缺少心跳的运行字段省略。",
@@ -182,6 +192,7 @@ NODE_FIELDS = {
     "telemetryAgeSeconds": field("number", "心跳发送时遥测样本的单调时钟年龄，秒。", nullable=True),
     "telemetry": TELEMETRY,
     "performanceStatus": PERFORMANCE_STATUS,
+    "writeAdmission": WRITE_ADMISSION,
     "configurationMismatch": field("boolean", "Worker 实际上报地址是否与管理员登记地址不一致；未登记节点为 false。"),
     "configuredUrl": field("string", "管理员配置地址；未登记时 null。", nullable=True),
     "capabilities": obj(

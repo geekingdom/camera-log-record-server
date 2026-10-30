@@ -65,4 +65,15 @@ describe("节点看板状态", () => {
     expect(nodeAdmissible({ ...activeNode, writeLatencyLimitMs: 600, writeLatencyMs: 599 }, now)).toBe(true);
     expect(nodeAdmissible({ ...activeNode, writeLatencyLimitMs: 600, writeLatencyMs: 601 }, now)).toBe(false);
   });
+  it("优先使用写入准入结论，但旧节点仍按最坏会话延迟回退", () => {
+    const isolatedSlow = {
+      ...activeNode, writeLatencyMs: 17_700, writeLatencyLimitMs: 200,
+      writeAdmission: { blocked: false, scope: "SESSION" as const, reason: "ISOLATED_SLOW_SESSIONS", limitMs: 200,
+        slowSessions: 2, normalSessions: 98, activeSessions: 100 },
+    };
+    expect(nodeAdmissible(isolatedSlow, now)).toBe(true);
+    expect(nodeAdmissible({ ...isolatedSlow, writeAdmission: { ...isolatedSlow.writeAdmission, blocked: true, scope: "NODE" as const, reason: "EXECUTOR_SATURATED" } }, now)).toBe(false);
+    expect(nodeAdmissible({ ...isolatedSlow, writeLatencyLimitMs: 500 }, now)).toBe(false);
+    expect(nodeAdmissible({ ...activeNode, writeLatencyMs: 17_700 }, now)).toBe(false);
+  });
 });

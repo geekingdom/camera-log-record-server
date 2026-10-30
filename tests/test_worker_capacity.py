@@ -188,6 +188,28 @@ async def test_worker_reports_actual_write_io_latency_separately_from_batch_wait
     }
 
 
+async def test_worker_write_diagnostic_snapshot_selects_slowest_session_and_shared_metrics(tmp_path, monkeypatch):
+    """诊断只关联最慢会话，并同时保留共享缓冲、写槽和 loop 采样以区分压力来源。"""
+    repo = Repository(AsyncMongoMockClient().db, Settings(
+        encryption_key=Fernet.generate_key().decode(), log_root=tmp_path))
+    worker = Worker(repo)
+    fast = {"p99Ms": 20.0, "samples": 1, "pendingMs": 0.0, "windowSeconds": 60}
+    slow = {"p99Ms": 100.0, "samples": 2, "pendingMs": 900.0, "windowSeconds": 60}
+    worker.active = {
+        "fast": SimpleNamespace(task={"id": "fast", "runId": "fast-run"}, collector=SimpleNamespace(
+            session_id="fast-session", write_latency=SimpleNamespace(snapshot=lambda: dict(fast)))),
+        "slow": SimpleNamespace(task={"id": "slow", "runId": "slow-run"}, collector=SimpleNamespace(
+            session_id="slow-session", write_latency=SimpleNamespace(snapshot=lambda: dict(slow)))),
+    }
+    monkeypatch.setattr("camera_logs.collection.buffering.snapshot", lambda: {"reservedBytes": 7, "limitBytes": 9, "oldestPendingMs": 900})
+    monkeypatch.setattr("camera_logs.logs.write_io.snapshot", lambda: {"active": 4, "waiting": 79})
+
+    snapshot = worker.write_diagnostic_snapshot()
+    assert snapshot["task"] == {"taskId": "slow", "runId": "slow-run", "sessionId": "slow-session"}
+    assert snapshot["endToEnd"]["pendingMs"] == 900.0
+    assert snapshot["buffer"]["limitBytes"] == 9 and snapshot["writeExecutor"]["waiting"] == 79
+
+
 async def test_write_pressure_events_only_record_threshold_crossings(tmp_path):
     """连续的相同写压状态只更新心跳，不重复写入节点压力事件。"""
     repo = Repository(AsyncMongoMockClient().db, Settings(

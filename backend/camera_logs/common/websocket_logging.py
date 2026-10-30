@@ -25,22 +25,24 @@ async def track_websocket(app, scope, receive, send, logger):
     client_ip = client[0] if isinstance(client, (tuple, list)) and client else None
     context_token = request_context.set({"requestId": state["request_id"], "clientIp": client_ip})
     started = time.perf_counter()
-    accepted, close_code, frames, error_type = False, None, 0, None
+    accepted, close_code, frames, error_type, close_origin = False, None, 0, None, None
 
     async def tracked_receive():
-        nonlocal close_code
+        nonlocal close_code, close_origin
         message = await receive()
         if message["type"] == "websocket.disconnect":
             close_code = message.get("code", 1006)
+            close_origin = "CLIENT"
         return message
 
     async def tracked_send(message):
-        nonlocal accepted, close_code, frames
+        nonlocal accepted, close_code, frames, close_origin
         await send(message)
         if message["type"] == "websocket.accept":
             accepted = True
         elif message["type"] == "websocket.close":
             close_code = message.get("code", 1000)
+            close_origin = "SERVER"
         elif message["type"] == "websocket.send":
             frames += 1
 
@@ -55,12 +57,17 @@ async def track_websocket(app, scope, receive, send, logger):
             actor = state.get("actor")
             actor_id = actor.get("id") if isinstance(actor, Mapping) else actor
             error_type = error_type or state.get("failure_type")
+            metrics = state.get("liveMetrics") if isinstance(state.get("liveMetrics"), Mapping) else {}
             context = {
                 "requestId": state["request_id"], "actor": actor_id, "clientIp": client_ip, "method": "WEBSOCKET",
                 "route": getattr(scope.get("route"), "path", None) or scope.get("path"),
                 "targets": dict(scope.get("path_params", {})), "accepted": accepted,
                 "closeCode": close_code if close_code is not None else 1006,
                 "framesSent": frames, "errorType": error_type,
+                "closeOrigin": close_origin or "UNKNOWN",
+                "closeReason": state.get("closeReason") or ("CLIENT_DISCONNECT" if close_origin == "CLIENT" else None),
+                "authChecks": int(metrics.get("authChecks", 0)), "taskReads": int(metrics.get("taskReads", 0)),
+                "tailCalls": int(metrics.get("tailCalls", 0)), "emptyTailCalls": int(metrics.get("emptyTailCalls", 0)),
                 "durationMs": round((time.perf_counter() - started) * 1000, 3),
             }
             level = logging.WARNING if error_type or context["closeCode"] not in {1000, 1001} else logging.INFO

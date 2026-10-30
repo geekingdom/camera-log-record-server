@@ -44,8 +44,9 @@ async def test_repeated_rollbacks_bound_pending_archives_and_preserve_sequence(t
     """反复回拨在队满时留下独立 spool，不阻塞后续采集写入。"""
     scheduled = []
 
-    def schedule(spool, *, recovery):
+    def schedule(spool, *, recovery, owner):
         assert recovery is False
+        assert owner == ("task", "run", "session")
         scheduled.append(spool)
 
     monkeypatch.setattr(storage, "schedule_pending_archive", schedule)

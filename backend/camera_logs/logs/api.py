@@ -305,10 +305,15 @@ def install_log_routes(app):
     async def live(ws: WebSocket, task_id: str):
         """首帧鉴权后按游标推送字节块；断开即取消鉴权和节点轮询。"""
         await ws.accept()
+        metrics = ws.scope.setdefault("state", {}).setdefault(
+            "liveMetrics", {"authChecks": 0, "taskReads": 0, "tailCalls": 0, "emptyTailCalls": 0},
+        )
         disconnected = None
 
-        async def close_socket(code: int, reason: str | None = None) -> None:
+        async def close_socket(code: int, reason: str | None = None, close_reason: str | None = None) -> None:
             """客户端已先断开时关闭会抛 RuntimeError；外层取消仍须继续传播。"""
+            if close_reason is not None:
+                ws.scope["state"]["closeReason"] = close_reason
             try:
                 await ws.close(code=code, reason=reason)
             except RuntimeError:
@@ -319,11 +324,12 @@ def install_log_routes(app):
                 hello = SubscribeFrame.model_validate(await asyncio.wait_for(ws.receive_json(), timeout=10))
             except ValidationError:
                 ws.state.failure_type = "ValidationError"
-                await close_socket(4408, "订阅首帧格式无效")
+                await close_socket(4408, "订阅首帧格式无效", "INVALID_HELLO")
                 return
 
             async def current_identity():
                 """每次推送重验会话与范围；权限撤销不能留下旧实时订阅。"""
+                metrics["authChecks"] += 1
                 if hello.token:
                     return await apply_ip_permissions(repo(), ws, await authenticate(repo(), hello.token))
                 check_origin(ws)
@@ -343,15 +349,16 @@ def install_log_routes(app):
             while True:
                 user = await await_live_operation(current_identity(), disconnected)
                 authorize(user, "logs:read", task_id)
+                metrics["taskReads"] += 1
                 task = await await_live_operation(repo().get("tasks", task_id), disconnected)
                 # 删除已被提交后，日志与归档仍可通过 HTTP 查询，但实时订阅必须终止。
                 if task.get("deletedAt") is not None:
-                    await close_socket(1000, "任务已删除")
+                    await close_socket(1000, "任务已删除", "TASK_DELETED")
                     return
                 # 停止已物理完成时不再维持空闲订阅；PAUSED 没有新日志不属于结束。
                 if (task.get("desiredState") == "STOPPED" and task.get("status") == "STOPPED"
                         and task.get("nodeId") is None):
-                    await close_socket(1000, "任务已停止")
+                    await close_socket(1000, "任务已停止", "TASK_STOPPED")
                     return
                 if not task.get("nodeId"):
                     await await_live_operation(
@@ -362,11 +369,14 @@ def install_log_routes(app):
                         disconnected,
                     )
                 else:
+                    metrics["tailCalls"] += 1
                     data = await await_live_operation(
                         node_request(repo(), task["nodeId"], f"/internal/tail/{task_id}",
-                                     {"cursor": cursor or ""}, client=ws.app.state.node_http),
+                                     {"cursor": cursor or "", "waitSeconds": 1}, client=ws.app.state.node_http),
                         disconnected,
                     )
+                    if not data["frames"] and not data.get("gap"):
+                        metrics["emptyTailCalls"] += 1
                     if data.get("gap"):
                         await await_live_operation(asyncio.wait_for(ws.send_json(GapFrame(
                             type="gap", message="实时缓冲已过期，请通过小时归档补读",
@@ -377,19 +387,19 @@ def install_log_routes(app):
                 await await_live_operation(asyncio.sleep(.1), disconnected)
         except TimeoutError:
             ws.state.failure_type = "TimeoutError"
-            await close_socket(4408, "订阅交互超时")
+            await close_socket(4408, "订阅交互超时", "SUBSCRIBE_TIMEOUT")
         except WebSocketDisconnect:
             # 正常断开由 WebSocket 中间件依据 closeCode 记录，不重复写错误事件。
             pass
         except HTTPException as exc:
             ws.state.failure_type = "HTTPException"
             code = {401: 4401, 403: 4403}.get(exc.status_code, 1013)
-            await close_socket(code, str(exc.detail)[:120])
+            await close_socket(code, str(exc.detail)[:120], "AUTH_REJECTED" if code in {4401, 4403} else "NODE_UNAVAILABLE")
         except Exception as exc:
             ws.state.failure_type = type(exc).__name__
             import logging
             logging.getLogger(__name__).exception("实时订阅异常 task=%s", task_id)
-            await close_socket(1011)
+            await close_socket(1011, close_reason="SERVER_ERROR")
         finally:
             if disconnected is not None:
                 disconnected.cancel()

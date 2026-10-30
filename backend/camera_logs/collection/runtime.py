@@ -60,6 +60,7 @@ class SessionRuntime:
         self.frames = deque()
         self.frame_bytes = 0
         self.frame_number = 0
+        self.tail_changed = asyncio.Condition()
         self.paths = {}
         self.catalog_dirty = {}
         self.catalog_ready = set()
@@ -141,6 +142,10 @@ class SessionRuntime:
         self.frame_bytes += len(chunk.data)
         while self.frame_bytes > 8*1024*1024 and self.frames:
             self.frame_bytes -= self.frames.popleft()["size"]
+        # 只在已追加的内存帧后同步唤醒内部 tail；不创建逐块后台任务，
+        # 等待者会在同一事件循环内重新按自己的游标读取缓冲。
+        async with self.tail_changed:
+            self.tail_changed.notify_all()
         if previous == 0 or time.monotonic()-self.last_catalog >= 1:
             await self._publish_catalog()
 
@@ -565,6 +570,7 @@ class SessionRuntime:
     async def stop(self):
         """禁用重试并等待采集器收尾，连接释放完成后才能取消运行等待。"""
         self.stopping = True
+        await self._wake_tail_waiters()
         failure = None
         try:
             if self.collector:
@@ -631,3 +637,30 @@ class SessionRuntime:
             frames = frames[-4:]
         # 缓冲本身已按 8 MiB 限制；一次返回所有连续帧，避免 100ms 轮询的固定帧数成为高频日志瓶颈。
         return {"frames": frames, "gap": bool(frames and cursor and int(frames[0]["cursor"].rsplit(":", 1)[1]) > number+1)}
+
+    async def wait_tail(self, cursor, wait_seconds: float = 0) -> dict:
+        """先读取再有界等待下一帧；停止或替换运行时立即结束旧实例的等待。"""
+        if wait_seconds <= 0:
+            return self.tail(cursor)
+        # 读取、记录序号和条件等待必须在同一把锁下：on_log 不能在空读与
+        # wait_for 之间插入通知，避免客户端漏掉刚到达的一帧后白等一个周期。
+        async with self.tail_changed:
+            before = self.frame_number
+            result = self.tail(cursor)
+            if result["frames"] or result["gap"] or self.stopping or self.retired:
+                return result
+            try:
+                await asyncio.wait_for(
+                    self.tail_changed.wait_for(
+                        lambda: self.frame_number != before or self.stopping or self.retired,
+                    ),
+                    timeout=wait_seconds,
+                )
+            except TimeoutError:
+                pass
+            return self.tail(cursor)
+
+    async def _wake_tail_waiters(self) -> None:
+        """停止或隔离旧运行时唤醒其内部 tail，避免等待者占满整个最长窗口。"""
+        async with self.tail_changed:
+            self.tail_changed.notify_all()

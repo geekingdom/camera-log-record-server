@@ -30,6 +30,28 @@ def test_health_reports_unknown_stale_offline_and_real_pressure():
     assert node_health(node("first", cpu=None))["status"] == "UNKNOWN"
 
 
+def test_write_admission_health_warning_requires_current_isolated_slow_session_conclusion():
+    """正常结论不应制造慢会话告警；配置变更后的旧结论必须按当前阈值复核。"""
+    healthy = node("healthy") | {"writeAdmission": {
+        "blocked": False, "scope": "NODE", "reason": "WITHIN_LIMIT", "limitMs": 200,
+    }}
+    assert node_health(healthy)["status"] == "HEALTHY"
+    assert not [reason for reason in node_health(healthy)["reasons"] if "少数会话" in reason]
+
+    isolated = node("isolated") | {"writeLatencyMs": 201, "writeAdmission": {
+        "blocked": False, "scope": "SESSION", "reason": "ISOLATED_SLOW_SESSIONS", "limitMs": 200,
+    }}
+    assert "少数会话" in "".join(node_health(isolated)["reasons"])
+
+    stale = isolated | {"id": "stale", "writeLatencyMs": 300, "writeAdmission": {
+        "blocked": False, "scope": "SESSION", "reason": "ISOLATED_SLOW_SESSIONS", "limitMs": 500,
+    }}
+    reasons = node_health(stale)["reasons"]
+    assert node_health(stale)["status"] == "CRITICAL"
+    assert "少数会话" not in "".join(reasons)
+    assert "写入延迟过高" in "".join(reasons)
+
+
 def test_selection_uses_capacity_ratios_cpu_memory_and_network():
     small, large = node("small", capacity=10), node("large", capacity=100)
     assert rank_nodes([small, large], {"small": 5, "large": 10})[0][1] == "large"

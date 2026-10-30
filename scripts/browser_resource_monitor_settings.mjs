@@ -138,7 +138,7 @@ try {
     const rate = nodeDialog.getByRole("spinbutton", { name: "日志输入速率上限", exact: true });
     assert.equal(await rate.inputValue(), "50");
     await rate.fill("24");
-    const latency = nodeDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true });
+    const latency = nodeDialog.getByRole("spinbutton", { name: "最差会话写入延迟阈值", exact: true });
     assert.equal(await latency.inputValue(), "200");
     await latency.fill("750");
     const general = nodeDialog.getByRole("switch", { name: "通用节点", exact: true });
@@ -154,10 +154,10 @@ try {
     assert.deepEqual(nodeWrites.at(-1).resourceNetworks, ["10.41.203.35", "10.18.117.0/24"]);
     await page.getByRole("button", { name: "编辑节点配置", exact: true }).click();
     const editDialog = page.getByRole("dialog", { name: "编辑节点配置", exact: true });
-    assert.equal(await editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true }).inputValue(), "750");
-    await editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true }).fill("1200");
+    assert.equal(await editDialog.getByRole("spinbutton", { name: "最差会话写入延迟阈值", exact: true }).inputValue(), "750");
+    await editDialog.getByRole("spinbutton", { name: "最差会话写入延迟阈值", exact: true }).fill("1200");
     // 推荐区扩展了正文；先让目标字段进入滚动可视区，再检查它没有被固定保存区覆盖。
-    const latencyField = editDialog.getByRole("spinbutton", { name: "写入延迟上限", exact: true });
+    const latencyField = editDialog.getByRole("spinbutton", { name: "最差会话写入延迟阈值", exact: true });
     await latencyField.scrollIntoViewIfNeeded();
     const fieldBox = await latencyField.boundingBox();
     const bodyBox = await editDialog.locator('.el-dialog__body').boundingBox();

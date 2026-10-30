@@ -280,39 +280,9 @@ class HourlyWriter:
                 raise
 
     async def _write_rotating_locked(self, chunks):
-        """调用方已持锁；只在跨小时、回拨或分片边界时逐片轮转。"""
-        positions: list[ChunkPosition] = []
-        for source_index, data, instant in chunks:
-            rollback = self._last_received_at if self._last_received_at and instant < self._last_received_at else None
-            hour = self._hour_of(instant, self.zone)
-            if self._hour is None:
-                await self._open(hour)
-            elif hour != self._hour or rollback:
-                await self._seal_locked()
-                await self._publish_pending_locked(background=True)
-                await self._open(hour)
-            consumed = 0
-            while consumed < len(data):
-                if self._size >= self._segment_max_bytes:
-                    await self._seal_locked()
-                    await self._open(hour)
-                count = min(self._segment_max_bytes - self._size, len(data) - consumed)
-                piece = data[consumed:consumed + count]
-                self._sequence += 1
-                position = ChunkPosition(self._sequence, self._size, count, self._log, rollback if consumed == 0 else None,
-                                         source_index, consumed)
-                assert self._handle is not None and self._index is not None and self._log is not None
-                await write_thread(self._append_sync, piece, position, instant)
-                positions.append(position)
-                self._size += count
-                self._digest.update(piece)
-                self._first_sequence = self._first_sequence or position.sequence
-                self._last_sequence = position.sequence
-                if time.monotonic() - self._last_sync >= 1:
-                    await write_thread(self._sync_files)
-                consumed += count
-            self._last_received_at = instant
-        return positions
+        """跨边界也按连续分片合并追加，防止每4KiB一次串行调度放大总延迟。"""
+        from camera_logs.logs.rotation_batch import write_rotating
+        return await write_rotating(self, chunks, write_thread)
 
     def _append_batch_sync(self, chunks) -> list[ChunkPosition]:
         """一次正文和一次索引追加保存多个源块，确认完成后再推进水位和摘要。"""
@@ -357,34 +327,6 @@ class HourlyWriter:
         if time.monotonic() - self._last_sync >= 1:
             self._sync_files()
         return positions
-
-    def _append_sync(self, data: bytes, position: ChunkPosition, instant: datetime) -> None:
-        assert self._handle is not None and self._index is not None
-        view = memoryview(data)
-        started = time.monotonic()
-        try:
-            while view:
-                written = self._handle.write(view)
-                if not written:
-                    raise OSError("log file did not accept a complete write")
-                view = view[written:]
-        finally:
-            record_stage("bodyAppendMs", (time.monotonic() - started) * 1000)
-        assert self._index_handle is not None
-        started = time.monotonic()
-        try:
-            index_text = json.dumps({"sequence": position.sequence, "offset": position.offset, "length": position.length,
-                "receivedAt": instant.astimezone(self.zone).isoformat()}, separators=(",", ":")) + "\n"
-            index_payload = index_text.encode("utf-8")
-            if self._index_handle.write(index_text) != len(index_text):
-                raise OSError("index file did not accept a complete write")
-            self._index_handle.flush()
-        finally:
-            record_stage("indexAppendMs", (time.monotonic() - started) * 1000)
-        self._index_digest.update(index_payload)
-        self._index_size += len(index_payload)
-        self._first_received_at = self._first_received_at or instant
-        self._last_received_at = instant
 
     def _sync_files(self) -> None:
         if self._handle is None or self._index_handle is None:
@@ -491,7 +433,8 @@ class HourlyWriter:
             if cancelled:
                 raise asyncio.CancelledError
             return archives
-        future = schedule_pending_archive(spool, recovery=False)
+        future = schedule_pending_archive(spool, recovery=False,
+                                          owner=(self.task_id, self.run_id, self.session_id))
         if future is not None:
             self._archive_tasks.add(future)
             future.add_done_callback(lambda completed: self._scheduled_archive_done(completed, archives))
@@ -501,8 +444,8 @@ class HourlyWriter:
         return None
 
     async def _persist_pending(self, segments: list[_Segment]) -> tuple[Path, list[dict], Path, bool]:
-        """取消也等待索引摘要和清单 fsync，不能让封存分卷失去恢复入口。"""
-        preparation = asyncio.create_task(asyncio.to_thread(self._prepare_archive, segments))
+        """清单使用有界采集I/O槽，不被默认后台池饥饿；取消仍等待恢复入口持久化。"""
+        preparation = asyncio.create_task(write_thread(self._prepare_archive, segments))
         cancelled = False
         while not preparation.done():
             try:
@@ -510,7 +453,7 @@ class HourlyWriter:
             except asyncio.CancelledError:
                 cancelled = True
         target, manifests = preparation.result()
-        persisted = asyncio.create_task(asyncio.to_thread(persist_archive_spool, target, manifests))
+        persisted = asyncio.create_task(write_thread(persist_archive_spool, target, manifests))
         while not persisted.done():
             try:
                 await asyncio.shield(persisted)

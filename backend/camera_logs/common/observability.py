@@ -377,7 +377,8 @@ def setup_logging(log_dir: Path, *, retention_days: int = DEFAULT_SERVICE_LOG_RE
     root.setLevel(logging.INFO)
     # 实时订阅与健康检查频繁调用 HTTP；逐次成功日志会放大队列和磁盘负担。
     # 平台访问审计保持 INFO，上游失败仍由调用边界记录，并保留依赖的告警。
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for dependency_logger in ("httpx", "asyncssh", "telnetlib3"):
+        logging.getLogger(dependency_logger).setLevel(logging.WARNING)
     root.handlers.clear()
     root.addHandler(queue_handler)
     listener = logging.handlers.QueueListener(log_queue, stdout_handler, file_handler, respect_handler_level=True)
@@ -430,6 +431,10 @@ def log_request(
     response_complete: bool = True,
     response_bytes: int = 0,
     error_reason: str | None = None,
+    request_event_persisted: bool | None = None,
+    request_event_error: BaseException | None = None,
+    response_duration_ms: float | None = None,
+    event_persist_duration_ms: float | None = None,
 ) -> None:
     """写入不含 query、header、body 的访问日志；异常仅保留安全说明与结构化定位帧。"""
     logger = logger or logging.getLogger("camera_logs.access")
@@ -446,8 +451,15 @@ def log_request(
         "status": status,
         "responseComplete": response_complete,
         "responseBytes": response_bytes,
-        "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
+        "durationMs": response_duration_ms if response_duration_ms is not None else round((time.perf_counter() - started_at) * 1000, 3),
+        "requestEventPersisted": request_event_persisted,
     }
+    if request_event_error is not None:
+        context["requestEventErrorType"] = type(request_event_error).__name__
+        context["requestEventTimeoutMs"] = 200
+        context["requestEventErrorFrames"] = _error_frames(request_event_error)
+    if event_persist_duration_ms is not None:
+        context["requestEventPersistDurationMs"] = event_persist_duration_ms
     if error is not None:
         context["error"] = {
             "type": type(error).__name__, "message": error_reason or "请求处理异常",
@@ -455,6 +467,8 @@ def log_request(
             "responseValidation": response_validation_details(error, request),
         }
         logger.error("request failed", extra={"context": context})
+    elif request_event_error is not None:
+        logger.warning("request completed with event persistence failure", extra={"context": context})
     elif response_complete:
         logger.info("request completed", extra={"context": context})
     else:
@@ -509,19 +523,23 @@ class RequestLoggingMiddleware:
             fallback = 499 if isinstance(failure, asyncio.CancelledError) else 500
             final_status = status if status is not None else fallback
             reason = _failure_reason(request, final_status, complete, failure)
+            response_duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            event_persisted, event_error = None, None
+            event_persist_duration_ms = None
+            event_started = None
+            repo = None
+            path = request.url.path
+            recordable = path.startswith("/api/v1/")
+            cancelled = failure is not None and isinstance(failure, asyncio.CancelledError)
             try:
-                log_request(request, status=final_status, started_at=started_at, error=failure,
-                            response_complete=complete, response_bytes=sent_bytes, error_reason=reason)
                 app = scope.get("app")
                 repo = getattr(getattr(app, "state", None), "repo", None)
-                path = request.url.path
                 # API 请求全部留下可检索的访问事件：查询、下载、写操作和失败请求
                 # 都必须能按 requestId 关联排障。仅记录路径、状态和大小，不读取正文、查询
                 # 参数或请求头，避免日志事件携带设备密码、令牌及大体量日志内容。
-                recordable = path.startswith("/api/v1/")
                 # 取消中的协程不能再等待数据库 I/O，否则 finally 可能覆盖调用方的取消语义。
-                cancelled = failure is not None and isinstance(failure, asyncio.CancelledError)
                 if repo and not cancelled and path.startswith("/api/v1/") and recordable:
+                    event_started = time.perf_counter()
                     outcome = "UNKNOWN" if not complete else "FAILED" if failure is not None else (
                         "PENDING" if final_status == 202 else "FAILED" if final_status >= 400 else "SUCCEEDED")
                     level = "ERROR" if outcome == "FAILED" else "WARNING" if outcome == "UNKNOWN" else "INFO"
@@ -540,16 +558,26 @@ class RequestLoggingMiddleware:
                         "errorFrames": _error_frames(failure) if failure is not None else None,
                         "responseValidation": response_validation_details(failure, request),
                     })
-            except asyncio.CancelledError:
+                    event_persist_duration_ms = round((time.perf_counter() - event_started) * 1000, 3)
+            except asyncio.CancelledError as error:
+                event_error = error
+                if event_started is not None:
+                    event_persist_duration_ms = round((time.perf_counter() - event_started) * 1000, 3)
                 raise
             except Exception as error:  # noqa: BLE001 - 排障写入不得覆盖原请求结果或异常传播。
-                logging.getLogger("camera_logs.access").warning("请求事件持久化失败", extra={"context": {
-                    # 数据库不可用时仍可按同一请求编号在 JSONL 中关联原始访问记录。
-                    "requestId": request.state.request_id, "method": request.method,
-                    "route": getattr(scope.get("route"), "path", None) or request.url.path,
-                    "errorType": type(error).__name__, "errorFrames": _error_frames(error),
-                }})
+                event_error = error
+                if event_started is not None:
+                    event_persist_duration_ms = round((time.perf_counter() - event_started) * 1000, 3)
             finally:
+                if repo and not cancelled and path.startswith("/api/v1/") and recordable and event_error is None:
+                    event_persisted = True
+                elif event_error is not None:
+                    event_persisted = False
+                log_request(request, status=final_status, started_at=started_at, error=failure,
+                            response_complete=complete, response_bytes=sent_bytes, error_reason=reason,
+                            request_event_persisted=event_persisted, request_event_error=event_error,
+                            response_duration_ms=response_duration_ms,
+                            event_persist_duration_ms=event_persist_duration_ms)
                 request_context.reset(context_token)
 
 

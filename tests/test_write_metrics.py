@@ -116,6 +116,7 @@ async def test_failed_write_never_becomes_a_successful_latency_sample(tmp_path):
     with pytest.raises(OSError):
         await collector._flush([(b"logged\n", datetime.now(UTC))])
     assert collector.write_latency.snapshot()["samples"] == 0
-    assert collector.write_latency.snapshot()["pendingMs"] == 300
+    # 写入已明确失败且收尾，不能继续将其当成永远未完成的写入抬高节点指标。
+    assert collector.write_latency.snapshot()["pendingMs"] == 0
     assert collector.write_io_latency.snapshot()["samples"] == 0
     assert collector.write_io_latency.snapshot()["pendingMs"] == 0

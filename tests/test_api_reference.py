@@ -44,6 +44,9 @@ def test_node_write_latency_limit_is_documented_with_valid_examples(client):
         field = reference["schemas"][name]["properties"]["writeLatencyLimitMs"]
         assert "毫秒" in field["description"]
         assert "200" in field["description"]
+        assert "最差会话" in field["description"]
+        assert "少数慢会话" in field["description"]
+        assert "旧节点" in field["description"]
     operations = {item["id"]: item for item in reference["operations"]}
     assert operations["POST /api/v1/admin/nodes"]["requestExample"]["writeLatencyLimitMs"] == 200
     assert operations["PATCH /api/v1/admin/nodes/{node_id}"]["requestExample"]["writeLatencyLimitMs"] == 500

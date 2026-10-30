@@ -8,7 +8,7 @@ from io import BytesIO
 from random import Random
 
 import pytest
-from camera_logs.logs import search_index
+from camera_logs.logs import archive_access, search_index
 from camera_logs.logs.search_index import build_index, index_path, query_index
 from camera_logs.logs.search_plan import plan_candidate_files
 from camera_logs.logs.search_stream import StreamSearch
@@ -35,6 +35,26 @@ def test_index_returns_chinese_candidate_across_decoder_chunk_without_storing_pl
     with sqlite3.connect(index_path(archive)) as database:
         dump = "\n".join(str(row) for row in database.execute("SELECT sql FROM sqlite_master"))
     assert "prefix" not in dump and "suffix" not in dump
+
+
+def test_index_consumes_background_read_budget_for_every_reader_block(tmp_path, monkeypatch):
+    """独立索引池的归档读取按256KiB块经过低优先级读取预算。"""
+    consumed = []
+
+    class RecordingLimiter:
+        def __init__(self, rate):
+            assert rate == 20
+
+        def consume(self, amount):
+            consumed.append(amount)
+
+    archive = tmp_path / "hour.tar.gz"
+    payload = b"x" * (256 * 1024 * 2 + 7)
+    _archive(archive, {"part.log": payload})
+    monkeypatch.setattr(archive_access, "ReadLimiter", RecordingLimiter)
+
+    assert build_index(archive, background_rate=20)
+    assert consumed == [256 * 1024, 256 * 1024, 7]
 
 
 def test_index_replacement_corruption_and_short_keyword_fall_back_to_unknown(tmp_path):

@@ -50,12 +50,20 @@ export function currentHealth(node: Node): NodeHealth | undefined {
   return node.health;
 }
 
+/** 仅采信当前阈值生成的 Worker 结论；配置变更后的旧心跳继续按最慢会话回退。 */
+export function writeAdmissionBlocked(node: Node) {
+  const limit = writeLatencyLimitMs(node);
+  return typeof node.writeAdmission?.blocked === "boolean" && Number.isInteger(node.writeAdmission.limitMs) && node.writeAdmission.limitMs === limit
+    ? node.writeAdmission.blocked
+    : Number(node.writeLatencyMs ?? 0) > limit;
+}
+
 /** 仅以现有的准入信号判断是否可接收新任务，不擅自推导调度评分。 */
 export function nodeAdmissible(node: Node, current = Date.now()) {
   const capacity = Number(node.capacity ?? 0);
   const activeTasks = Number(node.activeTasks ?? 0);
   const telemetry = currentTelemetry(node, current);
-  const pressured = Number(node.diskPercent ?? 0) >= 90 || Number(node.writeLatencyMs ?? 0) > writeLatencyLimitMs(node) ||
+  const pressured = Number(node.diskPercent ?? 0) >= 90 || writeAdmissionBlocked(node) ||
     Number(telemetry?.cpuPercent ?? 0) >= 95 || Number(telemetry?.memoryPercent ?? 0) >= 95;
   return nodeOnline(node, current) && node.accepting === true && !node.isolated && !node.configurationMismatch &&
     currentHealth(node)?.status !== "CRITICAL" && !pressured && capacity > activeTasks;

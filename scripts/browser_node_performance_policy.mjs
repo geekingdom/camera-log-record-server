@@ -20,6 +20,7 @@ try {
   for (const width of [1440, 390]) {
     const writes = [];
     let registeredNodes = [];
+    let writeMode = "isolated";
     const recommendedId = `recommended-${width}`;
     const recommendation = {
       available: true,
@@ -54,10 +55,15 @@ try {
       }
       if (path === "/api/v1/admin/nodes") return json({ items: [...registeredNodes, discoveredNode] });
       if (path === "/api/v1/nodes") {
+        const saturated = writeMode === "saturated";
         const archives = width === 1440
           ? { pendingJobs: 5, waitingJobs: 3, runningJobs: 2, oldestSeconds: 45, oldestWaitingSeconds: 13, oldestRunningSeconds: 45 }
           : { pendingJobs: 4, oldestSeconds: 18 };
-        return json(nodePage([{ id: `worker-${width}`, name: "采集节点", url: "http://worker.example.test:8001", capacity: 8, accepting: true, activeTasks: 2, online: true, reportedAt: "2026-09-20T08:00:00Z", writeLatencyMs: 12, writeLatencyLimitMs: 200, diskPercent: 30, performanceStatus: { effective: { mode: "MANUAL", bufferMiB: 128, writeConcurrency: 6, batchKiB: 512, flushIntervalMs: 80, readMiBPerSecond: 75 }, state: "MANUAL", reason: "管理员固定参数", admissionBlocked: true, changedAt: "2026-09-20T08:00:00Z", resources: {}, buffer: { reservedBytes: 33554432, limitBytes: 134217728, oldestPendingMs: 45, scope: "APPLICATION_BATCH_RESERVATIONS" }, writeIo: { stages: { batchWaitMs: { samples: 12, p99Ms: 48.5 } } }, writeIoLatency: { p99Ms: 512.4, pendingMs: 2000, samples: 24, windowSeconds: 60 }, archives } }]));
+        return json(nodePage([{ id: `worker-${width}`, name: "采集节点", url: "http://worker.example.test:8001", capacity: 8, accepting: true, activeTasks: 2, heartbeat: new Date().toISOString(), telemetry: { sampledAt: new Date().toISOString(), scope: "HOST", cpuPercent: 30, memoryPercent: 30 }, writeLatencyMs: 17_700, writeLatencySamples: 100, writeLatencyPendingMs: 3754, writeLatencyLimitMs: 200, diskPercent: 30,
+          writeAdmission: saturated
+            ? { blocked: true, reason: "EXECUTOR_SATURATED", scope: "NODE", limitMs: 200, slowSessions: 4, normalSessions: 96, activeSessions: 100 }
+            : { blocked: false, reason: "ISOLATED_SLOW_SESSIONS", scope: "SESSION", limitMs: 200, slowSessions: 2, normalSessions: 98, activeSessions: 100 },
+          performanceStatus: { effective: { mode: "MANUAL", bufferMiB: 128, writeConcurrency: 6, batchKiB: 512, flushIntervalMs: 80, readMiBPerSecond: 75 }, state: "MANUAL", reason: "管理员固定参数", admissionBlocked: saturated, changedAt: "2026-09-20T08:00:00Z", resources: {}, buffer: { reservedBytes: 33554432, limitBytes: 134217728, oldestPendingMs: 45, scope: "APPLICATION_BATCH_RESERVATIONS" }, writeIo: { concurrency: saturated ? 6 : 2, active: saturated ? 6 : 2, waiting: saturated ? 7 : 0, stages: { batchWaitMs: { samples: 12, p99Ms: 48.5 } } }, writeIoLatency: { p99Ms: 512.4, pendingMs: 2000, samples: 24, windowSeconds: 60 }, archives } }]));
       }
       return json(nodePage([]));
     });
@@ -119,14 +125,28 @@ try {
     const status = page.getByRole("region", { name: "节点采集性能状态", exact: true });
     await status.waitFor();
     const statusText = await status.textContent();
-    assert.match(statusText ?? "", /手动参数/);
-    assert.match(statusText ?? "", /128 MiB 缓冲；6 路写入；512 KiB 批量；80 ms 最长批等待；75 MiB\/s 后台逻辑读取/);
-    assert.match(statusText ?? "", /缓冲积压：32.0 MiB \/ 128 MiB；45 ms 最早等待；应用批次预留（不含协议库和操作系统缓存）/);
-    assert.match(statusText ?? "", /管理员固定参数/);
-    assert.match(statusText ?? "", /性能保护已暂停本节点新任务准入；已建立的采集会话继续运行。/);
-    assert.match(statusText ?? "", /批次等待 P99：48.5 ms（12 个样本）/);
-    assert.match(statusText ?? "", /实际写入 P99：512.4 ms；未完成写入等待：2000 ms（60 秒窗口，24 个样本）/);
-    assert.match(statusText ?? "", width === 1440
+    const isolatedCardText = await page.locator(".node-card").textContent();
+    assert.match(isolatedCardText ?? "", /最慢会话写入延迟/);
+    assert.match(statusText ?? "", /少数慢会话：2 \/ 100；其余 98 个会话有近期成功写入，写槽和缓冲仍有余量，允许新任务。/);
+    assert.match(isolatedCardText ?? "", /少数慢会话（2 \/ 100）告警，仍允许接入/);
+    await page.screenshot({ path: `output/playwright/node-write-admission-${width}-isolated.png`, fullPage: true });
+
+    writeMode = "saturated";
+    await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("tab", { name: "服务节点", exact: true }).click();
+    await status.waitFor();
+    const saturatedText = await status.textContent();
+    const saturatedCardText = await page.locator(".node-card").textContent();
+    assert.match(saturatedCardText ?? "", /写入执行器已满且存在等待，暂停新任务/);
+    await page.screenshot({ path: `output/playwright/node-write-admission-${width}-saturated.png`, fullPage: true });
+    assert.match(saturatedText ?? "", /手动参数/);
+    assert.match(saturatedText ?? "", /128 MiB 缓冲；6 路写入；512 KiB 批量；80 ms 最长批等待；75 MiB\/s 后台逻辑读取/);
+    assert.match(saturatedText ?? "", /缓冲积压：32.0 MiB \/ 128 MiB；45 ms 最早等待；应用批次预留（不含协议库和操作系统缓存）/);
+    assert.match(saturatedText ?? "", /管理员固定参数/);
+    assert.match(saturatedText ?? "", /性能保护已暂停本节点新任务准入；已建立的采集会话继续运行。/);
+    assert.match(saturatedText ?? "", /批次等待 P99：48.5 ms（12 个样本）/);
+    assert.match(saturatedText ?? "", /实际写入 P99：512.4 ms；未完成写入等待：2000 ms（60 秒窗口，24 个样本）/);
+    assert.match(saturatedText ?? "", width === 1440
       ? /归档：排队 3 个，最长 13 秒；执行中 2 个，最长 45 秒/
       : /归档：未完成 4 个，最长 18 秒（旧节点未区分排队与执行）/);
     const geometry = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth }));

@@ -12,15 +12,19 @@ import tarfile
 import tempfile
 import time
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
 from pathlib import Path
 
 from camera_logs.logs.archive_spool import load as load_archive_spool
 from camera_logs.logs.archive_spool import pending_path as _spool_pending_path
 from camera_logs.logs.archive_spool import write_json_atomic as _write_json_atomic
+from camera_logs.logs.background_execution import BackgroundJob
+from camera_logs.logs.background_execution import archive_key as _archive_key
+from camera_logs.logs.background_execution import log_lifecycle as _archive_log
+from camera_logs.logs.background_execution import safe_archive_owner as _archive_owner
+from camera_logs.logs.background_execution import split_background_budget as _split_background_budget
 from camera_logs.logs.job_threads import job_thread
 from camera_logs.logs.process_progress import advance as advance_progress
 from camera_logs.logs.process_progress import create as create_progress
@@ -32,10 +36,16 @@ logger = logging.getLogger(__name__)
 
 _pool: ProcessPoolExecutor | None = None
 _pool_progress = None
+_index_pool: ProcessPoolExecutor | None = None
+_index_pool_progress = None
 _dispatcher: asyncio.Task | None = None
 _dispatcher_loop = None
+_index_dispatcher: asyncio.Task | None = None
+_index_dispatcher_loop = None
+_closing = False
 MAX_SCHEDULED_ARCHIVES = 8
 RESERVED_RECOVERY_ARCHIVES = 2
+MAX_SCHEDULED_INDEXES = 8
 ARCHIVE_RETRY_BASE_SECONDS = 30
 ARCHIVE_RETRY_MAX_SECONDS = 300
 ARCHIVE_RETRY_MAX_EXPONENT = 4
@@ -44,23 +54,12 @@ PROCESS_PROGRESS_TIMEOUT_SECONDS = 300
 PROCESS_TERMINATE_GRACE_SECONDS = 5
 _scheduled_targets: set[Path] = set()
 _scheduled_futures: dict[Path, asyncio.Future] = {}
+_scheduled_index_targets: set[Path] = set()
+_scheduled_index_futures: dict[Path, asyncio.Future] = {}
 _retry_not_before: dict[Path, float] = {}
 _retry_attempts: dict[Path, int] = {}
-
-
-@dataclass(slots=True)
-class _Job:
-    """父进程中的单槽候选；只有被选中时才向不可重排的进程池提交。"""
-
-    kind: str
-    arguments: tuple
-    result: asyncio.Future
-    token: object | None = None
-    callback: Callable[[BaseException | None], None] | None = None
-
-
-_archive_jobs: deque[_Job] = deque()
-_index_jobs: deque[_Job] = deque()
+_archive_jobs: deque[BackgroundJob] = deque()
+_index_jobs: deque[BackgroundJob] = deque()
 
 
 def _pool_for_current_process() -> ProcessPoolExecutor:
@@ -74,25 +73,50 @@ def _pool_for_current_process() -> ProcessPoolExecutor:
     return _pool
 
 
+def _index_pool_for_current_process() -> ProcessPoolExecutor:
+    """延迟创建单槽索引进程；它与归档池隔离，不能占住新 spool 的发布槽位。"""
+    global _index_pool, _index_pool_progress
+    if _index_pool is None:
+        context = multiprocessing.get_context("spawn")
+        _index_pool_progress = create_progress(context)
+        _index_pool = ProcessPoolExecutor(max_workers=1, mp_context=context, initializer=install_progress,
+                                          initargs=(_index_pool_progress,))
+    return _index_pool
+
+
 async def _run_in_pool(function, *arguments):
     """提交已获父进程槽位的工作；子进程队列此时最多只有当前一项。"""
-    pool = _pool_for_current_process()
+    return await _run_in_selected_pool(function, arguments, index=False)
+
+
+async def _run_index_in_pool(function, *arguments):
+    """提交低优先级索引；独立单槽只能消耗其固定读取预算。"""
+    return await _run_in_selected_pool(function, arguments, index=True)
+
+
+async def _run_in_selected_pool(function, arguments: tuple, *, index: bool):
+    """在指定单槽池提交作业，池损坏只废弃自身，不影响另一类后台任务。"""
+    pool = _index_pool_for_current_process() if index else _pool_for_current_process()
+    progress = _index_pool_progress if index else _pool_progress
     try:
         submitted_at = time.monotonic()
         future = asyncio.get_running_loop().run_in_executor(pool, function, *arguments)
-        return await _wait_future(future, progress=_pool_progress, pool=pool, submitted_at=submitted_at)
+        return await _wait_future(future, progress=progress, pool=pool, submitted_at=submitted_at, index=index)
     except BrokenProcessPool:
         # 当前作业的 tar 发布状态不可判定，不能整批重试；只废弃已损坏的执行器，
         # 让后续仍由 spool/pending 保证可恢复的作业在新进程中重新提交。
-        await _discard_broken_pool(pool)
+        await _discard_broken_pool(pool, index=index)
         raise
 
 
-async def _discard_broken_pool(pool: ProcessPoolExecutor) -> None:
+async def _discard_broken_pool(pool: ProcessPoolExecutor, *, index: bool = False) -> None:
     """同步回收异常退出的进程池，避免全局引用让后续作业持续提交失败。"""
-    global _pool, _pool_progress
+    global _pool, _pool_progress, _index_pool, _index_pool_progress
     await job_thread(pool.shutdown, wait=True, cancel_futures=True)
-    if _pool is pool:
+    if index and _index_pool is pool:
+        _index_pool = None
+        _index_pool_progress = None
+    elif not index and _pool is pool:
         _pool = None
         _pool_progress = None
 
@@ -100,6 +124,8 @@ async def _discard_broken_pool(pool: ProcessPoolExecutor) -> None:
 def _start_dispatcher() -> None:
     """在当前事件循环按归档优先顺序启动唯一调度协程。"""
     global _dispatcher, _dispatcher_loop
+    if _closing:
+        return
     loop = asyncio.get_running_loop()
     if _dispatcher is not None and not _dispatcher.done():
         if _dispatcher_loop is not loop:
@@ -109,49 +135,91 @@ def _start_dispatcher() -> None:
     _dispatcher = loop.create_task(_dispatch_jobs())
 
 
-def _enqueue(kind: str, *arguments, token: object | None = None, callback=None) -> asyncio.Future:
+def _start_index_dispatcher() -> None:
+    """只有归档队列和归档执行都空闲时才启动低优先级索引；运行后与归档互不阻塞。"""
+    global _index_dispatcher, _index_dispatcher_loop
+    if _closing:
+        return
+    loop = asyncio.get_running_loop()
+    if _index_dispatcher is not None and not _index_dispatcher.done():
+        if _index_dispatcher_loop is not loop:
+            raise RuntimeError("索引调度器仍属于旧事件循环")
+        return
+    if _archive_jobs or (_dispatcher is not None and not _dispatcher.done()):
+        return
+    _index_dispatcher_loop = loop
+    _index_dispatcher = loop.create_task(_dispatch_index_jobs())
+
+
+def _enqueue(kind: str, *arguments, token: object | None = None,
+             owner: tuple[str, str, str] = ("-", "-", "-"), callback=None) -> asyncio.Future:
     """登记工作而不立即提交进程池，避免索引先入 FIFO 后阻塞待归档小时。"""
     loop = asyncio.get_running_loop()
     result = loop.create_future()
-    job = _Job(kind, arguments, result, token=token, callback=callback)
+    job = BackgroundJob(kind, arguments, result, time.monotonic(), _archive_key(kind, arguments),
+               _archive_owner(arguments[0]) if kind == "archive" and arguments else owner,
+               token=token, callback=callback)
+    if _closing:
+        if kind in {"archive", "spool", "index"}:
+            _archive_log(job, "CANCELLED")
+        result.cancel()
+        if callback is not None:
+            callback(asyncio.CancelledError())
+        return result
     (_archive_jobs if kind in {"archive", "spool"} else _index_jobs).append(job)
+    if kind in {"archive", "spool", "index"}:
+        _archive_log(job, "QUEUED")
     _start_dispatcher()
+    if kind == "index":
+        _start_index_dispatcher()
     return result
 
 
 async def _dispatch_jobs() -> None:
-    """单槽选择器：所有已等待归档优先，索引只在归档队列清空后才允许执行。"""
+    """归档单槽选择器；索引已由独立低优先级执行器隔离。"""
     global _dispatcher
     try:
-        while _archive_jobs or _index_jobs:
-            job = _archive_jobs.popleft() if _archive_jobs else _index_jobs.popleft()
+        while _archive_jobs:
+            job = _archive_jobs.popleft()
+            started_at = None
             try:
                 if job.kind in {"archive", "spool"}:
+                    started_at = time.monotonic()
+                    _archive_log(job, "RUNNING", started_at=started_at)
                     from camera_logs.node import performance_runtime
 
                     rate, allow_index = performance_runtime.background_settings()
-                    # 正常无积压时保留内联索引吞吐；压力或后续归档等待时先发布 READY。
-                    create_index = allow_index and not _archive_jobs
-                    background_rate = None if allow_index else rate
+                    # 并行索引始终只使用另一份 20% 预算，归档固定使用 80%。
+                    # 内联索引会占归档进程，必须禁用，缺索引时搜索仍回退原文。
+                    background_rate, _index_rate = _split_background_budget(rate)
+                    create_index = False
                     running = getattr(performance_runtime, "archive_running", None)
                     if running is not None:
                         running(job.token)
                     publisher = publish_spooled_archive if job.kind == "spool" else publish_hour_archive
                     value = await _run_in_pool(publisher, *job.arguments, background_rate, create_index)
-                else:
-                    value = await _run_in_pool(build_index, *job.arguments)
             except asyncio.CancelledError:
+                if job.kind in {"archive", "spool"}:
+                    _archive_log(job, "CANCELLED", started_at=started_at)
                 if not job.result.done():
                     job.result.cancel()
                 if job.callback is not None:
                     job.callback(asyncio.CancelledError())
                 raise
             except Exception as error:  # noqa: BLE001 - 子进程故障只结算当前作业，后续归档仍可执行。
+                retry_after = job.callback(error) if job.callback is not None else 0
+                if job.kind in {"archive", "spool"}:
+                    _archive_log(job, "FAILED", started_at=started_at, error=error,
+                                 retry_after_seconds=retry_after or 0)
                 if not job.result.done():
                     job.result.set_exception(error)
-                if job.callback is not None:
-                    job.callback(error)
             else:
+                if job.kind in {"archive", "spool"}:
+                    _archive_log(job, "SUCCEEDED", started_at=started_at)
+                    # 已验证发布后只登记有界低优先级索引，不等待它完成；压力
+                    # 策略禁用时由持久目录维护在后续空闲周期补建。
+                    if allow_index and isinstance(value, Path):
+                        schedule_published_index(value)
                 if not job.result.done():
                     job.result.set_result(value)
                 if job.callback is not None:
@@ -159,7 +227,9 @@ async def _dispatch_jobs() -> None:
     finally:
         if _dispatcher is asyncio.current_task():
             _dispatcher = None
-        for job in (*_archive_jobs, *_index_jobs):
+        for job in _archive_jobs:
+            if job.kind in {"archive", "spool"}:
+                _archive_log(job, "CANCELLED")
             if not job.result.done():
                 job.result.cancel()
             if job.callback is not None:
@@ -170,10 +240,81 @@ async def _dispatch_jobs() -> None:
                 except Exception:
                     logger.exception("取消排队后台作业的收尾失败")
         _archive_jobs.clear()
+        _start_index_dispatcher()
+
+
+async def _dispatch_index_jobs() -> None:
+    """索引单槽选择器；已运行索引不能阻塞随后到达的归档作业。"""
+    global _index_dispatcher
+    try:
+        while _index_jobs:
+            job = _index_jobs.popleft()
+            started_at = None
+            try:
+                from camera_logs.node import performance_runtime
+
+                rate, allow_index = performance_runtime.background_settings()
+                # 已运行的索引不强杀；但每个尚未提交子进程的候选都必须重新
+                # 让位给最新压力策略和归档队列。被放弃的候选由目录维护重试。
+                if not allow_index:
+                    _defer_index_job(job, "INDEX_DEFERRED_BY_PRESSURE")
+                    continue
+                if _archive_jobs or (_dispatcher is not None and not _dispatcher.done()):
+                    _defer_index_job(job, "INDEX_DEFERRED_TO_ARCHIVE")
+                    continue
+                _archive_rate, index_rate = _split_background_budget(rate)
+                started_at = time.monotonic()
+                _archive_log(job, "RUNNING", started_at=started_at)
+                value = await _run_index_in_pool(build_index, *job.arguments, index_rate)
+            except asyncio.CancelledError:
+                _archive_log(job, "CANCELLED", started_at=started_at)
+                if not job.result.done():
+                    job.result.cancel()
+                if job.callback is not None:
+                    job.callback(asyncio.CancelledError())
+                raise
+            except Exception as error:  # noqa: BLE001 - 单项索引失败不阻止其余补建。
+                _archive_log(job, "FAILED", started_at=started_at, error=error)
+                if not job.result.done():
+                    job.result.set_exception(error)
+                if job.callback is not None:
+                    job.callback(error)
+            else:
+                if value is False:
+                    _archive_log(job, "INCOMPLETE", started_at=started_at,
+                                 error_type="INDEX_NOT_PUBLISHED")
+                else:
+                    _archive_log(job, "SUCCEEDED", started_at=started_at)
+                if not job.result.done():
+                    job.result.set_result(value)
+                if job.callback is not None:
+                    job.callback(None)
+    finally:
+        if _index_dispatcher is asyncio.current_task():
+            _index_dispatcher = None
+        for job in _index_jobs:
+            _archive_log(job, "CANCELLED")
+            if not job.result.done():
+                job.result.cancel()
+            if job.callback is not None:
+                try:
+                    job.callback(asyncio.CancelledError())
+                except Exception:
+                    logger.exception("取消排队索引作业的收尾失败")
         _index_jobs.clear()
 
 
-async def _wait_future(future: asyncio.Future, *, progress=None, pool=None, submitted_at=0.0):
+def _defer_index_job(job: BackgroundJob, reason: str) -> None:
+    """尚未运行的索引让位后结算为未发布，清除去重身份以便维护安全补建。"""
+    _archive_log(job, "INCOMPLETE", error_type=reason)
+    if not job.result.done():
+        job.result.set_result(False)
+    _release_scheduled_index(Path(job.arguments[0]), job.result)
+    if job.callback is not None:
+        job.callback(None)
+
+
+async def _wait_future(future: asyncio.Future, *, progress=None, pool=None, submitted_at=0.0, index=False):
     """等待不可取消底层作业；后台失败不能覆盖已收到的调用方取消。"""
     cancelled = False
     while not future.done():
@@ -188,10 +329,13 @@ async def _wait_future(future: asyncio.Future, *, progress=None, pool=None, subm
             stamp, processed, phase = progress_snapshot(progress)
             if time.monotonic() - max(submitted_at, stamp) < PROCESS_PROGRESS_TIMEOUT_SECONDS:
                 continue
-            logger.error("后台压缩进程无进展，终止执行器 phase=%s processedBytes=%s", phase, processed)
+            logger.error("后台%s进程无进展，终止执行器 phase=%s processedBytes=%s",
+                         "索引" if index else "归档", phase, processed)
             await job_thread(_terminate_pool, pool)
-            global _pool, _pool_progress
-            if _pool is pool:
+            global _pool, _pool_progress, _index_pool, _index_pool_progress
+            if index and _index_pool is pool:
+                _index_pool = _index_pool_progress = None
+            elif not index and _pool is pool:
                 _pool = _pool_progress = None
             await asyncio.gather(future, return_exceptions=True)
             raise TimeoutError("后台压缩进程持续无进展")
@@ -215,15 +359,31 @@ async def _wait_for_job(future: asyncio.Future):
 
 
 async def _drain_dispatcher() -> None:
-    """关闭进程池前先排空父进程等待队列，避免已登记索引被静默遗弃。"""
+    """关闭两类进程池前排空归档与索引队列，避免任一类遗留子进程。"""
     cancelled = False
-    while _dispatcher is not None:
+    while _dispatcher is not None or _index_dispatcher is not None:
+        tasks = tuple(task for task in (_dispatcher, _index_dispatcher) if task is not None)
         try:
-            await asyncio.shield(_dispatcher)
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
         except asyncio.CancelledError:
             cancelled = True
     if cancelled:
         raise asyncio.CancelledError
+
+
+def _cancel_queued_jobs() -> None:
+    """超时关闭时结算未启动项；关闭门闩期间不得再由 archive finally 拉起索引。"""
+    for jobs in (_archive_jobs, _index_jobs):
+        while jobs:
+            job = jobs.popleft()
+            _archive_log(job, "CANCELLED")
+            if not job.result.done():
+                job.result.cancel()
+            if job.callback is not None:
+                try:
+                    job.callback(asyncio.CancelledError())
+                except Exception:
+                    logger.exception("取消关闭中排队后台作业的收尾失败")
 
 
 def _hash_stream(stream, limiter=None):
@@ -418,7 +578,9 @@ async def compress_hour(segments: list[dict], target: Path) -> Path:
         archive_finished(token)
 
 
-def _schedule_archive(kind: str, identity: Path, *arguments: object, admission_limit: int = MAX_SCHEDULED_ARCHIVES) -> asyncio.Future | None:
+def _schedule_archive(kind: str, identity: Path, *arguments: object,
+                      owner: tuple[str, str, str] = ("-", "-", "-"),
+                      admission_limit: int = MAX_SCHEDULED_ARCHIVES) -> asyncio.Future | None:
     """将一个可恢复归档公平登记为有限候选，失败项退避后才允许下轮重试。"""
     identity = Path(identity)
     exists = identity.exists() if kind == "spool" else (identity.exists() or _pending_path(identity).exists())
@@ -438,12 +600,17 @@ def _schedule_archive(kind: str, identity: Path, *arguments: object, admission_l
     archive_started(token, persisted=kind in {"spool", "archive"})
     _scheduled_targets.add(identity)
 
-    def complete(error: BaseException | None):
+    def complete(error: BaseException | None) -> int:
         _scheduled_targets.discard(identity)
         _scheduled_futures.pop(identity, None)
         if error is None:
             _retry_not_before.pop(identity, None)
             _retry_attempts.pop(identity, None)
+            delay = 0
+        elif isinstance(error, asyncio.CancelledError):
+            # Worker 正常关闭时 spool 留给下次维护重新发现；取消不属于发布失败，
+            # 不能写错误或制造退避窗口。
+            delay = 0
         else:
             attempts = min(_retry_attempts.get(identity, 0) + 1, ARCHIVE_RETRY_MAX_EXPONENT + 1)
             _retry_attempts[identity] = attempts
@@ -454,22 +621,22 @@ def _schedule_archive(kind: str, identity: Path, *arguments: object, admission_l
                 _retry_not_before.pop(oldest, None)
                 _retry_attempts.pop(oldest, None)
             _retry_not_before[identity] = time.monotonic() + delay
-            logger.warning("后台归档失败 target=%s errorType=%s retryAfterSeconds=%s",
-                           identity, type(error).__name__, delay, exc_info=error)
         archive_finished(token)
+        return delay
 
-    future = _enqueue(kind, *arguments, token=token, callback=complete)
+    future = _enqueue(kind, *arguments, token=token, owner=owner, callback=complete)
     _scheduled_futures[identity] = future
     # 调度调用方不等待结果；回调已读取异常，避免未观察的 Future 告警。
     future.add_done_callback(lambda value: value.exception() if not value.cancelled() else None)
     return future
 
 
-def schedule_pending_archive(target: Path, *, recovery: bool | None = None) -> asyncio.Future | None:
+def schedule_pending_archive(target: Path, *, recovery: bool | None = None,
+                             owner: tuple[str, str, str] = ("-", "-", "-")) -> asyncio.Future | None:
     """登记持久 spool；实时 Writer 显式传 False，缺省兼容旧维护调用的全额容量。"""
     spool = Path(target)
     limit = MAX_SCHEDULED_ARCHIVES if recovery is not False else MAX_SCHEDULED_ARCHIVES - RESERVED_RECOVERY_ARCHIVES
-    return _schedule_archive("spool", spool, spool, admission_limit=limit)
+    return _schedule_archive("spool", spool, spool, owner=owner, admission_limit=limit)
 
 
 def schedule_recovery_archive(target: Path) -> asyncio.Future | None:
@@ -491,8 +658,49 @@ async def compress_spool(spool: Path) -> Path:
 
 
 async def build_search_index(target: Path) -> bool:
-    """低优先级补建旧小时包索引；有待归档小时时先让归档解除积压。"""
-    return await _wait_for_job(_enqueue("index", Path(target)))
+    """低优先级补建入口；压力、重复或队满时返回 false，由后续维护重试。"""
+    future = schedule_published_index(target)
+    return await _wait_for_job(future) if future is not None else False
+
+
+def schedule_published_index(target: Path) -> asyncio.Future | None:
+    """为 READY 小时包有界登记独立索引，按目标去重并观察后台异常。"""
+    target = Path(target)
+    from camera_logs.node import performance_runtime
+
+    _rate, allow_index = performance_runtime.background_settings()
+    if not allow_index or _closing:
+        return None
+    existing = _scheduled_index_futures.get(target)
+    if existing is not None:
+        return existing
+    if len(_scheduled_index_targets) >= MAX_SCHEDULED_INDEXES:
+        return None
+    future = _enqueue("index", target)
+    if future.cancelled():
+        return None
+    _scheduled_index_targets.add(target)
+    _scheduled_index_futures[target] = future
+
+    def completed(done: asyncio.Future) -> None:
+        _release_scheduled_index(target, done)
+        # 自动登记者不 await；主动读取失败可避免未观察 Future，同时不改变
+        # 调用 build_search_index 的 await 语义。
+        if not done.cancelled():
+            try:
+                done.exception()
+            except asyncio.CancelledError:
+                pass
+
+    future.add_done_callback(completed)
+    return future
+
+
+def _release_scheduled_index(target: Path, future: asyncio.Future) -> None:
+    """仅释放仍指向当前 Future 的去重身份，迟到回调不能删除后来同 target 的重建。"""
+    if _scheduled_index_futures.get(target) is future:
+        _scheduled_index_futures.pop(target, None)
+        _scheduled_index_targets.discard(target)
 
 
 def _terminate_pool(pool: ProcessPoolExecutor) -> None:
@@ -513,35 +721,56 @@ def _terminate_pool(pool: ProcessPoolExecutor) -> None:
 
 
 async def shutdown_compression(*, timeout_seconds: float | None = None) -> None:
-    """收尾压缩器；超时后终止独立子进程，原始日志与恢复清单留待下次启动。"""
-    global _pool, _pool_progress
+    """收尾归档与索引执行器；超时后分别终止，绝不让旧进程跨 Worker 存活。"""
+    global _pool, _pool_progress, _index_pool, _index_pool_progress, _closing
     cancelled = False
     try:
-        if timeout_seconds is None:
+        try:
+            if timeout_seconds is None:
+                await _drain_dispatcher()
+            else:
+                await asyncio.wait_for(asyncio.shield(_drain_dispatcher()), timeout_seconds)
+        except TimeoutError:
+            # 等待层刻意忽略取消直到不可取消进程工作结束；先分别杀掉两个
+            # 子进程，再等待 future 结算，避免旧 Worker 的归档或索引持续运行。
+            _closing = True
+            if _dispatcher is not None:
+                _dispatcher.cancel()
+            if _index_dispatcher is not None:
+                _index_dispatcher.cancel()
+            if _pool is not None:
+                pool = _pool
+                await job_thread(_terminate_pool, pool)
+                if _pool is pool:
+                    _pool = None
+                    _pool_progress = None
+            if _index_pool is not None:
+                pool = _index_pool
+                await job_thread(_terminate_pool, pool)
+                if _index_pool is pool:
+                    _index_pool = None
+                    _index_pool_progress = None
             await _drain_dispatcher()
-        else:
-            await asyncio.wait_for(asyncio.shield(_drain_dispatcher()), timeout_seconds)
-    except TimeoutError:
-        # dispatcher 的等待层刻意忽略取消直到不可取消进程工作结束；先杀掉
-        # 唯一子进程，再等待该 future 结算，避免旧进程在新 Worker 运行时写 tar。
-        if _dispatcher is not None:
-            _dispatcher.cancel()
+            _cancel_queued_jobs()
+        except asyncio.CancelledError:
+            cancelled = True
         if _pool is not None:
             pool = _pool
-            await job_thread(_terminate_pool, pool)
-            if _pool is pool:
-                _pool = None
-                _pool_progress = None
-        await _drain_dispatcher()
-    except asyncio.CancelledError:
-        cancelled = True
-    if _pool is not None:
-        pool = _pool
-        try:
-            await job_thread(pool.shutdown, wait=True)
-        finally:
-            if _pool is pool:
-                _pool = None
-                _pool_progress = None
+            try:
+                await job_thread(pool.shutdown, wait=True)
+            finally:
+                if _pool is pool:
+                    _pool = None
+                    _pool_progress = None
+        if _index_pool is not None:
+            pool = _index_pool
+            try:
+                await job_thread(pool.shutdown, wait=True)
+            finally:
+                if _index_pool is pool:
+                    _index_pool = None
+                    _index_pool_progress = None
+    finally:
+        _closing = False
     if cancelled:
         raise asyncio.CancelledError

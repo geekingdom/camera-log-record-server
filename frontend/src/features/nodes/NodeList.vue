@@ -30,6 +30,7 @@ import {
   nodeAdmissible,
   nodeOnline,
   percentage,
+  writeAdmissionBlocked,
 } from "./nodeDashboard";
 import { archiveDiagnostics } from "./nodeArchiveDiagnostics";
 import { writeIoDiagnostics } from "./nodeWriteIoDiagnostics";
@@ -72,10 +73,22 @@ function admissionLabel(node: Node) {
   if (!node.accepting) return "暂停接入";
   if (currentHealth(node)?.status === "CRITICAL") return "健康严重";
   if (Number(node.diskPercent ?? 0) >= 90) return "磁盘压力过高";
-  if (Number(node.writeLatencyMs ?? 0) > writeLatencyLimitMs(node)) return `写入延迟超过 ${formatWriteLatencyLimit(writeLatencyLimitMs(node))}`;
   if (Number(currentTelemetry(node, now.value)?.cpuPercent ?? 0) >= 95) return "CPU 压力过高";
   if (Number(currentTelemetry(node, now.value)?.memoryPercent ?? 0) >= 95) return "内存压力过高";
   if (Number(node.activeTasks ?? 0) >= Number(node.capacity ?? 0)) return "容量已满";
+  if (writeAdmissionBlocked(node)) {
+    const reason = node.writeAdmission?.reason;
+    if (reason === "EXECUTOR_SATURATED") return "写入执行器已满且存在等待，暂停新任务";
+    if (reason === "BUFFER_BACKPRESSURE") return "采集缓冲接近上限，暂停新任务";
+    if (reason === "SINGLE_SESSION") return "唯一采集会话写入缓慢，暂停新任务";
+    if (["TOO_MANY_SLOW_SESSIONS", "MULTI_SESSION_PRESSURE"].includes(String(reason))) return "多个采集会话写入缓慢，暂停新任务";
+    return `最慢会话写入延迟超过 ${formatWriteLatencyLimit(writeLatencyLimitMs(node))}`;
+  }
+  if (node.writeAdmission?.scope === "SESSION" && node.writeAdmission.reason === "ISOLATED_SLOW_SESSIONS") {
+    const slow = node.writeAdmission.slowSessions ?? "少数";
+    const total = node.writeAdmission.activeSessions ?? "多";
+    return `少数慢会话（${slow} / ${total}）告警，仍允许接入`;
+  }
   return "允许接入";
 }
 function metricValue(value?: number | null) { return percentage(value) ?? 0; }
@@ -131,6 +144,18 @@ function performanceBacklog(node: Node) {
 function performanceAdmission(node: Node) {
   return node.performanceStatus?.admissionBlocked ? "性能保护已暂停本节点新任务准入；已建立的采集会话继续运行。" : undefined;
 }
+function writeAdmissionDetail(node: Node) {
+  const admission = node.writeAdmission;
+  if (!admission) return undefined;
+  if (!admission.blocked && admission.scope === "SESSION" && admission.reason === "ISOLATED_SLOW_SESSIONS") {
+    const slow = admission.slowSessions ?? "少数";
+    const total = admission.activeSessions ?? "多";
+    const normal = admission.normalSessions ?? "其余";
+    return `少数慢会话：${slow} / ${total}；其余 ${normal} 个会话有近期成功写入，写槽和缓冲仍有余量，允许新任务。`;
+  }
+  if (admission.blocked) return `节点写入准入：${admissionLabel(node)}。`;
+  return undefined;
+}
 function batchWait(node: Node) {
   const stage = node.performanceStatus?.writeIo?.stages?.batchWaitMs;
   if (!stage || !stage.samples) return undefined;
@@ -161,18 +186,19 @@ function actualWriteStatus(node: Node) { return writeIoDiagnostics(node.performa
         <div class="node-facts">
           <div><span>任务容量</span><strong>{{ node.activeTasks ?? "暂无数据" }}<template v-if="node.capacity !== undefined"> / {{ node.capacity }}</template></strong></div>
           <div><span>新任务准入</span><strong :class="{ admitted: nodeAdmissible(node, now), blocked: !nodeAdmissible(node, now) }">{{ admissionLabel(node) }}</strong></div>
-          <div><span>写入延迟 / 上限</span><strong>{{ formatLatency(node) }} / {{ formatWriteLatencyLimit(node.writeLatencyLimitMs) }}</strong></div>
+          <div><span>最慢会话写入延迟 / 上限</span><strong>{{ formatLatency(node) }} / {{ formatWriteLatencyLimit(node.writeLatencyLimitMs) }}</strong></div>
           <div><span>遥测范围</span><strong>{{ telemetryScope(node) }}</strong></div>
         </div>
 
-        <section v-if="node.performanceStatus" class="node-performance" aria-label="节点采集性能状态">
+        <section v-if="node.performanceStatus || writeAdmissionDetail(node)" class="node-performance" aria-label="节点采集性能状态">
           <div class="node-performance-head"><span>采集性能</span><span class="node-performance-state" :class="performanceTone(node)">{{ performanceStateLabel(node) }}</span></div>
           <span class="node-performance-detail">{{ performanceStateDetail(node) }}</span>
           <strong>{{ performanceEffective(node) }}</strong>
           <span v-if="performanceBudgetDelta(node.performanceStatus)" class="node-performance-budget">{{ performanceBudgetDelta(node.performanceStatus) }}</span>
           <span class="node-performance-backlog">缓冲积压：{{ performanceBacklog(node) }}</span>
-          <span v-if="node.performanceStatus.reason" class="node-performance-reason">{{ node.performanceStatus.reason }}</span>
+          <span v-if="node.performanceStatus?.reason" class="node-performance-reason">{{ node.performanceStatus.reason }}</span>
           <span v-if="performanceAdmission(node)" class="node-performance-admission">{{ performanceAdmission(node) }}</span>
+          <span v-if="writeAdmissionDetail(node)" class="node-performance-admission">{{ writeAdmissionDetail(node) }}</span>
           <span v-if="batchWait(node)" class="node-performance-write-io">{{ batchWait(node) }}</span>
           <span v-if="actualWriteStatus(node)" class="node-performance-actual-write">{{ actualWriteStatus(node) }}</span>
           <span v-if="archiveStatus(node)" class="node-performance-archives">{{ archiveStatus(node) }}</span>

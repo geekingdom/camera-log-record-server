@@ -104,7 +104,7 @@ class NodeRegistration(SettingsModel):
     inputRateLimitMiB: int = Field(default=DEFAULT_INPUT_RATE_LIMIT_MIB, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
                                     description="日志输入速率准入上限，单位MiB/s；0禁用，达到上限暂停分配新任务，不停止已有采集")
     writeLatencyLimitMs: int = Field(default=DEFAULT_WRITE_LATENCY_LIMIT_MS, ge=1, le=MAX_WRITE_LATENCY_LIMIT_MS, strict=True,
-                                     description="写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
+                                     description="最差会话写入延迟阈值，单位毫秒，整数1至60000，默认200；达到75%预警。最差会话超限时，少数慢会话且写槽和缓冲仍有余量仅告警；执行器/缓冲或多会话整体压力才暂停新任务。旧节点未上报 writeAdmission 时保守按最差会话超限阻断；不主动停止已有采集，Worker 下一心跳周期更新结论。")
     isGeneralNode: bool = Field(default=True, description='是否为可接收全部设备资源的通用节点，默认 true；false 时按资源地址规则准入并优先分配。')
     resourceNetworks: list[str] = Field(default_factory=list, max_length=128, description='非通用节点允许接入的资源 IP 或 CIDR 列表，匹配所属资源地址而非串口连接地址。')
     performance: PerformancePolicy = Field(default_factory=PerformancePolicy,
@@ -168,7 +168,7 @@ class NodeConfigPatch(SettingsModel):
     inputRateLimitMiB: int | None = Field(default=None, ge=0, le=MAX_INPUT_RATE_LIMIT_MIB, strict=True,
                                            description="节点日志输入准入上限MiB/s，0禁用；保存后调度立即读取新配置")
     writeLatencyLimitMs: int | None = Field(default=None, ge=1, le=MAX_WRITE_LATENCY_LIMIT_MS, strict=True,
-                                             description="节点写入延迟准入上限，单位毫秒，整数1至60000，默认200；达到75%预警，超过上限暂停新会话准入，不主动停止已有采集，Worker下一心跳周期生效。")
+                                             description="最差会话写入延迟阈值，单位毫秒，整数1至60000，默认200；达到75%预警。最差会话超限时，少数慢会话且写槽和缓冲仍有余量仅告警；执行器/缓冲或多会话整体压力才暂停新任务。旧节点未上报 writeAdmission 时保守按最差会话超限阻断；不主动停止已有采集，Worker 下一心跳周期更新结论。")
     isGeneralNode: bool | None = Field(default=None, description='是否为可接收全部设备资源的通用节点，默认 true；false 时按资源地址规则准入并优先分配。')
     resourceNetworks: list[str] | None = Field(default=None, max_length=128, description='非通用节点允许接入的资源 IP 或 CIDR 列表，匹配所属资源地址而非串口连接地址。')
     performance: PerformancePolicy | None = Field(default=None,
@@ -214,6 +214,7 @@ def _public_node_config(config: dict, node: dict | None, current=None) -> dict:
         result["activeTasks"] = node.get("activeTasks", 0)
         result["diskPercent"] = node.get("diskPercent")
         result["performanceStatus"] = node.get("performanceStatus")
+        result["writeAdmission"] = node.get("writeAdmission")
     return result
 
 
@@ -236,6 +237,7 @@ def _public_discovered_node(node: dict, current=None) -> dict:
         "activeTasks": node.get("activeTasks", 0),
         "diskPercent": node.get("diskPercent"),
         "performanceStatus": node.get("performanceStatus"),
+        "writeAdmission": node.get("writeAdmission"),
         **routing_config({}),
     }
 

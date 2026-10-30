@@ -294,9 +294,17 @@ def test_successful_http_client_polling_does_not_flood_service_logs(tmp_path):
     try:
         logging.getLogger("httpx").info("HTTP Request: GET http://worker/internal/tail/task HTTP/1.1 200 OK")
         logging.getLogger("httpx").warning("upstream warning")
+        logging.getLogger("asyncssh").info("third-party connection opened")
+        logging.getLogger("asyncssh").warning("third-party connection warning")
+        logging.getLogger("telnetlib3.client").info("third-party telnet opened")
+        logging.getLogger("telnetlib3.client").warning("third-party telnet warning")
+        logging.getLogger("camera_logs.collection.runtime").info("平台采集运行状态")
         logging.getLogger("camera_logs.access").info("request completed", extra={"context": {"requestId": "kept"}})
     finally:
         listener.stop()
     rows = _read_lines(next(tmp_path.glob("*T00-00-00/camera-logs.jsonl")))
-    assert [row["message"] for row in rows] == ["upstream warning", "request completed"]
+    assert [row["message"] for row in rows] == [
+        "upstream warning", "third-party connection warning", "third-party telnet warning",
+        "平台采集运行状态", "request completed",
+    ]
     assert rows[-1]["context"]["requestId"] == "kept"

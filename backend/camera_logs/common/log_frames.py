@@ -38,10 +38,10 @@ class StatusFrame(StrictResponseModel):
 
 
 class SubscribeFrame(StrictResponseModel):
-    """客户端建立实时日志订阅时发送的唯一首帧；后续断开立即取消上游操作。"""
+    """客户端建立实时日志订阅时发送的唯一首帧；断开立即取消上游操作，每轮最多等待一秒后重验授权。"""
 
     token: str | None = Field(default=None, description="可选服务令牌；省略或空字符串时使用现有 Cookie 会话鉴权。")
-    cursor: str | None = Field(default="", description="可选不透明续传游标；null 或省略时从当前实时缓冲的起点订阅。")
+    cursor: str | None = Field(default="", description="可选不透明续传游标；null 或省略时从当前实时缓冲的起点订阅。每轮内部等待最长一秒，返回后重新校验会话、令牌和来源IP权限。")
 
 
 SUBSCRIBE_SCHEMA = SubscribeFrame.model_json_schema()

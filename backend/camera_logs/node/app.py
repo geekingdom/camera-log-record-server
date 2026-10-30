@@ -4,7 +4,7 @@ import asyncio
 import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pymongo import AsyncMongoClient
 
 from camera_logs.common.config import Settings
@@ -106,12 +106,20 @@ def create_worker_app(settings=None):
         return {"status": "ok"}
 
     @app.get("/internal/tail/{task_id}")
-    async def tail(task_id: str, request: Request, cursor: str = ""):
-        """以内部令牌读取当前节点内存帧，缺少运行时返回空窗口。"""
+    async def tail(task_id: str, request: Request, cursor: str = "",
+                   waitSeconds: float = Query(0, ge=0, le=1,
+                                              description="内部实时 tail 在无新帧时最多等待的秒数，0 表示立即返回，最大 1 秒。")):
+        """以内部令牌读取当前节点内存帧，可有界等待新帧，缺少运行时立即返回空窗口。"""
         expected = "Bearer " + settings.internal_token
         if not settings.internal_token or not secrets.compare_digest(request.headers.get("authorization", ""), expected):
             raise HTTPException(401)
         runtime = app.state.worker.active.get(task_id)
-        return runtime.tail(cursor) if runtime else {"frames": [], "gap": False}
+        if runtime is None:
+            return {"frames": [], "gap": False}
+        result = await runtime.wait_tail(cursor, waitSeconds)
+        # 等待期间运行实例被停止或被同任务的新实例替换时，旧缓冲不能继续对外发布。
+        if app.state.worker.active.get(task_id) is not runtime:
+            return {"frames": [], "gap": False}
+        return result
 
     return app

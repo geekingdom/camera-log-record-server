@@ -28,7 +28,7 @@ class PerformancePolicy(BaseModel):
     writeConcurrency: Annotated[int, Field(strict=True, ge=1, le=32)] = Field(default=4, description='节点允许并发执行的写入工作数，整数1至32，默认4。')
     batchKiB: Annotated[int, Field(strict=True, ge=16, le=1024)] = Field(default=256, description='节点单次写入批量预算，单位KiB，整数16至1024，默认256。')
     flushIntervalMs: Annotated[int, Field(strict=True, ge=10, le=200)] = Field(default=100, description='节点写入批次最长等待，单位毫秒，整数10至200，默认100。')
-    readMiBPerSecond: Annotated[int, Field(strict=True, ge=1, le=200)] = Field(default=50, description='节点后台逻辑读取预算，单位MiB/s，整数1至200，默认50；不代表采集输入上限或全盘物理带宽。')
+    readMiBPerSecond: Annotated[int, Field(strict=True, ge=1, le=200)] = Field(default=50, description='节点逻辑读取预算，单位MiB/s，整数1至200，默认50；后台归档占80%、索引占20%，搜索与快照使用独立的同值限速器；不是采集输入上限或跨进程全盘总带宽上限。')
 
 
 class PerformanceController:

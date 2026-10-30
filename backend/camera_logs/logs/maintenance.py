@@ -458,13 +458,11 @@ async def pump_pending_archives(repo: Any) -> int:
                 record_pending(target, source)
                 scheduled += int(schedule_recovery_archive(target) is not None)
         except FileNotFoundError:
-            # 扫描与读取之间发布器可完成同一 spool/journal；该候选已失效，不应作为
-            # 维护错误或积压目标反复记录。若候选仍在，说明丢失的是其引用内容，必须
-            # 继续报告并保留补偿目标，不能把真实归档损坏吞掉。
-            if not source.exists():
-                continue
-            record_pending(source, source)
-            logger.exception("归档持久清单补充登记失败 path=%s", source)
+            # 扫描与打开之间发布器可能完成同一 spool；NFS 属性缓存下不能依赖
+            # exists() 复判。这里的读取只触及 spool 本身，打开失败即代表该候选
+            # 已失效，不计入积压也不反复告警。原始正文或索引缺失发生在发布器内，
+            # 仍会按既有失败、退避和恢复链路保留。
+            continue
         except Exception:
             record_pending(source, source)
             logger.exception("归档持久清单补充登记失败 path=%s", source)

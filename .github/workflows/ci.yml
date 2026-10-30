@@ -58,7 +58,7 @@ jobs:
       - name: 验证Coredump发现幂等及资源存在筛选索引
         run: python scripts/verify_coredump_discovery.py
       - name: 验证自动化并发CRUD和空日志订阅断开回收
-        run: python scripts/verify_automation_churn.py
+        run: python scripts/verify_automation_churn.py --concurrency 100 --rounds 3
       - name: 验证资源摘要与软删除收尾查询索引升级
         run: python scripts/verify_database_hot_paths.py
       - name: 验证全部认证结果的连续聚合与并发状态边界
@@ -86,6 +86,8 @@ jobs:
       - run: ruff check backend tests scripts
       - name: 验证跨整点索引增量摘要与归档字节一致
         run: python scripts/verify_hour_boundary_latency.py
+      - name: 验证百任务跨小时重建与两个阻塞写入会话隔离
+        run: python scripts/verify_automation_write_isolation.py
       - name: 验证小时归档预算恢复及八路压缩完整性
         run: python scripts/verify_archive_budget_recovery.py
       - name: 验证日志分片动态大小与实际接收时间命名

@@ -53,6 +53,7 @@ async def test_repeated_unknown_stop_does_not_grow_stored_traceback(tmp_path):
     runtime.catalog_task = asyncio.create_task(asyncio.sleep(0))
     runtime.background = asyncio.create_task(asyncio.sleep(0))
     runtime.task = {"id": "uncertain"}
+    runtime.tail_changed = asyncio.Condition()
     runtime.connection_uncertain = SshSlotUncertain("192.0.2.1", "token")
     await asyncio.gather(runtime.catalog_task, runtime.background)
     lengths = []

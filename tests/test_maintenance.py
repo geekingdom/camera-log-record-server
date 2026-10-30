@@ -241,22 +241,41 @@ async def test_pending_archive_pump_ignores_stale_spool_removed_after_scan(tmp_p
     assert not [record for record in caplog.records if record.message == "归档持久清单补充登记失败 path=%s"]
 
 
-async def test_pending_archive_pump_reports_missing_content_when_candidate_still_exists(tmp_path, monkeypatch, caplog):
-    """候选仍存在而其实际归档源缺失时，不能被扫描竞态分支吞掉。"""
+async def test_pending_archive_pump_ignores_open_enoent_even_when_nfs_still_reports_candidate(tmp_path, monkeypatch, caplog):
+    """扫描后的 spool 打开失败不依赖 exists 复判，也不得伪造磁盘积压。"""
     import logging
 
     repo = repository(tmp_path)
     source = tmp_path / "present.tar.gz.pending.json"
     source.write_text("{}")
+    reported = []
     monkeypatch.setattr("camera_logs.logs.maintenance._scanned_pending_archives",
                         lambda _root: ([source], [], {source: source.stat().st_mtime}, []))
+    monkeypatch.setattr("camera_logs.node.performance_runtime.archive_spool_snapshot",
+                        lambda pending, oldest: reported.append((pending, oldest)))
     monkeypatch.setattr("camera_logs.logs.maintenance.load_archive_spool",
-                        lambda _path: (_ for _ in ()).throw(FileNotFoundError("archive source missing")))
+                        lambda _path: (_ for _ in ()).throw(FileNotFoundError("spool disappeared after scan")))
     caplog.set_level(logging.ERROR, logger="camera_logs.logs.maintenance")
 
     assert await pump_pending_archives(repo) == 0
-    assert [record for record in caplog.records
-            if record.getMessage().startswith("归档持久清单补充登记失败 path=")]
+    assert reported == [(0, 0)]
+    assert not [record for record in caplog.records
+                if record.getMessage().startswith("归档持久清单补充登记失败 path=")]
+
+
+async def test_pending_archive_pump_keeps_spool_with_missing_raw_reference_for_publisher(tmp_path, monkeypatch):
+    """可解析 spool 即使引用原始正文缺失，也必须交给发布器按既有恢复规则处理。"""
+    from camera_logs.logs.archive_spool import persist
+
+    repo = repository(tmp_path)
+    target = tmp_path / "hour.tar.gz"
+    spool = persist(target, [{"logPath": str(tmp_path / "missing.log"), "logName": "missing.log"}])
+    scheduled = []
+    monkeypatch.setattr("camera_logs.logs.maintenance.schedule_pending_archive",
+                        lambda item, **_kwargs: scheduled.append(item) or object())
+
+    assert await pump_pending_archives(repo) == 1
+    assert scheduled == [spool]
 
 
 async def test_pending_archive_pump_admits_later_spools_after_completed_batch(tmp_path, monkeypatch):

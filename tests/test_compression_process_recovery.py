@@ -19,6 +19,17 @@ def _crash_compression_child() -> None:
     os._exit(23)
 
 
+def _controlled_long_index(archive: Path, _rate: int | None) -> bool:
+    """真实 spawn 索引子进程的受控长运行体，避免依赖机器速度制造竞态。"""
+    started = Path(str(archive) + ".index-started")
+    release = Path(str(archive) + ".index-release")
+    started.touch()
+    deadline = time.monotonic() + 10
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+    return False
+
+
 def _segment(log: Path, index: Path, body: bytes, index_body: bytes) -> dict:
     """构造与封存清单相同的成员摘要，供真实发布和恢复共同核验。"""
     return {
@@ -122,6 +133,33 @@ async def test_broken_process_pool_is_rebuilt_for_later_spooled_archive(tmp_path
         member = archive.extractfile(log.name)
         assert member is not None
         assert hashlib.sha256(member.read()).hexdigest() == hashlib.sha256(body).hexdigest()
+
+
+async def test_real_long_index_process_does_not_block_spooled_archive(tmp_path, monkeypatch):
+    """索引池真实长运行时，归档使用另一进程池完成发布，关闭后两个池均可回收。"""
+    index_target = tmp_path / "old-hour.tar.gz"
+    monkeypatch.setattr(compression, "build_index", _controlled_long_index)
+    indexing = asyncio.create_task(compression.build_search_index(index_target))
+    started = Path(str(index_target) + ".index-started")
+    deadline = time.monotonic() + 3
+    while not started.exists() and time.monotonic() < deadline:
+        await asyncio.sleep(.02)
+    assert started.exists(), "索引子进程未启动"
+
+    body, index_body = b"archive proceeds\n", b'{"sequence":5}\n'
+    log, index = tmp_path / "parallel.log", tmp_path / "parallel.index.jsonl"
+    target = tmp_path / "parallel.tar.gz"
+    log.write_bytes(body)
+    index.write_bytes(index_body)
+    spool = archive_spool.persist(target, [_segment(log, index, body, index_body)])
+    assert await asyncio.wait_for(compression.compress_spool(spool), 5) == target
+    assert target.exists() and not spool.exists()
+    assert compression._pool is not None and compression._index_pool is not None
+
+    Path(str(index_target) + ".index-release").touch()
+    assert await indexing is False
+    await compression.shutdown_compression(timeout_seconds=2)
+    assert compression._pool is None and compression._index_pool is None
 
 
 async def test_stalled_child_is_terminated_and_later_spool_uses_new_pool(tmp_path, monkeypatch):

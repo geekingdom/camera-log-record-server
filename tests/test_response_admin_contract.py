@@ -14,10 +14,16 @@ from camera_logs.common.api_contracts.response_admin import (
     TOKEN,
     TOKEN_SECRET,
 )
-from camera_logs.common.api_contracts.response_nodes import NODE, NODE_CONFIG
+from camera_logs.common.api_contracts.response_nodes import (
+    NODE,
+    NODE_CONFIG,
+    NODE_CONFIG_FIELDS,
+    WRITE_ADMISSION,
+)
 from camera_logs.common.database import now
 from camera_logs.node.performance_runtime import update_performance
 from camera_logs.node.telemetry import TelemetrySampler
+from camera_logs.node.write_pressure import write_admission
 from camera_logs.users.service_tokens import public_token
 from test_api import client  # noqa: F401
 from test_dashboard import _seed_dashboard_data, dashboard_client  # noqa: F401
@@ -87,6 +93,13 @@ async def test_current_worker_runtime_and_configuration_fields_are_documented(cl
         "telemetryAgeSeconds": 0,
         "telemetry": sample,
         "performanceStatus": status,
+        "writeAdmission": write_admission(
+            {"writeLatencyMs": 17700},
+            {"sessions": {"slowSessions": 2, "activeSessions": 100, "normalSessions": 98},
+             "writeExecutor": {"concurrency": 12, "active": 2, "waiting": 0},
+             "buffer": {"reservedBytes": 1024, "limitBytes": 1024 * 1024}},
+            {"writeLatencyLimitMs": 5000},
+        ),
         "accepting": True,
         "diskPercent": 10,
         "shutdownToken": "contract-instance",
@@ -101,6 +114,8 @@ async def test_current_worker_runtime_and_configuration_fields_are_documented(cl
     assert response.status_code == 200, response.text
     assert_documented(response.json()["items"][0], NODE)
     documented = response.json()["items"][0]
+    assert documented["writeAdmission"] == node["writeAdmission"]
+    assert documented["writeAdmission"]["reason"] == "ISOLATED_SLOW_SESSIONS"
     assert documented["claimVersion"] == 7
     assert documented["shutdownToken"] == "contract-instance"
     assert documented["plannedRestartRecoveryVersion"] == 2
@@ -133,6 +148,23 @@ def test_service_token_statuses_and_secret_result_are_documented():
     ]:
         assert_documented(public_token(document, owner), TOKEN)
     assert_documented(public_token(token, user) | {"token": "test-placeholder"}, TOKEN_SECRET)
+
+
+def test_write_admission_contract_explains_isolated_sessions_and_all_reason_codes():
+    """节点配置和运行响应必须区分最差会话告警、整体阻断及旧节点的保守回退。"""
+    limit = NODE_CONFIG_FIELDS["writeLatencyLimitMs"]["description"]
+    for term in ("最差会话", "整体压力", "少数", "旧节点", "保守"):
+        assert term in limit
+    fields = WRITE_ADMISSION["properties"]
+    for reason in (
+        "WITHIN_LIMIT", "ISOLATED_SLOW_SESSIONS", "SINGLE_SESSION", "TOO_MANY_SLOW_SESSIONS",
+        "MULTI_SESSION_PRESSURE", "EXECUTOR_SATURATED", "BUFFER_BACKPRESSURE",
+        "INCOMPLETE_DIAGNOSTICS", "LEGACY_WORST_LATENCY",
+    ):
+        assert reason in fields["reason"]["description"]
+    assert "blocked" in fields["scope"]["description"] and "不阻断" in fields["scope"]["description"]
+    for name in ("slowSessions", "normalSessions", "activeSessions"):
+        assert "省略" in fields[name]["description"]
 
 
 @pytest.mark.parametrize("state", ["startup", "stale", "isolated", "shutdown"])

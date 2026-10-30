@@ -145,10 +145,13 @@ def test_live_disconnect_cancels_inflight_node_tail_immediately(client, monkeypa
             cancelled.set()
             raise
 
-    monkeypatch.setattr("camera_logs.logs.api.node_request", blocked_tail)
+    tail = AsyncMock(side_effect=blocked_tail)
+    monkeypatch.setattr("camera_logs.logs.api.node_request", tail)
     with client.websocket_connect("/api/v1/tasks/disconnect-tail/logs") as socket:
         socket.send_json({"token": "test-admin-token"})
         assert started.wait(1)
+        assert tail.call_args.args[3] == {"cursor": "", "waitSeconds": 1}
+        assert "timeout_seconds" not in tail.call_args.kwargs
         socket.close()
         assert cancelled.wait(1)
 

@@ -242,10 +242,23 @@ export interface Node {
   writeLatencySamples?: number;
   writeLatencyPendingMs?: number;
   writeLatencyWindowSeconds?: number;
+  /** Worker 针对当前阈值给出的新任务写入准入结论；旧 Worker 可以不返回。 */
+  writeAdmission?: WriteAdmission | null;
   /** Worker 根据节点性能策略生成的只读运行结论，不由浏览器推导。 */
   performanceStatus?: NodePerformanceStatus | null;
   telemetry?: NodeTelemetry;
   health?: NodeHealth;
+}
+/** 写入准入区分节点整体背压与少数慢会话；延迟值始终是最慢会话的实际值。 */
+export interface WriteAdmission {
+  blocked: boolean;
+  reason: "WITHIN_LIMIT" | "ISOLATED_SLOW_SESSIONS" | "SINGLE_SESSION" | "TOO_MANY_SLOW_SESSIONS" | "MULTI_SESSION_PRESSURE" | "EXECUTOR_SATURATED" | "BUFFER_BACKPRESSURE" | "INCOMPLETE_DIAGNOSTICS" | "LEGACY_WORST_LATENCY" | string;
+  scope: "NODE" | "SESSION" | string;
+  /** Worker 生成本结论时使用的毫秒阈值。 */
+  limitMs: number;
+  slowSessions?: number | null;
+  normalSessions?: number | null;
+  activeSessions?: number | null;
 }
 export interface NodePerformanceStatus {
   state?: string;

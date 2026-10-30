@@ -84,11 +84,14 @@ def _schema(connection, fingerprint: str) -> bool:
     return True
 
 
-def build_index(archive_path: Path) -> bool:
-    """流式建立并原子发布索引；失败仅返回 false，不能阻止日志压缩发布。"""
+def build_index(archive_path: Path, background_rate: int | None = None) -> bool:
+    """流式建立并原子发布索引；可选后台预算限制每段归档读取，失败只回退原文搜索。"""
     archive_path = Path(archive_path)
     destination = index_path(archive_path)
     try:
+        from camera_logs.logs.archive_access import ReadLimiter
+
+        limiter = ReadLimiter(background_rate) if background_rate else None
         if shutil.disk_usage(archive_path.parent).free < MAX_INDEX_BYTES + MIN_FREE_BYTES:
             return False
         descriptor, temporary_name = tempfile.mkstemp(prefix=destination.name + ".", suffix=".partial", dir=destination.parent)
@@ -118,6 +121,8 @@ def build_index(archive_path: Path) -> bool:
                             decoder, pending = codecs.getincrementaldecoder("utf-8")("ignore"), ""
                             head, tail, has_newline, read = bytearray(), bytearray(), False, 0
                             while raw := stream.read(256 * 1024):
+                                if limiter:
+                                    limiter.consume(len(raw))
                                 read += len(raw)
                                 advance_progress("INDEX", len(raw))
                                 if len(head) < 16:

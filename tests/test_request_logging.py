@@ -152,15 +152,14 @@ async def test_request_event_persistence_failure_does_not_mask_business_failure(
     finally:
         access_logger.removeHandler(capture)
     insert.assert_awaited_once()
-    persistence = [record for record in records if record.getMessage() == "请求事件持久化失败"]
-    assert len(persistence) == 1
-    assert persistence[0].context["errorType"] == "OSError"
-    assert persistence[0].context["errorFrames"]
-    assert persistence[0].context["requestId"] == request_scope["state"]["request_id"]
-    assert persistence[0].context["route"] == "/api/v1/write"
-    assert persistence[0].context["method"] == "GET"
-    assert persistence[0].exc_info is None
-    assert private_error not in observability.JsonLineFormatter().format(persistence[0])
+    assert [record for record in records if record.getMessage() == "请求事件持久化失败"] == []
+    final = next(record for record in records if record.getMessage() == "request failed")
+    assert final.context["requestEventPersisted"] is False
+    assert final.context["requestEventErrorType"] == "OSError"
+    assert final.context["requestEventTimeoutMs"] == 200
+    assert final.context["requestId"] == request_scope["state"]["request_id"]
+    assert final.context["route"] == "/api/v1/write" and final.context["method"] == "GET"
+    assert private_error not in observability.JsonLineFormatter().format(final)
 
 
 def test_rejected_requests_keep_http_status_and_request_id(monkeypatch):

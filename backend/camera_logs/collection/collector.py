@@ -670,6 +670,12 @@ class Collector:
                 record_stage("batchWaitMs", max(0, time.monotonic() - started) * 1000)
             with measure_io(self.write_io_latency):
                 positions = await self._writer.write_many(pending)
+        except BaseException:
+            # 明确失败或已完成取消不应把已终结批次伪装为永久在途；真实挂起仍停在 await 内，
+            # 不会执行此分支，因而继续对节点准入暴露 pending 年龄。
+            self.write_latency.abort()
+            raise
+        else:
             self.write_latency.finish()
         finally:
             self.liveness_storage_busy = False
