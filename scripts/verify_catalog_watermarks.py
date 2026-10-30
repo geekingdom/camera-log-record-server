@@ -39,6 +39,7 @@ async def main():
             runtime.frames, runtime.paths = deque(), {}
             runtime.catalog_dirty, runtime.catalog_ready = {}, set()
             runtime.catalog_lock = asyncio.Lock()
+            runtime.tail_changed = asyncio.Condition()
             runtime.frame_bytes = runtime.frame_number = runtime.input_bytes = 0
             runtime.last_catalog = 0.
             runtime.started_at = datetime(2026, 9, 8, tzinfo=UTC)
